@@ -714,19 +714,17 @@ int run_build(std::string_view input_path, std::string_view output_path,
     }
 
     try {
-        scpp::compile_to_executable(source, std::string(output_path), extra_link_inputs, import_paths, static_link,
+        auto result = scpp::compile_to_executable(source, std::string(output_path), extra_link_inputs, import_paths, static_link,
                                     import_search_dirs, emit_debug_info, std::string(input_path));
-    } catch (const scpp::ParseError& e) {
-        print_diagnostic(input_path, source, e.loc, e.what());
-        return 1;
+        if (!result.has_value()) {
+            print_diagnostic(input_path, source, result.error().loc, result.error().what());
+            return 1;
+        }
     } catch (const scpp::DataflowError& e) {
         print_diagnostic(input_path, source, e.loc, e.what());
         return 1;
     } catch (const scpp::CodegenError& e) {
         print_diagnostic(input_path, source, e.loc, e.what());
-        return 1;
-    } catch (const scpp::DriverError& e) {
-        print_diagnostic(input_path, source, scpp::SourceLocation{}, e.what());
         return 1;
     }
     return 0;
@@ -752,19 +750,17 @@ int run_build_module(std::string_view input_path, std::string_view interface_pat
     }
 
     try {
-        scpp::emit_module_artifacts(source, std::string(interface_path), std::string(archive_path), import_paths,
+        auto result = scpp::emit_module_artifacts(source, std::string(interface_path), std::string(archive_path), import_paths,
                                     import_search_dirs, std::string(input_path));
-    } catch (const scpp::ParseError& e) {
-        print_diagnostic(input_path, source, e.loc, e.what());
-        return 1;
+        if (!result.has_value()) {
+            print_diagnostic(input_path, source, result.error().loc, result.error().what());
+            return 1;
+        }
     } catch (const scpp::DataflowError& e) {
         print_diagnostic(input_path, source, e.loc, e.what());
         return 1;
     } catch (const scpp::CodegenError& e) {
         print_diagnostic(input_path, source, e.loc, e.what());
-        return 1;
-    } catch (const scpp::DriverError& e) {
-        print_diagnostic(input_path, source, scpp::SourceLocation{}, e.what());
         return 1;
     }
     return 0;

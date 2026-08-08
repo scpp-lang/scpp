@@ -31,8 +31,16 @@ import scpp.parser;
 
 export namespace scpp {
 
+// SourceLocation defaults to {} for driver-native errors that have no
+// associated source position (e.g. "cannot find module", linker/archiver
+// failures); it is populated only when a DriverError is wrapping a
+// propagated ParseError from parser.cppm's own std::expected result, so
+// that location survives the wrap -- matching the shape ParseError/
+// DataflowError/CodegenError already use.
 struct DriverError : std::runtime_error {
-    explicit DriverError(const std::string& message) : std::runtime_error(message) {}
+    explicit DriverError(const std::string& message, SourceLocation loc = {})
+        : std::runtime_error(message), loc(loc) {}
+    SourceLocation loc;
 };
 
 inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 7;
@@ -479,10 +487,10 @@ struct LoadedModuleFile {
 
 void write_u8(std::ostream& out, std::uint8_t value) { out.put(static_cast<char>(value)); }
 
-[[nodiscard]] std::uint8_t read_u8(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<std::uint8_t, DriverError> read_u8(std::istream& in, const std::string& context) {
     char byte = '\0';
     in.read(&byte, 1);
-    if (!in) throw DriverError("invalid " + context + ": truncated byte");
+    if (!in) return std::unexpected(DriverError("invalid " + context + ": truncated byte"));
     return static_cast<std::uint8_t>(static_cast<unsigned char>(byte));
 }
 
@@ -499,27 +507,27 @@ void write_u64_le(std::ostream& out, std::uint64_t value) {
     out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
 }
 
-[[nodiscard]] std::uint32_t read_u32_le(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<std::uint32_t, DriverError> read_u32_le(std::istream& in, const std::string& context) {
     std::array<unsigned char, 4> bytes = {};
     in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    if (!in) throw DriverError("invalid " + context + ": truncated u32");
+    if (!in) return std::unexpected(DriverError("invalid " + context + ": truncated u32"));
     return static_cast<std::uint32_t>(bytes[0]) | (static_cast<std::uint32_t>(bytes[1]) << 8) |
            (static_cast<std::uint32_t>(bytes[2]) << 16) | (static_cast<std::uint32_t>(bytes[3]) << 24);
 }
 
-[[nodiscard]] std::int64_t read_i64_le(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<std::int64_t, DriverError> read_i64_le(std::istream& in, const std::string& context) {
     std::array<unsigned char, 8> bytes = {};
     in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    if (!in) throw DriverError("invalid " + context + ": truncated i64");
+    if (!in) return std::unexpected(DriverError("invalid " + context + ": truncated i64"));
     std::uint64_t raw = 0;
     for (std::size_t i = 0; i < bytes.size(); i++) raw |= static_cast<std::uint64_t>(bytes[i]) << (8 * i);
     return static_cast<std::int64_t>(raw);
 }
 
-[[nodiscard]] std::uint64_t read_u64_le(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<std::uint64_t, DriverError> read_u64_le(std::istream& in, const std::string& context) {
     std::array<unsigned char, 8> bytes = {};
     in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    if (!in) throw DriverError("invalid " + context + ": truncated u64");
+    if (!in) return std::unexpected(DriverError("invalid " + context + ": truncated u64"));
     std::uint64_t raw = 0;
     for (std::size_t i = 0; i < bytes.size(); i++) raw |= static_cast<std::uint64_t>(bytes[i]) << (8 * i);
     return raw;
@@ -532,8 +540,10 @@ void write_double_le(std::ostream& out, double value) {
     write_i64_le(out, static_cast<std::int64_t>(raw));
 }
 
-[[nodiscard]] double read_double_le(std::istream& in, const std::string& context) {
-    std::uint64_t raw = static_cast<std::uint64_t>(read_i64_le(in, context));
+[[nodiscard]] std::expected<double, DriverError> read_double_le(std::istream& in, const std::string& context) {
+    auto raw_result = read_i64_le(in, context);
+    if (!raw_result.has_value()) return std::unexpected(std::move(raw_result).error());
+    std::uint64_t raw = static_cast<std::uint64_t>(raw_result.value());
     double value = 0.0;
     std::memcpy(&value, &raw, sizeof(value));
     return value;
@@ -544,11 +554,12 @@ void write_string(std::ostream& out, std::string_view text) {
     out.write(text.data(), static_cast<std::streamsize>(text.size()));
 }
 
-[[nodiscard]] std::string read_string(std::istream& in, const std::string& context) {
-    std::uint32_t size = read_u32_le(in, context + " string length");
-    std::string text(size, '\0');
-    in.read(text.data(), static_cast<std::streamsize>(size));
-    if (!in) throw DriverError("invalid " + context + ": truncated string");
+[[nodiscard]] std::expected<std::string, DriverError> read_string(std::istream& in, const std::string& context) {
+    auto size_result = read_u32_le(in, context + " string length");
+    if (!size_result.has_value()) return std::unexpected(std::move(size_result).error());
+    std::string text(size_result.value(), '\0');
+    in.read(text.data(), static_cast<std::streamsize>(size_result.value()));
+    if (!in) return std::unexpected(DriverError("invalid " + context + ": truncated string"));
     return text;
 }
 
@@ -558,11 +569,17 @@ void write_source_location(std::ostream& out, const SourceLocation& loc) {
     write_string(out, loc.source_path_text());
 }
 
-[[nodiscard]] SourceLocation read_source_location(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<SourceLocation, DriverError> read_source_location(std::istream& in, const std::string& context) {
     SourceLocation loc;
-    loc.line = static_cast<int>(read_i64_le(in, context + " line"));
-    loc.column = static_cast<int>(read_i64_le(in, context + " column"));
-    std::string source_path = read_string(in, context + " source path");
+    auto line_result = read_i64_le(in, context + " line");
+    if (!line_result.has_value()) return std::unexpected(std::move(line_result).error());
+    loc.line = static_cast<int>(line_result.value());
+    auto column_result = read_i64_le(in, context + " column");
+    if (!column_result.has_value()) return std::unexpected(std::move(column_result).error());
+    loc.column = static_cast<int>(column_result.value());
+    auto source_path_result = read_string(in, context + " source path");
+    if (!source_path_result.has_value()) return std::unexpected(std::move(source_path_result).error());
+    std::string source_path = std::move(source_path_result).value();
     if (!source_path.empty()) loc.source_path = std::make_shared<const std::string>(std::move(source_path));
     return loc;
 }
@@ -573,17 +590,19 @@ void write_enum(std::ostream& out, Enum value) {
 }
 
 template<typename Enum>
-[[nodiscard]] Enum read_enum(std::istream& in, const std::string& context) {
-    return static_cast<Enum>(read_u8(in, context));
+[[nodiscard]] std::expected<Enum, DriverError> read_enum(std::istream& in, const std::string& context) {
+    auto value_result = read_u8(in, context);
+    if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+    return static_cast<Enum>(value_result.value());
 }
 
 void write_type(std::ostream& out, const Type& type);
-ExprPtr read_expr(std::istream& in, const std::string& context);
+[[nodiscard]] std::expected<ExprPtr, DriverError> read_expr(std::istream& in, const std::string& context);
 void write_expr(std::ostream& out, const Expr& expr);
-StmtPtr read_stmt(std::istream& in, const std::string& context);
+[[nodiscard]] std::expected<StmtPtr, DriverError> read_stmt(std::istream& in, const std::string& context);
 void write_stmt(std::ostream& out, const Stmt& stmt);
 void write_alignment_specifier(std::ostream& out, const AlignmentSpecifier& spec);
-[[nodiscard]] AlignmentSpecifier read_alignment_specifier(std::istream& in, const std::string& context);
+[[nodiscard]] std::expected<AlignmentSpecifier, DriverError> read_alignment_specifier(std::istream& in, const std::string& context);
 
 void write_type(std::ostream& out, const Type& type) {
     write_enum(out, type.kind);
@@ -624,45 +643,149 @@ void write_type(std::ostream& out, const Type& type) {
     write_u8(out, type.is_pack_expansion ? 1u : 0u);
 }
 
-[[nodiscard]] Type read_type(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<Type, DriverError> read_type(std::istream& in, const std::string& context) {
     Type type;
-    type.kind = read_enum<TypeKind>(in, context + " kind");
-    type.name = read_string(in, context + " name");
-    if (read_u8(in, context + " pointee present") != 0u) type.pointee = std::make_shared<Type>(read_type(in, context + " pointee"));
-    if (read_u8(in, context + " element present") != 0u) type.element = std::make_shared<Type>(read_type(in, context + " element"));
-    type.array_size = read_i64_le(in, context + " array size");
-    if (read_u8(in, context + " array size expr present") != 0u) {
-        type.array_size_expr = std::shared_ptr<Expr>(read_expr(in, context + " array size expr").release());
+    {
+        auto kind_result = read_enum<TypeKind>(in, context + " kind");
+        if (!kind_result.has_value()) return std::unexpected(std::move(kind_result).error());
+        type.kind = kind_result.value();
     }
-    if (read_u8(in, context + " function return present") != 0u) {
-        type.function_return = std::make_shared<Type>(read_type(in, context + " function return"));
+    {
+        auto name_result = read_string(in, context + " name");
+        if (!name_result.has_value()) return std::unexpected(std::move(name_result).error());
+        type.name = std::move(name_result).value();
     }
-    std::uint32_t param_count = read_u32_le(in, context + " function param count");
+    {
+        auto present_result = read_u8(in, context + " pointee present");
+        if (!present_result.has_value()) return std::unexpected(std::move(present_result).error());
+        if (present_result.value() != 0u) {
+            auto pointee_result = read_type(in, context + " pointee");
+            if (!pointee_result.has_value()) return std::unexpected(std::move(pointee_result).error());
+            type.pointee = std::make_shared<Type>(std::move(pointee_result).value());
+        }
+    }
+    {
+        auto present_result = read_u8(in, context + " element present");
+        if (!present_result.has_value()) return std::unexpected(std::move(present_result).error());
+        if (present_result.value() != 0u) {
+            auto element_result = read_type(in, context + " element");
+            if (!element_result.has_value()) return std::unexpected(std::move(element_result).error());
+            type.element = std::make_shared<Type>(std::move(element_result).value());
+        }
+    }
+    {
+        auto array_size_result = read_i64_le(in, context + " array size");
+        if (!array_size_result.has_value()) return std::unexpected(std::move(array_size_result).error());
+        type.array_size = array_size_result.value();
+    }
+    {
+        auto present_result = read_u8(in, context + " array size expr present");
+        if (!present_result.has_value()) return std::unexpected(std::move(present_result).error());
+        if (present_result.value() != 0u) {
+            auto expr_result = read_expr(in, context + " array size expr");
+            if (!expr_result.has_value()) return std::unexpected(std::move(expr_result).error());
+            type.array_size_expr = std::shared_ptr<Expr>(std::move(expr_result).value().release());
+        }
+    }
+    {
+        auto present_result = read_u8(in, context + " function return present");
+        if (!present_result.has_value()) return std::unexpected(std::move(present_result).error());
+        if (present_result.value() != 0u) {
+            auto return_result = read_type(in, context + " function return");
+            if (!return_result.has_value()) return std::unexpected(std::move(return_result).error());
+            type.function_return = std::make_shared<Type>(std::move(return_result).value());
+        }
+    }
+    std::uint32_t param_count = 0;
+    {
+        auto count_result = read_u32_le(in, context + " function param count");
+        if (!count_result.has_value()) return std::unexpected(std::move(count_result).error());
+        param_count = count_result.value();
+    }
     type.function_params.reserve(param_count);
-    for (std::uint32_t i = 0; i < param_count; i++) type.function_params.push_back(read_type(in, context + " function param"));
-    type.is_unsafe_function_pointer = read_u8(in, context + " unsafe fn ptr") != 0u;
-    type.is_const_function = read_u8(in, context + " const fn") != 0u;
-    type.function_ref_qualifier = read_enum<ReceiverRefQualifier>(in, context + " fn ref qualifier");
-    type.is_mutable_ref = read_u8(in, context + " mutable ref") != 0u;
-    type.is_rvalue_ref = read_u8(in, context + " rvalue ref") != 0u;
-    type.is_mutable_pointee = read_u8(in, context + " mutable pointee") != 0u;
-    type.is_const_qualified = read_u8(in, context + " const qualified") != 0u;
-    type.is_reference_wrapper_lifetime_source = read_u8(in, context + " ref_wrapper lifetime source") != 0u;
-    std::uint32_t template_arg_count = read_u32_le(in, context + " template arg count");
+    for (std::uint32_t i = 0; i < param_count; i++) {
+        auto param_result = read_type(in, context + " function param");
+        if (!param_result.has_value()) return std::unexpected(std::move(param_result).error());
+        type.function_params.push_back(std::move(param_result).value());
+    }
+    {
+        auto flag_result = read_u8(in, context + " unsafe fn ptr");
+        if (!flag_result.has_value()) return std::unexpected(std::move(flag_result).error());
+        type.is_unsafe_function_pointer = flag_result.value() != 0u;
+    }
+    {
+        auto flag_result = read_u8(in, context + " const fn");
+        if (!flag_result.has_value()) return std::unexpected(std::move(flag_result).error());
+        type.is_const_function = flag_result.value() != 0u;
+    }
+    {
+        auto qualifier_result = read_enum<ReceiverRefQualifier>(in, context + " fn ref qualifier");
+        if (!qualifier_result.has_value()) return std::unexpected(std::move(qualifier_result).error());
+        type.function_ref_qualifier = qualifier_result.value();
+    }
+    {
+        auto flag_result = read_u8(in, context + " mutable ref");
+        if (!flag_result.has_value()) return std::unexpected(std::move(flag_result).error());
+        type.is_mutable_ref = flag_result.value() != 0u;
+    }
+    {
+        auto flag_result = read_u8(in, context + " rvalue ref");
+        if (!flag_result.has_value()) return std::unexpected(std::move(flag_result).error());
+        type.is_rvalue_ref = flag_result.value() != 0u;
+    }
+    {
+        auto flag_result = read_u8(in, context + " mutable pointee");
+        if (!flag_result.has_value()) return std::unexpected(std::move(flag_result).error());
+        type.is_mutable_pointee = flag_result.value() != 0u;
+    }
+    {
+        auto flag_result = read_u8(in, context + " const qualified");
+        if (!flag_result.has_value()) return std::unexpected(std::move(flag_result).error());
+        type.is_const_qualified = flag_result.value() != 0u;
+    }
+    {
+        auto flag_result = read_u8(in, context + " ref_wrapper lifetime source");
+        if (!flag_result.has_value()) return std::unexpected(std::move(flag_result).error());
+        type.is_reference_wrapper_lifetime_source = flag_result.value() != 0u;
+    }
+    std::uint32_t template_arg_count = 0;
+    {
+        auto count_result = read_u32_le(in, context + " template arg count");
+        if (!count_result.has_value()) return std::unexpected(std::move(count_result).error());
+        template_arg_count = count_result.value();
+    }
     type.template_args.reserve(template_arg_count);
-    for (std::uint32_t i = 0; i < template_arg_count; i++) type.template_args.push_back(read_type(in, context + " template arg"));
-    std::uint32_t non_type_arg_count = read_u32_le(in, context + " non-type arg count");
+    for (std::uint32_t i = 0; i < template_arg_count; i++) {
+        auto arg_result = read_type(in, context + " template arg");
+        if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
+        type.template_args.push_back(std::move(arg_result).value());
+    }
+    std::uint32_t non_type_arg_count = 0;
+    {
+        auto count_result = read_u32_le(in, context + " non-type arg count");
+        if (!count_result.has_value()) return std::unexpected(std::move(count_result).error());
+        non_type_arg_count = count_result.value();
+    }
     type.non_type_args.reserve(non_type_arg_count);
     for (std::uint32_t i = 0; i < non_type_arg_count; i++) {
-        if (read_u8(in, context + " non-type arg present") != 0u) {
-            type.non_type_args.push_back(std::shared_ptr<Expr>(read_expr(in, context + " non-type arg").release()));
+        auto present_result = read_u8(in, context + " non-type arg present");
+        if (!present_result.has_value()) return std::unexpected(std::move(present_result).error());
+        if (present_result.value() != 0u) {
+            auto arg_result = read_expr(in, context + " non-type arg");
+            if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
+            type.non_type_args.push_back(std::shared_ptr<Expr>(std::move(arg_result).value().release()));
         } else {
             type.non_type_args.push_back(nullptr);
         }
     }
-    type.is_pack_expansion = read_u8(in, context + " pack expansion") != 0u;
+    {
+        auto flag_result = read_u8(in, context + " pack expansion");
+        if (!flag_result.has_value()) return std::unexpected(std::move(flag_result).error());
+        type.is_pack_expansion = flag_result.value() != 0u;
+    }
     return type;
 }
+
 
 void write_generic_type_param(std::ostream& out, const GenericTypeParam& param) {
     write_string(out, param.name);
@@ -672,13 +795,23 @@ void write_generic_type_param(std::ostream& out, const GenericTypeParam& param) 
     write_type(out, param.non_type_type);
 }
 
-[[nodiscard]] GenericTypeParam read_generic_type_param(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<GenericTypeParam, DriverError> read_generic_type_param(std::istream& in, const std::string& context) {
     GenericTypeParam param;
-    param.name = read_string(in, context + " name");
-    param.concept_name = read_string(in, context + " concept");
-    param.is_pack = read_u8(in, context + " is_pack") != 0u;
-    param.is_non_type = read_u8(in, context + " is_non_type") != 0u;
-    param.non_type_type = read_type(in, context + " non-type type");
+    auto name_r = read_string(in, context + " name");
+    if (!name_r.has_value()) return std::unexpected(std::move(name_r).error());
+    param.name = std::move(name_r).value();
+    auto concept_r = read_string(in, context + " concept");
+    if (!concept_r.has_value()) return std::unexpected(std::move(concept_r).error());
+    param.concept_name = std::move(concept_r).value();
+    auto is_pack_r = read_u8(in, context + " is_pack");
+    if (!is_pack_r.has_value()) return std::unexpected(std::move(is_pack_r).error());
+    param.is_pack = is_pack_r.value() != 0u;
+    auto is_non_type_r = read_u8(in, context + " is_non_type");
+    if (!is_non_type_r.has_value()) return std::unexpected(std::move(is_non_type_r).error());
+    param.is_non_type = is_non_type_r.value() != 0u;
+    auto non_type_type_r = read_type(in, context + " non-type type");
+    if (!non_type_type_r.has_value()) return std::unexpected(std::move(non_type_type_r).error());
+    param.non_type_type = std::move(non_type_type_r).value();
     return param;
 }
 
@@ -694,18 +827,36 @@ void write_param(std::ostream& out, const Param& param) {
     write_u8(out, param.is_parameter_pack ? 1u : 0u);
 }
 
-[[nodiscard]] Param read_param(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<Param, DriverError> read_param(std::istream& in, const std::string& context) {
     Param param;
-    param.type = read_type(in, context + " type");
-    param.name = read_string(in, context + " name");
-    param.lifetime.name = read_string(in, context + " lifetime");
-    if (read_u8(in, context + " default expr present") != 0u) {
-        param.default_expr = std::shared_ptr<Expr>(read_expr(in, context + " default expr").release());
+    auto type_r = read_type(in, context + " type");
+    if (!type_r.has_value()) return std::unexpected(std::move(type_r).error());
+    param.type = std::move(type_r).value();
+    auto name_r = read_string(in, context + " name");
+    if (!name_r.has_value()) return std::unexpected(std::move(name_r).error());
+    param.name = std::move(name_r).value();
+    auto lifetime_r = read_string(in, context + " lifetime");
+    if (!lifetime_r.has_value()) return std::unexpected(std::move(lifetime_r).error());
+    param.lifetime.name = std::move(lifetime_r).value();
+    auto default_present_r = read_u8(in, context + " default expr present");
+    if (!default_present_r.has_value()) return std::unexpected(std::move(default_present_r).error());
+    if (default_present_r.value() != 0u) {
+        auto default_expr_r = read_expr(in, context + " default expr");
+        if (!default_expr_r.has_value()) return std::unexpected(std::move(default_expr_r).error());
+        param.default_expr = std::shared_ptr<Expr>(std::move(default_expr_r).value().release());
     }
-    param.generic_concept = read_string(in, context + " generic concept");
-    param.require_thread_movable = read_u8(in, context + " thread_movable") != 0u;
-    param.require_thread_shareable = read_u8(in, context + " thread_shareable") != 0u;
-    param.is_parameter_pack = read_u8(in, context + " parameter pack") != 0u;
+    auto generic_concept_r = read_string(in, context + " generic concept");
+    if (!generic_concept_r.has_value()) return std::unexpected(std::move(generic_concept_r).error());
+    param.generic_concept = std::move(generic_concept_r).value();
+    auto thread_movable_r = read_u8(in, context + " thread_movable");
+    if (!thread_movable_r.has_value()) return std::unexpected(std::move(thread_movable_r).error());
+    param.require_thread_movable = thread_movable_r.value() != 0u;
+    auto thread_shareable_r = read_u8(in, context + " thread_shareable");
+    if (!thread_shareable_r.has_value()) return std::unexpected(std::move(thread_shareable_r).error());
+    param.require_thread_shareable = thread_shareable_r.value() != 0u;
+    auto pack_r = read_u8(in, context + " parameter pack");
+    if (!pack_r.has_value()) return std::unexpected(std::move(pack_r).error());
+    param.is_parameter_pack = pack_r.value() != 0u;
     return param;
 }
 
@@ -716,11 +867,21 @@ void write_lambda_capture(std::ostream& out, const LambdaCapture& capture) {
     if (capture.init) write_expr(out, *capture.init);
 }
 
-[[nodiscard]] LambdaCapture read_lambda_capture(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<LambdaCapture, DriverError> read_lambda_capture(std::istream& in, const std::string& context) {
     LambdaCapture capture;
-    capture.name = read_string(in, context + " name");
-    capture.by_reference = read_u8(in, context + " by_reference") != 0u;
-    if (read_u8(in, context + " init present") != 0u) capture.init = read_expr(in, context + " init");
+    auto name_r = read_string(in, context + " name");
+    if (!name_r.has_value()) return std::unexpected(std::move(name_r).error());
+    capture.name = std::move(name_r).value();
+    auto by_ref_r = read_u8(in, context + " by_reference");
+    if (!by_ref_r.has_value()) return std::unexpected(std::move(by_ref_r).error());
+    capture.by_reference = by_ref_r.value() != 0u;
+    auto init_present_r = read_u8(in, context + " init present");
+    if (!init_present_r.has_value()) return std::unexpected(std::move(init_present_r).error());
+    if (init_present_r.value() != 0u) {
+        auto init_r = read_expr(in, context + " init");
+        if (!init_r.has_value()) return std::unexpected(std::move(init_r).error());
+        capture.init = std::move(init_r).value();
+    }
     return capture;
 }
 
@@ -731,11 +892,21 @@ void write_explicit_template_arg(std::ostream& out, const ExplicitTemplateArg& a
     if (arg.value) write_expr(out, *arg.value);
 }
 
-[[nodiscard]] ExplicitTemplateArg read_explicit_template_arg(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<ExplicitTemplateArg, DriverError> read_explicit_template_arg(std::istream& in, const std::string& context) {
     ExplicitTemplateArg arg;
-    arg.is_type = read_u8(in, context + " is_type") != 0u;
-    arg.type = read_type(in, context + " type");
-    if (read_u8(in, context + " value present") != 0u) arg.value = std::shared_ptr<Expr>(read_expr(in, context + " value").release());
+    auto is_type_r = read_u8(in, context + " is_type");
+    if (!is_type_r.has_value()) return std::unexpected(std::move(is_type_r).error());
+    arg.is_type = is_type_r.value() != 0u;
+    auto type_r = read_type(in, context + " type");
+    if (!type_r.has_value()) return std::unexpected(std::move(type_r).error());
+    arg.type = std::move(type_r).value();
+    auto value_present_r = read_u8(in, context + " value present");
+    if (!value_present_r.has_value()) return std::unexpected(std::move(value_present_r).error());
+    if (value_present_r.value() != 0u) {
+        auto value_r = read_expr(in, context + " value");
+        if (!value_r.has_value()) return std::unexpected(std::move(value_r).error());
+        arg.value = std::shared_ptr<Expr>(std::move(value_r).value().release());
+    }
     return arg;
 }
 
@@ -778,44 +949,132 @@ void write_expr(std::ostream& out, const Expr& expr) {
     if (expr.lambda_body) write_stmt(out, *expr.lambda_body);
 }
 
-ExprPtr read_expr(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<ExprPtr, DriverError> read_expr(std::istream& in, const std::string& context) {
     auto expr = std::make_unique<Expr>();
-    expr->kind = read_enum<ExprKind>(in, context + " kind");
-    expr->loc = read_source_location(in, context + " loc");
-    expr->int_value = read_i64_le(in, context + " int");
-    expr->float_value = read_double_le(in, context + " double");
-    expr->bool_value = read_u8(in, context + " bool") != 0u;
-    expr->name = read_string(in, context + " name");
-    expr->explicit_global_qualification = read_u8(in, context + " global qualification") != 0u;
-    expr->binary_op = read_enum<BinaryOp>(in, context + " binary op");
-    if (read_u8(in, context + " lhs present") != 0u) expr->lhs = read_expr(in, context + " lhs");
-    if (read_u8(in, context + " rhs present") != 0u) expr->rhs = read_expr(in, context + " rhs");
-    if (read_u8(in, context + " third present") != 0u) expr->third = read_expr(in, context + " third");
-    expr->fold_ellipsis_on_left = read_u8(in, context + " fold left") != 0u;
-    expr->unary_op = read_enum<UnaryOp>(in, context + " unary op");
-    std::uint32_t arg_count = read_u32_le(in, context + " arg count");
+    auto kind_r = read_enum<ExprKind>(in, context + " kind");
+    if (!kind_r.has_value()) return std::unexpected(std::move(kind_r).error());
+    expr->kind = kind_r.value();
+    auto loc_r = read_source_location(in, context + " loc");
+    if (!loc_r.has_value()) return std::unexpected(std::move(loc_r).error());
+    expr->loc = std::move(loc_r).value();
+    auto int_r = read_i64_le(in, context + " int");
+    if (!int_r.has_value()) return std::unexpected(std::move(int_r).error());
+    expr->int_value = int_r.value();
+    auto float_r = read_double_le(in, context + " double");
+    if (!float_r.has_value()) return std::unexpected(std::move(float_r).error());
+    expr->float_value = float_r.value();
+    auto bool_r = read_u8(in, context + " bool");
+    if (!bool_r.has_value()) return std::unexpected(std::move(bool_r).error());
+    expr->bool_value = bool_r.value() != 0u;
+    auto name_r = read_string(in, context + " name");
+    if (!name_r.has_value()) return std::unexpected(std::move(name_r).error());
+    expr->name = std::move(name_r).value();
+    auto global_qual_r = read_u8(in, context + " global qualification");
+    if (!global_qual_r.has_value()) return std::unexpected(std::move(global_qual_r).error());
+    expr->explicit_global_qualification = global_qual_r.value() != 0u;
+    auto binary_op_r = read_enum<BinaryOp>(in, context + " binary op");
+    if (!binary_op_r.has_value()) return std::unexpected(std::move(binary_op_r).error());
+    expr->binary_op = binary_op_r.value();
+    auto lhs_present_r = read_u8(in, context + " lhs present");
+    if (!lhs_present_r.has_value()) return std::unexpected(std::move(lhs_present_r).error());
+    if (lhs_present_r.value() != 0u) {
+        auto lhs_r = read_expr(in, context + " lhs");
+        if (!lhs_r.has_value()) return std::unexpected(std::move(lhs_r).error());
+        expr->lhs = std::move(lhs_r).value();
+    }
+    auto rhs_present_r = read_u8(in, context + " rhs present");
+    if (!rhs_present_r.has_value()) return std::unexpected(std::move(rhs_present_r).error());
+    if (rhs_present_r.value() != 0u) {
+        auto rhs_r = read_expr(in, context + " rhs");
+        if (!rhs_r.has_value()) return std::unexpected(std::move(rhs_r).error());
+        expr->rhs = std::move(rhs_r).value();
+    }
+    auto third_present_r = read_u8(in, context + " third present");
+    if (!third_present_r.has_value()) return std::unexpected(std::move(third_present_r).error());
+    if (third_present_r.value() != 0u) {
+        auto third_r = read_expr(in, context + " third");
+        if (!third_r.has_value()) return std::unexpected(std::move(third_r).error());
+        expr->third = std::move(third_r).value();
+    }
+    auto fold_left_r = read_u8(in, context + " fold left");
+    if (!fold_left_r.has_value()) return std::unexpected(std::move(fold_left_r).error());
+    expr->fold_ellipsis_on_left = fold_left_r.value() != 0u;
+    auto unary_op_r = read_enum<UnaryOp>(in, context + " unary op");
+    if (!unary_op_r.has_value()) return std::unexpected(std::move(unary_op_r).error());
+    expr->unary_op = unary_op_r.value();
+    auto arg_count_r = read_u32_le(in, context + " arg count");
+    if (!arg_count_r.has_value()) return std::unexpected(std::move(arg_count_r).error());
+    std::uint32_t arg_count = arg_count_r.value();
     expr->args.reserve(arg_count);
-    for (std::uint32_t i = 0; i < arg_count; i++) expr->args.push_back(read_expr(in, context + " arg"));
-    std::uint32_t explicit_arg_count = read_u32_le(in, context + " explicit arg count");
+    for (std::uint32_t i = 0; i < arg_count; i++) {
+        auto arg_r = read_expr(in, context + " arg");
+        if (!arg_r.has_value()) return std::unexpected(std::move(arg_r).error());
+        expr->args.push_back(std::move(arg_r).value());
+    }
+    auto explicit_arg_count_r = read_u32_le(in, context + " explicit arg count");
+    if (!explicit_arg_count_r.has_value()) return std::unexpected(std::move(explicit_arg_count_r).error());
+    std::uint32_t explicit_arg_count = explicit_arg_count_r.value();
     expr->explicit_template_args.reserve(explicit_arg_count);
-    for (std::uint32_t i = 0; i < explicit_arg_count; i++) expr->explicit_template_args.push_back(read_explicit_template_arg(in, context + " explicit arg"));
-    expr->type = read_type(in, context + " type");
-    expr->sizeof_operand_is_type = read_u8(in, context + " sizeof is type") != 0u;
-    expr->has_paren_init = read_u8(in, context + " has paren init") != 0u;
-    expr->destroy_through_pointer = read_u8(in, context + " destroy through pointer") != 0u;
-    expr->through_arrow = read_u8(in, context + " through arrow") != 0u;
-    expr->implicit_arrow_deref = read_u8(in, context + " implicit arrow deref") != 0u;
-    expr->implicit_arrow_chain_safe = read_u8(in, context + " implicit arrow chain safe") != 0u;
-    std::uint32_t capture_count = read_u32_le(in, context + " capture count");
+    for (std::uint32_t i = 0; i < explicit_arg_count; i++) {
+        auto explicit_arg_r = read_explicit_template_arg(in, context + " explicit arg");
+        if (!explicit_arg_r.has_value()) return std::unexpected(std::move(explicit_arg_r).error());
+        expr->explicit_template_args.push_back(std::move(explicit_arg_r).value());
+    }
+    auto type_r = read_type(in, context + " type");
+    if (!type_r.has_value()) return std::unexpected(std::move(type_r).error());
+    expr->type = std::move(type_r).value();
+    auto sizeof_is_type_r = read_u8(in, context + " sizeof is type");
+    if (!sizeof_is_type_r.has_value()) return std::unexpected(std::move(sizeof_is_type_r).error());
+    expr->sizeof_operand_is_type = sizeof_is_type_r.value() != 0u;
+    auto has_paren_init_r = read_u8(in, context + " has paren init");
+    if (!has_paren_init_r.has_value()) return std::unexpected(std::move(has_paren_init_r).error());
+    expr->has_paren_init = has_paren_init_r.value() != 0u;
+    auto destroy_through_pointer_r = read_u8(in, context + " destroy through pointer");
+    if (!destroy_through_pointer_r.has_value()) return std::unexpected(std::move(destroy_through_pointer_r).error());
+    expr->destroy_through_pointer = destroy_through_pointer_r.value() != 0u;
+    auto through_arrow_r = read_u8(in, context + " through arrow");
+    if (!through_arrow_r.has_value()) return std::unexpected(std::move(through_arrow_r).error());
+    expr->through_arrow = through_arrow_r.value() != 0u;
+    auto implicit_arrow_deref_r = read_u8(in, context + " implicit arrow deref");
+    if (!implicit_arrow_deref_r.has_value()) return std::unexpected(std::move(implicit_arrow_deref_r).error());
+    expr->implicit_arrow_deref = implicit_arrow_deref_r.value() != 0u;
+    auto implicit_arrow_chain_safe_r = read_u8(in, context + " implicit arrow chain safe");
+    if (!implicit_arrow_chain_safe_r.has_value()) return std::unexpected(std::move(implicit_arrow_chain_safe_r).error());
+    expr->implicit_arrow_chain_safe = implicit_arrow_chain_safe_r.value() != 0u;
+    auto capture_count_r = read_u32_le(in, context + " capture count");
+    if (!capture_count_r.has_value()) return std::unexpected(std::move(capture_count_r).error());
+    std::uint32_t capture_count = capture_count_r.value();
     expr->lambda_captures.reserve(capture_count);
-    for (std::uint32_t i = 0; i < capture_count; i++) expr->lambda_captures.push_back(read_lambda_capture(in, context + " capture"));
-    expr->lambda_blanket_mode = read_enum<LambdaCaptureMode>(in, context + " blanket mode");
-    std::uint32_t lambda_param_count = read_u32_le(in, context + " lambda param count");
+    for (std::uint32_t i = 0; i < capture_count; i++) {
+        auto capture_r = read_lambda_capture(in, context + " capture");
+        if (!capture_r.has_value()) return std::unexpected(std::move(capture_r).error());
+        expr->lambda_captures.push_back(std::move(capture_r).value());
+    }
+    auto blanket_mode_r = read_enum<LambdaCaptureMode>(in, context + " blanket mode");
+    if (!blanket_mode_r.has_value()) return std::unexpected(std::move(blanket_mode_r).error());
+    expr->lambda_blanket_mode = blanket_mode_r.value();
+    auto lambda_param_count_r = read_u32_le(in, context + " lambda param count");
+    if (!lambda_param_count_r.has_value()) return std::unexpected(std::move(lambda_param_count_r).error());
+    std::uint32_t lambda_param_count = lambda_param_count_r.value();
     expr->lambda_params.reserve(lambda_param_count);
-    for (std::uint32_t i = 0; i < lambda_param_count; i++) expr->lambda_params.push_back(read_param(in, context + " lambda param"));
-    expr->has_lambda_explicit_return_type = read_u8(in, context + " explicit return") != 0u;
-    expr->lambda_is_mutable = read_u8(in, context + " lambda mutable") != 0u;
-    if (read_u8(in, context + " lambda body present") != 0u) expr->lambda_body = read_stmt(in, context + " lambda body");
+    for (std::uint32_t i = 0; i < lambda_param_count; i++) {
+        auto lambda_param_r = read_param(in, context + " lambda param");
+        if (!lambda_param_r.has_value()) return std::unexpected(std::move(lambda_param_r).error());
+        expr->lambda_params.push_back(std::move(lambda_param_r).value());
+    }
+    auto explicit_return_r = read_u8(in, context + " explicit return");
+    if (!explicit_return_r.has_value()) return std::unexpected(std::move(explicit_return_r).error());
+    expr->has_lambda_explicit_return_type = explicit_return_r.value() != 0u;
+    auto lambda_mutable_r = read_u8(in, context + " lambda mutable");
+    if (!lambda_mutable_r.has_value()) return std::unexpected(std::move(lambda_mutable_r).error());
+    expr->lambda_is_mutable = lambda_mutable_r.value() != 0u;
+    auto lambda_body_present_r = read_u8(in, context + " lambda body present");
+    if (!lambda_body_present_r.has_value()) return std::unexpected(std::move(lambda_body_present_r).error());
+    if (lambda_body_present_r.value() != 0u) {
+        auto lambda_body_r = read_stmt(in, context + " lambda body");
+        if (!lambda_body_r.has_value()) return std::unexpected(std::move(lambda_body_r).error());
+        expr->lambda_body = std::move(lambda_body_r).value();
+    }
     return expr;
 }
 
@@ -856,49 +1115,127 @@ void write_stmt(std::ostream& out, const Stmt& stmt) {
     write_u8(out, stmt.is_unsafe ? 1u : 0u);
 }
 
-StmtPtr read_stmt(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<StmtPtr, DriverError> read_stmt(std::istream& in, const std::string& context) {
     auto stmt = std::make_unique<Stmt>();
-    stmt->kind = read_enum<StmtKind>(in, context + " kind");
-    stmt->loc = read_source_location(in, context + " loc");
-    stmt->type = read_type(in, context + " type");
-    stmt->var_name = read_string(in, context + " var name");
-    if (read_u8(in, context + " init present") != 0u) stmt->init = read_expr(in, context + " init");
-    std::uint32_t align_spec_count = read_u32_le(in, context + " align spec count");
+    auto kind_r = read_enum<StmtKind>(in, context + " kind");
+    if (!kind_r.has_value()) return std::unexpected(std::move(kind_r).error());
+    stmt->kind = kind_r.value();
+    auto loc_r = read_source_location(in, context + " loc");
+    if (!loc_r.has_value()) return std::unexpected(std::move(loc_r).error());
+    stmt->loc = std::move(loc_r).value();
+    auto type_r = read_type(in, context + " type");
+    if (!type_r.has_value()) return std::unexpected(std::move(type_r).error());
+    stmt->type = std::move(type_r).value();
+    auto var_name_r = read_string(in, context + " var name");
+    if (!var_name_r.has_value()) return std::unexpected(std::move(var_name_r).error());
+    stmt->var_name = std::move(var_name_r).value();
+    auto init_present_r = read_u8(in, context + " init present");
+    if (!init_present_r.has_value()) return std::unexpected(std::move(init_present_r).error());
+    if (init_present_r.value() != 0u) {
+        auto init_r = read_expr(in, context + " init");
+        if (!init_r.has_value()) return std::unexpected(std::move(init_r).error());
+        stmt->init = std::move(init_r).value();
+    }
+    auto align_spec_count_r = read_u32_le(in, context + " align spec count");
+    if (!align_spec_count_r.has_value()) return std::unexpected(std::move(align_spec_count_r).error());
+    std::uint32_t align_spec_count = align_spec_count_r.value();
     stmt->alignment_specs.reserve(align_spec_count);
     for (std::uint32_t i = 0; i < align_spec_count; i++) {
-        stmt->alignment_specs.push_back(read_alignment_specifier(in, context + " align spec"));
+        auto spec_r = read_alignment_specifier(in, context + " align spec");
+        if (!spec_r.has_value()) return std::unexpected(std::move(spec_r).error());
+        stmt->alignment_specs.push_back(std::move(spec_r).value());
     }
-    stmt->resolved_alignment = read_u64_le(in, context + " resolved alignment");
-    stmt->is_const = read_u8(in, context + " is_const") != 0u;
-    stmt->is_constexpr = read_u8(in, context + " is_constexpr") != 0u;
-    stmt->has_ctor_args = read_u8(in, context + " has ctor args") != 0u;
-    std::uint32_t ctor_arg_count = read_u32_le(in, context + " ctor arg count");
+    auto resolved_alignment_r = read_u64_le(in, context + " resolved alignment");
+    if (!resolved_alignment_r.has_value()) return std::unexpected(std::move(resolved_alignment_r).error());
+    stmt->resolved_alignment = resolved_alignment_r.value();
+    auto is_const_r = read_u8(in, context + " is_const");
+    if (!is_const_r.has_value()) return std::unexpected(std::move(is_const_r).error());
+    stmt->is_const = is_const_r.value() != 0u;
+    auto is_constexpr_r = read_u8(in, context + " is_constexpr");
+    if (!is_constexpr_r.has_value()) return std::unexpected(std::move(is_constexpr_r).error());
+    stmt->is_constexpr = is_constexpr_r.value() != 0u;
+    auto has_ctor_args_r = read_u8(in, context + " has ctor args");
+    if (!has_ctor_args_r.has_value()) return std::unexpected(std::move(has_ctor_args_r).error());
+    stmt->has_ctor_args = has_ctor_args_r.value() != 0u;
+    auto ctor_arg_count_r = read_u32_le(in, context + " ctor arg count");
+    if (!ctor_arg_count_r.has_value()) return std::unexpected(std::move(ctor_arg_count_r).error());
+    std::uint32_t ctor_arg_count = ctor_arg_count_r.value();
     stmt->ctor_args.reserve(ctor_arg_count);
-    for (std::uint32_t i = 0; i < ctor_arg_count; i++) stmt->ctor_args.push_back(read_expr(in, context + " ctor arg"));
-    if (read_u8(in, context + " expr present") != 0u) stmt->expr = read_expr(in, context + " expr");
-    if (read_u8(in, context + " condition present") != 0u) stmt->condition = read_expr(in, context + " condition");
-    stmt->if_mode = read_enum<IfMode>(in, context + " if mode");
-    if (read_u8(in, context + " then present") != 0u) stmt->then_branch = read_stmt(in, context + " then");
-    if (read_u8(in, context + " else present") != 0u) stmt->else_branch = read_stmt(in, context + " else");
-    std::uint32_t switch_case_count = read_u32_le(in, context + " switch case count");
+    for (std::uint32_t i = 0; i < ctor_arg_count; i++) {
+        auto ctor_arg_r = read_expr(in, context + " ctor arg");
+        if (!ctor_arg_r.has_value()) return std::unexpected(std::move(ctor_arg_r).error());
+        stmt->ctor_args.push_back(std::move(ctor_arg_r).value());
+    }
+    auto expr_present_r = read_u8(in, context + " expr present");
+    if (!expr_present_r.has_value()) return std::unexpected(std::move(expr_present_r).error());
+    if (expr_present_r.value() != 0u) {
+        auto expr_r = read_expr(in, context + " expr");
+        if (!expr_r.has_value()) return std::unexpected(std::move(expr_r).error());
+        stmt->expr = std::move(expr_r).value();
+    }
+    auto condition_present_r = read_u8(in, context + " condition present");
+    if (!condition_present_r.has_value()) return std::unexpected(std::move(condition_present_r).error());
+    if (condition_present_r.value() != 0u) {
+        auto condition_r = read_expr(in, context + " condition");
+        if (!condition_r.has_value()) return std::unexpected(std::move(condition_r).error());
+        stmt->condition = std::move(condition_r).value();
+    }
+    auto if_mode_r = read_enum<IfMode>(in, context + " if mode");
+    if (!if_mode_r.has_value()) return std::unexpected(std::move(if_mode_r).error());
+    stmt->if_mode = if_mode_r.value();
+    auto then_present_r = read_u8(in, context + " then present");
+    if (!then_present_r.has_value()) return std::unexpected(std::move(then_present_r).error());
+    if (then_present_r.value() != 0u) {
+        auto then_r = read_stmt(in, context + " then");
+        if (!then_r.has_value()) return std::unexpected(std::move(then_r).error());
+        stmt->then_branch = std::move(then_r).value();
+    }
+    auto else_present_r = read_u8(in, context + " else present");
+    if (!else_present_r.has_value()) return std::unexpected(std::move(else_present_r).error());
+    if (else_present_r.value() != 0u) {
+        auto else_r = read_stmt(in, context + " else");
+        if (!else_r.has_value()) return std::unexpected(std::move(else_r).error());
+        stmt->else_branch = std::move(else_r).value();
+    }
+    auto switch_case_count_r = read_u32_le(in, context + " switch case count");
+    if (!switch_case_count_r.has_value()) return std::unexpected(std::move(switch_case_count_r).error());
+    std::uint32_t switch_case_count = switch_case_count_r.value();
     stmt->switch_cases.reserve(switch_case_count);
     for (std::uint32_t i = 0; i < switch_case_count; i++) {
         SwitchCase switch_case{};
-        switch_case.loc = read_source_location(in, context + " switch case loc");
-        if (read_u8(in, context + " switch case value present") != 0u) {
-            switch_case.value = read_expr(in, context + " switch case value");
+        auto switch_case_loc_r = read_source_location(in, context + " switch case loc");
+        if (!switch_case_loc_r.has_value()) return std::unexpected(std::move(switch_case_loc_r).error());
+        switch_case.loc = std::move(switch_case_loc_r).value();
+        auto switch_case_value_present_r = read_u8(in, context + " switch case value present");
+        if (!switch_case_value_present_r.has_value()) return std::unexpected(std::move(switch_case_value_present_r).error());
+        if (switch_case_value_present_r.value() != 0u) {
+            auto switch_case_value_r = read_expr(in, context + " switch case value");
+            if (!switch_case_value_r.has_value()) return std::unexpected(std::move(switch_case_value_r).error());
+            switch_case.value = std::move(switch_case_value_r).value();
         }
-        std::uint32_t switch_stmt_count = read_u32_le(in, context + " switch case stmt count");
+        auto switch_stmt_count_r = read_u32_le(in, context + " switch case stmt count");
+        if (!switch_stmt_count_r.has_value()) return std::unexpected(std::move(switch_stmt_count_r).error());
+        std::uint32_t switch_stmt_count = switch_stmt_count_r.value();
         switch_case.statements.reserve(switch_stmt_count);
         for (std::uint32_t j = 0; j < switch_stmt_count; j++) {
-            switch_case.statements.push_back(read_stmt(in, context + " switch case stmt"));
+            auto switch_stmt_r = read_stmt(in, context + " switch case stmt");
+            if (!switch_stmt_r.has_value()) return std::unexpected(std::move(switch_stmt_r).error());
+            switch_case.statements.push_back(std::move(switch_stmt_r).value());
         }
         stmt->switch_cases.push_back(std::move(switch_case));
     }
-    std::uint32_t nested_count = read_u32_le(in, context + " nested count");
+    auto nested_count_r = read_u32_le(in, context + " nested count");
+    if (!nested_count_r.has_value()) return std::unexpected(std::move(nested_count_r).error());
+    std::uint32_t nested_count = nested_count_r.value();
     stmt->statements.reserve(nested_count);
-    for (std::uint32_t i = 0; i < nested_count; i++) stmt->statements.push_back(read_stmt(in, context + " nested"));
-    stmt->is_unsafe = read_u8(in, context + " unsafe") != 0u;
+    for (std::uint32_t i = 0; i < nested_count; i++) {
+        auto nested_r = read_stmt(in, context + " nested");
+        if (!nested_r.has_value()) return std::unexpected(std::move(nested_r).error());
+        stmt->statements.push_back(std::move(nested_r).value());
+    }
+    auto unsafe_r = read_u8(in, context + " unsafe");
+    if (!unsafe_r.has_value()) return std::unexpected(std::move(unsafe_r).error());
+    stmt->is_unsafe = unsafe_r.value() != 0u;
     return stmt;
 }
 
@@ -918,22 +1255,48 @@ void write_alignment_specifier(std::ostream& out, const AlignmentSpecifier& spec
     if (spec.expr) write_expr(out, *spec.expr);
 }
 
-[[nodiscard]] AlignmentSpecifier read_alignment_specifier(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<AlignmentSpecifier, DriverError> read_alignment_specifier(std::istream& in, const std::string& context) {
     AlignmentSpecifier spec;
-    spec.loc = read_source_location(in, context + " loc");
-    spec.operand_is_type = read_u8(in, context + " operand is type") != 0u;
-    spec.type = read_type(in, context + " type");
-    if (read_u8(in, context + " expr present") != 0u) spec.expr = read_expr(in, context + " expr");
+    auto loc_r = read_source_location(in, context + " loc");
+    if (!loc_r.has_value()) return std::unexpected(std::move(loc_r).error());
+    spec.loc = std::move(loc_r).value();
+    auto operand_is_type_r = read_u8(in, context + " operand is type");
+    if (!operand_is_type_r.has_value()) return std::unexpected(std::move(operand_is_type_r).error());
+    spec.operand_is_type = operand_is_type_r.value() != 0u;
+    auto type_r = read_type(in, context + " type");
+    if (!type_r.has_value()) return std::unexpected(std::move(type_r).error());
+    spec.type = std::move(type_r).value();
+    auto expr_present_r = read_u8(in, context + " expr present");
+    if (!expr_present_r.has_value()) return std::unexpected(std::move(expr_present_r).error());
+    if (expr_present_r.value() != 0u) {
+        auto expr_r = read_expr(in, context + " expr");
+        if (!expr_r.has_value()) return std::unexpected(std::move(expr_r).error());
+        spec.expr = std::move(expr_r).value();
+    }
     return spec;
 }
 
-[[nodiscard]] Initializer read_initializer(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<Initializer, DriverError> read_initializer(std::istream& in, const std::string& context) {
     Initializer init;
-    if (read_u8(in, context + " expr present") != 0u) init.expr = read_expr(in, context + " expr");
-    init.has_brace_args = read_u8(in, context + " brace args present") != 0u;
-    std::uint32_t arg_count = read_u32_le(in, context + " brace arg count");
+    auto expr_present_r = read_u8(in, context + " expr present");
+    if (!expr_present_r.has_value()) return std::unexpected(std::move(expr_present_r).error());
+    if (expr_present_r.value() != 0u) {
+        auto expr_r = read_expr(in, context + " expr");
+        if (!expr_r.has_value()) return std::unexpected(std::move(expr_r).error());
+        init.expr = std::move(expr_r).value();
+    }
+    auto brace_present_r = read_u8(in, context + " brace args present");
+    if (!brace_present_r.has_value()) return std::unexpected(std::move(brace_present_r).error());
+    init.has_brace_args = brace_present_r.value() != 0u;
+    auto arg_count_r = read_u32_le(in, context + " brace arg count");
+    if (!arg_count_r.has_value()) return std::unexpected(std::move(arg_count_r).error());
+    std::uint32_t arg_count = arg_count_r.value();
     init.brace_args.reserve(arg_count);
-    for (std::uint32_t i = 0; i < arg_count; i++) init.brace_args.push_back(read_expr(in, context + " brace arg"));
+    for (std::uint32_t i = 0; i < arg_count; i++) {
+        auto arg_r = read_expr(in, context + " brace arg");
+        if (!arg_r.has_value()) return std::unexpected(std::move(arg_r).error());
+        init.brace_args.push_back(std::move(arg_r).value());
+    }
     return init;
 }
 
@@ -943,11 +1306,17 @@ void write_member_initializer(std::ostream& out, const MemberInitializer& init) 
     write_source_location(out, init.loc);
 }
 
-[[nodiscard]] MemberInitializer read_member_initializer(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<MemberInitializer, DriverError> read_member_initializer(std::istream& in, const std::string& context) {
     MemberInitializer init;
-    init.member_name = read_string(in, context + " member name");
-    init.initializer = read_initializer(in, context + " initializer");
-    init.loc = read_source_location(in, context + " loc");
+    auto name_r = read_string(in, context + " member name");
+    if (!name_r.has_value()) return std::unexpected(std::move(name_r).error());
+    init.member_name = std::move(name_r).value();
+    auto initializer_r = read_initializer(in, context + " initializer");
+    if (!initializer_r.has_value()) return std::unexpected(std::move(initializer_r).error());
+    init.initializer = std::move(initializer_r).value();
+    auto loc_r = read_source_location(in, context + " loc");
+    if (!loc_r.has_value()) return std::unexpected(std::move(loc_r).error());
+    init.loc = std::move(loc_r).value();
     return init;
 }
 
@@ -963,21 +1332,39 @@ void write_struct_field(std::ostream& out, const StructField& field) {
     write_u64_le(out, field.resolved_alignment);
 }
 
-[[nodiscard]] StructField read_struct_field(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<StructField, DriverError> read_struct_field(std::istream& in, const std::string& context) {
     StructField field;
-    field.loc = read_source_location(in, context + " loc");
-    field.type = read_type(in, context + " type");
-    field.name = read_string(in, context + " name");
-    if (read_u8(in, context + " default initializer present") != 0u) {
-        field.default_initializer = read_initializer(in, context + " default initializer");
+    auto loc_r = read_source_location(in, context + " loc");
+    if (!loc_r.has_value()) return std::unexpected(std::move(loc_r).error());
+    field.loc = std::move(loc_r).value();
+    auto type_r = read_type(in, context + " type");
+    if (!type_r.has_value()) return std::unexpected(std::move(type_r).error());
+    field.type = std::move(type_r).value();
+    auto name_r = read_string(in, context + " name");
+    if (!name_r.has_value()) return std::unexpected(std::move(name_r).error());
+    field.name = std::move(name_r).value();
+    auto default_present_r = read_u8(in, context + " default initializer present");
+    if (!default_present_r.has_value()) return std::unexpected(std::move(default_present_r).error());
+    if (default_present_r.value() != 0u) {
+        auto default_r = read_initializer(in, context + " default initializer");
+        if (!default_r.has_value()) return std::unexpected(std::move(default_r).error());
+        field.default_initializer = std::move(default_r).value();
     }
-    field.access = read_enum<AccessSpecifier>(in, context + " access");
-    std::uint32_t align_spec_count = read_u32_le(in, context + " align spec count");
+    auto access_r = read_enum<AccessSpecifier>(in, context + " access");
+    if (!access_r.has_value()) return std::unexpected(std::move(access_r).error());
+    field.access = access_r.value();
+    auto align_spec_count_r = read_u32_le(in, context + " align spec count");
+    if (!align_spec_count_r.has_value()) return std::unexpected(std::move(align_spec_count_r).error());
+    std::uint32_t align_spec_count = align_spec_count_r.value();
     field.alignment_specs.reserve(align_spec_count);
     for (std::uint32_t i = 0; i < align_spec_count; i++) {
-        field.alignment_specs.push_back(read_alignment_specifier(in, context + " align spec"));
+        auto spec_r = read_alignment_specifier(in, context + " align spec");
+        if (!spec_r.has_value()) return std::unexpected(std::move(spec_r).error());
+        field.alignment_specs.push_back(std::move(spec_r).value());
     }
-    field.resolved_alignment = read_u64_le(in, context + " resolved alignment");
+    auto resolved_alignment_r = read_u64_le(in, context + " resolved alignment");
+    if (!resolved_alignment_r.has_value()) return std::unexpected(std::move(resolved_alignment_r).error());
+    field.resolved_alignment = resolved_alignment_r.value();
     return field;
 }
 
@@ -993,21 +1380,39 @@ void write_class_field(std::ostream& out, const ClassField& field) {
     write_u64_le(out, field.resolved_alignment);
 }
 
-[[nodiscard]] ClassField read_class_field(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<ClassField, DriverError> read_class_field(std::istream& in, const std::string& context) {
     ClassField field;
-    field.loc = read_source_location(in, context + " loc");
-    field.type = read_type(in, context + " type");
-    field.name = read_string(in, context + " name");
-    if (read_u8(in, context + " default initializer present") != 0u) {
-        field.default_initializer = read_initializer(in, context + " default initializer");
+    auto loc_r = read_source_location(in, context + " loc");
+    if (!loc_r.has_value()) return std::unexpected(std::move(loc_r).error());
+    field.loc = std::move(loc_r).value();
+    auto type_r = read_type(in, context + " type");
+    if (!type_r.has_value()) return std::unexpected(std::move(type_r).error());
+    field.type = std::move(type_r).value();
+    auto name_r = read_string(in, context + " name");
+    if (!name_r.has_value()) return std::unexpected(std::move(name_r).error());
+    field.name = std::move(name_r).value();
+    auto default_present_r = read_u8(in, context + " default initializer present");
+    if (!default_present_r.has_value()) return std::unexpected(std::move(default_present_r).error());
+    if (default_present_r.value() != 0u) {
+        auto default_r = read_initializer(in, context + " default initializer");
+        if (!default_r.has_value()) return std::unexpected(std::move(default_r).error());
+        field.default_initializer = std::move(default_r).value();
     }
-    field.access = read_enum<AccessSpecifier>(in, context + " access");
-    std::uint32_t align_spec_count = read_u32_le(in, context + " align spec count");
+    auto access_r = read_enum<AccessSpecifier>(in, context + " access");
+    if (!access_r.has_value()) return std::unexpected(std::move(access_r).error());
+    field.access = access_r.value();
+    auto align_spec_count_r = read_u32_le(in, context + " align spec count");
+    if (!align_spec_count_r.has_value()) return std::unexpected(std::move(align_spec_count_r).error());
+    std::uint32_t align_spec_count = align_spec_count_r.value();
     field.alignment_specs.reserve(align_spec_count);
     for (std::uint32_t i = 0; i < align_spec_count; i++) {
-        field.alignment_specs.push_back(read_alignment_specifier(in, context + " align spec"));
+        auto spec_r = read_alignment_specifier(in, context + " align spec");
+        if (!spec_r.has_value()) return std::unexpected(std::move(spec_r).error());
+        field.alignment_specs.push_back(std::move(spec_r).value());
     }
-    field.resolved_alignment = read_u64_le(in, context + " resolved alignment");
+    auto resolved_alignment_r = read_u64_le(in, context + " resolved alignment");
+    if (!resolved_alignment_r.has_value()) return std::unexpected(std::move(resolved_alignment_r).error());
+    field.resolved_alignment = resolved_alignment_r.value();
     return field;
 }
 
@@ -1019,13 +1424,23 @@ void write_base_specifier(std::ostream& out, const BaseSpecifier& base) {
     write_string(out, base.pack_arg_name);
 }
 
-[[nodiscard]] BaseSpecifier read_base_specifier(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<BaseSpecifier, DriverError> read_base_specifier(std::istream& in, const std::string& context) {
     BaseSpecifier base;
-    base.base_type = read_type(in, context + " type");
-    base.access = read_enum<AccessSpecifier>(in, context + " access");
-    base.is_virtual = read_u8(in, context + " is_virtual") != 0u;
-    base.kind = read_enum<BaseClassKind>(in, context + " kind");
-    base.pack_arg_name = read_string(in, context + " pack arg");
+    auto type_r = read_type(in, context + " type");
+    if (!type_r.has_value()) return std::unexpected(std::move(type_r).error());
+    base.base_type = std::move(type_r).value();
+    auto access_r = read_enum<AccessSpecifier>(in, context + " access");
+    if (!access_r.has_value()) return std::unexpected(std::move(access_r).error());
+    base.access = access_r.value();
+    auto is_virtual_r = read_u8(in, context + " is_virtual");
+    if (!is_virtual_r.has_value()) return std::unexpected(std::move(is_virtual_r).error());
+    base.is_virtual = is_virtual_r.value() != 0u;
+    auto kind_r = read_enum<BaseClassKind>(in, context + " kind");
+    if (!kind_r.has_value()) return std::unexpected(std::move(kind_r).error());
+    base.kind = kind_r.value();
+    auto pack_arg_r = read_string(in, context + " pack arg");
+    if (!pack_arg_r.has_value()) return std::unexpected(std::move(pack_arg_r).error());
+    base.pack_arg_name = std::move(pack_arg_r).value();
     return base;
 }
 
@@ -1035,11 +1450,17 @@ void write_class_using_declaration(std::ostream& out, const ClassUsingDeclaratio
     write_enum(out, decl.access);
 }
 
-[[nodiscard]] ClassUsingDeclaration read_class_using_declaration(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<ClassUsingDeclaration, DriverError> read_class_using_declaration(std::istream& in, const std::string& context) {
     ClassUsingDeclaration decl;
-    decl.base_name = read_string(in, context + " base name");
-    decl.member_name = read_string(in, context + " member name");
-    decl.access = read_enum<AccessSpecifier>(in, context + " access");
+    auto base_name_r = read_string(in, context + " base name");
+    if (!base_name_r.has_value()) return std::unexpected(std::move(base_name_r).error());
+    decl.base_name = std::move(base_name_r).value();
+    auto member_name_r = read_string(in, context + " member name");
+    if (!member_name_r.has_value()) return std::unexpected(std::move(member_name_r).error());
+    decl.member_name = std::move(member_name_r).value();
+    auto access_r = read_enum<AccessSpecifier>(in, context + " access");
+    if (!access_r.has_value()) return std::unexpected(std::move(access_r).error());
+    decl.access = access_r.value();
     return decl;
 }
 
@@ -1048,10 +1469,14 @@ void write_enum_variant(std::ostream& out, const EnumVariant& variant) {
     write_i64_le(out, variant.value);
 }
 
-[[nodiscard]] EnumVariant read_enum_variant(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<EnumVariant, DriverError> read_enum_variant(std::istream& in, const std::string& context) {
     EnumVariant variant;
-    variant.name = read_string(in, context + " name");
-    variant.value = read_i64_le(in, context + " value");
+    auto name_r = read_string(in, context + " name");
+    if (!name_r.has_value()) return std::unexpected(std::move(name_r).error());
+    variant.name = std::move(name_r).value();
+    auto value_r = read_i64_le(in, context + " value");
+    if (!value_r.has_value()) return std::unexpected(std::move(value_r).error());
+    variant.value = value_r.value();
     return variant;
 }
 
@@ -1067,19 +1492,41 @@ void write_enum_def(std::ostream& out, const EnumDef& def) {
     write_string(out, def.owning_module);
 }
 
-[[nodiscard]] EnumDef read_enum_def(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<EnumDef, DriverError> read_enum_def(std::istream& in, const std::string& context) {
     EnumDef def;
-    def.name = read_string(in, context + " name");
-    def.underlying_type = read_type(in, context + " underlying");
-    std::uint32_t variant_count = read_u32_le(in, context + " variant count");
+    auto name_r = read_string(in, context + " name");
+    if (!name_r.has_value()) return std::unexpected(std::move(name_r).error());
+    def.name = std::move(name_r).value();
+    auto underlying_r = read_type(in, context + " underlying");
+    if (!underlying_r.has_value()) return std::unexpected(std::move(underlying_r).error());
+    def.underlying_type = std::move(underlying_r).value();
+    auto variant_count_r = read_u32_le(in, context + " variant count");
+    if (!variant_count_r.has_value()) return std::unexpected(std::move(variant_count_r).error());
+    std::uint32_t variant_count = variant_count_r.value();
     def.variants.reserve(variant_count);
-    for (std::uint32_t i = 0; i < variant_count; i++) def.variants.push_back(read_enum_variant(in, context + " variant"));
-    std::uint32_t ns_count = read_u32_le(in, context + " namespace count");
+    for (std::uint32_t i = 0; i < variant_count; i++) {
+        auto variant_r = read_enum_variant(in, context + " variant");
+        if (!variant_r.has_value()) return std::unexpected(std::move(variant_r).error());
+        def.variants.push_back(std::move(variant_r).value());
+    }
+    auto ns_count_r = read_u32_le(in, context + " namespace count");
+    if (!ns_count_r.has_value()) return std::unexpected(std::move(ns_count_r).error());
+    std::uint32_t ns_count = ns_count_r.value();
     def.namespace_path.reserve(ns_count);
-    for (std::uint32_t i = 0; i < ns_count; i++) def.namespace_path.push_back(read_string(in, context + " namespace"));
-    def.is_exported = read_u8(in, context + " is_exported") != 0u;
-    def.is_compile_time_dependency = read_u8(in, context + " is_compile_time_dependency") != 0u;
-    def.owning_module = read_string(in, context + " owning_module");
+    for (std::uint32_t i = 0; i < ns_count; i++) {
+        auto ns_r = read_string(in, context + " namespace");
+        if (!ns_r.has_value()) return std::unexpected(std::move(ns_r).error());
+        def.namespace_path.push_back(std::move(ns_r).value());
+    }
+    auto is_exported_r = read_u8(in, context + " is_exported");
+    if (!is_exported_r.has_value()) return std::unexpected(std::move(is_exported_r).error());
+    def.is_exported = is_exported_r.value() != 0u;
+    auto is_ctd_r = read_u8(in, context + " is_compile_time_dependency");
+    if (!is_ctd_r.has_value()) return std::unexpected(std::move(is_ctd_r).error());
+    def.is_compile_time_dependency = is_ctd_r.value() != 0u;
+    auto owning_module_r = read_string(in, context + " owning_module");
+    if (!owning_module_r.has_value()) return std::unexpected(std::move(owning_module_r).error());
+    def.owning_module = std::move(owning_module_r).value();
     return def;
 }
 
@@ -1108,36 +1555,86 @@ void write_struct_def(std::ostream& out, const StructDef& def) {
     write_string(out, def.nodiscard_reason);
 }
 
-[[nodiscard]] StructDef read_struct_def(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<StructDef, DriverError> read_struct_def(std::istream& in, const std::string& context) {
     StructDef def;
-    def.loc = read_source_location(in, context + " loc");
-    def.name = read_string(in, context + " name");
-    std::uint32_t field_count = read_u32_le(in, context + " field count");
+    auto loc_r = read_source_location(in, context + " loc");
+    if (!loc_r.has_value()) return std::unexpected(std::move(loc_r).error());
+    def.loc = std::move(loc_r).value();
+    auto name_r = read_string(in, context + " name");
+    if (!name_r.has_value()) return std::unexpected(std::move(name_r).error());
+    def.name = std::move(name_r).value();
+    auto field_count_r = read_u32_le(in, context + " field count");
+    if (!field_count_r.has_value()) return std::unexpected(std::move(field_count_r).error());
+    std::uint32_t field_count = field_count_r.value();
     def.fields.reserve(field_count);
-    for (std::uint32_t i = 0; i < field_count; i++) def.fields.push_back(read_struct_field(in, context + " field"));
-    def.is_union = read_u8(in, context + " is_union") != 0u;
-    def.is_packed = read_u8(in, context + " is_packed") != 0u;
-    std::uint32_t align_spec_count = read_u32_le(in, context + " align spec count");
+    for (std::uint32_t i = 0; i < field_count; i++) {
+        auto field_r = read_struct_field(in, context + " field");
+        if (!field_r.has_value()) return std::unexpected(std::move(field_r).error());
+        def.fields.push_back(std::move(field_r).value());
+    }
+    auto is_union_r = read_u8(in, context + " is_union");
+    if (!is_union_r.has_value()) return std::unexpected(std::move(is_union_r).error());
+    def.is_union = is_union_r.value() != 0u;
+    auto is_packed_r = read_u8(in, context + " is_packed");
+    if (!is_packed_r.has_value()) return std::unexpected(std::move(is_packed_r).error());
+    def.is_packed = is_packed_r.value() != 0u;
+    auto align_spec_count_r = read_u32_le(in, context + " align spec count");
+    if (!align_spec_count_r.has_value()) return std::unexpected(std::move(align_spec_count_r).error());
+    std::uint32_t align_spec_count = align_spec_count_r.value();
     def.alignment_specs.reserve(align_spec_count);
     for (std::uint32_t i = 0; i < align_spec_count; i++) {
-        def.alignment_specs.push_back(read_alignment_specifier(in, context + " align spec"));
+        auto spec_r = read_alignment_specifier(in, context + " align spec");
+        if (!spec_r.has_value()) return std::unexpected(std::move(spec_r).error());
+        def.alignment_specs.push_back(std::move(spec_r).value());
     }
-    def.resolved_alignment = read_u64_le(in, context + " resolved alignment");
-    std::uint32_t ns_count = read_u32_le(in, context + " namespace count");
+    auto resolved_alignment_r = read_u64_le(in, context + " resolved alignment");
+    if (!resolved_alignment_r.has_value()) return std::unexpected(std::move(resolved_alignment_r).error());
+    def.resolved_alignment = resolved_alignment_r.value();
+    auto ns_count_r = read_u32_le(in, context + " namespace count");
+    if (!ns_count_r.has_value()) return std::unexpected(std::move(ns_count_r).error());
+    std::uint32_t ns_count = ns_count_r.value();
     def.namespace_path.reserve(ns_count);
-    for (std::uint32_t i = 0; i < ns_count; i++) def.namespace_path.push_back(read_string(in, context + " namespace"));
-    def.is_exported = read_u8(in, context + " is_exported") != 0u;
-    def.is_compile_time_dependency = read_u8(in, context + " is_compile_time_dependency") != 0u;
-    def.owning_module = read_string(in, context + " owning_module");
-    std::uint32_t template_param_count = read_u32_le(in, context + " template param count");
+    for (std::uint32_t i = 0; i < ns_count; i++) {
+        auto ns_r = read_string(in, context + " namespace");
+        if (!ns_r.has_value()) return std::unexpected(std::move(ns_r).error());
+        def.namespace_path.push_back(std::move(ns_r).value());
+    }
+    auto is_exported_r = read_u8(in, context + " is_exported");
+    if (!is_exported_r.has_value()) return std::unexpected(std::move(is_exported_r).error());
+    def.is_exported = is_exported_r.value() != 0u;
+    auto is_ctd_r = read_u8(in, context + " is_compile_time_dependency");
+    if (!is_ctd_r.has_value()) return std::unexpected(std::move(is_ctd_r).error());
+    def.is_compile_time_dependency = is_ctd_r.value() != 0u;
+    auto owning_module_r = read_string(in, context + " owning_module");
+    if (!owning_module_r.has_value()) return std::unexpected(std::move(owning_module_r).error());
+    def.owning_module = std::move(owning_module_r).value();
+    auto template_param_count_r = read_u32_le(in, context + " template param count");
+    if (!template_param_count_r.has_value()) return std::unexpected(std::move(template_param_count_r).error());
+    std::uint32_t template_param_count = template_param_count_r.value();
     def.template_params.reserve(template_param_count);
-    for (std::uint32_t i = 0; i < template_param_count; i++) def.template_params.push_back(read_generic_type_param(in, context + " template param"));
-    def.is_forward_declaration = read_u8(in, context + " is_forward_declaration") != 0u;
-    def.template_owner_id = read_string(in, context + " template owner id");
-    def.thread_movable_override = read_u8(in, context + " thread movable override") != 0u;
-    def.thread_shareable_override = read_u8(in, context + " thread shareable override") != 0u;
-    def.is_nodiscard = read_u8(in, context + " nodiscard") != 0u;
-    def.nodiscard_reason = read_string(in, context + " nodiscard reason");
+    for (std::uint32_t i = 0; i < template_param_count; i++) {
+        auto template_param_r = read_generic_type_param(in, context + " template param");
+        if (!template_param_r.has_value()) return std::unexpected(std::move(template_param_r).error());
+        def.template_params.push_back(std::move(template_param_r).value());
+    }
+    auto is_fwd_decl_r = read_u8(in, context + " is_forward_declaration");
+    if (!is_fwd_decl_r.has_value()) return std::unexpected(std::move(is_fwd_decl_r).error());
+    def.is_forward_declaration = is_fwd_decl_r.value() != 0u;
+    auto template_owner_id_r = read_string(in, context + " template owner id");
+    if (!template_owner_id_r.has_value()) return std::unexpected(std::move(template_owner_id_r).error());
+    def.template_owner_id = std::move(template_owner_id_r).value();
+    auto thread_movable_override_r = read_u8(in, context + " thread movable override");
+    if (!thread_movable_override_r.has_value()) return std::unexpected(std::move(thread_movable_override_r).error());
+    def.thread_movable_override = thread_movable_override_r.value() != 0u;
+    auto thread_shareable_override_r = read_u8(in, context + " thread shareable override");
+    if (!thread_shareable_override_r.has_value()) return std::unexpected(std::move(thread_shareable_override_r).error());
+    def.thread_shareable_override = thread_shareable_override_r.value() != 0u;
+    auto is_nodiscard_r = read_u8(in, context + " nodiscard");
+    if (!is_nodiscard_r.has_value()) return std::unexpected(std::move(is_nodiscard_r).error());
+    def.is_nodiscard = is_nodiscard_r.value() != 0u;
+    auto nodiscard_reason_r = read_string(in, context + " nodiscard reason");
+    if (!nodiscard_reason_r.has_value()) return std::unexpected(std::move(nodiscard_reason_r).error());
+    def.nodiscard_reason = std::move(nodiscard_reason_r).value();
     return def;
 }
 
@@ -1180,57 +1677,139 @@ void write_class_def(std::ostream& out, const ClassDef& def) {
     write_string(out, def.nodiscard_reason);
 }
 
-[[nodiscard]] ClassDef read_class_def(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<ClassDef, DriverError> read_class_def(std::istream& in, const std::string& context) {
     ClassDef def;
-    def.loc = read_source_location(in, context + " loc");
-    def.name = read_string(in, context + " name");
-    std::uint32_t field_count = read_u32_le(in, context + " field count");
+    auto loc_r = read_source_location(in, context + " loc");
+    if (!loc_r.has_value()) return std::unexpected(std::move(loc_r).error());
+    def.loc = std::move(loc_r).value();
+    auto name_r = read_string(in, context + " name");
+    if (!name_r.has_value()) return std::unexpected(std::move(name_r).error());
+    def.name = std::move(name_r).value();
+    auto field_count_r = read_u32_le(in, context + " field count");
+    if (!field_count_r.has_value()) return std::unexpected(std::move(field_count_r).error());
+    std::uint32_t field_count = field_count_r.value();
     def.fields.reserve(field_count);
-    for (std::uint32_t i = 0; i < field_count; i++) def.fields.push_back(read_class_field(in, context + " field"));
-    std::uint32_t align_spec_count = read_u32_le(in, context + " align spec count");
+    for (std::uint32_t i = 0; i < field_count; i++) {
+        auto field_r = read_class_field(in, context + " field");
+        if (!field_r.has_value()) return std::unexpected(std::move(field_r).error());
+        def.fields.push_back(std::move(field_r).value());
+    }
+    auto align_spec_count_r = read_u32_le(in, context + " align spec count");
+    if (!align_spec_count_r.has_value()) return std::unexpected(std::move(align_spec_count_r).error());
+    std::uint32_t align_spec_count = align_spec_count_r.value();
     def.alignment_specs.reserve(align_spec_count);
     for (std::uint32_t i = 0; i < align_spec_count; i++) {
-        def.alignment_specs.push_back(read_alignment_specifier(in, context + " align spec"));
+        auto spec_r = read_alignment_specifier(in, context + " align spec");
+        if (!spec_r.has_value()) return std::unexpected(std::move(spec_r).error());
+        def.alignment_specs.push_back(std::move(spec_r).value());
     }
-    def.resolved_alignment = read_u64_le(in, context + " resolved alignment");
-    std::uint32_t ns_count = read_u32_le(in, context + " namespace count");
+    auto resolved_alignment_r = read_u64_le(in, context + " resolved alignment");
+    if (!resolved_alignment_r.has_value()) return std::unexpected(std::move(resolved_alignment_r).error());
+    def.resolved_alignment = resolved_alignment_r.value();
+    auto ns_count_r = read_u32_le(in, context + " namespace count");
+    if (!ns_count_r.has_value()) return std::unexpected(std::move(ns_count_r).error());
+    std::uint32_t ns_count = ns_count_r.value();
     def.namespace_path.reserve(ns_count);
-    for (std::uint32_t i = 0; i < ns_count; i++) def.namespace_path.push_back(read_string(in, context + " namespace"));
-    def.is_exported = read_u8(in, context + " is_exported") != 0u;
-    def.is_compile_time_dependency = read_u8(in, context + " is_compile_time_dependency") != 0u;
-    def.owning_module = read_string(in, context + " owning_module");
-    def.is_concept_witness = read_u8(in, context + " is_concept_witness") != 0u;
-    def.is_interface = read_u8(in, context + " is_interface") != 0u;
-    std::uint32_t base_count = read_u32_le(in, context + " base count");
+    for (std::uint32_t i = 0; i < ns_count; i++) {
+        auto ns_r = read_string(in, context + " namespace");
+        if (!ns_r.has_value()) return std::unexpected(std::move(ns_r).error());
+        def.namespace_path.push_back(std::move(ns_r).value());
+    }
+    auto is_exported_r = read_u8(in, context + " is_exported");
+    if (!is_exported_r.has_value()) return std::unexpected(std::move(is_exported_r).error());
+    def.is_exported = is_exported_r.value() != 0u;
+    auto is_ctd_r = read_u8(in, context + " is_compile_time_dependency");
+    if (!is_ctd_r.has_value()) return std::unexpected(std::move(is_ctd_r).error());
+    def.is_compile_time_dependency = is_ctd_r.value() != 0u;
+    auto owning_module_r = read_string(in, context + " owning_module");
+    if (!owning_module_r.has_value()) return std::unexpected(std::move(owning_module_r).error());
+    def.owning_module = std::move(owning_module_r).value();
+    auto is_concept_witness_r = read_u8(in, context + " is_concept_witness");
+    if (!is_concept_witness_r.has_value()) return std::unexpected(std::move(is_concept_witness_r).error());
+    def.is_concept_witness = is_concept_witness_r.value() != 0u;
+    auto is_interface_r = read_u8(in, context + " is_interface");
+    if (!is_interface_r.has_value()) return std::unexpected(std::move(is_interface_r).error());
+    def.is_interface = is_interface_r.value() != 0u;
+    auto base_count_r = read_u32_le(in, context + " base count");
+    if (!base_count_r.has_value()) return std::unexpected(std::move(base_count_r).error());
+    std::uint32_t base_count = base_count_r.value();
     def.base_specifiers.reserve(base_count);
-    for (std::uint32_t i = 0; i < base_count; i++) def.base_specifiers.push_back(read_base_specifier(in, context + " base"));
-    std::uint32_t using_count = read_u32_le(in, context + " using count");
+    for (std::uint32_t i = 0; i < base_count; i++) {
+        auto base_r = read_base_specifier(in, context + " base");
+        if (!base_r.has_value()) return std::unexpected(std::move(base_r).error());
+        def.base_specifiers.push_back(std::move(base_r).value());
+    }
+    auto using_count_r = read_u32_le(in, context + " using count");
+    if (!using_count_r.has_value()) return std::unexpected(std::move(using_count_r).error());
+    std::uint32_t using_count = using_count_r.value();
     def.using_declarations.reserve(using_count);
     for (std::uint32_t i = 0; i < using_count; i++) {
-        def.using_declarations.push_back(read_class_using_declaration(in, context + " using"));
+        auto using_r = read_class_using_declaration(in, context + " using");
+        if (!using_r.has_value()) return std::unexpected(std::move(using_r).error());
+        def.using_declarations.push_back(std::move(using_r).value());
     }
-    std::uint32_t template_param_count = read_u32_le(in, context + " template param count");
+    auto template_param_count_r = read_u32_le(in, context + " template param count");
+    if (!template_param_count_r.has_value()) return std::unexpected(std::move(template_param_count_r).error());
+    std::uint32_t template_param_count = template_param_count_r.value();
     def.template_params.reserve(template_param_count);
-    for (std::uint32_t i = 0; i < template_param_count; i++) def.template_params.push_back(read_generic_type_param(in, context + " template param"));
-    def.template_owner_id = read_string(in, context + " template owner id");
-    def.is_forward_declaration = read_u8(in, context + " is_forward_declaration") != 0u;
-    def.is_synthetic_check_only = read_u8(in, context + " is_synthetic_check_only") != 0u;
-    def.is_variadic_primary_template = read_u8(in, context + " is_variadic_primary") != 0u;
-    def.is_variadic_specialization = read_u8(in, context + " is_variadic_specialization") != 0u;
-    def.is_partial_specialization = read_u8(in, context + " is_partial_specialization") != 0u;
-    std::uint32_t spec_arg_count = read_u32_le(in, context + " specialization arg count");
+    for (std::uint32_t i = 0; i < template_param_count; i++) {
+        auto template_param_r = read_generic_type_param(in, context + " template param");
+        if (!template_param_r.has_value()) return std::unexpected(std::move(template_param_r).error());
+        def.template_params.push_back(std::move(template_param_r).value());
+    }
+    auto template_owner_id_r = read_string(in, context + " template owner id");
+    if (!template_owner_id_r.has_value()) return std::unexpected(std::move(template_owner_id_r).error());
+    def.template_owner_id = std::move(template_owner_id_r).value();
+    auto is_fwd_decl_r = read_u8(in, context + " is_forward_declaration");
+    if (!is_fwd_decl_r.has_value()) return std::unexpected(std::move(is_fwd_decl_r).error());
+    def.is_forward_declaration = is_fwd_decl_r.value() != 0u;
+    auto is_synth_check_only_r = read_u8(in, context + " is_synthetic_check_only");
+    if (!is_synth_check_only_r.has_value()) return std::unexpected(std::move(is_synth_check_only_r).error());
+    def.is_synthetic_check_only = is_synth_check_only_r.value() != 0u;
+    auto is_variadic_primary_r = read_u8(in, context + " is_variadic_primary");
+    if (!is_variadic_primary_r.has_value()) return std::unexpected(std::move(is_variadic_primary_r).error());
+    def.is_variadic_primary_template = is_variadic_primary_r.value() != 0u;
+    auto is_variadic_spec_r = read_u8(in, context + " is_variadic_specialization");
+    if (!is_variadic_spec_r.has_value()) return std::unexpected(std::move(is_variadic_spec_r).error());
+    def.is_variadic_specialization = is_variadic_spec_r.value() != 0u;
+    auto is_partial_spec_r = read_u8(in, context + " is_partial_specialization");
+    if (!is_partial_spec_r.has_value()) return std::unexpected(std::move(is_partial_spec_r).error());
+    def.is_partial_specialization = is_partial_spec_r.value() != 0u;
+    auto spec_arg_count_r = read_u32_le(in, context + " specialization arg count");
+    if (!spec_arg_count_r.has_value()) return std::unexpected(std::move(spec_arg_count_r).error());
+    std::uint32_t spec_arg_count = spec_arg_count_r.value();
     def.specialization_template_args.reserve(spec_arg_count);
-    for (std::uint32_t i = 0; i < spec_arg_count; i++) def.specialization_template_args.push_back(read_type(in, context + " specialization arg"));
-    def.thread_movable_override = read_u8(in, context + " thread movable override") != 0u;
-    def.thread_shareable_override = read_u8(in, context + " thread shareable override") != 0u;
-    if (read_u8(in, context + " movable_if expr present") != 0u) {
-        def.thread_movable_if_movable_expr = read_expr(in, context + " movable_if expr");
+    for (std::uint32_t i = 0; i < spec_arg_count; i++) {
+        auto spec_arg_r = read_type(in, context + " specialization arg");
+        if (!spec_arg_r.has_value()) return std::unexpected(std::move(spec_arg_r).error());
+        def.specialization_template_args.push_back(std::move(spec_arg_r).value());
     }
-    if (read_u8(in, context + " shareable_if expr present") != 0u) {
-        def.thread_movable_if_shareable_expr = read_expr(in, context + " shareable_if expr");
+    auto thread_movable_override_r = read_u8(in, context + " thread movable override");
+    if (!thread_movable_override_r.has_value()) return std::unexpected(std::move(thread_movable_override_r).error());
+    def.thread_movable_override = thread_movable_override_r.value() != 0u;
+    auto thread_shareable_override_r = read_u8(in, context + " thread shareable override");
+    if (!thread_shareable_override_r.has_value()) return std::unexpected(std::move(thread_shareable_override_r).error());
+    def.thread_shareable_override = thread_shareable_override_r.value() != 0u;
+    auto movable_if_present_r = read_u8(in, context + " movable_if expr present");
+    if (!movable_if_present_r.has_value()) return std::unexpected(std::move(movable_if_present_r).error());
+    if (movable_if_present_r.value() != 0u) {
+        auto movable_if_r = read_expr(in, context + " movable_if expr");
+        if (!movable_if_r.has_value()) return std::unexpected(std::move(movable_if_r).error());
+        def.thread_movable_if_movable_expr = std::move(movable_if_r).value();
     }
-    def.is_nodiscard = read_u8(in, context + " nodiscard") != 0u;
-    def.nodiscard_reason = read_string(in, context + " nodiscard reason");
+    auto shareable_if_present_r = read_u8(in, context + " shareable_if expr present");
+    if (!shareable_if_present_r.has_value()) return std::unexpected(std::move(shareable_if_present_r).error());
+    if (shareable_if_present_r.value() != 0u) {
+        auto shareable_if_r = read_expr(in, context + " shareable_if expr");
+        if (!shareable_if_r.has_value()) return std::unexpected(std::move(shareable_if_r).error());
+        def.thread_movable_if_shareable_expr = std::move(shareable_if_r).value();
+    }
+    auto is_nodiscard_r = read_u8(in, context + " nodiscard");
+    if (!is_nodiscard_r.has_value()) return std::unexpected(std::move(is_nodiscard_r).error());
+    def.is_nodiscard = is_nodiscard_r.value() != 0u;
+    auto nodiscard_reason_r = read_string(in, context + " nodiscard reason");
+    if (!nodiscard_reason_r.has_value()) return std::unexpected(std::move(nodiscard_reason_r).error());
+    def.nodiscard_reason = std::move(nodiscard_reason_r).value();
     return def;
 }
 
@@ -1273,49 +1852,129 @@ void write_function(std::ostream& out, const Function& fn) {
     write_string(out, fn.owning_module);
 }
 
-[[nodiscard]] Function read_function(std::istream& in, const std::string& context) {
+[[nodiscard]] std::expected<Function, DriverError> read_function(std::istream& in, const std::string& context) {
     Function fn;
-    fn.return_type = read_type(in, context + " return type");
-    fn.name = read_string(in, context + " name");
-    fn.loc = read_source_location(in, context + " loc");
-    std::uint32_t param_count = read_u32_le(in, context + " param count");
+    auto return_type_r = read_type(in, context + " return type");
+    if (!return_type_r.has_value()) return std::unexpected(std::move(return_type_r).error());
+    fn.return_type = std::move(return_type_r).value();
+    auto name_r = read_string(in, context + " name");
+    if (!name_r.has_value()) return std::unexpected(std::move(name_r).error());
+    fn.name = std::move(name_r).value();
+    auto loc_r = read_source_location(in, context + " loc");
+    if (!loc_r.has_value()) return std::unexpected(std::move(loc_r).error());
+    fn.loc = std::move(loc_r).value();
+    auto param_count_r = read_u32_le(in, context + " param count");
+    if (!param_count_r.has_value()) return std::unexpected(std::move(param_count_r).error());
+    std::uint32_t param_count = param_count_r.value();
     fn.params.reserve(param_count);
-    for (std::uint32_t i = 0; i < param_count; i++) fn.params.push_back(read_param(in, context + " param"));
-    fn.return_lifetime.name = read_string(in, context + " return lifetime");
-    if (read_u8(in, context + " body present") != 0u) fn.body = read_stmt(in, context + " body");
-    fn.is_extern_c = read_u8(in, context + " extern_c") != 0u;
-    fn.is_module_extern = read_u8(in, context + " module_extern") != 0u;
-    fn.is_unsafe = read_u8(in, context + " unsafe") != 0u;
-    fn.is_nodiscard = read_u8(in, context + " nodiscard") != 0u;
-    fn.nodiscard_reason = read_string(in, context + " nodiscard reason");
-    fn.is_compile_time_dependency = read_u8(in, context + " compile_time_dependency") != 0u;
-    fn.eval_mode = read_enum<FunctionEvalMode>(in, context + " eval mode");
-    fn.has_varargs = read_u8(in, context + " has_varargs") != 0u;
-    fn.method_requires_concept = read_string(in, context + " method_requires_concept");
-    fn.is_generic_template = read_u8(in, context + " is_generic_template") != 0u;
-    std::uint32_t template_param_count = read_u32_le(in, context + " template param count");
+    for (std::uint32_t i = 0; i < param_count; i++) {
+        auto param_r = read_param(in, context + " param");
+        if (!param_r.has_value()) return std::unexpected(std::move(param_r).error());
+        fn.params.push_back(std::move(param_r).value());
+    }
+    auto return_lifetime_r = read_string(in, context + " return lifetime");
+    if (!return_lifetime_r.has_value()) return std::unexpected(std::move(return_lifetime_r).error());
+    fn.return_lifetime.name = std::move(return_lifetime_r).value();
+    auto body_present_r = read_u8(in, context + " body present");
+    if (!body_present_r.has_value()) return std::unexpected(std::move(body_present_r).error());
+    if (body_present_r.value() != 0u) {
+        auto body_r = read_stmt(in, context + " body");
+        if (!body_r.has_value()) return std::unexpected(std::move(body_r).error());
+        fn.body = std::move(body_r).value();
+    }
+    auto extern_c_r = read_u8(in, context + " extern_c");
+    if (!extern_c_r.has_value()) return std::unexpected(std::move(extern_c_r).error());
+    fn.is_extern_c = extern_c_r.value() != 0u;
+    auto module_extern_r = read_u8(in, context + " module_extern");
+    if (!module_extern_r.has_value()) return std::unexpected(std::move(module_extern_r).error());
+    fn.is_module_extern = module_extern_r.value() != 0u;
+    auto unsafe_r = read_u8(in, context + " unsafe");
+    if (!unsafe_r.has_value()) return std::unexpected(std::move(unsafe_r).error());
+    fn.is_unsafe = unsafe_r.value() != 0u;
+    auto nodiscard_r = read_u8(in, context + " nodiscard");
+    if (!nodiscard_r.has_value()) return std::unexpected(std::move(nodiscard_r).error());
+    fn.is_nodiscard = nodiscard_r.value() != 0u;
+    auto nodiscard_reason_r = read_string(in, context + " nodiscard reason");
+    if (!nodiscard_reason_r.has_value()) return std::unexpected(std::move(nodiscard_reason_r).error());
+    fn.nodiscard_reason = std::move(nodiscard_reason_r).value();
+    auto ctd_r = read_u8(in, context + " compile_time_dependency");
+    if (!ctd_r.has_value()) return std::unexpected(std::move(ctd_r).error());
+    fn.is_compile_time_dependency = ctd_r.value() != 0u;
+    auto eval_mode_r = read_enum<FunctionEvalMode>(in, context + " eval mode");
+    if (!eval_mode_r.has_value()) return std::unexpected(std::move(eval_mode_r).error());
+    fn.eval_mode = eval_mode_r.value();
+    auto varargs_r = read_u8(in, context + " has_varargs");
+    if (!varargs_r.has_value()) return std::unexpected(std::move(varargs_r).error());
+    fn.has_varargs = varargs_r.value() != 0u;
+    auto method_requires_concept_r = read_string(in, context + " method_requires_concept");
+    if (!method_requires_concept_r.has_value()) return std::unexpected(std::move(method_requires_concept_r).error());
+    fn.method_requires_concept = std::move(method_requires_concept_r).value();
+    auto is_generic_template_r = read_u8(in, context + " is_generic_template");
+    if (!is_generic_template_r.has_value()) return std::unexpected(std::move(is_generic_template_r).error());
+    fn.is_generic_template = is_generic_template_r.value() != 0u;
+    auto template_param_count_r = read_u32_le(in, context + " template param count");
+    if (!template_param_count_r.has_value()) return std::unexpected(std::move(template_param_count_r).error());
+    std::uint32_t template_param_count = template_param_count_r.value();
     fn.template_params.reserve(template_param_count);
-    for (std::uint32_t i = 0; i < template_param_count; i++) fn.template_params.push_back(read_generic_type_param(in, context + " template param"));
-    fn.generic_method_owner_id = read_string(in, context + " generic method owner");
-    fn.member_owner_class = read_string(in, context + " member owner class");
-    std::uint32_t member_init_count = read_u32_le(in, context + " member initializer count");
+    for (std::uint32_t i = 0; i < template_param_count; i++) {
+        auto template_param_r = read_generic_type_param(in, context + " template param");
+        if (!template_param_r.has_value()) return std::unexpected(std::move(template_param_r).error());
+        fn.template_params.push_back(std::move(template_param_r).value());
+    }
+    auto generic_method_owner_r = read_string(in, context + " generic method owner");
+    if (!generic_method_owner_r.has_value()) return std::unexpected(std::move(generic_method_owner_r).error());
+    fn.generic_method_owner_id = std::move(generic_method_owner_r).value();
+    auto member_owner_class_r = read_string(in, context + " member owner class");
+    if (!member_owner_class_r.has_value()) return std::unexpected(std::move(member_owner_class_r).error());
+    fn.member_owner_class = std::move(member_owner_class_r).value();
+    auto member_init_count_r = read_u32_le(in, context + " member initializer count");
+    if (!member_init_count_r.has_value()) return std::unexpected(std::move(member_init_count_r).error());
+    std::uint32_t member_init_count = member_init_count_r.value();
     fn.member_initializers.reserve(member_init_count);
     for (std::uint32_t i = 0; i < member_init_count; i++) {
-        fn.member_initializers.push_back(read_member_initializer(in, context + " member initializer"));
+        auto member_init_r = read_member_initializer(in, context + " member initializer");
+        if (!member_init_r.has_value()) return std::unexpected(std::move(member_init_r).error());
+        fn.member_initializers.push_back(std::move(member_init_r).value());
     }
-    fn.receiver_ref_qualifier = read_enum<ReceiverRefQualifier>(in, context + " receiver ref qualifier");
-    fn.is_static = read_u8(in, context + " is_static") != 0u;
-    fn.access = read_enum<AccessSpecifier>(in, context + " access");
-    fn.is_virtual = read_u8(in, context + " is_virtual") != 0u;
-    fn.is_override = read_u8(in, context + " is_override") != 0u;
-    fn.is_pure = read_u8(in, context + " is_pure") != 0u;
-    fn.is_defaulted = read_u8(in, context + " is_defaulted") != 0u;
-    fn.forwards_to = read_string(in, context + " forwards_to");
-    std::uint32_t ns_count = read_u32_le(in, context + " namespace count");
+    auto receiver_ref_qualifier_r = read_enum<ReceiverRefQualifier>(in, context + " receiver ref qualifier");
+    if (!receiver_ref_qualifier_r.has_value()) return std::unexpected(std::move(receiver_ref_qualifier_r).error());
+    fn.receiver_ref_qualifier = receiver_ref_qualifier_r.value();
+    auto is_static_r = read_u8(in, context + " is_static");
+    if (!is_static_r.has_value()) return std::unexpected(std::move(is_static_r).error());
+    fn.is_static = is_static_r.value() != 0u;
+    auto access_r = read_enum<AccessSpecifier>(in, context + " access");
+    if (!access_r.has_value()) return std::unexpected(std::move(access_r).error());
+    fn.access = access_r.value();
+    auto is_virtual_r = read_u8(in, context + " is_virtual");
+    if (!is_virtual_r.has_value()) return std::unexpected(std::move(is_virtual_r).error());
+    fn.is_virtual = is_virtual_r.value() != 0u;
+    auto is_override_r = read_u8(in, context + " is_override");
+    if (!is_override_r.has_value()) return std::unexpected(std::move(is_override_r).error());
+    fn.is_override = is_override_r.value() != 0u;
+    auto is_pure_r = read_u8(in, context + " is_pure");
+    if (!is_pure_r.has_value()) return std::unexpected(std::move(is_pure_r).error());
+    fn.is_pure = is_pure_r.value() != 0u;
+    auto is_defaulted_r = read_u8(in, context + " is_defaulted");
+    if (!is_defaulted_r.has_value()) return std::unexpected(std::move(is_defaulted_r).error());
+    fn.is_defaulted = is_defaulted_r.value() != 0u;
+    auto forwards_to_r = read_string(in, context + " forwards_to");
+    if (!forwards_to_r.has_value()) return std::unexpected(std::move(forwards_to_r).error());
+    fn.forwards_to = std::move(forwards_to_r).value();
+    auto ns_count_r = read_u32_le(in, context + " namespace count");
+    if (!ns_count_r.has_value()) return std::unexpected(std::move(ns_count_r).error());
+    std::uint32_t ns_count = ns_count_r.value();
     fn.namespace_path.reserve(ns_count);
-    for (std::uint32_t i = 0; i < ns_count; i++) fn.namespace_path.push_back(read_string(in, context + " namespace"));
-    fn.is_exported = read_u8(in, context + " is_exported") != 0u;
-    fn.owning_module = read_string(in, context + " owning_module");
+    for (std::uint32_t i = 0; i < ns_count; i++) {
+        auto ns_r = read_string(in, context + " namespace");
+        if (!ns_r.has_value()) return std::unexpected(std::move(ns_r).error());
+        fn.namespace_path.push_back(std::move(ns_r).value());
+    }
+    auto is_exported_r = read_u8(in, context + " is_exported");
+    if (!is_exported_r.has_value()) return std::unexpected(std::move(is_exported_r).error());
+    fn.is_exported = is_exported_r.value() != 0u;
+    auto owning_module_r = read_string(in, context + " owning_module");
+    if (!owning_module_r.has_value()) return std::unexpected(std::move(owning_module_r).error());
+    fn.owning_module = std::move(owning_module_r).value();
     return fn;
 }
 
@@ -1469,34 +2128,66 @@ struct GenericMethodOwnerRemap {
     return payload.str();
 }
 
-[[nodiscard]] StructuredCompileTimePayload deserialize_compile_time_payload(std::string_view bytes, const std::string& path) {
+[[nodiscard]] std::expected<StructuredCompileTimePayload, DriverError> deserialize_compile_time_payload(std::string_view bytes, const std::string& path) {
     std::istringstream in(std::string(bytes), std::ios::binary);
     char magic[4] = {};
     in.read(magic, sizeof(magic));
     if (!in || std::string_view(magic, 4) != SCPPM_COMPILE_TIME_AST_MAGIC) {
-        throw DriverError("invalid .scppm file '" + path + "': bad structured compile-time payload magic");
+        return std::unexpected(DriverError("invalid .scppm file '" + path + "': bad structured compile-time payload magic"));
     }
-    std::uint32_t version = read_u32_le(in, path + " payload version");
+    auto version_r = read_u32_le(in, path + " payload version");
+    if (!version_r.has_value()) return std::unexpected(std::move(version_r).error());
+    std::uint32_t version = version_r.value();
     if (version != SCPPM_COMPILE_TIME_AST_VERSION) {
-        throw DriverError("unsupported structured compile-time payload version " + std::to_string(version) +
-                          " in '" + path + "'");
+        return std::unexpected(DriverError("unsupported structured compile-time payload version " + std::to_string(version) +
+                          " in '" + path + "'"));
     }
     StructuredCompileTimePayload payload;
-    std::uint32_t root_count = read_u32_le(in, path + " root count");
+    auto root_count_r = read_u32_le(in, path + " root count");
+    if (!root_count_r.has_value()) return std::unexpected(std::move(root_count_r).error());
+    std::uint32_t root_count = root_count_r.value();
     payload.root_function_names.reserve(root_count);
-    for (std::uint32_t i = 0; i < root_count; i++) payload.root_function_names.push_back(read_string(in, path + " root"));
-    std::uint32_t enum_count = read_u32_le(in, path + " enum count");
+    for (std::uint32_t i = 0; i < root_count; i++) {
+        auto root_r = read_string(in, path + " root");
+        if (!root_r.has_value()) return std::unexpected(std::move(root_r).error());
+        payload.root_function_names.push_back(std::move(root_r).value());
+    }
+    auto enum_count_r = read_u32_le(in, path + " enum count");
+    if (!enum_count_r.has_value()) return std::unexpected(std::move(enum_count_r).error());
+    std::uint32_t enum_count = enum_count_r.value();
     payload.enums.reserve(enum_count);
-    for (std::uint32_t i = 0; i < enum_count; i++) payload.enums.push_back(read_enum_def(in, path + " enum"));
-    std::uint32_t struct_count = read_u32_le(in, path + " struct count");
+    for (std::uint32_t i = 0; i < enum_count; i++) {
+        auto enum_r = read_enum_def(in, path + " enum");
+        if (!enum_r.has_value()) return std::unexpected(std::move(enum_r).error());
+        payload.enums.push_back(std::move(enum_r).value());
+    }
+    auto struct_count_r = read_u32_le(in, path + " struct count");
+    if (!struct_count_r.has_value()) return std::unexpected(std::move(struct_count_r).error());
+    std::uint32_t struct_count = struct_count_r.value();
     payload.structs.reserve(struct_count);
-    for (std::uint32_t i = 0; i < struct_count; i++) payload.structs.push_back(read_struct_def(in, path + " struct"));
-    std::uint32_t class_count = read_u32_le(in, path + " class count");
+    for (std::uint32_t i = 0; i < struct_count; i++) {
+        auto struct_r = read_struct_def(in, path + " struct");
+        if (!struct_r.has_value()) return std::unexpected(std::move(struct_r).error());
+        payload.structs.push_back(std::move(struct_r).value());
+    }
+    auto class_count_r = read_u32_le(in, path + " class count");
+    if (!class_count_r.has_value()) return std::unexpected(std::move(class_count_r).error());
+    std::uint32_t class_count = class_count_r.value();
     payload.classes.reserve(class_count);
-    for (std::uint32_t i = 0; i < class_count; i++) payload.classes.push_back(read_class_def(in, path + " class"));
-    std::uint32_t function_count = read_u32_le(in, path + " function count");
+    for (std::uint32_t i = 0; i < class_count; i++) {
+        auto class_r = read_class_def(in, path + " class");
+        if (!class_r.has_value()) return std::unexpected(std::move(class_r).error());
+        payload.classes.push_back(std::move(class_r).value());
+    }
+    auto function_count_r = read_u32_le(in, path + " function count");
+    if (!function_count_r.has_value()) return std::unexpected(std::move(function_count_r).error());
+    std::uint32_t function_count = function_count_r.value();
     payload.functions.reserve(function_count);
-    for (std::uint32_t i = 0; i < function_count; i++) payload.functions.push_back(read_function(in, path + " function"));
+    for (std::uint32_t i = 0; i < function_count; i++) {
+        auto function_r = read_function(in, path + " function");
+        if (!function_r.has_value()) return std::unexpected(std::move(function_r).error());
+        payload.functions.push_back(std::move(function_r).value());
+    }
     return payload;
 }
 
@@ -1594,10 +2285,10 @@ void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&
     }
 }
 
-void write_scppm_file(const Program& program, std::string_view interface_source, const std::string& path) {
+[[nodiscard]] std::expected<void, DriverError> write_scppm_file(const Program& program, std::string_view interface_source, const std::string& path) {
     std::ofstream out(path, std::ios::binary);
     if (!out) {
-        throw DriverError("cannot write module interface '" + path + "'");
+        return std::unexpected(DriverError("cannot write module interface '" + path + "'"));
     }
     std::string payload = serialize_compile_time_payload(program);
     unsigned char flags = payload.empty() ? 0u : 0x01u;
@@ -1610,16 +2301,17 @@ void write_scppm_file(const Program& program, std::string_view interface_source,
         out.write(payload.data(), static_cast<std::streamsize>(payload.size()));
     }
     if (!out) {
-        throw DriverError("failed while writing module interface '" + path + "'");
+        return std::unexpected(DriverError("failed while writing module interface '" + path + "'"));
     }
+    return {};
 }
 
-LoadedModuleFile read_module_file(const std::string& path) {
+[[nodiscard]] std::expected<LoadedModuleFile, DriverError> read_module_file(const std::string& path) {
     LoadedModuleFile loaded;
     std::filesystem::path file_path(path);
     if (file_path.extension() != ".scppm") {
         std::ifstream file(path);
-        if (!file) throw DriverError("cannot open imported module source '" + path + "'");
+        if (!file) return std::unexpected(DriverError("cannot open imported module source '" + path + "'"));
         std::ostringstream buffer;
         buffer << file.rdbuf();
         loaded.interface_source = buffer.str();
@@ -1628,37 +2320,41 @@ LoadedModuleFile read_module_file(const std::string& path) {
 
     loaded.is_scppm = true;
     std::ifstream file(path, std::ios::binary);
-    if (!file) throw DriverError("cannot open imported module interface '" + path + "'");
+    if (!file) return std::unexpected(DriverError("cannot open imported module interface '" + path + "'"));
     char header[8];
     file.read(header, sizeof(header));
     if (file.gcount() != static_cast<std::streamsize>(sizeof(header))) {
-        throw DriverError("invalid .scppm file '" + path + "': truncated header");
+        return std::unexpected(DriverError("invalid .scppm file '" + path + "': truncated header"));
     }
     if (std::memcmp(header, "SCPPM", 5) != 0) {
-        throw DriverError("invalid .scppm file '" + path + "': bad magic");
+        return std::unexpected(DriverError("invalid .scppm file '" + path + "': bad magic"));
     }
     unsigned char major_version = static_cast<unsigned char>(header[5]);
     if (major_version != 1) {
-        throw DriverError("unsupported .scppm major version " + std::to_string(major_version) + " in '" + path + "'");
+        return std::unexpected(DriverError("unsupported .scppm major version " + std::to_string(major_version) + " in '" + path + "'"));
     }
     unsigned char flags = static_cast<unsigned char>(header[7]);
-    std::uint32_t interface_length = read_u32_le(file, path + " interface length");
+    auto interface_length_r = read_u32_le(file, path + " interface length");
+    if (!interface_length_r.has_value()) return std::unexpected(std::move(interface_length_r).error());
+    std::uint32_t interface_length = interface_length_r.value();
     loaded.interface_source.resize(interface_length);
     file.read(loaded.interface_source.data(), static_cast<std::streamsize>(interface_length));
-    if (!file) throw DriverError("invalid .scppm file '" + path + "': truncated interface source");
+    if (!file) return std::unexpected(DriverError("invalid .scppm file '" + path + "': truncated interface source"));
     if ((flags & 0x01u) != 0u) {
         loaded.has_compile_time_payload = true;
-        std::uint32_t payload_length = read_u32_le(file, path + " payload length");
+        auto payload_length_r = read_u32_le(file, path + " payload length");
+        if (!payload_length_r.has_value()) return std::unexpected(std::move(payload_length_r).error());
+        std::uint32_t payload_length = payload_length_r.value();
         loaded.compile_time_payload_bytes.resize(payload_length);
         file.read(loaded.compile_time_payload_bytes.data(), static_cast<std::streamsize>(payload_length));
-        if (!file) throw DriverError("invalid .scppm file '" + path + "': truncated structured payload");
+        if (!file) return std::unexpected(DriverError("invalid .scppm file '" + path + "': truncated structured payload"));
     }
     return loaded;
 }
 
-void create_archive(const std::vector<std::string>& object_paths, const std::string& archive_path) {
+[[nodiscard]] std::expected<void, DriverError> create_archive(const std::vector<std::string>& object_paths, const std::string& archive_path) {
     if (object_paths.empty()) {
-        throw DriverError("archive command requires at least one object file for '" + archive_path + "'");
+        return std::unexpected(DriverError("archive command requires at least one object file for '" + archive_path + "'"));
     }
     std::string command = "ar rcs \"" + archive_path + "\"";
     for (const std::string& object_path : object_paths) {
@@ -1666,8 +2362,9 @@ void create_archive(const std::vector<std::string>& object_paths, const std::str
     }
     int result = std::system(command.c_str());
     if (result != 0) {
-        throw DriverError("archive command failed: " + command);
+        return std::unexpected(DriverError("archive command failed: " + command));
     }
+    return {};
 }
 
 [[nodiscard]] std::optional<std::filesystem::path> current_executable_path() {
@@ -1765,7 +2462,7 @@ void create_archive(const std::vector<std::string>& object_paths, const std::str
     return std::min(offsets[line_index] + static_cast<std::size_t>(std::max(loc.column, 1) - 1), source.size());
 }
 
-[[nodiscard]] std::size_t find_matching_brace(std::string_view source, std::size_t open_offset) {
+[[nodiscard]] std::expected<std::size_t, DriverError> find_matching_brace(std::string_view source, std::size_t open_offset) {
     bool in_string = false;
     bool in_char = false;
     bool in_line_comment = false;
@@ -1825,7 +2522,7 @@ void create_archive(const std::vector<std::string>& object_paths, const std::str
             if (depth == 0) return i;
         }
     }
-    throw DriverError("failed to locate end of function body while writing module interface");
+    return std::unexpected(DriverError("failed to locate end of function body while writing module interface"));
 }
 
 // Scans forward from a bodyless declaration's own start (e.g. a
@@ -1836,7 +2533,7 @@ void create_archive(const std::vector<std::string>& object_paths, const std::str
 // depth too (not just parens) since a parameter's default argument can
 // itself be a brace-init expression or a lambda with its own nested
 // `;`-containing body.
-[[nodiscard]] std::size_t find_declaration_semicolon(std::string_view source, std::size_t decl_begin) {
+[[nodiscard]] std::expected<std::size_t, DriverError> find_declaration_semicolon(std::string_view source, std::size_t decl_begin) {
     bool in_string = false;
     bool in_char = false;
     bool in_line_comment = false;
@@ -1897,7 +2594,7 @@ void create_archive(const std::vector<std::string>& object_paths, const std::str
             return i;
         }
     }
-    throw DriverError("failed to locate end of superseded forward declaration while writing module interface");
+    return std::unexpected(DriverError("failed to locate end of superseded forward declaration while writing module interface"));
 }
 
 // A standalone forward declaration's own recorded Function::loc starts
@@ -2032,7 +2729,7 @@ void create_archive(const std::vector<std::string>& object_paths, const std::str
     return std::nullopt;
 }
 
-std::string strip_concrete_function_bodies(const Program& program, const std::string& file_path, std::string source) {
+[[nodiscard]] std::expected<std::string, DriverError> strip_concrete_function_bodies(const Program& program, const std::string& file_path, std::string source) {
     struct BodyRange {
         std::size_t begin;
         std::size_t end;
@@ -2050,7 +2747,9 @@ std::string strip_concrete_function_bodies(const Program& program, const std::st
                 ranges.push_back(BodyRange{*colon, begin, ""});
             }
         }
-        std::size_t end = find_matching_brace(source, begin);
+        auto end_r = find_matching_brace(source, begin);
+        if (!end_r.has_value()) return std::unexpected(std::move(end_r).error());
+        std::size_t end = end_r.value();
         ranges.push_back(BodyRange{begin, end + 1, ";"});
         // Once this definition's own body is stripped down to a bare
         // `;` above, any standalone forward declaration(s) that were
@@ -2068,7 +2767,9 @@ std::string strip_concrete_function_bodies(const Program& program, const std::st
             std::size_t decl_begin = offset_for_loc(source, superseded_loc);
             if (decl_begin >= source.size()) continue;
             decl_begin = widen_declaration_begin_over_leading_modifiers(source, decl_begin);
-            std::size_t decl_end = find_declaration_semicolon(source, decl_begin);
+            auto decl_end_r = find_declaration_semicolon(source, decl_begin);
+            if (!decl_end_r.has_value()) return std::unexpected(std::move(decl_end_r).error());
+            std::size_t decl_end = decl_end_r.value();
             ranges.push_back(BodyRange{decl_begin, decl_end + 1, ""});
         }
     }
@@ -2162,7 +2863,9 @@ public:
 
         resolving_.insert(module_name);
         std::string resolved_path = absolute_source_path(path_it->second);
-        LoadedModuleFile loaded = read_module_file(resolved_path);
+        auto loaded_r = read_module_file(resolved_path);
+        if (!loaded_r.has_value()) throw std::move(loaded_r).error();
+        LoadedModuleFile loaded = std::move(loaded_r).value();
         // Stamps every SourceLocation this parse() produces (see
         // ParseError's and parse_primary()'s own comments) with
         // path_it->second -- the path exactly as given via `--import
@@ -2182,8 +2885,9 @@ public:
         Program imported = std::move(imported_result.value());
         imported.source_path = resolved_path;
         if (loaded.has_compile_time_payload) {
-            merge_compile_time_payload(imported,
-                                       deserialize_compile_time_payload(loaded.compile_time_payload_bytes, resolved_path));
+            auto payload_r = deserialize_compile_time_payload(loaded.compile_time_payload_bytes, resolved_path);
+            if (!payload_r.has_value()) throw std::move(payload_r).error();
+            merge_compile_time_payload(imported, std::move(payload_r).value());
         } else if (!loaded.is_scppm) {
             mark_reachable_hidden_compile_time_dependencies(imported);
         } else if (loaded.is_scppm && program_requires_structured_payload(imported)) {
@@ -2233,7 +2937,9 @@ public:
         }
 
         partitions_resolving_.insert(key);
-        LoadedModuleFile loaded = read_module_file(path_it->second);
+        auto loaded_r = read_module_file(path_it->second);
+        if (!loaded_r.has_value()) throw std::move(loaded_r).error();
+        LoadedModuleFile loaded = std::move(loaded_r).value();
         if (loaded.is_scppm) {
             throw DriverError("partition import path '" + path_it->second +
                               "' must use a source .scpp file, not a compiled .scppm artifact");
@@ -2400,7 +3106,9 @@ private:
                 it.increment(ec);
                 continue;
             }
-            LoadedModuleFile loaded = read_module_file(entry.path().string());
+            auto loaded_r = read_module_file(entry.path().string());
+            if (!loaded_r.has_value()) throw std::move(loaded_r).error();
+            LoadedModuleFile loaded = std::move(loaded_r).value();
             if (std::optional<ScannedModuleDecl> decl = scan_declared_module_from_source(loaded.interface_source);
                 decl.has_value()) {
                 std::string key = decl->module_name;
@@ -2483,12 +3191,12 @@ private:
     return starts_with(trimmed, "export import ") || starts_with(trimmed, "import ");
 }
 
-std::string render_module_interface_file(const Program& program, ModuleCache& cache, const std::string& file_path,
+[[nodiscard]] std::expected<std::string, DriverError> render_module_interface_file(const Program& program, ModuleCache& cache, const std::string& file_path,
                                          const std::string& module_source_path, bool keep_concrete_bodies,
                                          bool keep_module_declaration,
                                          std::unordered_set<std::string>& expanded_partition_paths);
 
-std::string inline_partition_imports(const Program& program, ModuleCache& cache, const std::string& module_source_path,
+[[nodiscard]] std::expected<std::string, DriverError> inline_partition_imports(const Program& program, ModuleCache& cache, const std::string& module_source_path,
                                      std::string_view source,
                                      bool keep_concrete_bodies, std::unordered_set<std::string>& expanded_partition_paths) {
     std::ostringstream out;
@@ -2507,13 +3215,15 @@ std::string inline_partition_imports(const Program& program, ModuleCache& cache,
             std::string key = program.module_name + ":" + partition_name;
             std::optional<std::string> partition_path = cache.source_path_for_partition(key);
             if (!partition_path.has_value()) {
-                throw DriverError("cannot find partition '" + program.module_name + ":" + partition_name +
-                                  "' while writing module interface artifacts");
+                return std::unexpected(DriverError("cannot find partition '" + program.module_name + ":" + partition_name +
+                                  "' while writing module interface artifacts"));
             }
             std::string absolute_partition_path = absolute_source_path(*partition_path);
             if (expanded_partition_paths.insert(absolute_partition_path).second) {
-                out << render_module_interface_file(program, cache, absolute_partition_path, module_source_path, keep_concrete_bodies,
+                auto rendered_r = render_module_interface_file(program, cache, absolute_partition_path, module_source_path, keep_concrete_bodies,
                                                     /*keep_module_declaration=*/false, expanded_partition_paths);
+                if (!rendered_r.has_value()) return std::unexpected(std::move(rendered_r).error());
+                out << std::move(rendered_r).value();
             }
         } else {
             out << std::string(line);
@@ -2525,14 +3235,18 @@ std::string inline_partition_imports(const Program& program, ModuleCache& cache,
     return out.str();
 }
 
-std::string render_module_interface_file(const Program& program, ModuleCache& cache, const std::string& file_path,
+[[nodiscard]] std::expected<std::string, DriverError> render_module_interface_file(const Program& program, ModuleCache& cache, const std::string& file_path,
                                          const std::string& module_source_path, bool keep_concrete_bodies,
                                          bool keep_module_declaration,
                                          std::unordered_set<std::string>& expanded_partition_paths) {
-    LoadedModuleFile loaded = read_module_file(file_path);
+    auto loaded_r = read_module_file(file_path);
+    if (!loaded_r.has_value()) return std::unexpected(std::move(loaded_r).error());
+    LoadedModuleFile loaded = std::move(loaded_r).value();
     std::string source = std::move(loaded.interface_source);
     if (!keep_concrete_bodies) {
-        source = strip_concrete_function_bodies(program, absolute_source_path(file_path), std::move(source));
+        auto stripped_r = strip_concrete_function_bodies(program, absolute_source_path(file_path), std::move(source));
+        if (!stripped_r.has_value()) return std::unexpected(std::move(stripped_r).error());
+        source = std::move(stripped_r).value();
     }
 
     std::ostringstream out;
@@ -2551,8 +3265,10 @@ std::string render_module_interface_file(const Program& program, ModuleCache& ca
                 if (had_newline) out << '\n';
             }
         } else {
-            out << inline_partition_imports(program, cache, module_source_path, line, keep_concrete_bodies,
+            auto inlined_r = inline_partition_imports(program, cache, module_source_path, line, keep_concrete_bodies,
                                             expanded_partition_paths);
+            if (!inlined_r.has_value()) return std::unexpected(std::move(inlined_r).error());
+            out << std::move(inlined_r).value();
             if (had_newline) out << '\n';
         }
         if (!had_newline) break;
@@ -2616,13 +3332,15 @@ std::string hoist_non_partition_imports(std::string source) {
     return out.str();
 }
 
-std::string build_merged_interface_source(const Program& program, ModuleCache& cache, const std::string& module_source_path,
+[[nodiscard]] std::expected<std::string, DriverError> build_merged_interface_source(const Program& program, ModuleCache& cache, const std::string& module_source_path,
                                           bool keep_concrete_bodies) {
     std::unordered_set<std::string> expanded_partition_paths;
-    return hoist_non_partition_imports(render_module_interface_file(program, cache, module_source_path, module_source_path,
+    auto rendered_r = render_module_interface_file(program, cache, module_source_path, module_source_path,
                                                                     keep_concrete_bodies,
                                                                     /*keep_module_declaration=*/true,
-                                                                    expanded_partition_paths));
+                                                                    expanded_partition_paths);
+    if (!rendered_r.has_value()) return std::unexpected(std::move(rendered_r).error());
+    return hoist_non_partition_imports(std::move(rendered_r).value());
 }
 
 llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
@@ -2639,7 +3357,7 @@ llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
 // by compile_to_executable below -- exactly the same backend either way,
 // since by this point a Program is just a Program regardless of which
 // file it came from.
-void emit_object_file_for_program(Program& program, const std::string& object_path, bool emit_debug_info = false,
+[[nodiscard]] std::expected<void, DriverError> emit_object_file_for_program(Program& program, const std::string& object_path, bool emit_debug_info = false,
                                   int opt_level = 2) {
     reject_not_yet_lowerable_constexpr_surface(program);
     // ch05 §5.11: must run before check_moves -- see Monomorphizer's own
@@ -2651,7 +3369,7 @@ void emit_object_file_for_program(Program& program, const std::string& object_pa
     try {
         fold_immediate_calls(program);
     } catch (const ConstexprError& error) {
-        throw DriverError(error.what());
+        return std::unexpected(DriverError(error.what()));
     }
     try {
         check_moves(program);
@@ -2676,7 +3394,7 @@ void emit_object_file_for_program(Program& program, const std::string& object_pa
         if (llvm::LLVMGetTargetFromTriple(triple.c_str(), &target, &lookup_error_c)) {
             std::string lookup_error = lookup_error_c != nullptr ? lookup_error_c : "";
             llvm::LLVMDisposeMessage(lookup_error_c);
-            throw DriverError("failed to lookup target '" + triple + "': " + lookup_error);
+            return std::unexpected(DriverError("failed to lookup target '" + triple + "': " + lookup_error));
         }
 
         // A std::unique_ptr with llvm::LLVMDisposeTargetMachine as its deleter
@@ -2696,7 +3414,7 @@ void emit_object_file_for_program(Program& program, const std::string& object_pa
                                      llvm::LLVMRelocPIC, llvm::LLVMCodeModelDefault),
             &llvm::LLVMDisposeTargetMachine);
         if (!target_machine) {
-            throw DriverError("failed to create target machine for '" + triple + "'");
+            return std::unexpected(DriverError("failed to create target machine for '" + triple + "'"));
         }
 
         // The data layout must be set *before* codegen runs: std::make_unique
@@ -2716,26 +3434,60 @@ void emit_object_file_for_program(Program& program, const std::string& object_pa
                                          &emit_error_c)) {
             std::string emit_error = emit_error_c != nullptr ? emit_error_c : "unknown error";
             llvm::LLVMDisposeMessage(emit_error_c);
-            throw DriverError("could not emit object file '" + object_path + "': " + emit_error);
+            return std::unexpected(DriverError("could not emit object file '" + object_path + "': " + emit_error));
         }
     } catch (const ConstexprError& error) {
-        throw DriverError(error.what());
+        return std::unexpected(DriverError(error.what()));
     }
+    return {};
 }
 
-void emit_module_archive_for_program(Program& program, const std::string& archive_path, int opt_level = 2) {
+[[nodiscard]] std::expected<void, DriverError> emit_module_archive_for_program(Program& program, const std::string& archive_path, int opt_level = 2) {
     std::filesystem::path object_path(archive_path);
     object_path.replace_extension(".scppo");
-    emit_object_file_for_program(program, object_path.string(), /*emit_debug_info=*/false, opt_level);
-    try {
-        create_archive({object_path.string()}, archive_path);
-    } catch (...) {
+    auto emit_r = emit_object_file_for_program(program, object_path.string(), /*emit_debug_info=*/false, opt_level);
+    if (!emit_r.has_value()) return std::unexpected(std::move(emit_r).error());
+    auto archive_r = create_archive({object_path.string()}, archive_path);
+    if (!archive_r.has_value()) {
         std::error_code ec;
         std::filesystem::remove(object_path, ec);
-        throw;
+        return std::unexpected(std::move(archive_r).error());
     }
     std::error_code ec;
     std::filesystem::remove(object_path, ec);
+    return {};
+}
+
+// Shared boundary shim for the 3 public entry points below that call
+// parse(): parser.cppm's own ParseError-producing failures surface
+// normally as a disengaged std::expected (see parse()'s signature), but
+// the ModuleResolver/PartitionResolver callbacks passed into parse() --
+// here, cache.resolve()/cache.resolve_partition() -- are fixed,
+// pre-existing std::function signatures (parser.cppm's own PR #404
+// conversion) with no std::expected-shaped room to report a failure
+// resolving/parsing an imported module or partition, so they still
+// signal that by throwing DriverError (their own failures, e.g. "cannot
+// find module") or ParseError (a nested resolve() rethrowing an
+// imported file's own parse failure, see ModuleCache::resolve's
+// comment) instead. This is the one remaining try/catch boundary
+// needed to bring both possibilities back into the std::expected
+// channel new callers of this file's own now-exception-free API expect.
+[[nodiscard]] std::expected<Program, DriverError> parse_source_with_module_cache(std::string_view source, ModuleCache& cache,
+                                                                                  const std::string& source_path) {
+    try {
+        auto program_result = parse(
+            source, [&cache](const std::string& name) -> const Program* { return &cache.resolve(name); },
+            [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); }, source_path);
+        if (!program_result.has_value()) {
+            const ParseError& error = program_result.error();
+            return std::unexpected(DriverError(error.what(), error.loc));
+        }
+        return std::move(program_result).value();
+    } catch (const DriverError& error) {
+        return std::unexpected(error);
+    } catch (const ParseError& error) {
+        return std::unexpected(DriverError(error.what(), error.loc));
+    }
 }
 
 } // namespace scpp
@@ -2772,23 +3524,21 @@ std::optional<std::filesystem::path> driver_runtime_default_source_stdlib_dir() 
 // imported module's *own* separate object file is compile_to_executable's
 // job below, since deciding where to put it needs an executable-level
 // path to derive from.
-void emit_object_file(std::string_view source, const std::string& object_path,
+[[nodiscard]] std::expected<void, DriverError> emit_object_file(std::string_view source, const std::string& object_path,
                        const std::unordered_map<std::string, std::string>& import_paths = {},
                        const std::vector<std::string>& import_search_dirs = {},
                        bool emit_debug_info = false,
                        const std::string& source_path = {},
                        int opt_level = 2) {
     ModuleCache cache(import_paths, import_search_dirs);
-    auto program_result = parse(
-        source, [&cache](const std::string& name) -> const Program* { return &cache.resolve(name); },
-        [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); }, source_path);
-    if (!program_result.has_value()) throw std::move(program_result).error();
-    Program program = std::move(program_result.value());
+    auto program_result = parse_source_with_module_cache(source, cache, source_path);
+    if (!program_result.has_value()) return std::unexpected(std::move(program_result).error());
+    Program program = std::move(program_result).value();
     program.source_path = source_path.empty() ? std::string() : absolute_source_path(source_path);
-    emit_object_file_for_program(program, object_path, emit_debug_info, opt_level);
+    return emit_object_file_for_program(program, object_path, emit_debug_info, opt_level);
 }
 
-void emit_module_artifacts(std::string_view source, const std::string& interface_path, const std::string& archive_path,
+[[nodiscard]] std::expected<void, DriverError> emit_module_artifacts(std::string_view source, const std::string& interface_path, const std::string& archive_path,
                            const std::unordered_map<std::string, std::string>& import_paths = {},
                            const std::vector<std::string>& import_search_dirs = {},
                            const std::string& source_path = {},
@@ -2800,25 +3550,25 @@ void emit_module_artifacts(std::string_view source, const std::string& interface
         }
     }
     ModuleCache cache(std::move(effective_import_paths), import_search_dirs);
-    auto program_result = parse(
-        source, [&cache](const std::string& name) -> const Program* { return &cache.resolve(name); },
-        [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); }, source_path);
-    if (!program_result.has_value()) throw std::move(program_result).error();
-    Program program = std::move(program_result.value());
+    auto program_result = parse_source_with_module_cache(source, cache, source_path);
+    if (!program_result.has_value()) return std::unexpected(std::move(program_result).error());
+    Program program = std::move(program_result).value();
     program.source_path = source_path.empty() ? std::string() : absolute_source_path(source_path);
     reject_not_yet_lowerable_constexpr_surface(program);
     if (!program.is_module_interface) {
-        throw DriverError("module artifacts can only be emitted from an interface unit, not '" +
-                          (program.module_name.empty() ? std::string("<non-module>") : module_key(program)) + "'");
+        return std::unexpected(DriverError("module artifacts can only be emitted from an interface unit, not '" +
+                          (program.module_name.empty() ? std::string("<non-module>") : module_key(program)) + "'"));
     }
-    std::string merged_interface_source =
+    auto merged_interface_source_r =
         build_merged_interface_source(program, cache, absolute_source_path(source_path), /*keep_concrete_bodies=*/false);
-    write_scppm_file(program, merged_interface_source, interface_path);
-    emit_module_archive_for_program(program, archive_path, opt_level);
+    if (!merged_interface_source_r.has_value()) return std::unexpected(std::move(merged_interface_source_r).error());
+    auto write_r = write_scppm_file(program, merged_interface_source_r.value(), interface_path);
+    if (!write_r.has_value()) return std::unexpected(std::move(write_r).error());
+    return emit_module_archive_for_program(program, archive_path, opt_level);
 }
 
-void archive_objects(const std::vector<std::string>& object_paths, const std::string& archive_path) {
-    create_archive(object_paths, archive_path);
+[[nodiscard]] std::expected<void, DriverError> archive_objects(const std::vector<std::string>& object_paths, const std::string& archive_path) {
+    return create_archive(object_paths, archive_path);
 }
 
 // Links a native object file into an executable using the system compiler
@@ -2840,10 +3590,10 @@ void archive_objects(const std::vector<std::string>& object_paths, const std::st
 // cli.cppm) keeps a value to forward positionally without having to
 // change that independent call site's signature; the value itself is now
 // ignored.
-void link_executable(const std::vector<std::string>& link_inputs, const std::string& executable_path,
+[[nodiscard]] std::expected<void, DriverError> link_executable(const std::vector<std::string>& link_inputs, const std::string& executable_path,
                      bool /*static_link*/ = false) {
     if (link_inputs.empty()) {
-        throw DriverError("linker command requires at least one input for '" + executable_path + "'");
+        return std::unexpected(DriverError("linker command requires at least one input for '" + executable_path + "'"));
     }
     std::string command = "cc -static";
     for (const std::string& input : link_inputs) {
@@ -2862,8 +3612,9 @@ void link_executable(const std::vector<std::string>& link_inputs, const std::str
     command += " -o \"" + executable_path + "\"";
     int result = std::system(command.c_str());
     if (result != 0) {
-        throw DriverError("linker command failed: " + command);
+        return std::unexpected(DriverError("linker command failed: " + command));
     }
+    return {};
 }
 
 // `import_paths` (ch11 §11.7, `--import name=path`) resolves any
@@ -2874,7 +3625,7 @@ void link_executable(const std::vector<std::string>& link_inputs, const std::str
 // §11.13/§11.14's intended "prefer compiled artifacts, fall back to
 // source/interface compilation" model while still letting generic
 // instantiations materialize in the importing file's own object.
-void compile_to_executable(std::string_view source, const std::string& executable_path,
+[[nodiscard]] std::expected<void, DriverError> compile_to_executable(std::string_view source, const std::string& executable_path,
                             const std::vector<std::string>& extra_link_inputs = {},
                             const std::unordered_map<std::string, std::string>& import_paths = {},
                             bool static_link = false,
@@ -2883,15 +3634,14 @@ void compile_to_executable(std::string_view source, const std::string& executabl
                             const std::string& source_path = {},
                             int opt_level = 2) {
     ModuleCache cache(import_paths, import_search_dirs);
-    auto program_result = parse(
-        source, [&cache](const std::string& name) -> const Program* { return &cache.resolve(name); },
-        [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); }, source_path);
-    if (!program_result.has_value()) throw std::move(program_result).error();
-    Program program = std::move(program_result.value());
+    auto program_result = parse_source_with_module_cache(source, cache, source_path);
+    if (!program_result.has_value()) return std::unexpected(std::move(program_result).error());
+    Program program = std::move(program_result).value();
     program.source_path = source_path.empty() ? std::string() : absolute_source_path(source_path);
 
     std::string object_path = executable_path + ".o";
-    emit_object_file_for_program(program, object_path, emit_debug_info, opt_level);
+    auto emit_r = emit_object_file_for_program(program, object_path, emit_debug_info, opt_level);
+    if (!emit_r.has_value()) return std::unexpected(std::move(emit_r).error());
 
     std::vector<std::string> module_object_paths;
     std::vector<std::string> module_archive_paths;
@@ -2901,7 +3651,8 @@ void compile_to_executable(std::string_view source, const std::string& executabl
             continue;
         }
         std::string module_object_path = executable_path + "." + module_name + ".o";
-        emit_object_file_for_program(cache.program_for(module_name), module_object_path, emit_debug_info, opt_level);
+        auto module_emit_r = emit_object_file_for_program(cache.program_for(module_name), module_object_path, emit_debug_info, opt_level);
+        if (!module_emit_r.has_value()) return std::unexpected(std::move(module_emit_r).error());
         module_object_paths.push_back(module_object_path);
     }
 
@@ -2928,13 +3679,15 @@ void compile_to_executable(std::string_view source, const std::string& executabl
     }
     std::vector<std::string> final_link_inputs = {object_path};
     final_link_inputs.insert(final_link_inputs.end(), link_inputs.begin(), link_inputs.end());
-    link_executable(final_link_inputs, executable_path, static_link);
+    auto link_r = link_executable(final_link_inputs, executable_path, static_link);
+    if (!link_r.has_value()) return std::unexpected(std::move(link_r).error());
 
     std::error_code final_cleanup_ec;
     std::filesystem::remove(object_path, final_cleanup_ec);
     for (const std::string& module_object_path : module_object_paths) {
         std::filesystem::remove(module_object_path, final_cleanup_ec);
     }
+    return {};
 }
 
 } // namespace scpp

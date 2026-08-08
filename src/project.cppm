@@ -1357,19 +1357,17 @@ std::vector<BuiltModule> build_modules_for_target(const std::vector<SourceInfo>&
                 }
                 trace_build("build module " + module_name);
                 try {
-                    scpp::emit_module_artifacts(module_source, interface_path.string(), archive_path.string(), import_paths, {},
+                    auto emit_r = scpp::emit_module_artifacts(module_source, interface_path.string(), archive_path.string(), import_paths, {},
                                                 source.path.string(), opt_level);
-                } catch (const scpp::ParseError& e) {
-                    print_diagnostic(source.path.string(), module_source, e.loc, e.what());
-                    throw;
+                    if (!emit_r.has_value()) {
+                        print_diagnostic(source.path.string(), module_source, emit_r.error().loc, emit_r.error().what());
+                        throw BuildError(emit_r.error().what());
+                    }
                 } catch (const scpp::DataflowError& e) {
                     print_diagnostic(source.path.string(), module_source, e.loc, e.what());
                     throw;
                 } catch (const scpp::CodegenError& e) {
                     print_diagnostic(source.path.string(), module_source, e.loc, e.what());
-                    throw;
-                } catch (const scpp::DriverError& e) {
-                    print_diagnostic(source.path.string(), module_source, scpp::SourceLocation{}, e.what());
                     throw;
                 }
                 BuiltModule built{module_name, source.path, interface_path, archive_path,
@@ -2029,7 +2027,10 @@ private:
         if (!lib_custom_outputs.empty()) {
             std::vector<std::string> archive_inputs;
             for (const std::filesystem::path& path : lib_custom_outputs) archive_inputs.push_back(path.string());
-            scpp::archive_objects(archive_inputs, built_lib_modules.front().archive_path.string());
+            auto archive_r = scpp::archive_objects(archive_inputs, built_lib_modules.front().archive_path.string());
+            if (!archive_r.has_value()) {
+                throw BuildError(archive_r.error().what());
+            }
             built_lib_modules.front().archive_digest = path_digest_or_empty(built_lib_modules.front().archive_path);
         }
         result.library_modules.insert(result.library_modules.end(), built_lib_modules.begin(), built_lib_modules.end());
@@ -2132,7 +2133,10 @@ private:
             // gone (see link_executable in driver.cppm, which links
             // statically regardless of this argument) -- pass `true`
             // explicitly rather than a no-longer-existing profile setting.
-            scpp::link_executable(extra_link_inputs, executable_path.string(), /*static_link=*/true);
+            auto link_r = scpp::link_executable(extra_link_inputs, executable_path.string(), /*static_link=*/true);
+            if (!link_r.has_value()) {
+                throw BuildError(link_r.error().what());
+            }
             database_.put(BuildRecord{
                 binary_key,
                 "binary",
@@ -2183,19 +2187,17 @@ private:
         trace_build("build object " + object_path.string());
         std::string source_text = read_file(source.path);
         try {
-            scpp::emit_object_file(source_text, object_path.string(), import_paths, {}, kManifestBuildEmitDebugInfo,
+            auto emit_r = scpp::emit_object_file(source_text, object_path.string(), import_paths, {}, kManifestBuildEmitDebugInfo,
                                    source.path.string(), kManifestBuildOptLevel);
-        } catch (const scpp::ParseError& e) {
-            print_diagnostic(source.path.string(), source_text, e.loc, e.what());
-            throw;
+            if (!emit_r.has_value()) {
+                print_diagnostic(source.path.string(), source_text, emit_r.error().loc, emit_r.error().what());
+                throw BuildError(emit_r.error().what());
+            }
         } catch (const scpp::DataflowError& e) {
             print_diagnostic(source.path.string(), source_text, e.loc, e.what());
             throw;
         } catch (const scpp::CodegenError& e) {
             print_diagnostic(source.path.string(), source_text, e.loc, e.what());
-            throw;
-        } catch (const scpp::DriverError& e) {
-            print_diagnostic(source.path.string(), source_text, scpp::SourceLocation{}, e.what());
             throw;
         }
         database_.put(BuildRecord{
