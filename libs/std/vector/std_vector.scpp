@@ -165,6 +165,28 @@ public:
         return;
     }
 
+    // std::vector::emplace_back() -- 0-arg form only, the sole shape
+    // scpp's self-hosting sources use so far: default-constructs a new
+    // trailing element in place, avoiding the extra move/copy a
+    // push_back(T{}) call would need. Constrained the same way
+    // resize()'s 2-arg overload below is: without a `requires` clause
+    // this method's body (`T()`) is still monomorphized/type-checked
+    // for *every* std::vector<T> instantiation regardless of whether
+    // emplace_back() is ever actually called (see
+    // Monomorphizer::instantiate_ordinary_generic_class's
+    // method_requires_concept gate, which only *skips* a constrained
+    // method's clone -- an unconstrained one is never skipped) --
+    // wrongly rejecting any T without a default constructor (e.g. a
+    // move/copy-tracking helper type with only a value constructor).
+    void emplace_back() requires std::default_initializable<T> {
+        this->__ensure_capacity_for_one_more();
+        [[scpp::unsafe]] {
+            new (&this->data_[this->size_]) T();
+        }
+        this->size_ = this->size_ + 1;
+        return;
+    }
+
     void pop_back() {
         if (this->size_ == 0) {
             std::abort();
@@ -183,6 +205,35 @@ public:
 
     size_t capacity() const {
         return this->capacity_;
+    }
+
+    // std::vector::reserve: grows backing storage so at least
+    // `new_capacity` elements fit without a further reallocation, if it
+    // doesn't already -- a no-op if `new_capacity` is no bigger than the
+    // current capacity (matches real std::vector::reserve, which never
+    // shrinks).
+    void reserve(size_t new_capacity) {
+        if (new_capacity <= this->capacity_) return;
+        this->__grow_to(new_capacity);
+        return;
+    }
+
+    // std::vector::resize(count, value): grows or shrinks to hold
+    // exactly `new_size` elements. Growing copy-constructs each new
+    // element from `value` (mirrors real std::vector::resize's 2-arg
+    // overload); shrinking destroys the excess trailing elements, same
+    // as repeatedly calling pop_back().
+    void resize(size_t new_size, const T& value) requires std::copy_constructible<T> {
+        while (this->size_ > new_size) {
+            this->pop_back();
+        }
+        if (new_size > this->size_) {
+            this->reserve(new_size);
+            while (this->size_ < new_size) {
+                this->push_back(value);
+            }
+        }
+        return;
     }
 
     bool empty() const {
@@ -205,6 +256,42 @@ public:
         this->__check_index(index);
         [[scpp::unsafe]] {
             return this->data_[index];
+        }
+    }
+
+    // size_ - 1 underflows to SIZE_MAX on an empty vector, which
+    // __check_index rejects (index >= size_) the same way pop_back()
+    // already aborts on empty -- so these stay consistent with this
+    // class's existing empty-container handling without any extra check.
+    // Mirrors at()'s own direct data_[index] access (rather than
+    // delegating to at()) since the lifetime-tracking pass ties a
+    // lifetime-tracked T&'s validity to a *direct* field access on
+    // `this`, not to one seen only through a nested call's return value.
+    T& back() {
+        this->__check_index(this->size_ - 1);
+        [[scpp::unsafe]] {
+            return this->data_[this->size_ - 1];
+        }
+    }
+
+    const T& back() const {
+        this->__check_index(this->size_ - 1);
+        [[scpp::unsafe]] {
+            return this->data_[this->size_ - 1];
+        }
+    }
+
+    T& front() {
+        this->__check_index(0);
+        [[scpp::unsafe]] {
+            return this->data_[0];
+        }
+    }
+
+    const T& front() const {
+        this->__check_index(0);
+        [[scpp::unsafe]] {
+            return this->data_[0];
         }
     }
 

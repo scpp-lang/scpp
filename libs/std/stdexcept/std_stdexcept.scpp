@@ -1,0 +1,36 @@
+// std_stdexcept.scpp
+//
+// The `:stdexcept` interface partition of the "std" module:
+// `std::runtime_error`, mirroring (the constructor/`what()` surface of)
+// real C++'s <stdexcept>. scpp the language has no `throw`/`catch` at
+// all, so this is never actually thrown or caught self-hosted -- it
+// exists purely so a self-hosted-compiled type can still derive from
+// `std::runtime_error` the same way native (non-self-hosted) C++ code
+// does, e.g. parser.cppm's `ParseError`, which stays exception-derived
+// only so already-existing, not-yet-converted native callers can keep
+// catching it as a real `std::exception`. Deliberately minimal: no
+// `std::exception` base or sibling `logic_error` etc., since nothing
+// self-hosted needs them yet.
+export module std:stdexcept;
+
+import :string;
+
+namespace std {
+
+export class runtime_error {
+private:
+    std::string message_;
+
+public:
+    runtime_error(const std::string& message) : message_{message} {
+        return;
+    }
+
+    virtual ~runtime_error() = default;
+
+    const char* what() const {
+        return this->message_.c_str();
+    }
+};
+
+} // namespace std

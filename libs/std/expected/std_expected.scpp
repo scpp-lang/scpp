@@ -112,6 +112,111 @@ public:
             return ((E*)&this->storage_)[0];
         }
     }
+
+    // Rvalue-qualified overload: lets `std::move(x).error()` -- the
+    // idiomatic way to propagate an error out of a by-value `expected`
+    // that's about to go out of scope anyway (e.g. `return
+    // std::unexpected(std::move(_r).error());`) -- move `E` out of
+    // storage and return it fresh by value, rather than aliasing
+    // storage via a reference the way the lvalue overloads above do.
+    // Overload resolution (see receiver_matches_method_qualifier in
+    // movecheck/calls.cppm) prefers this over the unqualified overload
+    // whenever the receiver is actually an rvalue, so existing lvalue
+    // call sites (`x.error()`) are unaffected.
+    E error() && {
+        if (this->has_value_) {
+            std::abort();
+        }
+        [[scpp::unsafe]] {
+            // std::move only accepts a plain local-variable name (not an
+            // arbitrary expression), so bind the storage slot to a named
+            // reference first -- codegen_lvalue auto-dereferences a
+            // reference local back to its referent's own address, so
+            // this still moves directly out of `this->storage_` itself.
+            E& source = ((E*)&this->storage_)[0];
+            return std::move(source);
+        }
+    }
+};
+
+// A dedicated partial specialization for `expected<void, E>` --
+// mirrors real C++'s standard library, which also requires its own
+// `expected<void, E>` specialization: the primary template above
+// stores a `T` alongside the `E` in its success/failure union, but
+// `sizeof(void)`/`alignas(void)` are simply invalid, so a `void`
+// success type can never share the primary's storage layout. There is
+// no value to hold on success here (only the boolean discriminant),
+// and `value()` becomes a no-op check-and-return rather than an
+// accessor.
+export template<typename E>
+class [[nodiscard("expected results must be checked")]] expected<void, E> {
+private:
+    bool has_value_{};
+    alignas(E) char storage_[sizeof(E)]{};
+
+public:
+    expected() {
+        this->has_value_ = true;
+        return;
+    }
+
+    expected(const std::unexpected<E>& error) {
+        this->has_value_ = false;
+        [[scpp::unsafe]] {
+            new ((E*)&this->storage_) E(error.error());
+        }
+        return;
+    }
+
+    virtual ~expected() {
+        if (!this->has_value_) {
+            [[scpp::unsafe]] {
+                ((E*)&this->storage_)->~E();
+            }
+        }
+        return;
+    }
+
+    bool has_value() const {
+        return this->has_value_;
+    }
+
+    void value() const {
+        if (!this->has_value_) {
+            std::abort();
+        }
+        return;
+    }
+
+    E& error() {
+        if (this->has_value_) {
+            std::abort();
+        }
+        [[scpp::unsafe]] {
+            return ((E*)&this->storage_)[0];
+        }
+    }
+
+    const E& error() const {
+        if (this->has_value_) {
+            std::abort();
+        }
+        [[scpp::unsafe]] {
+            return ((E*)&this->storage_)[0];
+        }
+    }
+
+    // See the identically-motivated overload on the primary
+    // `expected<T, E>` template above.
+    E error() && {
+        if (this->has_value_) {
+            std::abort();
+        }
+        [[scpp::unsafe]] {
+            E& source = ((E*)&this->storage_)[0];
+            return std::move(source);
+        }
+    }
 };
 
 } // namespace std

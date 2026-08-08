@@ -258,6 +258,19 @@ public:
         return;
     }
 
+    // std::shared_ptr(unique_ptr<Y>&&) (real C++'s converting-move
+    // constructor): takes over sole ownership of `other`'s pointee --
+    // `other` releases the raw pointer (becoming empty, exactly like
+    // real C++'s own unique_ptr after this move), and this shared_ptr
+    // starts a fresh reference count for it, same as the T* constructor
+    // just above.
+    shared_ptr(unique_ptr<T>&& other) {
+        T* raw = other.release();
+        this->ptr_ = raw;
+        this->handle_.reset(std::__shared_ptr_detail_erase<T>(raw), std::__shared_ptr_detail_destroy<T>);
+        return;
+    }
+
     // Copying a shared_ptr is its whole point, so it is spelled out
     // explicitly: this class declares its own copy-assignment operator
     // just below, and scpp (unlike real C++, which only deprecates the
