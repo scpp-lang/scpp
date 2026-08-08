@@ -405,7 +405,8 @@ void run_error_location_tests() {
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
             scpp::Codegen codegen("test_module");
-            codegen.generate(program);
+            auto generate_result = codegen.generate(program);
+            if (!generate_result.has_value()) throw std::move(generate_result).error();
             expect(false, c.name + ": expected a CodegenError, none was thrown");
         } catch (const scpp::CodegenError& e) {
             expect(e.loc.is_known(), c.name + ": CodegenError has no location");
@@ -511,7 +512,8 @@ void run_module_system_tests() {
             auto check_moves_result = scpp::check_moves(program);
             if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
-            codegen.generate(program);
+            auto generate_result = codegen.generate(program);
+            if (!generate_result.has_value()) throw std::move(generate_result).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         } catch (const scpp::CodegenError&) {
@@ -1225,7 +1227,8 @@ void run_concept_tests() {
             auto check_moves_result = scpp::check_moves(program);
             if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
-            codegen.generate(program);
+            auto generate_result = codegen.generate(program);
+            if (!generate_result.has_value()) throw std::move(generate_result).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         } catch (const scpp::CodegenError&) {
@@ -1315,7 +1318,8 @@ int main() {
             auto check_moves_result = scpp::check_moves(program);
             if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
-            codegen.generate(program);
+            auto generate_result = codegen.generate(program);
+            if (!generate_result.has_value()) throw std::move(generate_result).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         } catch (const scpp::CodegenError&) {
@@ -1364,7 +1368,8 @@ int main() {
             auto check_moves_result = scpp::check_moves(program);
             if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
-            codegen.generate(program);
+            auto generate_result = codegen.generate(program);
+            if (!generate_result.has_value()) throw std::move(generate_result).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         } catch (const scpp::CodegenError&) {
@@ -1410,7 +1415,8 @@ int main() {
             auto check_moves_result = scpp::check_moves(program);
             if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
-            codegen.generate(program);
+            auto generate_result = codegen.generate(program);
+            if (!generate_result.has_value()) throw std::move(generate_result).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         } catch (const scpp::CodegenError&) {
@@ -1451,7 +1457,8 @@ int main() {
             auto check_moves_result = scpp::check_moves(program);
             if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
-            codegen.generate(program);
+            auto generate_result = codegen.generate(program);
+            if (!generate_result.has_value()) throw std::move(generate_result).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         } catch (const scpp::CodegenError&) {
@@ -1500,7 +1507,8 @@ void run_generic_pack_deduction_tests() {
             auto check_moves_result = scpp::check_moves(program);
             if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
-            codegen.generate(program);
+            auto generate_result = codegen.generate(program);
+            if (!generate_result.has_value()) throw std::move(generate_result).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         } catch (const scpp::CodegenError&) {
@@ -1548,7 +1556,8 @@ void run_generic_pack_deduction_tests() {
             auto check_moves_result = scpp::check_moves(program);
             if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
-            codegen.generate(program);
+            auto generate_result = codegen.generate(program);
+            if (!generate_result.has_value()) throw std::move(generate_result).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         } catch (const scpp::CodegenError&) {
@@ -1631,7 +1640,8 @@ void run_generic_pack_deduction_tests() {
             auto check_moves_result = scpp::check_moves(program);
             if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
-            codegen.generate(program);
+            auto generate_result = codegen.generate(program);
+            if (!generate_result.has_value()) throw std::move(generate_result).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         } catch (const scpp::CodegenError&) {
@@ -1720,7 +1730,8 @@ void run_generic_pack_deduction_tests() {
             auto check_moves_result = scpp::check_moves(program);
             if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
-            codegen.generate(program);
+            auto generate_result = codegen.generate(program);
+            if (!generate_result.has_value()) throw std::move(generate_result).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         } catch (const scpp::CodegenError&) {
@@ -1776,7 +1787,8 @@ void run_generic_pack_deduction_tests() {
             auto check_moves_result = scpp::check_moves(program);
             if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
-            codegen.generate(program);
+            auto generate_result = codegen.generate(program);
+            if (!generate_result.has_value()) throw std::move(generate_result).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         } catch (const scpp::CodegenError&) {
@@ -1817,7 +1829,8 @@ void run_generic_function_overload_tests() {
             auto check_moves_result = scpp::check_moves(program);
             if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
-            codegen.generate(program);
+            auto generate_result = codegen.generate(program);
+            if (!generate_result.has_value()) throw std::move(generate_result).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         } catch (const scpp::CodegenError&) {
@@ -1859,7 +1872,8 @@ void run_generic_function_overload_tests() {
             auto check_moves_result = scpp::check_moves(program);
             if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
-            codegen.generate(program);
+            auto generate_result = codegen.generate(program);
+            if (!generate_result.has_value()) throw std::move(generate_result).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         } catch (const scpp::CodegenError&) {
@@ -1958,7 +1972,8 @@ void run_reference_overload_forwarding_tests() {
             auto check_moves_result = scpp::check_moves(program);
             if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
-            codegen.generate(program);
+            auto generate_result = codegen.generate(program);
+            if (!generate_result.has_value()) throw std::move(generate_result).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         } catch (const scpp::CodegenError&) {
@@ -1995,7 +2010,8 @@ void run_functional_tests() {
         auto check_moves_result = scpp::check_moves(program);
         if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
         scpp::Codegen codegen("test_module");
-        codegen.generate(program);
+        auto generate_result = codegen.generate(program);
+        if (!generate_result.has_value()) throw std::move(generate_result).error();
     } catch (const scpp::DataflowError&) {
         threw = true;
     } catch (const scpp::CodegenError&) {
@@ -2024,7 +2040,8 @@ void run_thread_tests() {
         auto check_moves_result = scpp::check_moves(program);
         if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
         scpp::Codegen codegen("test_module");
-        codegen.generate(program);
+        auto generate_result = codegen.generate(program);
+        if (!generate_result.has_value()) throw std::move(generate_result).error();
     } catch (const scpp::DataflowError&) {
         threw = true;
     } catch (const scpp::CodegenError&) {
@@ -2438,7 +2455,8 @@ void run_explicit_destructor_tests() {
             auto check_moves_result = scpp::check_moves(program);
             if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
-            codegen.generate(program);
+            auto generate_result = codegen.generate(program);
+            if (!generate_result.has_value()) throw std::move(generate_result).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         } catch (const scpp::CodegenError&) {
@@ -5609,7 +5627,8 @@ void run_enum_tests() {
             auto check_moves_result = scpp::check_moves(program);
             if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
-            codegen.generate(program);
+            auto generate_result = codegen.generate(program);
+            if (!generate_result.has_value()) throw std::move(generate_result).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         } catch (const scpp::CodegenError&) {
@@ -5635,7 +5654,8 @@ void run_enum_tests() {
             auto check_moves_result = scpp::check_moves(program);
             if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
-            codegen.generate(program);
+            auto generate_result = codegen.generate(program);
+            if (!generate_result.has_value()) throw std::move(generate_result).error();
         } catch (const scpp::DataflowError& e) {
             threw = true;
             expect(std::string(e.what()).find("scpp::enum_cast<Color>(value)") != std::string::npos,
@@ -5665,7 +5685,8 @@ void run_enum_tests() {
             auto check_moves_result = scpp::check_moves(program);
             if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
-            codegen.generate(program);
+            auto generate_result = codegen.generate(program);
+            if (!generate_result.has_value()) throw std::move(generate_result).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         } catch (const scpp::CodegenError&) {

@@ -2711,7 +2711,12 @@ void emit_object_file_for_program(Program& program, const std::string& object_pa
         llvm::LLVMDisposeMessage(data_layout_c);
         llvm::LLVMDisposeTargetData(target_data);
 
-        llvm::LLVMModuleRef module = codegen.generate(program);
+        llvm::LLVMModuleRef module;
+        {
+            auto module_result = codegen.generate(program);
+            if (!module_result.has_value()) throw std::move(module_result).error();
+            module = std::move(module_result).value();
+        }
 
         char* emit_error_c = nullptr;
         if (llvm::LLVMTargetMachineEmitToFile(target_machine.get(), module, object_path.c_str(), llvm::LLVMObjectFile,

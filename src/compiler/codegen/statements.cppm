@@ -8,7 +8,7 @@ import :api;
 
 namespace scpp {
 
-    void Codegen::codegen_stmt(const Stmt& stmt, llvm::LLVMValueRef current_function)
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::codegen_stmt(const Stmt& stmt, llvm::LLVMValueRef current_function)
 {
         // Refreshed on every call (including each recursive call for a
         // nested statement) so a CodegenError thrown while handling
@@ -29,11 +29,11 @@ namespace scpp {
                     // Once a block has a terminator (return), skip anything
                     // after it: unreachable code shouldn't be lowered.
                     if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) != nullptr) break;
-                    codegen_stmt(*s, current_function);
+                    if (auto r = codegen_stmt(*s, current_function); !r.has_value()) return std::unexpected(std::move(r).error());
                 }
                 if (stmt.is_unsafe) unsafe_depth_--;
                 pop_scope();
-                return;
+                return {};
 
             case StmtKind::VarDecl: {
                 std::optional<unsigned> declared_alignment = alignment_for_type(stmt.type);
@@ -45,7 +45,7 @@ namespace scpp {
                 }
                 if (stmt.is_static_local) {
                     if (current_function_def_ == nullptr) {
-                        throw CodegenError("internal error: function-local static outside a function body", current_loc_);
+                        return std::unexpected(CodegenError("internal error: function-local static outside a function body", current_loc_));
                     }
                     auto add_internal_global = [&](llvm::LLVMTypeRef llvm_type, const std::string& name,
                                                    llvm::LLVMValueRef init) {
@@ -89,9 +89,14 @@ namespace scpp {
                     std::string static_base = "__scpp_static_local." + overload_names_.at(current_function_def_) + "." +
                                               stmt.var_name + "." + std::to_string(stmt.loc.line) + "." +
                                               std::to_string(stmt.loc.column);
-                    llvm::LLVMTypeRef storage_type = stmt.type.kind == TypeKind::Reference
-                                                         ? llvm::LLVMPointerTypeInContext(context_, 0)
-                                                     : to_llvm_type(stmt.type);
+                    llvm::LLVMTypeRef storage_type;
+                    if (stmt.type.kind == TypeKind::Reference) {
+                        storage_type = llvm::LLVMPointerTypeInContext(context_, 0);
+                    } else {
+                        auto storage_type_result = to_llvm_type(stmt.type);
+                        if (!storage_type_result.has_value()) return std::unexpected(std::move(storage_type_result).error());
+                        storage_type = std::move(storage_type_result).value();
+                    }
                     llvm::LLVMValueRef storage =
                         add_internal_global(storage_type, static_base + ".storage", llvm::LLVMConstNull(storage_type));
                     if (declared_alignment.has_value()) llvm::LLVMSetAlignment(storage, *declared_alignment);
@@ -141,38 +146,48 @@ namespace scpp {
                     refresh_debug_location(stmt.loc);
                     if (stmt.type.kind == TypeKind::Reference) {
                         if (!stmt.init) {
-                            throw CodegenError("reference '" + stmt.var_name +
+                            return std::unexpected(CodegenError("reference '" + stmt.var_name +
                                                    "' must be initialized (bound to a variable) at declaration",
-                                current_loc_);
+                                current_loc_));
                         }
-                        validate_reference_pointee(*stmt.type.pointee);
-                        llvm::LLVMValueRef referent_addr =
-                            !stmt.type.is_mutable_ref && produces_rvalue_of_type(*stmt.init, *stmt.type.pointee)
-                                ? codegen_materialize_rvalue_reference_source(*stmt.init)
-                                : codegen_lvalue(*stmt.init).ptr;
+                        if (auto r = validate_reference_pointee(*stmt.type.pointee); !r.has_value()) return std::unexpected(std::move(r).error());
+                        llvm::LLVMValueRef referent_addr;
+                        if (!stmt.type.is_mutable_ref && produces_rvalue_of_type(*stmt.init, *stmt.type.pointee)) {
+                            auto addr_result = codegen_materialize_rvalue_reference_source(*stmt.init);
+                            if (!addr_result.has_value()) return std::unexpected(std::move(addr_result).error());
+                            referent_addr = std::move(addr_result).value();
+                        } else {
+                            auto lvalue_result = codegen_lvalue(*stmt.init);
+                            if (!lvalue_result.has_value()) return std::unexpected(std::move(lvalue_result).error());
+                            referent_addr = std::move(lvalue_result).value().ptr;
+                        }
                         llvm::LLVMBuildStore(builder_, referent_addr, storage);
                     } else if (stmt.type.kind == TypeKind::Span) {
                         if (!stmt.init) {
-                            throw CodegenError("span '" + stmt.var_name +
+                            return std::unexpected(CodegenError("span '" + stmt.var_name +
                                                    "' must be initialized (bound to an array) at declaration",
-                                current_loc_);
+                                current_loc_));
                         }
-                        llvm::LLVMValueRef span_value = codegen_span_value_for_target(*stmt.init, stmt.type);
+                        auto span_value_result = codegen_span_value_for_target(*stmt.init, stmt.type);
+                        if (!span_value_result.has_value()) return std::unexpected(std::move(span_value_result).error());
+                        llvm::LLVMValueRef span_value = std::move(span_value_result).value();
                         llvm::LLVMBuildStore(builder_, span_value, storage);
                     } else if (is_bare_void(stmt.type)) {
-                        throw CodegenError("variable '" + stmt.var_name +
+                        return std::unexpected(CodegenError("variable '" + stmt.var_name +
                                                "' cannot have type 'void' (only a return type or a pointer's "
                                                "pointee -- 'void*' -- may be 'void')",
-                            current_loc_);
+                            current_loc_));
                     } else if (stmt.init && stmt.init->kind == ExprKind::Lambda) {
-                        codegen_construct_lambda(*stmt.init, storage);
+                        if (auto r = codegen_construct_lambda(*stmt.init, storage); !r.has_value()) return std::unexpected(std::move(r).error());
                     } else if (stmt.has_ctor_args) {
-                        zero_initialize_storage(storage, stmt.type, declared_alignment);
+                        if (auto r = zero_initialize_storage(storage, stmt.type, declared_alignment); !r.has_value()) return std::unexpected(std::move(r).error());
                         if (stmt.type.kind != TypeKind::Named || !structs_.contains(stmt.type.name)) {
-                            initialize_storage_from_brace_args(LValue{storage, stmt.type, declared_alignment}, stmt.ctor_args);
-                        } else if (try_initialize_class_storage_from_same_type_source(
-                                       LValue{storage, stmt.type, declared_alignment}, stmt.ctor_args)) {
+                            if (auto r = initialize_storage_from_brace_args(LValue{storage, stmt.type, declared_alignment}, stmt.ctor_args); !r.has_value()) return std::unexpected(std::move(r).error());
                         } else {
+                            auto same_type_result = try_initialize_class_storage_from_same_type_source(
+                                       LValue{storage, stmt.type, declared_alignment}, stmt.ctor_args);
+                            if (!same_type_result.has_value()) return std::unexpected(std::move(same_type_result).error());
+                            if (!std::move(same_type_result).value()) {
                             std::string ctor_name = stmt.type.name + "_new";
                             const Function* ctor_def = stmt.type.name == "std::thread"
                                                            ? resolve_constructor_overload_exact(stmt.type.name, stmt.ctor_args)
@@ -182,30 +197,34 @@ namespace scpp {
                                 if (stmt.ctor_args.empty() && class_def == nullptr) {
                                 } else if (stmt.ctor_args.empty() && class_def != nullptr &&
                                            !class_has_any_constructor(stmt.type.name)) {
-                                    emit_default_initializers_for_class_storage(
-                                        storage, *class_def, /*initialize_virtual_interface_bases=*/true);
+                                    if (auto r = emit_default_initializers_for_class_storage(
+                                        storage, *class_def, /*initialize_virtual_interface_bases=*/true); !r.has_value()) return std::unexpected(std::move(r).error());
                                 } else {
-                                    throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
-                                        current_loc_);
+                                    return std::unexpected(CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
+                                        current_loc_));
                                 }
                             } else if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
-                                llvm::LLVMValueRef value =
+                                auto value_result =
                                     codegen_constructed_class_value(stmt.type.name, stmt.ctor_args, ctor_def);
-                                create_store(value, storage, declared_alignment);
+                                if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                                create_store(std::move(value_result).value(), storage, declared_alignment);
                             } else {
                                 llvm::LLVMValueRef ctor =
                                     llvm::LLVMGetNamedFunction(module_, overload_names_.at(ctor_def).c_str());
                                 if (ctor == nullptr) {
-                                    throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
-                                        current_loc_);
+                                    return std::unexpected(CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
+                                        current_loc_));
                                 }
                                 if (const ClassDef* class_def = find_class_def(stmt.type.name)) {
-                                    emit_complete_object_interface_initializers(*class_def, ctor_def, storage);
+                                    if (auto r = emit_complete_object_interface_initializers(*class_def, ctor_def, storage); !r.has_value()) return std::unexpected(std::move(r).error());
                                 }
-                                std::vector<llvm::LLVMValueRef> args =
+                                auto args_result =
                                     codegen_call_args(stmt.ctor_args, ctor_def, /*param_offset=*/1);
+                                if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
+                                std::vector<llvm::LLVMValueRef> args = std::move(args_result).value();
                                 args.insert(args.begin(), storage);
                                 build_call(ctor, args);
+                            }
                             }
                         }
                     } else if (stmt.init) {
@@ -213,22 +232,26 @@ namespace scpp {
                             stmt.init->kind == ExprKind::Identifier) {
                             const Expr& source_expr =
                                 *stmt.init;
-                            LValue src = codegen_lvalue(source_expr);
+                            auto src_result = codegen_lvalue(source_expr);
+                            if (!src_result.has_value()) return std::unexpected(std::move(src_result).error());
+                            LValue src = std::move(src_result).value();
                             if (const Function* user_ctor = find_user_declared_copy_ctor_ast(stmt.type.name)) {
                                 llvm::LLVMValueRef ctor =
                                     llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
                                 build_call(ctor, {storage, src.ptr});
                             } else {
-                                codegen_memberwise_copy_construct(storage, src.ptr, stmt.type.name);
+                                if (auto r = codegen_memberwise_copy_construct(storage, src.ptr, stmt.type.name); !r.has_value()) return std::unexpected(std::move(r).error());
                             }
                         } else {
-                            llvm::LLVMValueRef init_value = codegen_value_for_target(*stmt.init, stmt.type);
+                            auto init_value_result = codegen_value_for_target(*stmt.init, stmt.type);
+                            if (!init_value_result.has_value()) return std::unexpected(std::move(init_value_result).error());
+                            llvm::LLVMValueRef init_value = std::move(init_value_result).value();
                             refresh_debug_location(stmt.loc);
-                            check_store_type(init_value, storage_type, "variable '" + stmt.var_name + "'");
+                            if (auto r = check_store_type(init_value, storage_type, "variable '" + stmt.var_name + "'"); !r.has_value()) return std::unexpected(std::move(r).error());
                             create_store(init_value, storage, declared_alignment);
                         }
                     } else if (stmt.type.kind == TypeKind::Named && structs_.contains(stmt.type.name)) {
-                        zero_initialize_storage(storage, stmt.type, declared_alignment);
+                        if (auto r = zero_initialize_storage(storage, stmt.type, declared_alignment); !r.has_value()) return std::unexpected(std::move(r).error());
                         const ClassDef* class_def = find_class_def(stmt.type.name);
                         std::vector<ExprPtr> no_args;
                         std::string ctor_name = stmt.type.name + "_new";
@@ -237,22 +260,22 @@ namespace scpp {
                             llvm::LLVMValueRef ctor =
                                 llvm::LLVMGetNamedFunction(module_, overload_names_.at(ctor_def).c_str());
                             if (ctor == nullptr) {
-                                throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
-                                    current_loc_);
+                                return std::unexpected(CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
+                                    current_loc_));
                             }
                             if (const ClassDef* concrete_def = find_class_def(stmt.type.name)) {
-                                emit_complete_object_interface_initializers(*concrete_def, ctor_def, storage);
+                                if (auto r = emit_complete_object_interface_initializers(*concrete_def, ctor_def, storage); !r.has_value()) return std::unexpected(std::move(r).error());
                             }
                             build_call(ctor, {storage});
                         } else if (class_def != nullptr && !class_has_any_constructor(stmt.type.name)) {
-                            emit_default_initializers_for_class_storage(
-                                storage, *class_def, /*initialize_virtual_interface_bases=*/true);
+                            if (auto r = emit_default_initializers_for_class_storage(
+                                storage, *class_def, /*initialize_virtual_interface_bases=*/true); !r.has_value()) return std::unexpected(std::move(r).error());
                         } else if (class_def != nullptr) {
-                            throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
-                                current_loc_);
+                            return std::unexpected(CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
+                                current_loc_));
                         }
                     } else {
-                        zero_initialize_storage(storage, stmt.type, declared_alignment);
+                        if (auto r = zero_initialize_storage(storage, stmt.type, declared_alignment); !r.has_value()) return std::unexpected(std::move(r).error());
                     }
 
                     if (moved_flag != nullptr) {
@@ -274,7 +297,7 @@ namespace scpp {
                     if (!scope_stack_.empty()) {
                         scope_stack_.back().push_back(stmt.var_name);
                     }
-                    return;
+                    return {};
                 }
                 if (stmt.type.kind == TypeKind::Reference) {
                     // Real C++ references must be bound at declaration
@@ -282,23 +305,27 @@ namespace scpp {
                     // "null" reference) -- unlike every other type, which
                     // zero-initializes when no initializer is given.
                     if (!stmt.init) {
-                        throw CodegenError("reference '" + stmt.var_name +
+                        return std::unexpected(CodegenError("reference '" + stmt.var_name +
                                             "' must be initialized (bound to a variable) at declaration",
-                            current_loc_);
+                            current_loc_));
                     }
                     if (is_interface_reference_type(stmt.type)) {
+                        auto slot_type_result = to_llvm_type(stmt.type);
+                        if (!slot_type_result.has_value()) return std::unexpected(std::move(slot_type_result).error());
                         llvm::LLVMValueRef slot =
-                            create_entry_block_alloca(to_llvm_type(stmt.type), stmt.var_name, declared_alignment);
-                        create_store(codegen_interface_value_for_target(*stmt.init, stmt.type), slot, alignment_for_type(stmt.type));
+                            create_entry_block_alloca(std::move(slot_type_result).value(), stmt.var_name, declared_alignment);
+                        auto interface_value_result = codegen_interface_value_for_target(*stmt.init, stmt.type);
+                        if (!interface_value_result.has_value()) return std::unexpected(std::move(interface_value_result).error());
+                        create_store(std::move(interface_value_result).value(), slot, alignment_for_type(stmt.type));
                         locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
                         locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
-                        maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc);
+                        if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                         if (!scope_stack_.empty()) {
                             scope_stack_.back().push_back(stmt.var_name);
                         }
-                        return;
+                        return {};
                     }
-                    validate_reference_pointee(*stmt.type.pointee);
+                    if (auto r = validate_reference_pointee(*stmt.type.pointee); !r.has_value()) return std::unexpected(std::move(r).error());
                     // ch05 §5.x: a *const* reference may bind directly to
                     // a fresh rvalue initializer (a literal, std::move/
                     // std::make_unique, a lambda literal, or a call not
@@ -313,20 +340,26 @@ namespace scpp {
                     // address directly, and also enforces it resolves to
                     // a real, addressable place (a plain variable, or a
                     // further member/subscript chain off one).
-                    llvm::LLVMValueRef referent_addr =
-                        !stmt.type.is_mutable_ref && produces_rvalue_of_type(*stmt.init, *stmt.type.pointee)
-                            ? codegen_materialize_rvalue_reference_source(*stmt.init)
-                            : codegen_lvalue(*stmt.init).ptr;
+                    llvm::LLVMValueRef referent_addr;
+                    if (!stmt.type.is_mutable_ref && produces_rvalue_of_type(*stmt.init, *stmt.type.pointee)) {
+                        auto addr_result = codegen_materialize_rvalue_reference_source(*stmt.init);
+                        if (!addr_result.has_value()) return std::unexpected(std::move(addr_result).error());
+                        referent_addr = std::move(addr_result).value();
+                    } else {
+                        auto lvalue_result = codegen_lvalue(*stmt.init);
+                        if (!lvalue_result.has_value()) return std::unexpected(std::move(lvalue_result).error());
+                        referent_addr = std::move(lvalue_result).value().ptr;
+                    }
                     llvm::LLVMValueRef slot =
                         create_entry_block_alloca(llvm::LLVMPointerTypeInContext(context_, 0), stmt.var_name, declared_alignment);
                     llvm::LLVMBuildStore(builder_, referent_addr, slot);
                     locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
                     locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
-                    maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc);
+                    if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                     if (!scope_stack_.empty()) {
                         scope_stack_.back().push_back(stmt.var_name);
                     }
-                    return;
+                    return {};
                 }
 
                 if (stmt.type.kind == TypeKind::Span) {
@@ -335,28 +368,32 @@ namespace scpp {
                     // constructing one from a fixed-size array (spec
                     // ch06/M6; std::vector doesn't exist yet).
                     if (!stmt.init) {
-                        throw CodegenError("span '" + stmt.var_name +
+                        return std::unexpected(CodegenError("span '" + stmt.var_name +
                                             "' must be initialized (bound to an array) at declaration",
-                            current_loc_);
+                            current_loc_));
                     }
-                    llvm::LLVMTypeRef span_type = to_llvm_type(stmt.type);
-                    llvm::LLVMValueRef span_value = codegen_span_value_for_target(*stmt.init, stmt.type);
+                    auto span_type_result = to_llvm_type(stmt.type);
+                    if (!span_type_result.has_value()) return std::unexpected(std::move(span_type_result).error());
+                    llvm::LLVMTypeRef span_type = std::move(span_type_result).value();
+                    auto span_value_result = codegen_span_value_for_target(*stmt.init, stmt.type);
+                    if (!span_value_result.has_value()) return std::unexpected(std::move(span_value_result).error());
+                    llvm::LLVMValueRef span_value = std::move(span_value_result).value();
                     llvm::LLVMValueRef slot = create_entry_block_alloca(span_type, stmt.var_name, declared_alignment);
                     llvm::LLVMBuildStore(builder_, span_value, slot);
                     locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
                     locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
-                    maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc);
+                    if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                     if (!scope_stack_.empty()) {
                         scope_stack_.back().push_back(stmt.var_name);
                     }
-                    return;
+                    return {};
                 }
 
                 if (is_bare_void(stmt.type)) {
-                    throw CodegenError("variable '" + stmt.var_name +
+                    return std::unexpected(CodegenError("variable '" + stmt.var_name +
                                         "' cannot have type 'void' (only a return type or a pointer's "
                                         "pointee -- 'void*' -- may be 'void')",
-                        current_loc_);
+                        current_loc_));
                 }
 
                 // ch05 §5.12: `auto f = [...];` -- the only spelling
@@ -376,19 +413,23 @@ namespace scpp {
                 // every scalar/struct/array/pointer type the general
                 // path below handles).
                 if (stmt.init && stmt.init->kind == ExprKind::Lambda) {
+                    auto closure_type_result = to_llvm_type(stmt.type);
+                    if (!closure_type_result.has_value()) return std::unexpected(std::move(closure_type_result).error());
                     llvm::LLVMValueRef closure_ptr =
-                        create_entry_block_alloca(to_llvm_type(stmt.type), stmt.var_name, declared_alignment);
-                    codegen_construct_lambda(*stmt.init, closure_ptr);
+                        create_entry_block_alloca(std::move(closure_type_result).value(), stmt.var_name, declared_alignment);
+                    if (auto r = codegen_construct_lambda(*stmt.init, closure_ptr); !r.has_value()) return std::unexpected(std::move(r).error());
                     locals_[stmt.var_name] = LocalSlot{closure_ptr, stmt.type};
                     locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
-                    maybe_emit_local_debug_decl(stmt.var_name, stmt.type, closure_ptr, stmt.loc);
+                    if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, closure_ptr, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                     if (!scope_stack_.empty()) {
                         scope_stack_.back().push_back(stmt.var_name);
                     }
-                    return;
+                    return {};
                 }
 
-                llvm::LLVMTypeRef llvm_type = to_llvm_type(stmt.type);
+                auto llvm_type_result = to_llvm_type(stmt.type);
+                if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
+                llvm::LLVMTypeRef llvm_type = std::move(llvm_type_result).value();
                 llvm::LLVMValueRef slot = create_entry_block_alloca(llvm_type, stmt.var_name, declared_alignment);
                 if (stmt.has_ctor_args) {
                     // `ClassName name{args};` (ch04 §4.2 / spec §6.1):
@@ -403,23 +444,25 @@ namespace scpp {
                     // real C++ itself already uses, so this needs no new
                     // storage-layout logic beyond what every other
                     // Named-type VarDecl already does above.
-                    zero_initialize_storage(slot, stmt.type, declared_alignment);
+                    if (auto r = zero_initialize_storage(slot, stmt.type, declared_alignment); !r.has_value()) return std::unexpected(std::move(r).error());
                     locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
                     locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
                     if (stmt.type.kind == TypeKind::Named) {
                         locals_[stmt.var_name].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
                     }
-                    maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc);
+                    if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                     if (!scope_stack_.empty()) {
                         scope_stack_.back().push_back(stmt.var_name);
                     }
                     if (stmt.type.kind != TypeKind::Named || !structs_.contains(stmt.type.name)) {
-                        initialize_storage_from_brace_args(LValue{slot, stmt.type, declared_alignment}, stmt.ctor_args);
-                        return;
+                        if (auto r = initialize_storage_from_brace_args(LValue{slot, stmt.type, declared_alignment}, stmt.ctor_args); !r.has_value()) return std::unexpected(std::move(r).error());
+                        return {};
                     }
-                    if (try_initialize_class_storage_from_same_type_source(LValue{slot, stmt.type, declared_alignment},
-                                                                           stmt.ctor_args)) {
-                        return;
+                    auto same_type_result = try_initialize_class_storage_from_same_type_source(LValue{slot, stmt.type, declared_alignment},
+                                                                           stmt.ctor_args);
+                    if (!same_type_result.has_value()) return std::unexpected(std::move(same_type_result).error());
+                    if (std::move(same_type_result).value()) {
+                        return {};
                     }
                     std::string ctor_name = stmt.type.name + "_new";
                     // ch05 §5.10: a class may declare multiple
@@ -432,11 +475,11 @@ namespace scpp {
                     if (ctor_def == nullptr) {
                         const ClassDef* class_def = find_class_def(stmt.type.name);
                         if (stmt.ctor_args.empty() && class_def == nullptr) {
-                            return;
+                            return {};
                         }
                         if (stmt.ctor_args.empty() && class_def != nullptr && !class_has_any_constructor(stmt.type.name)) {
-                            emit_default_initializers_for_class_storage(slot, *class_def, /*initialize_virtual_interface_bases=*/true);
-                            return;
+                            if (auto r = emit_default_initializers_for_class_storage(slot, *class_def, /*initialize_virtual_interface_bases=*/true); !r.has_value()) return std::unexpected(std::move(r).error());
+                            return {};
                         }
                         // spec §6.5: `ClassName y{x};` with no matching
                         // user-declared constructor found by ordinary
@@ -449,26 +492,29 @@ namespace scpp {
                         // compiler-provided recursive memberwise copy
                         // directly, exactly like move construction's own
                         // analogous fallback above.
-                        throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
-                            current_loc_);
+                        return std::unexpected(CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
+                            current_loc_));
                     }
                     if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
-                        llvm::LLVMValueRef value = codegen_constructed_class_value(stmt.type.name, stmt.ctor_args, ctor_def);
-                        create_store(value, slot, declared_alignment);
-                        return;
+                        auto value_result = codegen_constructed_class_value(stmt.type.name, stmt.ctor_args, ctor_def);
+                        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                        create_store(std::move(value_result).value(), slot, declared_alignment);
+                        return {};
                     }
                     llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(ctor_def).c_str());
                     if (ctor == nullptr) {
-                        throw CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
-                            current_loc_);
+                        return std::unexpected(CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
+                            current_loc_));
                     }
                     if (const ClassDef* class_def = find_class_def(stmt.type.name)) {
-                        emit_complete_object_interface_initializers(*class_def, ctor_def, slot);
+                        if (auto r = emit_complete_object_interface_initializers(*class_def, ctor_def, slot); !r.has_value()) return std::unexpected(std::move(r).error());
                     }
-                    std::vector<llvm::LLVMValueRef> args = codegen_call_args(stmt.ctor_args, ctor_def, /*param_offset=*/1);
+                    auto args_result = codegen_call_args(stmt.ctor_args, ctor_def, /*param_offset=*/1);
+                    if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
+                    std::vector<llvm::LLVMValueRef> args = std::move(args_result).value();
                     args.insert(args.begin(), slot);
                     build_call(ctor, args);
-                    return;
+                    return {};
                 }
                 if (stmt.init) {
                     if (stmt.type.kind == TypeKind::Named && structs_.contains(stmt.type.name) &&
@@ -484,23 +530,27 @@ namespace scpp {
                         // unlike a blind byte copy); otherwise the
                         // compiler-provided recursive memberwise copy.
                         const Expr& source_expr = *stmt.init;
-                        LValue src = codegen_lvalue(source_expr);
+                        auto src_result = codegen_lvalue(source_expr);
+                        if (!src_result.has_value()) return std::unexpected(std::move(src_result).error());
+                        LValue src = std::move(src_result).value();
                         if (const Function* user_ctor = find_user_declared_copy_ctor_ast(stmt.type.name)) {
                             llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
                             build_call(ctor, {slot, src.ptr});
                         } else {
-                            codegen_memberwise_copy_construct(slot, src.ptr, stmt.type.name);
+                            if (auto r = codegen_memberwise_copy_construct(slot, src.ptr, stmt.type.name); !r.has_value()) return std::unexpected(std::move(r).error());
                         }
                         locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
                         locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
                         locals_[stmt.var_name].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
-                        maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc);
+                        if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                         if (!scope_stack_.empty()) {
                             scope_stack_.back().push_back(stmt.var_name);
                         }
-                        return;
+                        return {};
                     }
-                    llvm::LLVMValueRef init_value = codegen_value_for_target(*stmt.init, stmt.type);
+                    auto init_value_result = codegen_value_for_target(*stmt.init, stmt.type);
+                    if (!init_value_result.has_value()) return std::unexpected(std::move(init_value_result).error());
+                    llvm::LLVMValueRef init_value = std::move(init_value_result).value();
                     // Refresh to `stmt`'s own position: codegen_expr just
                     // recursed through `stmt.init` (possibly a compound
                     // expression like `a + b`), leaving current_loc_ at
@@ -508,7 +558,7 @@ namespace scpp {
                     // than the statement check_store_type is actually
                     // about.
                     refresh_debug_location(stmt.loc);
-                    check_store_type(init_value, llvm_type, "variable '" + stmt.var_name + "'");
+                    if (auto r = check_store_type(init_value, llvm_type, "variable '" + stmt.var_name + "'"); !r.has_value()) return std::unexpected(std::move(r).error());
                     create_store(init_value, slot, declared_alignment);
                 } else {
                     // scpp has no concept of an uninitialized variable: a
@@ -516,18 +566,18 @@ namespace scpp {
                     // zero-initialized (0 / false / null / all-zero
                     // fields), for every type -- scalars and raw pointers
                     // included, not just struct/array/unique_ptr.
-                    zero_initialize_storage(slot, stmt.type, declared_alignment);
+                    if (auto r = zero_initialize_storage(slot, stmt.type, declared_alignment); !r.has_value()) return std::unexpected(std::move(r).error());
                 }
                 locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
                 locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
                 if (stmt.type.kind == TypeKind::Named) {
                     locals_[stmt.var_name].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
                 }
-                maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc);
+                if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                 if (!scope_stack_.empty()) {
                     scope_stack_.back().push_back(stmt.var_name);
                 }
-                return;
+                return {};
             }
 
             case StmtKind::Return: {
@@ -550,41 +600,51 @@ namespace scpp {
                 if (stmt.expr) {
                     if (current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Named &&
                         current_function_def_->return_type.name == "void") {
-                        codegen_expr(*stmt.expr);
-                    } else {
-                        value = current_function_def_ != nullptr && is_interface_reference_type(current_function_def_->return_type)
-                                    ? codegen_interface_value_for_target(*stmt.expr, current_function_def_->return_type)
-                                : current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Reference
-                                    ? codegen_lvalue(*stmt.expr).ptr
-                                    : current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Named &&
+                        if (auto r = codegen_expr(*stmt.expr); !r.has_value()) return std::unexpected(std::move(r).error());
+                    } else if (current_function_def_ != nullptr && is_interface_reference_type(current_function_def_->return_type)) {
+                        auto value_result = codegen_interface_value_for_target(*stmt.expr, current_function_def_->return_type);
+                        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                        value = std::move(value_result).value();
+                    } else if (current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Reference) {
+                        auto lvalue_result = codegen_lvalue(*stmt.expr);
+                        if (!lvalue_result.has_value()) return std::unexpected(std::move(lvalue_result).error());
+                        value = std::move(lvalue_result).value().ptr;
+                    } else if (current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Named &&
                                           find_class_def(current_function_def_->return_type.name) != nullptr &&
-                                          is_implicit_move_return_source(*stmt.expr, current_function_def_->return_type)
-                                          ? [&]() {
-                                                Expr implicit_move;
-                                                implicit_move.kind = ExprKind::Move;
-                                                implicit_move.loc = stmt.expr->loc;
-                                                implicit_move.lhs = clone_expr(*stmt.expr);
-                                                return codegen_expr(implicit_move);
-                                            }()
-                                    : current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Named &&
-                                          find_class_def(current_function_def_->return_type.name) != nullptr
-                                          // /*allow_implicit_converting_ctor=*/true: mirrors
-                                          // movecheck's own dataflow.cppm return-statement check
-                                          // (return_converting_ctor, via
-                                          // find_single_argument_converting_constructor_signature),
-                                          // which already accepts returning some other type T that
-                                          // the return type has a single-argument converting
-                                          // constructor from (e.g. `return
-                                          // std::unexpected(E{...});` returning into a
-                                          // `std::expected<T, E>`-typed function) -- without this,
-                                          // codegen would emit stmt.expr's own (mismatched) type
-                                          // directly as the `ret` operand instead of constructing
-                                          // the actual return type, tripping LLVM's IR verifier.
-                                          ? codegen_class_value_for_boundary(*stmt.expr, current_function_def_->return_type,
-                                                                             /*allow_implicit_converting_ctor=*/true)
-                                    : current_function_def_ != nullptr
-                                          ? codegen_value_for_target(*stmt.expr, current_function_def_->return_type)
-                                          : codegen_expr(*stmt.expr);
+                                          is_implicit_move_return_source(*stmt.expr, current_function_def_->return_type)) {
+                        Expr implicit_move;
+                        implicit_move.kind = ExprKind::Move;
+                        implicit_move.loc = stmt.expr->loc;
+                        implicit_move.lhs = clone_expr(*stmt.expr);
+                        auto value_result = codegen_expr(implicit_move);
+                        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                        value = std::move(value_result).value();
+                    } else if (current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Named &&
+                                          find_class_def(current_function_def_->return_type.name) != nullptr) {
+                        // /*allow_implicit_converting_ctor=*/true: mirrors
+                        // movecheck's own dataflow.cppm return-statement check
+                        // (return_converting_ctor, via
+                        // find_single_argument_converting_constructor_signature),
+                        // which already accepts returning some other type T that
+                        // the return type has a single-argument converting
+                        // constructor from (e.g. `return
+                        // std::unexpected(E{...});` returning into a
+                        // `std::expected<T, E>`-typed function) -- without this,
+                        // codegen would emit stmt.expr's own (mismatched) type
+                        // directly as the `ret` operand instead of constructing
+                        // the actual return type, tripping LLVM's IR verifier.
+                        auto value_result = codegen_class_value_for_boundary(*stmt.expr, current_function_def_->return_type,
+                                                                             /*allow_implicit_converting_ctor=*/true);
+                        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                        value = std::move(value_result).value();
+                    } else if (current_function_def_ != nullptr) {
+                        auto value_result = codegen_value_for_target(*stmt.expr, current_function_def_->return_type);
+                        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                        value = std::move(value_result).value();
+                    } else {
+                        auto value_result = codegen_expr(*stmt.expr);
+                        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                        value = std::move(value_result).value();
                     }
                 }
                 free_unique_ptr_locals();
@@ -593,26 +653,28 @@ namespace scpp {
                 } else {
                     llvm::LLVMBuildRetVoid(builder_);
                 }
-                return;
+                return {};
             }
 
             case StmtKind::ExprStmt:
                 if (stmt.expr && stmt.expr->kind == ExprKind::Delete) {
-                    codegen_delete_expr(*stmt.expr);
-                    return;
+                    if (auto r = codegen_delete_expr(*stmt.expr); !r.has_value()) return std::unexpected(std::move(r).error());
+                    return {};
                 }
                 if (stmt.expr && stmt.expr->kind == ExprKind::Destroy) {
-                    codegen_destroy_expr(*stmt.expr);
-                    return;
+                    if (auto r = codegen_destroy_expr(*stmt.expr); !r.has_value()) return std::unexpected(std::move(r).error());
+                    return {};
                 }
-                codegen_expr(*stmt.expr);
-                return;
+                if (auto r = codegen_expr(*stmt.expr); !r.has_value()) return std::unexpected(std::move(r).error());
+                return {};
 
             case StmtKind::If: {
                 // `stmt.condition` is a `bool` expression, stored/passed
                 // as i8 (see to_llvm_type) -- CreateCondBr needs a 1-bit
                 // condition, so narrow it right here (see bool_to_i1).
-                llvm::LLVMValueRef cond = codegen_contextual_bool_i1(*stmt.condition);
+                auto cond_result = codegen_contextual_bool_i1(*stmt.condition);
+                if (!cond_result.has_value()) return std::unexpected(std::move(cond_result).error());
+                llvm::LLVMValueRef cond = std::move(cond_result).value();
                 llvm::LLVMBasicBlockRef then_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "if.then");
                 llvm::LLVMBasicBlockRef else_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "if.else");
                 llvm::LLVMBasicBlockRef merge_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "if.end");
@@ -626,7 +688,7 @@ namespace scpp {
                 // branch, not left dangling in the flat locals_ map.
                 llvm::LLVMPositionBuilderAtEnd(builder_, then_block);
                 push_scope();
-                codegen_stmt(*stmt.then_branch, current_function);
+                if (auto r = codegen_stmt(*stmt.then_branch, current_function); !r.has_value()) return std::unexpected(std::move(r).error());
                 pop_scope();
                 if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) == nullptr) {
                     llvm::LLVMBuildBr(builder_, merge_block);
@@ -635,7 +697,7 @@ namespace scpp {
                 llvm::LLVMPositionBuilderAtEnd(builder_, else_block);
                 push_scope();
                 if (stmt.else_branch) {
-                    codegen_stmt(*stmt.else_branch, current_function);
+                    if (auto r = codegen_stmt(*stmt.else_branch, current_function); !r.has_value()) return std::unexpected(std::move(r).error());
                 }
                 pop_scope();
                 if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) == nullptr) {
@@ -644,7 +706,7 @@ namespace scpp {
 
                 llvm::LLVMPositionBuilderAtEnd(builder_, merge_block);
                 if (llvm::LLVMGetFirstUse(llvm::LLVMBasicBlockAsValue(merge_block)) != nullptr) {
-                    return;
+                    return {};
                 }
                 // Both branches terminated (e.g. returned), so this merge
                 // point is unreachable; give it a terminator anyway since
@@ -652,7 +714,7 @@ namespace scpp {
                 // see the *original* branches' terminators, not this dead
                 // block, when checking "does this path return?".
                 llvm::LLVMBuildUnreachable(builder_);
-                return;
+                return {};
             }
 
             case StmtKind::While: {
@@ -681,7 +743,9 @@ namespace scpp {
                     llvm::LLVMBuildBr(builder_, body_block);
                 } else {
                     // Same bool_to_i1 narrowing as the If case above.
-                    llvm::LLVMValueRef cond = codegen_contextual_bool_i1(*stmt.condition);
+                    auto cond_result = codegen_contextual_bool_i1(*stmt.condition);
+                    if (!cond_result.has_value()) return std::unexpected(std::move(cond_result).error());
+                    llvm::LLVMValueRef cond = std::move(cond_result).value();
                     llvm::LLVMBuildCondBr(builder_, cond, body_block, end_block);
                 }
 
@@ -693,7 +757,7 @@ namespace scpp {
                 llvm::LLVMPositionBuilderAtEnd(builder_, body_block);
                 push_scope();
                 control_flow_stack_.push_back(ControlFlowFrame{cond_block, end_block, scope_stack_.size()});
-                codegen_stmt(*stmt.then_branch, current_function);
+                if (auto r = codegen_stmt(*stmt.then_branch, current_function); !r.has_value()) return std::unexpected(std::move(r).error());
                 pop_scope();
                 control_flow_stack_.pop_back();
                 if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) == nullptr) {
@@ -704,11 +768,13 @@ namespace scpp {
                 if (llvm::LLVMGetFirstUse(llvm::LLVMBasicBlockAsValue(end_block)) == nullptr) {
                     llvm::LLVMBuildUnreachable(builder_);
                 }
-                return;
+                return {};
             }
 
             case StmtKind::Switch: {
-                llvm::LLVMValueRef condition = codegen_expr(*stmt.condition);
+                auto condition_result = codegen_expr(*stmt.condition);
+                if (!condition_result.has_value()) return std::unexpected(std::move(condition_result).error());
+                llvm::LLVMValueRef condition = std::move(condition_result).value();
                 llvm::LLVMBasicBlockRef end_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "switch.end");
                 std::vector<llvm::LLVMBasicBlockRef> case_blocks;
                 case_blocks.reserve(stmt.switch_cases.size());
@@ -720,7 +786,9 @@ namespace scpp {
                 std::vector<std::pair<llvm::LLVMValueRef, llvm::LLVMBasicBlockRef>> value_cases;
                 for (std::size_t i = 0; i < stmt.switch_cases.size(); i++) {
                     if (stmt.switch_cases[i].value) {
-                        value_cases.push_back({codegen_expr(*stmt.switch_cases[i].value), case_blocks[i]});
+                        auto case_value_result = codegen_expr(*stmt.switch_cases[i].value);
+                        if (!case_value_result.has_value()) return std::unexpected(std::move(case_value_result).error());
+                        value_cases.push_back({std::move(case_value_result).value(), case_blocks[i]});
                     } else {
                         has_default = true;
                         default_block = case_blocks[i];
@@ -754,7 +822,7 @@ namespace scpp {
                     control_flow_stack_.push_back(ControlFlowFrame{std::nullopt, end_block, scope_stack_.size()});
                     for (const StmtPtr& child : stmt.switch_cases[i].statements) {
                         if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) != nullptr) break;
-                        codegen_stmt(*child, current_function);
+                        if (auto r = codegen_stmt(*child, current_function); !r.has_value()) return std::unexpected(std::move(r).error());
                     }
                     bool falls_into_next_case =
                         stmt.switch_cases[i].statements.empty() ||
@@ -775,7 +843,7 @@ namespace scpp {
 
                 llvm::LLVMPositionBuilderAtEnd(builder_, end_block);
                 if (!end_block_reachable) llvm::LLVMBuildUnreachable(builder_);
-                return;
+                return {};
             }
 
             case StmtKind::Break:
@@ -783,19 +851,19 @@ namespace scpp {
                     emit_scope_cleanup_to_depth(control_flow_stack_.back().scope_depth);
                     llvm::LLVMBuildBr(builder_, control_flow_stack_.back().end_block);
                 }
-                return;
+                return {};
 
             case StmtKind::Continue:
                 for (auto it = control_flow_stack_.rbegin(); it != control_flow_stack_.rend(); ++it) {
                     if (!it->continue_block.has_value()) continue;
                     emit_scope_cleanup_to_depth(it->scope_depth);
                     llvm::LLVMBuildBr(builder_, *it->continue_block);
-                    return;
+                    return {};
                 }
-                return;
+                return {};
 
             case StmtKind::Fallthrough:
-                return;
+                return {};
         }
     }
 

@@ -92,7 +92,7 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
     }
 
 
-    [[nodiscard]] std::size_t Codegen::alignment_bytes_for_type(const Type& type) const
+    [[nodiscard]] std::expected<std::size_t, CodegenError> Codegen::alignment_bytes_for_type(const Type& type) const
 {
         if (program_ != nullptr) {
             std::optional<TypeLayoutInfo> layout = layout_of_type(*program_, type, current_target_layout_info());
@@ -102,12 +102,13 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
             auto it = structs_.find(type.name);
             if (it != structs_.end()) return it->second.abi_align;
         }
-        llvm::LLVMTypeRef llvm_type = const_cast<Codegen*>(this)->to_llvm_type(type);
-        return llvm::LLVMABIAlignmentOfType(data_layout_ref(module_), llvm_type);
+        auto llvm_type_result = const_cast<Codegen*>(this)->to_llvm_type(type);
+        if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
+        return llvm::LLVMABIAlignmentOfType(data_layout_ref(module_), std::move(llvm_type_result).value());
     }
 
 
-    llvm::LLVMValueRef Codegen::codegen_sizeof_value(const Expr& expr)
+    [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::codegen_sizeof_value(const Expr& expr)
 {
         Type queried_type;
         if (expr.sizeof_operand_is_type) {
@@ -115,89 +116,94 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
         } else {
             std::optional<Type> inferred = infer_type(*expr.lhs);
             if (!inferred.has_value()) {
-                throw CodegenError("cannot apply 'sizeof' to this expression: its type could not be inferred", current_loc_);
+                return std::unexpected(CodegenError("cannot apply 'sizeof' to this expression: its type could not be inferred", current_loc_));
             }
             queried_type = *inferred;
         }
-        if (program_ == nullptr) throw CodegenError("internal error: sizeof requires program type information", current_loc_);
+        if (program_ == nullptr) return std::unexpected(CodegenError("internal error: sizeof requires program type information", current_loc_));
         std::optional<TypeLayoutInfo> layout = layout_of_type(*program_, queried_type, current_target_layout_info());
         if (!layout.has_value()) {
-            throw CodegenError("cannot apply 'sizeof' to this type in this version", current_loc_);
+            return std::unexpected(CodegenError("cannot apply 'sizeof' to this type in this version", current_loc_));
         }
-        return llvm::LLVMConstInt(to_llvm_type(named_type("size_t")), layout->size_bytes, /*SignExtend=*/0);
+        auto size_t_type = to_llvm_type(named_type("size_t"));
+        if (!size_t_type.has_value()) return std::unexpected(std::move(size_t_type).error());
+        return llvm::LLVMConstInt(std::move(size_t_type).value(), layout->size_bytes, /*SignExtend=*/0);
     }
 
 
-    llvm::LLVMValueRef Codegen::codegen_alignof_value(const Expr& expr)
+    [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::codegen_alignof_value(const Expr& expr)
 {
-        if (program_ == nullptr) throw CodegenError("internal error: alignof requires program type information", current_loc_);
+        if (program_ == nullptr) return std::unexpected(CodegenError("internal error: alignof requires program type information", current_loc_));
         std::optional<TypeLayoutInfo> layout = layout_of_type(*program_, expr.type, current_target_layout_info());
         if (!layout.has_value()) {
-            throw CodegenError("cannot apply 'alignof' to this type in this version", current_loc_);
+            return std::unexpected(CodegenError("cannot apply 'alignof' to this type in this version", current_loc_));
         }
-        return llvm::LLVMConstInt(to_llvm_type(named_type("size_t")), layout->abi_align_bytes, /*SignExtend=*/0);
+        auto size_t_type = to_llvm_type(named_type("size_t"));
+        if (!size_t_type.has_value()) return std::unexpected(std::move(size_t_type).error());
+        return llvm::LLVMConstInt(std::move(size_t_type).value(), layout->abi_align_bytes, /*SignExtend=*/0);
     }
 
 
-    void Codegen::validate_trivial(const Type& type, std::vector<std::string>& in_progress)
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::validate_trivial(const Type& type, std::vector<std::string>& in_progress)
 {
         switch (type.kind) {
             case TypeKind::Pointer:
             case TypeKind::FunctionPointer:
-                return;
+                return {};
             case TypeKind::Function:
-                throw CodegenError("a bare function type cannot be a struct field in this version", current_loc_);
+                return std::unexpected(CodegenError("a bare function type cannot be a struct field in this version", current_loc_));
             case TypeKind::Reference:
-                throw CodegenError("a reference cannot be a struct field in this version",
-                    current_loc_);
+                return std::unexpected(CodegenError("a reference cannot be a struct field in this version",
+                    current_loc_));
             case TypeKind::Span:
-                throw CodegenError("a std::span cannot be a struct field in this version (it is a "
+                return std::unexpected(CodegenError("a std::span cannot be a struct field in this version (it is a "
                                     "lifetime-checked borrowed view; use class instead)",
-                    current_loc_);
+                    current_loc_));
             case TypeKind::Array:
-                validate_trivial(*type.element, in_progress);
-                return;
+                return validate_trivial(*type.element, in_progress);
             case TypeKind::Named: {
-                if (is_scalar_type_name(type.name)) return;
-                if (find_enum_def(program_, type.name) != nullptr) return;
+                if (is_scalar_type_name(type.name)) return {};
+                if (find_enum_def(program_, type.name) != nullptr) return {};
                 if (type.name == "void") {
-                    throw CodegenError("'void' cannot be a struct field (only a return type or a "
+                    return std::unexpected(CodegenError("'void' cannot be a struct field (only a return type or a "
                                         "pointer's pointee -- 'void*' -- may be 'void')",
-                        current_loc_);
+                        current_loc_));
                 }
                 if (find_class_def(type.name) != nullptr) {
-                    throw CodegenError("a class type '" + type.name + "' cannot be a struct field; use class instead",
-                        current_loc_);
+                    return std::unexpected(CodegenError("a class type '" + type.name + "' cannot be a struct field; use class instead",
+                        current_loc_));
                 }
                 const StructDef* def = find_struct_def(type.name);
                 if (def == nullptr) {
-                    throw CodegenError("unknown type '" + type.name + "'",
-                        current_loc_);
+                    return std::unexpected(CodegenError("unknown type '" + type.name + "'",
+                        current_loc_));
                 }
                 if (std::find(in_progress.begin(), in_progress.end(), type.name) != in_progress.end()) {
-                    throw CodegenError("struct '" + type.name + "' cannot contain itself by value "
+                    return std::unexpected(CodegenError("struct '" + type.name + "' cannot contain itself by value "
                                                                  "(did you mean a pointer '" +
                                         type.name + "*'?)",
-                        current_loc_);
+                        current_loc_));
                 }
                 in_progress.push_back(type.name);
                 for (const StructField& field : def->fields) {
-                    validate_trivial(field.type, in_progress);
+                    if (auto result = validate_trivial(field.type, in_progress); !result.has_value()) {
+                        return std::unexpected(std::move(result).error());
+                    }
                 }
                 in_progress.pop_back();
-                return;
+                return {};
             }
         }
     }
 
 
-    void Codegen::declare_struct(const StructDef& def)
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::declare_struct(const StructDef& def)
 {
         if (def.is_forward_declaration) {
-            throw CodegenError("forward-declared struct '" + def.name + "' requires a full definition before layout is needed",
-                current_loc_);
+            return std::unexpected(CodegenError("forward-declared struct '" + def.name + "' requires a full definition before layout is needed",
+                current_loc_));
         }
-        if (declaring_aggregates_.contains(def.name)) return;
+        if (declaring_aggregates_.contains(def.name)) return {};
         declaring_aggregates_.insert(def.name);
         StructInfo info;
         info.is_union = def.is_union;
@@ -209,20 +215,23 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
             std::size_t offset = 0;
             std::size_t overall_align = std::max<std::size_t>(1, def.resolved_alignment == 0 ? 1 : static_cast<std::size_t>(def.resolved_alignment));
             for (const StructField& field : def.fields) {
-                try {
-                    validate_trivial(field.type, in_progress);
-                } catch (const CodegenError& e) {
-                    throw CodegenError(std::string(def.is_union ? "union '" : "struct '") + def.name + "' field '" +
-                                            field.name + "': " + e.what() +
+                if (auto validate_result = validate_trivial(field.type, in_progress); !validate_result.has_value()) {
+                    return std::unexpected(CodegenError(std::string(def.is_union ? "union '" : "struct '") + def.name + "' field '" +
+                                            field.name + "': " + validate_result.error().what() +
                                             " (only scalars, pointers, trivial structs/unions, and fixed-size arrays "
                                             "of trivial types are allowed here; see spec ch04)",
-                        current_loc_);
+                        current_loc_));
                 }
-                llvm::LLVMTypeRef field_type = to_llvm_type(field.type);
+                auto field_type_result = to_llvm_type(field.type);
+                if (!field_type_result.has_value()) return std::unexpected(std::move(field_type_result).error());
+                llvm::LLVMTypeRef field_type = std::move(field_type_result).value();
                 std::size_t field_size = llvm::LLVMABISizeOfType(data_layout_ref(module_), field_type);
-                std::size_t field_align = def.is_packed ? 1
-                                                   : std::max(alignment_bytes_for_type(field.type),
-                                                              static_cast<std::size_t>(field.resolved_alignment));
+                std::size_t field_align = 1;
+                if (!def.is_packed) {
+                    auto align_result = alignment_bytes_for_type(field.type);
+                    if (!align_result.has_value()) return std::unexpected(std::move(align_result).error());
+                    field_align = std::max(std::move(align_result).value(), static_cast<std::size_t>(field.resolved_alignment));
+                }
                 std::size_t aligned_offset = align_up(offset, field_align);
                 if (aligned_offset > offset) {
                     llvm_field_types.push_back(
@@ -249,27 +258,30 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
             info.abi_align = static_cast<unsigned>(final_align);
         } else {
             for (const StructField& field : def.fields) {
-                try {
-                    validate_trivial(field.type, in_progress);
-                } catch (const CodegenError& e) {
-                    throw CodegenError(std::string(def.is_union ? "union '" : "struct '") + def.name + "' field '" +
-                                            field.name + "': " + e.what() +
+                if (auto validate_result = validate_trivial(field.type, in_progress); !validate_result.has_value()) {
+                    return std::unexpected(CodegenError(std::string(def.is_union ? "union '" : "struct '") + def.name + "' field '" +
+                                            field.name + "': " + validate_result.error().what() +
                                             " (only scalars, pointers, trivial structs/unions, and fixed-size arrays "
                                             "of trivial types are allowed here; see spec ch04)",
-                        current_loc_);
+                        current_loc_));
                 }
                 info.field_names.push_back(field.name);
                 info.field_types.push_back(field.type);
-                info.field_alignments.push_back(
-                    static_cast<unsigned>(def.is_packed ? 1
-                                              : std::max(alignment_bytes_for_type(field.type),
-                                                         static_cast<std::size_t>(field.resolved_alignment))));
+                std::size_t union_field_align = 1;
+                if (!def.is_packed) {
+                    auto align_result = alignment_bytes_for_type(field.type);
+                    if (!align_result.has_value()) return std::unexpected(std::move(align_result).error());
+                    union_field_align = std::max(std::move(align_result).value(), static_cast<std::size_t>(field.resolved_alignment));
+                }
+                info.field_alignments.push_back(static_cast<unsigned>(union_field_align));
                 info.field_physical_indices.push_back(0);
-                llvm_field_types.push_back(to_llvm_type(field.type));
+                auto field_type_result = to_llvm_type(field.type);
+                if (!field_type_result.has_value()) return std::unexpected(std::move(field_type_result).error());
+                llvm_field_types.push_back(std::move(field_type_result).value());
             }
             if (llvm_field_types.empty()) {
-                throw CodegenError("union '" + def.name + "' must declare at least one field",
-                    current_loc_);
+                return std::unexpected(CodegenError("union '" + def.name + "' must declare at least one field",
+                    current_loc_));
             }
             std::size_t align_value = def.is_packed ? 1 : std::max<std::size_t>(1, def.resolved_alignment);
             std::size_t max_size = 0;
@@ -304,16 +316,17 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
         }
         structs_[def.name] = std::move(info);
         declaring_aggregates_.erase(def.name);
+        return {};
     }
 
 
-    void Codegen::declare_class(const ClassDef& def)
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::declare_class(const ClassDef& def)
 {
         if (def.is_forward_declaration) {
-            throw CodegenError("forward-declared class '" + def.name + "' requires a full definition before layout is needed",
-                current_loc_);
+            return std::unexpected(CodegenError("forward-declared class '" + def.name + "' requires a full definition before layout is needed",
+                current_loc_));
         }
-        if (declaring_aggregates_.contains(def.name)) return;
+        if (declaring_aggregates_.contains(def.name)) return {};
         declaring_aggregates_.insert(def.name);
         StructInfo info;
         info.has_ordinary_vtable = !def.is_interface;
@@ -339,9 +352,13 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
                                      static_cast<std::size_t>(pointer_abi_alignment_for_as(module_, 0)));
         }
         for (const ClassField& field : def.fields) {
-            llvm::LLVMTypeRef field_type = to_llvm_type(field.type);
+            auto field_type_result = to_llvm_type(field.type);
+            if (!field_type_result.has_value()) return std::unexpected(std::move(field_type_result).error());
+            llvm::LLVMTypeRef field_type = std::move(field_type_result).value();
             std::size_t field_size = llvm::LLVMABISizeOfType(data_layout_ref(module_), field_type);
-            std::size_t field_align = std::max(alignment_bytes_for_type(field.type), static_cast<std::size_t>(field.resolved_alignment));
+            auto align_result = alignment_bytes_for_type(field.type);
+            if (!align_result.has_value()) return std::unexpected(std::move(align_result).error());
+            std::size_t field_align = std::max(std::move(align_result).value(), static_cast<std::size_t>(field.resolved_alignment));
             std::size_t aligned_offset = align_up(offset, field_align);
             if (aligned_offset > offset) {
                 llvm_field_types.push_back(
@@ -367,15 +384,16 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
         info.abi_align = static_cast<unsigned>(overall_align);
         structs_[def.name] = std::move(info);
         declaring_aggregates_.erase(def.name);
+        return {};
     }
 
 
-    llvm::LLVMTypeRef Codegen::to_llvm_type(const Type& type)
+    [[nodiscard]] std::expected<llvm::LLVMTypeRef, CodegenError> Codegen::to_llvm_type(const Type& type)
 {
         switch (type.kind) {
             case TypeKind::Function:
-                throw CodegenError("a bare function type cannot be lowered directly; only function pointers are runtime values",
-                                   current_loc_);
+                return std::unexpected(CodegenError("a bare function type cannot be lowered directly; only function pointers are runtime values",
+                                   current_loc_));
             case TypeKind::Pointer:
             case TypeKind::Reference:
                 if (is_interface_representation_type(type)) {
@@ -395,7 +413,11 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
             case TypeKind::FunctionPointer: {
                 std::vector<llvm::LLVMTypeRef> params;
                 params.reserve(type.function_params.size());
-                for (const Type& param : type.function_params) params.push_back(to_llvm_type(param));
+                for (const Type& param : type.function_params) {
+                    auto param_result = to_llvm_type(param);
+                    if (!param_result.has_value()) return std::unexpected(std::move(param_result).error());
+                    params.push_back(std::move(param_result).value());
+                }
                 return llvm::LLVMPointerTypeInContext(context_, 0);
             }
             case TypeKind::Span: {
@@ -411,8 +433,11 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
                 llvm::LLVMTypeRef fields[] = {llvm::LLVMPointerTypeInContext(context_, 0), llvm::LLVMInt64TypeInContext(context_)};
                 return llvm::LLVMStructTypeInContext(context_, fields, 2, /*Packed=*/0);
             }
-            case TypeKind::Array:
-                return llvm::LLVMArrayType2(to_llvm_type(*type.element), type.array_size);
+            case TypeKind::Array: {
+                auto element_result = to_llvm_type(*type.element);
+                if (!element_result.has_value()) return std::unexpected(std::move(element_result).error());
+                return llvm::LLVMArrayType2(std::move(element_result).value(), type.array_size);
+            }
             case TypeKind::Named:
                 if (type.name == "int") return llvm::LLVMInt32TypeInContext(context_);
                 // A full byte (i8), matching real C++'s sizeof(bool)==1
@@ -485,7 +510,9 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
                         if (struct_def == nullptr) struct_def = &def;
                     }
                     if (struct_def != nullptr) {
-                        declare_struct(*struct_def);
+                        if (auto declare_result = declare_struct(*struct_def); !declare_result.has_value()) {
+                            return std::unexpected(std::move(declare_result).error());
+                        }
                         auto it = structs_.find(type.name);
                         if (it != structs_.end()) return it->second.llvm_type;
                     }
@@ -502,16 +529,18 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
                         if (class_def == nullptr) class_def = &def;
                     }
                     if (class_def != nullptr) {
-                        declare_class(*class_def);
+                        if (auto declare_result = declare_class(*class_def); !declare_result.has_value()) {
+                            return std::unexpected(std::move(declare_result).error());
+                        }
                         auto it = structs_.find(type.name);
                         if (it != structs_.end()) return it->second.llvm_type;
                     }
                 }
-                throw CodegenError("unsupported type '" + type.name + "'",
-                    current_loc_);
+                return std::unexpected(CodegenError("unsupported type '" + type.name + "'",
+                    current_loc_));
         }
-        throw CodegenError("unhandled type kind",
-            current_loc_);
+        return std::unexpected(CodegenError("unhandled type kind",
+            current_loc_));
     }
 
 
@@ -558,9 +587,11 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
     }
 
 
-    void Codegen::zero_initialize_storage(llvm::LLVMValueRef ptr, const Type& type, std::optional<unsigned> alignment)
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::zero_initialize_storage(llvm::LLVMValueRef ptr, const Type& type, std::optional<unsigned> alignment)
 {
-        llvm::LLVMTypeRef llvm_type = to_llvm_type(type);
+        auto llvm_type_result = to_llvm_type(type);
+        if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
+        llvm::LLVMTypeRef llvm_type = std::move(llvm_type_result).value();
         switch (type.kind) {
             case TypeKind::Named:
             case TypeKind::Array:
@@ -571,29 +602,32 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
                                 llvm::LLVMConstInt(llvm::LLVMInt64TypeInContext(context_), size, /*SignExtend=*/0),
                                 alignment.value_or(1));
                 if (type.kind == TypeKind::Named && class_has_ordinary_vtable(type.name)) {
-                    initialize_ordinary_vtable_pointer(type.name, ptr);
+                    if (auto init_result = initialize_ordinary_vtable_pointer(type.name, ptr); !init_result.has_value()) {
+                        return std::unexpected(std::move(init_result).error());
+                    }
                 }
-                return;
+                return {};
             }
             default:
                 create_store(llvm::LLVMConstNull(llvm_type), ptr, alignment);
-                return;
+                return {};
         }
     }
 
 
-    void Codegen::validate_reference_pointee(const Type& pointee)
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::validate_reference_pointee(const Type& pointee)
 {
         if (pointee.kind == TypeKind::Reference) {
-            throw CodegenError("a reference to a reference is not supported",
-                current_loc_);
+            return std::unexpected(CodegenError("a reference to a reference is not supported",
+                current_loc_));
         }
+        return {};
     }
 
 
-    void Codegen::validate_reference_return_elision(const Function& fn)
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::validate_reference_return_elision(const Function& fn)
 {
-        if (fn.return_lifetime.present()) return;
+        if (fn.return_lifetime.present()) return {};
         // ch04 §4.2/ch05 §5.9/spec §6.5: `this` (always params[0] when
         // present) is always the elision source when the function is a
         // method, regardless of how many other reference parameters it
@@ -602,12 +636,12 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
         // counterpart, kept in sync).
         if (!fn.params.empty() && fn.params[0].name == "this" && fn.params[0].type.kind == TypeKind::Reference) {
             if (fn.return_type.is_mutable_ref && !fn.params[0].type.is_mutable_ref) {
-                throw CodegenError("function '" + fn.name +
+                return std::unexpected(CodegenError("function '" + fn.name +
                                     "' returns a mutable reference ('T&') but its 'this' is a read-only "
                                     "('const') receiver",
-                    current_loc_);
+                    current_loc_));
             }
-            return;
+            return {};
         }
         const Param* found = nullptr;
         for (const Param& param : fn.params) {
@@ -617,26 +651,27 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
             // source.
             if (param.type.kind != TypeKind::Reference || param.type.is_rvalue_ref) continue;
             if (found != nullptr) {
-                throw CodegenError("function '" + fn.name +
+                return std::unexpected(CodegenError("function '" + fn.name +
                                     "' returns a reference but has more than one reference parameter; scpp "
                                     "v0.1 can only infer a returned reference's lifetime when there is exactly "
                                     "one (spec ch05.3)",
-                    current_loc_);
+                    current_loc_));
             }
             found = &param;
         }
         if (found == nullptr) {
-            throw CodegenError("function '" + fn.name +
+            return std::unexpected(CodegenError("function '" + fn.name +
                                 "' returns a reference but has no reference parameter to infer its lifetime "
                                 "from (spec ch05.3)",
-                current_loc_);
+                current_loc_));
         }
         if (fn.return_type.is_mutable_ref && !found->type.is_mutable_ref) {
-            throw CodegenError("function '" + fn.name +
+            return std::unexpected(CodegenError("function '" + fn.name +
                                 "' returns a mutable reference ('T&') but its sole reference parameter '" +
                                 found->name + "' is a shared reference ('const T&')",
-                current_loc_);
+                current_loc_));
         }
+        return {};
     }
 
 
@@ -646,45 +681,46 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
     }
 
 
-    void Codegen::validate_c_abi_compatible(const Type& type, const std::string& fn_name,
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::validate_c_abi_compatible(const Type& type, const std::string& fn_name,
                                     const std::string& context_description)
 {
         if (is_interface_representation_type(type)) {
-            throw CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
+            return std::unexpected(CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
                                 " cannot be an interface-typed pointer or reference -- it has no defined C "
                                 "representation (spec ch02 §2.1 / §11.3)",
-                current_loc_);
+                current_loc_));
         }
         switch (type.kind) {
             case TypeKind::Function:
-                throw CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
+                return std::unexpected(CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
                                     " cannot be a bare function type -- use a function pointer instead (spec ch02 §2.1)",
-                    current_loc_);
+                    current_loc_));
             case TypeKind::Named: {
                 if (find_class_def(type.name) != nullptr) {
-                    throw CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
+                    return std::unexpected(CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
                                         " cannot be class type '" + type.name +
                                         "' -- class types have no defined C representation "
                                         "(spec ch02 §2.1)",
-                        current_loc_);
+                        current_loc_));
                 }
-                if (is_scalar_type_name(type.name)) return;
+                if (is_scalar_type_name(type.name)) return {};
             }
             case TypeKind::Pointer:
             case TypeKind::FunctionPointer:
             case TypeKind::Array:
-                return;
+                return {};
             case TypeKind::Reference:
-                throw CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
+                return std::unexpected(CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
                                     " cannot be a reference -- it has no defined C representation (spec "
                                     "ch02 §2.1)",
-                    current_loc_);
+                    current_loc_));
             case TypeKind::Span:
-                throw CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
+                return std::unexpected(CodegenError("function '" + fn_name + "' (extern \"C\"): " + context_description +
                                     " cannot be std::span -- it has no defined C representation (spec "
                                     "ch02 §2.1)",
-                    current_loc_);
+                    current_loc_));
         }
+        return {};
     }
 
 } // namespace scpp
