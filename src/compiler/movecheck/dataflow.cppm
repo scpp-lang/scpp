@@ -429,18 +429,6 @@ void validate_deref_expr(const Expr& expr, const DataflowState& state, const Bod
         signatures.contains(underlying->name + "_operator_deref");
     bool is_this_ref = resolved.has_value() && operand.kind == ExprKind::Identifier && operand.name == "this" &&
                        resolved->kind == TypeKind::Reference;
-    if (std::getenv("SCPP_DEBUG_DEREF") != nullptr) {
-        std::cerr << "[DEBUG deref] loc=" << state.current_loc.line << ":" << state.current_loc.column
-                  << " operand_kind=" << static_cast<int>(operand.kind)
-                  << " operand_name=" << operand.name
-                  << " resolved=" << resolved.has_value()
-                  << " resolved_kind=" << (resolved.has_value() ? static_cast<int>(resolved->kind) : -1)
-                  << " underlying_name=" << (underlying != nullptr ? underlying->name : "<none>")
-                  << " underlying_kind=" << (underlying != nullptr ? static_cast<int>(underlying->kind) : -1)
-                  << " checked_key=" << (underlying != nullptr ? underlying->name + "_operator_deref" : "<none>")
-                  << " is_class_deref=" << is_class_deref
-                  << "\n";
-    }
     if (!is_raw_ptr && !is_fn_ptr && !is_class_deref && !is_this_ref) {
         throw DataflowError("cannot dereference ('*') '" + describe +
                              "': only a raw pointer (inside '[[scpp::unsafe]] { }'), a function pointer "
@@ -883,33 +871,6 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                 class_value_param ? find_single_argument_converting_constructor_signature(sig->param_types[param_index], arg, body,
                                                                                          signatures)
                                   : nullptr;
-            if (std::getenv("SCPP_DEBUG_ARG") != nullptr && sig != nullptr && param_index < sig->param_types.size()) {
-                std::optional<Type> dbg_arg_type = infer_expr_type(arg, body, signatures);
-                std::cerr << "[DEBUG argcheck] loc=" << state.current_loc.line << ":" << state.current_loc.column
-                          << " param=" << sig->param_names[param_index]
-                          << " param_type=" << sig->param_types[param_index].name
-                          << " param_type_kind=" << static_cast<int>(sig->param_types[param_index].kind)
-                          << " class_value_param=" << class_value_param
-                          << " copyable_lvalue_source=" << copyable_lvalue_source
-                          << " freely_copyable_value_source=" << freely_copyable_value_source
-                          << " produces_rvalue=" << produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures)
-                          << " converting_ctor=" << (converting_ctor != nullptr)
-                          << " arg_type_resolved=" << dbg_arg_type.has_value()
-                          << " arg_type_name=" << (dbg_arg_type.has_value() ? dbg_arg_type->name : "<none>")
-                          << " arg_type_kind=" << (dbg_arg_type.has_value() ? static_cast<int>(dbg_arg_type->kind) : -1)
-                          << " arg_kind=" << static_cast<int>(arg.kind)
-                          << " arg_name=" << arg.name
-                          << " arg_args_size=" << arg.args.size()
-                          << " arg_through_arrow=" << arg.through_arrow
-                          << " arg_lhs_kind=" << (arg.lhs != nullptr ? static_cast<int>(arg.lhs->kind) : -1)
-                          << " arg_lhs_unary_op=" << (arg.lhs != nullptr ? static_cast<int>(arg.lhs->unary_op) : -1)
-                          << " is_copy_ctor=" << (body.program != nullptr ? is_copy_constructible(sig->param_types[param_index].name, *body.program) : false)
-                          << " shape_ok=" << is_lvalue_copy_source_shape(arg)
-                          << " record_ok=" << is_named_record_type_for_call_binding(sig->param_types[param_index], body)
-                          << " bare_same_type_ok=" << is_bare_same_type_copy_source(arg, sig->param_types[param_index], body, signatures)
-                          << " arg_lhs_lhs_kind=" << (arg.lhs != nullptr && arg.lhs->lhs != nullptr ? static_cast<int>(arg.lhs->lhs->kind) : -1)
-                          << "\n";
-            }
             if (report_errors && class_value_param && !copyable_lvalue_source && !freely_copyable_value_source &&
                 !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures) && converting_ctor == nullptr) {
                 throw DataflowError("passing class '" + sig->param_types[param_index].name +
@@ -1180,22 +1141,6 @@ void check_constructor_arguments(const Type& constructed_type, const std::vector
             bool freely_copyable_value_source =
                 class_value_param && is_freely_copyable_class_value_source(arg, sig->param_types[param_index], body, signatures);
             if (arg.kind == ExprKind::Lambda) freely_copyable_value_source = class_value_param;
-            if (std::getenv("SCPP_DEBUG_CTORARG") != nullptr && sig != nullptr && param_index < sig->param_types.size()) {
-                std::cerr << "[DEBUG ctorarg] loc=" << state.current_loc.line << ":" << state.current_loc.column
-                          << " param_index=" << param_index
-                          << " sig_null=" << (sig == nullptr)
-                          << " param_type=" << (sig != nullptr && param_index < sig->param_types.size() ? sig->param_types[param_index].name : "<n/a>")
-                          << " class_value_param=" << class_value_param
-                          << " copyable_lvalue_source=" << copyable_lvalue_source
-                          << " freely_copyable_value_source=" << freely_copyable_value_source
-                          << " produces_rvalue=" << produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures)
-                          << " arg_kind=" << static_cast<int>(arg.kind)
-                          << " arg_name=" << arg.name
-                          << " is_copy_ctor=" << (body.program != nullptr ? is_copy_constructible(sig->param_types[param_index].name, *body.program) : false)
-                          << " bare_same_type_ok=" << is_bare_same_type_copy_source(arg, sig->param_types[param_index], body, signatures)
-                          << " record_ok=" << is_named_record_type_for_call_binding(sig->param_types[param_index], body)
-                          << "\n";
-            }
             if (report_errors && class_value_param && !copyable_lvalue_source && !freely_copyable_value_source &&
                 !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures)) {
                 throw DataflowError("passing class '" + sig->param_types[param_index].name +
@@ -2943,47 +2888,7 @@ void check_function(const Function& fn, const Program& program, const Signatures
         queued[i] = true;
     }
 
-    bool _dbg_fn = std::getenv("SCPP_DEBUG_FN") != nullptr;
-    bool _dbg_target = _dbg_fn && fn.name.find("qualify_same_namespace_function_calls") != std::string::npos;
-    if (_dbg_fn) {
-        std::cerr << "[SCPP_DEBUG_FN]   check_function(" << fn.name << "): n_blocks=" << n << std::endl;
-        if (_dbg_target) {
-            auto kind_name = [](MirStatementKind k) -> const char* {
-                switch (k) {
-                    case MirStatementKind::Declare: return "Declare";
-                    case MirStatementKind::Assign: return "Assign";
-                    case MirStatementKind::Eval: return "Eval";
-                    case MirStatementKind::Drop: return "Drop";
-                    case MirStatementKind::ScopeExit: return "ScopeExit";
-                    case MirStatementKind::BindReference: return "BindReference";
-                    case MirStatementKind::UnsafeEnter: return "UnsafeEnter";
-                    case MirStatementKind::UnsafeExit: return "UnsafeExit";
-                }
-                return "?";
-            };
-            for (std::size_t i = 0; i < n; i++) {
-                std::vector<std::size_t> succs = successors(body.blocks[i].terminator);
-                std::cerr << "[SCPP_DEBUG_FN]     block[" << i << "] stmts=" << body.blocks[i].statements.size()
-                          << " preds=[";
-                for (std::size_t p : preds[i]) std::cerr << p << ",";
-                std::cerr << "] succs=[";
-                for (std::size_t s : succs) std::cerr << s << ",";
-                std::cerr << "]" << std::endl;
-                for (const MirStatement& ms : body.blocks[i].statements) {
-                    std::cerr << "[SCPP_DEBUG_FN]       stmt: " << kind_name(ms.kind) << " local='" << ms.local
-                              << "' type=" << ms.type.name << " is_mutable_ref=" << ms.type.is_mutable_ref
-                              << std::endl;
-                }
-            }
-        }
-    }
-    long _dbg_iter = 0;
     while (!worklist.empty()) {
-        _dbg_iter++;
-        if (_dbg_fn && (_dbg_iter % 200000) == 0) {
-            std::cerr << "[SCPP_DEBUG_FN]   check_function(" << fn.name << "): iter=" << _dbg_iter
-                      << " worklist.size()=" << worklist.size() << std::endl;
-        }
         std::size_t b = worklist.front();
         worklist.pop_front();
         queued[b] = false;
@@ -3000,105 +2905,13 @@ void check_function(const Function& fn, const Program& program, const Signatures
         }
 
         DataflowState new_out = new_in;
-        static thread_local long _dbg_block2_visits = 0;
-        bool trace_this_visit = _dbg_target && b == 2 && _dbg_block2_visits < 6;
-        if (trace_this_visit) {
-            _dbg_block2_visits++;
-            auto sc = [&](const DataflowState& s) -> int {
-                auto it = s.borrows.find("$for_range_80");
-                return it == s.borrows.end() ? -1 : it->second.shared_count;
-            };
-            std::cerr << "[SCPP_DEBUG_FN]     ===block2 visit#" << _dbg_block2_visits << " new_in.$for_range_80.shared="
-                      << sc(new_in) << std::endl;
-        }
         for (std::size_t i = 0; i < body.blocks[b].statements.size(); i++) {
             apply_statement(body.blocks[b].statements[i], new_out, body, signatures, /*report_errors=*/false);
-            if (trace_this_visit) {
-                auto it = new_out.borrows.find("$for_range_80");
-                std::cerr << "[SCPP_DEBUG_FN]       after stmt[" << i << "] (kind depends) $for_range_80.shared="
-                          << (it == new_out.borrows.end() ? -1 : it->second.shared_count)
-                          << " ref_targets[fn].present=" << new_out.ref_targets.contains("fn") << std::endl;
-            }
             release_dead_references(new_out, body, live_after[b][i]);
-            if (trace_this_visit) {
-                auto it = new_out.borrows.find("$for_range_80");
-                std::cerr << "[SCPP_DEBUG_FN]       after release_dead_references[" << i << "] $for_range_80.shared="
-                          << (it == new_out.borrows.end() ? -1 : it->second.shared_count)
-                          << " ref_targets[fn].present=" << new_out.ref_targets.contains("fn") << std::endl;
-            }
         }
 
         in_states[b] = new_in;
         bool out_changed = !(new_out == out_states[b]);
-        if (_dbg_target && ((_dbg_iter >= 100 && _dbg_iter < 130) || (_dbg_iter >= 10000 && (_dbg_iter % 10000) < 5))) {
-            const DataflowState& old_out = out_states[b];
-            std::cerr << "[SCPP_DEBUG_FN]     iter=" << _dbg_iter << " block=" << b
-                      << " out_changed=" << out_changed << " locals=" << (new_out.locals == old_out.locals)
-                      << " borrows=" << (new_out.borrows == old_out.borrows)
-                      << " ref_targets=" << (new_out.ref_targets == old_out.ref_targets)
-                      << " lls=" << (new_out.local_lifetime_sources == old_out.local_lifetime_sources)
-                      << " susp=" << (new_out.suspended_reborrows == old_out.suspended_reborrows)
-                      << " ccb=" << (new_out.closure_capture_borrows == old_out.closure_capture_borrows)
-                      << " unsafe=" << (new_out.unsafe_depth == old_out.unsafe_depth) << std::endl;
-            if (!(new_out.borrows == old_out.borrows)) {
-                std::cerr << "[SCPP_DEBUG_FN]       borrows sizes: new=" << new_out.borrows.size()
-                          << " old=" << old_out.borrows.size() << std::endl;
-                for (const auto& [place, bs] : new_out.borrows) {
-                    auto it = old_out.borrows.find(place);
-                    if (it == old_out.borrows.end() || !(it->second == bs)) {
-                        std::cerr << "[SCPP_DEBUG_FN]         borrow '" << place << "' new=(shared=" << bs.shared_count
-                                  << ",mut=" << bs.mutable_borrow << ")";
-                        if (it != old_out.borrows.end()) {
-                            std::cerr << " old=(shared=" << it->second.shared_count << ",mut=" << it->second.mutable_borrow
-                                      << ")";
-                        } else {
-                            std::cerr << " (missing in old)";
-                        }
-                        std::cerr << std::endl;
-                    }
-                }
-                for (const auto& [place, bs] : old_out.borrows) {
-                    if (new_out.borrows.find(place) == new_out.borrows.end()) {
-                        std::cerr << "[SCPP_DEBUG_FN]         borrow '" << place << "' removed (was shared="
-                                  << bs.shared_count << ",mut=" << bs.mutable_borrow << ")" << std::endl;
-                    }
-                }
-            }
-            if (!(new_out.ref_targets == old_out.ref_targets)) {
-                std::cerr << "[SCPP_DEBUG_FN]       ref_targets sizes: new=" << new_out.ref_targets.size()
-                          << " old=" << old_out.ref_targets.size() << std::endl;
-                for (const auto& [name, target] : new_out.ref_targets) {
-                    auto it = old_out.ref_targets.find(name);
-                    if (it == old_out.ref_targets.end() || !(it->second == target)) {
-                        std::cerr << "[SCPP_DEBUG_FN]         ref '" << name << "' new_roots=" << format_roots(target.roots)
-                                  << " new_lender='" << target.lender << "'";
-                        if (it != old_out.ref_targets.end()) {
-                            std::cerr << " old_roots=" << format_roots(it->second.roots) << " old_lender='"
-                                      << it->second.lender << "'";
-                        } else {
-                            std::cerr << " (missing in old)";
-                        }
-                        std::cerr << std::endl;
-                    }
-                }
-            }
-            if (!(new_out.local_lifetime_sources == old_out.local_lifetime_sources)) {
-                std::cerr << "[SCPP_DEBUG_FN]       lls sizes: new=" << new_out.local_lifetime_sources.size()
-                          << " old=" << old_out.local_lifetime_sources.size() << std::endl;
-                for (const auto& [name, roots] : new_out.local_lifetime_sources) {
-                    auto it = old_out.local_lifetime_sources.find(name);
-                    if (it == old_out.local_lifetime_sources.end() || !(it->second == roots)) {
-                        std::cerr << "[SCPP_DEBUG_FN]         lls '" << name << "' new=" << format_roots(roots);
-                        if (it != old_out.local_lifetime_sources.end()) {
-                            std::cerr << " old=" << format_roots(it->second);
-                        } else {
-                            std::cerr << " (missing in old)";
-                        }
-                        std::cerr << std::endl;
-                    }
-                }
-            }
-        }
         out_states[b] = std::move(new_out);
 
         if (out_changed) {
@@ -3133,17 +2946,8 @@ void check_function(const Function& fn, const Program& program, const Signatures
 // monomorphization runs before check_moves (see driver.cppm) -- the
 // error is exactly as correct either way.
 void check_moves_impl(const Program& program) {
-    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
-        std::cerr << "[SCPP_DEBUG_FN] entering check_moves_impl, functions.size()=" << program.functions.size() << std::endl;
-    }
     Signatures signatures = build_signatures(program);
-    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
-        std::cerr << "[SCPP_DEBUG_FN] build_signatures done" << std::endl;
-    }
     validate_class_semantics(program, signatures);
-    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
-        std::cerr << "[SCPP_DEBUG_FN] validate_class_semantics done" << std::endl;
-    }
     // ch04 §4.2: every class name in the program, so Member-access
     // checking (apply_expr's own Member case) can tell a class-typed
     // base (access-controlled) apart from a struct-typed one (never
@@ -3186,16 +2990,10 @@ void check_moves_impl(const Program& program) {
         if (is_copy_constructible(def.name, program)) classes_with_copy_ctor.insert(def.name);
         if (is_copy_assignable(def.name, program)) classes_with_copy_assign.insert(def.name);
     }
-    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
-        std::cerr << "[SCPP_DEBUG_FN] copy_ctor/assign sets built, classes.size()=" << program.classes.size() << std::endl;
-    }
     for (const ClassDef& def : program.classes) {
         for (const Function& fn : program.functions) {
             validate_constructor_member_initialization(fn, def, program);
         }
-    }
-    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
-        std::cerr << "[SCPP_DEBUG_FN] validate_constructor_member_initialization loop done" << std::endl;
     }
     // ch05 §5.11: every concept/bare-`auto` witness class (never a real,
     // user-written one) -- see ClassDef::is_concept_witness and
@@ -3230,9 +3028,6 @@ void check_moves_impl(const Program& program) {
         // deduction-pattern complexity.
         if (!fn.template_params.empty()) continue;
         if (!fn.generic_method_owner_id.empty()) continue;
-        if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
-            std::cerr << "[SCPP_DEBUG_FN] checking " << fn.name << " (owner=" << fn.member_owner_class << ")" << std::endl;
-        }
         check_function(fn, program, signatures, class_names, class_field_types, class_field_access, classes_with_copy_ctor,
                        classes_with_copy_assign, witness_class_names);
     }
