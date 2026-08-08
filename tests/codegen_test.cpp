@@ -95,7 +95,8 @@ scpp::Program parse_with_std_imports(std::string_view source) {
 
 std::string generate_ir(std::string_view source) {
     scpp::Program program = parse_with_std_imports(source);
-    scpp::monomorphize_generics(program);
+    auto monomorphize_result = scpp::monomorphize_generics(program);
+    if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
     // ch05 §9.4: resolves every array bound (and other constant-expression
     // context, e.g. `alignas`) before codegen ever reads a type's layout --
     // codegen itself never evaluates constant expressions, only the

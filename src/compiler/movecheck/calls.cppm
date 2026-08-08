@@ -135,7 +135,7 @@ void rewrite_type_alias_constructor_call(Expr& expr, const Body& body) {
 [[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] bool is_reference_wrapper_constructor_call(const Expr& expr);
 [[nodiscard]] bool is_optional_constructor_call(const Expr& expr);
-        void check_enum_conversion_compatibility(const Type& target_type, const Expr& source_expr, const Body& body,
+        [[nodiscard]] std::expected<void, DataflowError> check_enum_conversion_compatibility(const Type& target_type, const Expr& source_expr, const Body& body,
                                                  const Signatures& signatures, const SourceLocation& loc);
 [[nodiscard]] CalleeSignature resolve_callee_signature(const Expr& call_expr, const Body& body,
                                                        const Signatures& signatures,
@@ -185,34 +185,34 @@ struct NodiscardInfo {
 [[nodiscard]] std::optional<Type> resolve_function_designator_type(const Expr& expr, const Type& target_type,
                                                                    const Body& body,
                                                                    const Signatures& signatures);
-void check_function_pointer_assignment(const Type& target_type, const Expr& expr, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> check_function_pointer_assignment(const Type& target_type, const Expr& expr, const Body& body,
                                        const Signatures& signatures, SourceLocation loc,
                                        const std::string& target_name, bool report_errors);
-void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& target_type, const Expr& expr, const Body& body,
                                   const Signatures& signatures, SourceLocation loc,
                                   const std::string& target_name, bool report_errors);
 [[nodiscard]] bool assignment_target_is_read_only(const Expr& expr, const Body& body,
                                                   const Signatures& signatures);
-void validate_sizeof_operand(const Expr& expr, const Body& body, const Signatures& signatures,
+[[nodiscard]] std::expected<void, DataflowError> validate_sizeof_operand(const Expr& expr, const Body& body, const Signatures& signatures,
                                     const SourceLocation& loc);
-void validate_alignof_operand(const Expr& expr, const Body& body, const SourceLocation& loc);
+[[nodiscard]] std::expected<void, DataflowError> validate_alignof_operand(const Expr& expr, const Body& body, const SourceLocation& loc);
         [[nodiscard]] std::optional<std::string> direct_write_root(const Expr& expr, const Body& body);
 [[nodiscard]] bool produces_rvalue_of_type(const Expr& expr, const Type& expected_type, const Body& body,
                                            const Signatures& signatures);
 
-void check_enum_conversion_compatibility(const Type& target_type, const Expr& source_expr, const Body& body,
+std::expected<void, DataflowError> check_enum_conversion_compatibility(const Type& target_type, const Expr& source_expr, const Body& body,
                                          const Signatures& signatures, const SourceLocation& loc) {
     const Type& target_operand = binary_operand_type(target_type);
     std::optional<Type> source_type = infer_expr_type(source_expr, body, signatures);
-    if (!source_type.has_value()) return;
+    if (!source_type.has_value()) return {};
     const Type& source_operand = binary_operand_type(*source_type);
     bool target_is_enum = is_enum_type(target_operand, body.program);
     bool source_is_enum = is_enum_type(source_operand, body.program);
-    if (!(target_is_enum || source_is_enum)) return;
-    if (types_equal(target_operand, source_operand)) return;
-    throw DataflowError("enum class values do not implicitly convert to or from integers (or other enum types) in "
+    if (!(target_is_enum || source_is_enum)) return {};
+    if (types_equal(target_operand, source_operand)) return {};
+    return std::unexpected(DataflowError("enum class values do not implicitly convert to or from integers (or other enum types) in "
                         "this version; use an explicit cast to the enum's underlying type",
-                        loc);
+                        loc));
 }
 
 [[nodiscard]] FunctionSignature function_pointer_signature(const Type& type) {
@@ -1067,45 +1067,46 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
     return std::nullopt;
 }
 
-void check_function_pointer_assignment(const Type& target_type, const Expr& expr, const Body& body,
+std::expected<void, DataflowError> check_function_pointer_assignment(const Type& target_type, const Expr& expr, const Body& body,
                                        const Signatures& signatures, SourceLocation loc, const std::string& target_name,
                                        bool report_errors) {
-    if (!report_errors || !is_function_pointer(target_type)) return;
+    if (!report_errors || !is_function_pointer(target_type)) return {};
     std::optional<Type> source_type = resolve_function_designator_type(expr, target_type, body, signatures);
     if (!source_type) source_type = infer_expr_type(expr, body, signatures);
     if (!source_type || !is_function_pointer(*source_type)) {
-        throw DataflowError("cannot initialize function pointer '" + target_name +
+        return std::unexpected(DataflowError("cannot initialize function pointer '" + target_name +
                              "' from this expression: expected a function or function pointer with matching "
                              "signature",
-            loc);
+            loc));
     }
-    if (types_equal(target_type, *source_type)) return;
+    if (types_equal(target_type, *source_type)) return {};
     if (same_function_pointer_shape_ignoring_unsafe(target_type, *source_type) && target_type.is_unsafe_function_pointer &&
         !source_type->is_unsafe_function_pointer) {
-        return;
+        return {};
     }
     if (same_function_pointer_shape_ignoring_unsafe(target_type, *source_type) && !target_type.is_unsafe_function_pointer &&
         source_type->is_unsafe_function_pointer) {
-        throw DataflowError("cannot assign an unsafe-qualified function pointer to plain function pointer '" +
+        return std::unexpected(DataflowError("cannot assign an unsafe-qualified function pointer to plain function pointer '" +
                                  target_name + "'",
-            loc);
+            loc));
     }
+    return {};
 }
 
-void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, const Body& body,
+std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& target_type, const Expr& expr, const Body& body,
                                    const Signatures& signatures, SourceLocation loc, const std::string& target_name,
                                    bool report_errors) {
-    if (!report_errors || target_type.kind != TypeKind::Pointer) return;
+    if (!report_errors || target_type.kind != TypeKind::Pointer) return {};
     std::optional<Type> source_type = infer_expr_type(expr, body, signatures);
-    if (!source_type || source_type->kind != TypeKind::Pointer) return;
-    if (raw_pointer_implicitly_convertible(*source_type, target_type)) return;
+    if (!source_type || source_type->kind != TypeKind::Pointer) return {};
+    if (raw_pointer_implicitly_convertible(*source_type, target_type)) return {};
     if (body.program != nullptr &&
         types_compatible_with_base_conversion(*source_type, target_type, *body.program, enclosing_class_name(body))) {
-        return;
+        return {};
     }
-    throw DataflowError("cannot initialize or assign raw pointer '" + target_name +
+    return std::unexpected(DataflowError("cannot initialize or assign raw pointer '" + target_name +
                             "' from an incompatible pointer type without an explicit cast",
-                        loc);
+                        loc));
 }
 
 // Structurally validates and resolves spec ch05.3's elision rule for a
@@ -1869,7 +1870,7 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
     return std::nullopt;
 }
 
-void validate_sizeof_operand(const Expr& expr, const Body& body, const Signatures& signatures,
+std::expected<void, DataflowError> validate_sizeof_operand(const Expr& expr, const Body& body, const Signatures& signatures,
                              const SourceLocation& loc) {
     Type queried_type;
     if (expr.sizeof_operand_is_type) {
@@ -1877,25 +1878,27 @@ void validate_sizeof_operand(const Expr& expr, const Body& body, const Signature
     } else {
         std::optional<Type> inferred = infer_expr_type(*expr.lhs, body, signatures);
         if (!inferred.has_value()) {
-            throw DataflowError("cannot apply 'sizeof' to this expression: its type could not be inferred", loc);
+            return std::unexpected(DataflowError("cannot apply 'sizeof' to this expression: its type could not be inferred", loc));
         }
         queried_type = *inferred;
     }
     if (body.program == nullptr) {
-        throw DataflowError("internal error: sizeof requires program type information", loc);
+        return std::unexpected(DataflowError("internal error: sizeof requires program type information", loc));
     }
     if (!layout_of_type(*body.program, queried_type).has_value()) {
-        throw DataflowError("cannot apply 'sizeof' to this type in this version", loc);
+        return std::unexpected(DataflowError("cannot apply 'sizeof' to this type in this version", loc));
     }
+    return {};
 }
 
-void validate_alignof_operand(const Expr& expr, const Body& body, const SourceLocation& loc) {
+std::expected<void, DataflowError> validate_alignof_operand(const Expr& expr, const Body& body, const SourceLocation& loc) {
     if (body.program == nullptr) {
-        throw DataflowError("internal error: alignof requires program type information", loc);
+        return std::unexpected(DataflowError("internal error: alignof requires program type information", loc));
     }
     if (!layout_of_type(*body.program, expr.type).has_value()) {
-        throw DataflowError("cannot apply 'alignof' to this type in this version", loc);
+        return std::unexpected(DataflowError("cannot apply 'alignof' to this type in this version", loc));
     }
+    return {};
 }
 
 } // namespace scpp

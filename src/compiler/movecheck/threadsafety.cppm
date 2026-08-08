@@ -23,21 +23,22 @@ void collect_interfaces_for_thread_safety(const Program& program, const std::str
     }
 }
 
-[[nodiscard]] bool evaluate_thread_bool_constant_expr_for_program(const Expr& expr, const Program& program,
+[[nodiscard]] std::expected<bool, DataflowError> evaluate_thread_bool_constant_expr_for_program(const Expr& expr, const Program& program,
                                                                   std::unordered_set<std::string> visiting = {});
-[[nodiscard]] bool thread_movable_of(const Type& type, const Program& program,
+[[nodiscard]] std::expected<bool, DataflowError> thread_movable_of(const Type& type, const Program& program,
                                      std::unordered_set<std::string> visiting = {});
-[[nodiscard]] bool thread_shareable_of(const Type& type, const Program& program,
+[[nodiscard]] std::expected<bool, DataflowError> thread_shareable_of(const Type& type, const Program& program,
                                        std::unordered_set<std::string> visiting = {});
 [[nodiscard]] bool parameter_requires_thread_safety_constraint(const FunctionSignature& sig, std::size_t param_index);
 [[nodiscard]] std::string parameter_display_name(const FunctionSignature& sig, std::size_t param_index);
 [[nodiscard]] bool parameter_names_interface_type(const Type& param_type, const Body& body);
 [[nodiscard]] Type thread_safety_constraint_subject_type(const Expr& arg, const Type& param_type,
                                                          const Body& body, const Signatures& signatures);
-void enforce_thread_safety_constraints_for_argument(const Expr& arg, const FunctionSignature& sig,
+[[nodiscard]] std::expected<void, DataflowError> enforce_thread_safety_constraints_for_argument(const Expr& arg, const FunctionSignature& sig,
                                                     std::size_t param_index, std::string_view callee_kind,
                                                     const std::string& callee_name, const Body& body,
                                                     const Signatures& signatures, SourceLocation loc);
+
 
 [[nodiscard]] bool parameter_requires_thread_safety_constraint(const FunctionSignature& sig, std::size_t param_index) {
     return param_index < sig.param_require_thread_movable.size() &&
@@ -81,12 +82,12 @@ void enforce_thread_safety_constraints_for_argument(const Expr& arg, const Funct
     return param_type;
 }
 
-void enforce_thread_safety_constraints_for_argument(const Expr& arg, const FunctionSignature& sig, std::size_t param_index,
+[[nodiscard]] std::expected<void, DataflowError> enforce_thread_safety_constraints_for_argument(const Expr& arg, const FunctionSignature& sig, std::size_t param_index,
                                                     std::string_view callee_kind, const std::string& callee_name,
                                                     const Body& body, const Signatures& signatures, SourceLocation loc) {
     if (body.program == nullptr || !parameter_requires_thread_safety_constraint(sig, param_index) ||
         param_index >= sig.param_types.size()) {
-        return;
+        return {};
     }
     Type subject = thread_safety_constraint_subject_type(arg, sig.param_types[param_index], body, signatures);
     if (subject.kind != TypeKind::Reference && sig.param_types[param_index].kind == TypeKind::Reference &&
@@ -96,26 +97,38 @@ void enforce_thread_safety_constraints_for_argument(const Expr& arg, const Funct
         subject = std::move(wrapped);
     }
     std::string param_name = parameter_display_name(sig, param_index);
-    if (sig.param_require_thread_movable[param_index] && !thread_movable_of(subject, *body.program)) {
-        throw DataflowError("argument for parameter '" + param_name + "' of " + std::string(callee_kind) + " '" +
-                                callee_name + "' does not satisfy '[[scpp::thread_movable]]' (spec §8.1/§8.5(6))",
-            loc);
+    if (sig.param_require_thread_movable[param_index]) {
+        auto _r = thread_movable_of(subject, *body.program);
+        if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (!_r.value()) {
+            return std::unexpected(DataflowError("argument for parameter '" + param_name + "' of " + std::string(callee_kind) + " '" +
+                                    callee_name + "' does not satisfy '[[scpp::thread_movable]]' (spec §8.1/§8.5(6))",
+                loc));
+        }
     }
-    bool shareable_ok = !sig.param_require_thread_shareable[param_index] || thread_shareable_of(subject, *body.program);
+    bool shareable_ok = true;
+    if (sig.param_require_thread_shareable[param_index]) {
+        auto _r = thread_shareable_of(subject, *body.program);
+        if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+        shareable_ok = _r.value();
+    }
     if (!shareable_ok) {
         if (std::optional<Type> concrete = concrete_interface_argument_type(arg, sig.param_types[param_index], body, signatures);
             concrete.has_value()) {
-            shareable_ok = thread_shareable_of(*concrete, *body.program);
+            auto _r = thread_shareable_of(*concrete, *body.program);
+            if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+            shareable_ok = _r.value();
         }
     }
     if (!shareable_ok) {
-        throw DataflowError("argument for parameter '" + param_name + "' of " + std::string(callee_kind) + " '" +
+        return std::unexpected(DataflowError("argument for parameter '" + param_name + "' of " + std::string(callee_kind) + " '" +
                                 callee_name + "' does not satisfy '[[scpp::thread_shareable]]' (spec §8.1/§8.5(6))",
-            loc);
+            loc));
     }
+    return {};
 }
 
-[[nodiscard]] bool evaluate_thread_bool_constant_expr_for_program(const Expr& expr, const Program& program,
+[[nodiscard]] std::expected<bool, DataflowError> evaluate_thread_bool_constant_expr_for_program(const Expr& expr, const Program& program,
                                                                   std::unordered_set<std::string> visiting) {
     switch (expr.kind) {
         case ExprKind::BoolLiteral: return expr.bool_value;
@@ -124,36 +137,48 @@ void enforce_thread_safety_constraints_for_argument(const Expr& arg, const Funct
                                                     : thread_shareable_of(expr.type, program, visiting);
         case ExprKind::Unary:
             if (expr.unary_op == UnaryOp::Not && expr.lhs) {
-                return !evaluate_thread_bool_constant_expr_for_program(*expr.lhs, program, visiting);
+                auto _r = evaluate_thread_bool_constant_expr_for_program(*expr.lhs, program, visiting);
+                if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+                return !_r.value();
             }
             break;
         case ExprKind::Binary:
             if (!expr.lhs || !expr.rhs) break;
             if (expr.binary_op == BinaryOp::And) {
-                return evaluate_thread_bool_constant_expr_for_program(*expr.lhs, program, visiting) &&
-                       evaluate_thread_bool_constant_expr_for_program(*expr.rhs, program, visiting);
+                auto _lhs = evaluate_thread_bool_constant_expr_for_program(*expr.lhs, program, visiting);
+                if (!_lhs.has_value()) return std::unexpected(std::move(_lhs).error());
+                if (!_lhs.value()) return false;
+                return evaluate_thread_bool_constant_expr_for_program(*expr.rhs, program, visiting);
             }
             if (expr.binary_op == BinaryOp::Or) {
-                return evaluate_thread_bool_constant_expr_for_program(*expr.lhs, program, visiting) ||
-                       evaluate_thread_bool_constant_expr_for_program(*expr.rhs, program, visiting);
+                auto _lhs = evaluate_thread_bool_constant_expr_for_program(*expr.lhs, program, visiting);
+                if (!_lhs.has_value()) return std::unexpected(std::move(_lhs).error());
+                if (_lhs.value()) return true;
+                return evaluate_thread_bool_constant_expr_for_program(*expr.rhs, program, visiting);
             }
             if (expr.binary_op == BinaryOp::Eq) {
-                return evaluate_thread_bool_constant_expr_for_program(*expr.lhs, program, visiting) ==
-                       evaluate_thread_bool_constant_expr_for_program(*expr.rhs, program, visiting);
+                auto _lhs = evaluate_thread_bool_constant_expr_for_program(*expr.lhs, program, visiting);
+                if (!_lhs.has_value()) return std::unexpected(std::move(_lhs).error());
+                auto _rhs = evaluate_thread_bool_constant_expr_for_program(*expr.rhs, program, visiting);
+                if (!_rhs.has_value()) return std::unexpected(std::move(_rhs).error());
+                return _lhs.value() == _rhs.value();
             }
             if (expr.binary_op == BinaryOp::Ne) {
-                return evaluate_thread_bool_constant_expr_for_program(*expr.lhs, program, visiting) !=
-                       evaluate_thread_bool_constant_expr_for_program(*expr.rhs, program, visiting);
+                auto _lhs = evaluate_thread_bool_constant_expr_for_program(*expr.lhs, program, visiting);
+                if (!_lhs.has_value()) return std::unexpected(std::move(_lhs).error());
+                auto _rhs = evaluate_thread_bool_constant_expr_for_program(*expr.rhs, program, visiting);
+                if (!_rhs.has_value()) return std::unexpected(std::move(_rhs).error());
+                return _lhs.value() != _rhs.value();
             }
             break;
         default: break;
     }
-    throw DataflowError("thread-trait override expressions must be boolean constant expressions built from "
+    return std::unexpected(DataflowError("thread-trait override expressions must be boolean constant expressions built from "
                         "bool literals, !, &&, ||, ==, !=, and scpp::is_thread_movable/shareable(T)",
-                        expr.loc);
+                        expr.loc));
 }
 
-[[nodiscard]] bool thread_movable_of(const Type& type, const Program& program,
+[[nodiscard]] std::expected<bool, DataflowError> thread_movable_of(const Type& type, const Program& program,
                                      std::unordered_set<std::string> visiting) {
     switch (type.kind) {
         case TypeKind::Named: {
@@ -169,7 +194,9 @@ void enforce_thread_safety_constraints_for_argument(const Expr& arg, const Funct
                                                                           visiting);
                 }
                 for (const ClassField& f : c.fields) {
-                    if (!thread_movable_of(f.type, program, visiting)) return false;
+                    auto _r = thread_movable_of(f.type, program, visiting);
+                    if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+                    if (!_r.value()) return false;
                 }
                 return true;
             }
@@ -177,7 +204,9 @@ void enforce_thread_safety_constraints_for_argument(const Expr& arg, const Funct
                 if (s.name != type.name) continue;
                 if (s.thread_movable_override) return true;
                 for (const StructField& f : s.fields) {
-                    if (!thread_movable_of(f.type, program, visiting)) return false;
+                    auto _r = thread_movable_of(f.type, program, visiting);
+                    if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+                    if (!_r.value()) return false;
                 }
                 return true;
             }
@@ -186,15 +215,19 @@ void enforce_thread_safety_constraints_for_argument(const Expr& arg, const Funct
         case TypeKind::Pointer: return false;
         case TypeKind::Function:
         case TypeKind::FunctionPointer: return true;
-        case TypeKind::Array: return type.element && thread_movable_of(*type.element, program, visiting);
+        case TypeKind::Array:
+            if (!type.element) return false;
+            return thread_movable_of(*type.element, program, visiting);
         case TypeKind::Reference:
-            return type.is_rvalue_ref ? (type.pointee && thread_movable_of(*type.pointee, program, visiting)) : false;
+            if (!type.is_rvalue_ref) return false;
+            if (!type.pointee) return false;
+            return thread_movable_of(*type.pointee, program, visiting);
         case TypeKind::Span: return false;
     }
     return false;
 }
 
-[[nodiscard]] bool thread_shareable_of(const Type& type, const Program& program,
+[[nodiscard]] std::expected<bool, DataflowError> thread_shareable_of(const Type& type, const Program& program,
                                        std::unordered_set<std::string> visiting) {
     switch (type.kind) {
         case TypeKind::Named: {
@@ -216,7 +249,9 @@ void enforce_thread_safety_constraints_for_argument(const Expr& arg, const Funct
                     if (iface != nullptr && iface->thread_shareable_override && c.fields.empty()) return true;
                 }
                 for (const ClassField& f : c.fields) {
-                    if (!thread_shareable_of(f.type, program, visiting)) return false;
+                    auto _r = thread_shareable_of(f.type, program, visiting);
+                    if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+                    if (!_r.value()) return false;
                 }
                 return true;
             }
@@ -224,7 +259,9 @@ void enforce_thread_safety_constraints_for_argument(const Expr& arg, const Funct
                 if (s.name != type.name) continue;
                 if (s.thread_shareable_override) return true;
                 for (const StructField& f : s.fields) {
-                    if (!thread_shareable_of(f.type, program, visiting)) return false;
+                    auto _r = thread_shareable_of(f.type, program, visiting);
+                    if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+                    if (!_r.value()) return false;
                 }
                 return true;
             }
@@ -233,12 +270,19 @@ void enforce_thread_safety_constraints_for_argument(const Expr& arg, const Funct
         case TypeKind::Pointer: return false;
         case TypeKind::Function:
         case TypeKind::FunctionPointer: return true;
-        case TypeKind::Array: return type.element && thread_shareable_of(*type.element, program, visiting);
+        case TypeKind::Array:
+            if (!type.element) return false;
+            return thread_shareable_of(*type.element, program, visiting);
         case TypeKind::Reference:
-            if (type.is_rvalue_ref) return type.pointee && thread_shareable_of(*type.pointee, program, visiting);
-            return type.pointee && !type.is_mutable_ref && thread_shareable_of(*type.pointee, program, visiting);
+            if (type.is_rvalue_ref) {
+                if (!type.pointee) return false;
+                return thread_shareable_of(*type.pointee, program, visiting);
+            }
+            if (!type.pointee || type.is_mutable_ref) return false;
+            return thread_shareable_of(*type.pointee, program, visiting);
         case TypeKind::Span:
-            return type.pointee && !type.is_mutable_ref && thread_shareable_of(*type.pointee, program, visiting);
+            if (!type.pointee || type.is_mutable_ref) return false;
+            return thread_shareable_of(*type.pointee, program, visiting);
     }
     return false;
 }

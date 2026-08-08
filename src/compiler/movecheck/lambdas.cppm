@@ -13,7 +13,7 @@ import :borrows;
 
 namespace scpp {
 
-void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& reference_capture_borrows,
+[[nodiscard]] std::expected<void, DataflowError> apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& reference_capture_borrows,
                            const Body& body, const Signatures& signatures, bool report_errors,
                            std::vector<ClosureCaptureBorrow>* out_closure_capture_borrows = nullptr);
 void collect_locally_declared_names(const Stmt& stmt, std::unordered_set<std::string>& out);
@@ -29,14 +29,14 @@ void rewrite_unqualified_member_calls(Stmt& stmt, const std::unordered_map<std::
                                       const std::unordered_map<std::string, std::string>& static_methods);
 void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::string, std::string>& instance_methods,
                                       const std::unordered_map<std::string, std::string>& static_methods);
-void reject_write_to_nonmutable_by_value_capture(const Expr& expr,
+[[nodiscard]] std::expected<void, DataflowError> reject_write_to_nonmutable_by_value_capture(const Expr& expr,
                                                  const std::unordered_set<std::string>& by_value_names);
-void reject_write_to_nonmutable_by_value_capture(const Stmt& stmt,
+[[nodiscard]] std::expected<void, DataflowError> reject_write_to_nonmutable_by_value_capture(const Stmt& stmt,
                                                  const std::unordered_set<std::string>& by_value_names);
 
-void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
                 const Signatures& signatures, bool report_errors);
-void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowState& state,
+[[nodiscard]] std::expected<void, DataflowError> apply_reference_argument(const Expr& arg, const Type& param_type, DataflowState& state,
                               BorrowMap& in_call_borrows, const Body& body,
                               const Signatures& signatures, bool report_errors);
 
@@ -68,11 +68,11 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
 //    call argument (apply_reference_argument): the closure's own field
 //    genuinely borrows it, for as long as `reference_capture_borrows`
 //    (see above) says it lasts.
-void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& reference_capture_borrows,
+[[nodiscard]] std::expected<void, DataflowError> apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& reference_capture_borrows,
                             const Body& body, const Signatures& signatures, bool report_errors,
                             std::vector<ClosureCaptureBorrow>* out_closure_capture_borrows) {
     auto apply_by_value_capture_source = [&](const Expr& source, const Type& source_type,
-                                             const std::string& capture_display) {
+                                             const std::string& capture_display) -> std::expected<void, DataflowError> {
         if (is_named_class_type(source_type, body)) {
             bool is_copy_source = is_bare_same_type_copy_source(source, source_type, body, signatures);
             bool is_freely_copyable_source =
@@ -83,35 +83,47 @@ void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& re
                     if (!is_freely_copyable_source &&
                         (state.classes_with_copy_ctor == nullptr ||
                          !state.classes_with_copy_ctor->contains(source_type.name))) {
-                        throw DataflowError(
+                        return std::unexpected(DataflowError(
                             "capture '" + capture_display + "' of class '" + source_type.name +
                                "' requires std::move or another rvalue source because the class is not "
                                "copy-constructible (spec §6.5/§5.12)",
-                            state.current_loc);
+                            state.current_loc));
                     }
                 } else if (!is_rvalue_source) {
-                    throw DataflowError(
+                    return std::unexpected(DataflowError(
                         "capture '" + capture_display + "' of class '" + source_type.name +
                             "' must use an implicitly copyable same-typed source (if copy-constructible) or an "
                             "rvalue such as "
                             "std::move(...) (spec §6.5/§5.12)",
-                        state.current_loc);
+                        state.current_loc));
                 }
             }
-            apply_expr(source, /*is_move_target_context=*/is_rvalue_source, state, body, signatures, report_errors);
-            return;
+            if (auto _r = apply_expr(source, /*is_move_target_context=*/is_rvalue_source, state, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            return {};
         }
-        apply_expr(source, /*is_move_target_context=*/source.kind == ExprKind::Move, state, body, signatures,
-                   report_errors);
+        if (auto _r = apply_expr(source, /*is_move_target_context=*/source.kind == ExprKind::Move, state, body, signatures,
+                   report_errors); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+        return {};
     };
     for (const LambdaCapture& capture : expr.lambda_captures) {
         if (capture.init) {
-            reject_lifetime_group_state_embedding(*capture.init, state, body, signatures, report_errors, "a closure capture", nullptr);
+            if (auto _r = reject_lifetime_group_state_embedding(*capture.init, state, body, signatures, report_errors, "a closure capture", nullptr);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             std::optional<Type> init_type = infer_expr_type(*capture.init, body, signatures);
             if (init_type.has_value()) {
-                apply_by_value_capture_source(*capture.init, *init_type, capture.name);
+                if (auto _r = apply_by_value_capture_source(*capture.init, *init_type, capture.name); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
             } else {
-                apply_expr(*capture.init, /*is_move_target_context=*/true, state, body, signatures, report_errors);
+                if (auto _r = apply_expr(*capture.init, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
             }
             continue;
         }
@@ -122,13 +134,18 @@ void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& re
                 capture_ident.kind = ExprKind::Identifier;
                 capture_ident.loc = expr.loc;
                 capture_ident.name = capture.name;
-                reject_lifetime_group_state_embedding(capture_ident, state, body, signatures, report_errors, "a closure capture", nullptr);
-                apply_by_value_capture_source(capture_ident, type_it->second, capture.name);
+                if (auto _r = reject_lifetime_group_state_embedding(capture_ident, state, body, signatures, report_errors, "a closure capture", nullptr);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                if (auto _r = apply_by_value_capture_source(capture_ident, type_it->second, capture.name); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
                 continue;
             }
             LocalState current = lookup(state.locals, capture.name);
             if (report_errors && current != LocalState::Initialized) {
-                throw DataflowError(describe_bad_state(capture.name, current), state.current_loc);
+                return std::unexpected(DataflowError(describe_bad_state(capture.name, current), state.current_loc));
             }
             continue;
         }
@@ -136,27 +153,34 @@ void apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& re
         capture_ident.kind = ExprKind::Identifier;
         capture_ident.loc = expr.loc;
         capture_ident.name = capture.name;
-        reject_lifetime_group_state_embedding(capture_ident, state, body, signatures, report_errors, "a closure capture", nullptr);
-        RootSet roots =
-            resolve_borrow_source_root(capture_ident, state, body, signatures, report_errors);
+        if (auto _r = reject_lifetime_group_state_embedding(capture_ident, state, body, signatures, report_errors, "a closure capture", nullptr);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+        auto roots_result = resolve_borrow_source_root(capture_ident, state, body, signatures, report_errors);
+        if (!roots_result.has_value()) return std::unexpected(std::move(roots_result).error());
+        RootSet roots = std::move(roots_result).value();
         auto type_it = body.local_types.find(capture.name);
         if (type_it == body.local_types.end()) {
             if (report_errors) {
-                throw DataflowError("lambda captures '" + capture.name +
+                return std::unexpected(DataflowError("lambda captures '" + capture.name +
                                        "', which is not a local variable or parameter in this scope (ch05 §5.12)",
-                    state.current_loc);
+                    state.current_loc));
             }
             continue;
         }
         Type ref_type = by_reference_capture_type(capture.name, type_it->second, body);
-        apply_reference_argument(capture_ident, ref_type, state, reference_capture_borrows, body, signatures,
-                                  report_errors);
+        if (auto _r = apply_reference_argument(capture_ident, ref_type, state, reference_capture_borrows, body, signatures,
+                                  report_errors); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
         if (out_closure_capture_borrows != nullptr) {
             for (const std::string& root : roots) {
                 out_closure_capture_borrows->push_back(ClosureCaptureBorrow{root, ref_type.is_mutable_ref});
             }
         }
     }
+    return {};
 }
 // ch05 §5.12: collects every VarDecl's own name inside `stmt`
 // (recursively, ignoring lexical scope -- same "whole-body, flat"
@@ -474,59 +498,79 @@ void rewrite_unqualified_member_calls(Stmt& stmt, const std::unordered_map<std::
 // lambda is *not* `mutable` (see resolve_lambda). A nested lambda's own
 // body is deliberately not recursed into: it has its own independent
 // capture list, checked when *it* is itself resolved.
-void reject_write_to_nonmutable_by_value_capture(const Expr& expr, const std::unordered_set<std::string>& by_value_names) {
+[[nodiscard]] std::expected<void, DataflowError> reject_write_to_nonmutable_by_value_capture(const Expr& expr, const std::unordered_set<std::string>& by_value_names) {
     if (expr.kind == ExprKind::Binary &&
         (expr.binary_op == BinaryOp::Assign || expr.binary_op == BinaryOp::AddAssign ||
          expr.binary_op == BinaryOp::SubAssign || expr.binary_op == BinaryOp::MulAssign ||
          expr.binary_op == BinaryOp::DivAssign) &&
         expr.lhs->kind == ExprKind::Identifier && by_value_names.contains(expr.lhs->name)) {
-        throw DataflowError("cannot assign to by-value-captured '" + expr.lhs->name +
+        return std::unexpected(DataflowError("cannot assign to by-value-captured '" + expr.lhs->name +
                                  "' inside a non-'mutable' lambda (ch05 §5.12 -- a closure's own call operator "
                                  "is 'const' by default; add 'mutable' to opt out)",
-            expr.loc);
+            expr.loc));
     }
-    if (expr.lhs) reject_write_to_nonmutable_by_value_capture(*expr.lhs, by_value_names);
-    if (expr.rhs) reject_write_to_nonmutable_by_value_capture(*expr.rhs, by_value_names);
-    if (expr.third) reject_write_to_nonmutable_by_value_capture(*expr.third, by_value_names);
-    for (const ExprPtr& arg : expr.args) reject_write_to_nonmutable_by_value_capture(*arg, by_value_names);
+    if (expr.lhs) {
+        if (auto _r = reject_write_to_nonmutable_by_value_capture(*expr.lhs, by_value_names); !_r.has_value()) return std::unexpected(std::move(_r).error());
+    }
+    if (expr.rhs) {
+        if (auto _r = reject_write_to_nonmutable_by_value_capture(*expr.rhs, by_value_names); !_r.has_value()) return std::unexpected(std::move(_r).error());
+    }
+    if (expr.third) {
+        if (auto _r = reject_write_to_nonmutable_by_value_capture(*expr.third, by_value_names); !_r.has_value()) return std::unexpected(std::move(_r).error());
+    }
+    for (const ExprPtr& arg : expr.args) {
+        if (auto _r = reject_write_to_nonmutable_by_value_capture(*arg, by_value_names); !_r.has_value()) return std::unexpected(std::move(_r).error());
+    }
+    return {};
 }
 
-void reject_write_to_nonmutable_by_value_capture(const Stmt& stmt, const std::unordered_set<std::string>& by_value_names) {
+[[nodiscard]] std::expected<void, DataflowError> reject_write_to_nonmutable_by_value_capture(const Stmt& stmt, const std::unordered_set<std::string>& by_value_names) {
     switch (stmt.kind) {
         case StmtKind::VarDecl:
-            if (stmt.init) reject_write_to_nonmutable_by_value_capture(*stmt.init, by_value_names);
-            for (const ExprPtr& arg : stmt.ctor_args) reject_write_to_nonmutable_by_value_capture(*arg, by_value_names);
-            return;
+            if (stmt.init) {
+                if (auto _r = reject_write_to_nonmutable_by_value_capture(*stmt.init, by_value_names); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            }
+            for (const ExprPtr& arg : stmt.ctor_args) {
+                if (auto _r = reject_write_to_nonmutable_by_value_capture(*arg, by_value_names); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            }
+            return {};
         case StmtKind::Return:
         case StmtKind::ExprStmt:
-            if (stmt.expr) reject_write_to_nonmutable_by_value_capture(*stmt.expr, by_value_names);
-            return;
-        case StmtKind::If:
-            reject_write_to_nonmutable_by_value_capture(*stmt.condition, by_value_names);
-            reject_write_to_nonmutable_by_value_capture(*stmt.then_branch, by_value_names);
-            if (stmt.else_branch) reject_write_to_nonmutable_by_value_capture(*stmt.else_branch, by_value_names);
-            return;
-        case StmtKind::While:
-            reject_write_to_nonmutable_by_value_capture(*stmt.condition, by_value_names);
-            reject_write_to_nonmutable_by_value_capture(*stmt.then_branch, by_value_names);
-            return;
-        case StmtKind::Switch:
-            reject_write_to_nonmutable_by_value_capture(*stmt.condition, by_value_names);
+            if (stmt.expr) return reject_write_to_nonmutable_by_value_capture(*stmt.expr, by_value_names);
+            return {};
+        case StmtKind::If: {
+            if (auto _r = reject_write_to_nonmutable_by_value_capture(*stmt.condition, by_value_names); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            if (auto _r = reject_write_to_nonmutable_by_value_capture(*stmt.then_branch, by_value_names); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            if (stmt.else_branch) return reject_write_to_nonmutable_by_value_capture(*stmt.else_branch, by_value_names);
+            return {};
+        }
+        case StmtKind::While: {
+            if (auto _r = reject_write_to_nonmutable_by_value_capture(*stmt.condition, by_value_names); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            return reject_write_to_nonmutable_by_value_capture(*stmt.then_branch, by_value_names);
+        }
+        case StmtKind::Switch: {
+            if (auto _r = reject_write_to_nonmutable_by_value_capture(*stmt.condition, by_value_names); !_r.has_value()) return std::unexpected(std::move(_r).error());
             for (const SwitchCase& switch_case : stmt.switch_cases) {
-                if (switch_case.value) reject_write_to_nonmutable_by_value_capture(*switch_case.value, by_value_names);
+                if (switch_case.value) {
+                    if (auto _r = reject_write_to_nonmutable_by_value_capture(*switch_case.value, by_value_names); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                }
                 for (const StmtPtr& s : switch_case.statements) {
-                    reject_write_to_nonmutable_by_value_capture(*s, by_value_names);
+                    if (auto _r = reject_write_to_nonmutable_by_value_capture(*s, by_value_names); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 }
             }
-            return;
+            return {};
+        }
         case StmtKind::Break:
         case StmtKind::Continue:
         case StmtKind::Fallthrough:
-            return;
+            return {};
         case StmtKind::Block:
-            for (const StmtPtr& s : stmt.statements) reject_write_to_nonmutable_by_value_capture(*s, by_value_names);
-            return;
+            for (const StmtPtr& s : stmt.statements) {
+                if (auto _r = reject_write_to_nonmutable_by_value_capture(*s, by_value_names); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            }
+            return {};
     }
+    return {};
 }
 
 

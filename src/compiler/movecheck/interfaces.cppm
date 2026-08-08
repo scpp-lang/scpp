@@ -12,7 +12,7 @@ import :threadsafety;
 namespace scpp {
 
 [[nodiscard]] bool type_forms_interface_object(const Type& type, const Program& program);
-void validate_class_semantics(const Program& program, const Signatures& signatures);
+[[nodiscard]] std::expected<void, DataflowError> validate_class_semantics(const Program& program, const Signatures& signatures);
 
 [[nodiscard]] bool type_forms_interface_object(const Type& type, const Program& program) {
     switch (type.kind) {
@@ -39,22 +39,22 @@ public:
         }
     }
 
-    void run() {
+    [[nodiscard]] std::expected<void, DataflowError> run() {
         for (const ClassDef& def : program_.classes) {
             if (should_skip(def)) continue;
-            validate_class_shape(def);
+            if (auto _r = validate_class_shape(def); !_r.has_value()) return std::unexpected(std::move(_r).error());
         }
         for (const ClassDef& def : program_.classes) {
             if (should_skip(def)) continue;
-            (void)analyze(def.name);
+            if (auto _r = ensure_analyzed(def.name); !_r.has_value()) return std::unexpected(std::move(_r).error());
         }
         for (const Function& fn : program_.functions) {
             if (!fn.body) continue;
             if (!fn.member_owner_class.empty() && !fn.forwards_to.empty()) continue;
-            validate_function_signature(fn);
-            validate_function_body(fn, *fn.body);
+            if (auto _r = validate_function_signature(fn); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            if (auto _r = validate_function_body(fn, *fn.body); !_r.has_value()) return std::unexpected(std::move(_r).error());
         }
-        validate_thread_contracts();
+        return validate_thread_contracts();
     }
 
 private:
@@ -245,59 +245,61 @@ private:
         return false;
     }
 
-    void validate_class_shape(const ClassDef& def) {
+    [[nodiscard]] std::expected<void, DataflowError> validate_class_shape(const ClassDef& def) {
         int ordinary_bases = 0;
         for (const BaseSpecifier& base : def.base_specifiers) {
             const ClassDef* base_def = find_class_def(program_, base.base_type.name);
             if (base_def == nullptr) continue;
             if (base_def->is_interface) {
                 if (!base.is_virtual) {
-                    throw DataflowError("class '" + def.name + "' directly inherits interface '" + base.base_type.name +
-                                        "' without the required 'virtual' (spec §11.3(1))");
+                    return std::unexpected(DataflowError("class '" + def.name + "' directly inherits interface '" + base.base_type.name +
+                                        "' without the required 'virtual' (spec §11.3(1))"));
                 }
             } else {
                 ordinary_bases++;
                 if (base.is_virtual) {
-                    throw DataflowError("class '" + def.name + "' directly inherits ordinary class '" + base.base_type.name +
-                                        "' with forbidden 'virtual' (spec §11.3(2))");
+                    return std::unexpected(DataflowError("class '" + def.name + "' directly inherits ordinary class '" + base.base_type.name +
+                                        "' with forbidden 'virtual' (spec §11.3(2))"));
                 }
             }
 
         }
         if (ordinary_bases > 1) {
-            throw DataflowError("class '" + def.name + "' has more than one ordinary direct base class (spec §11.1(6))");
+            return std::unexpected(DataflowError("class '" + def.name + "' has more than one ordinary direct base class (spec §11.1(6))"));
         }
         if (def.is_interface && !def.fields.empty()) {
-            throw DataflowError("interface '" + def.name + "' declares a non-static data member (spec §11.2(1))");
+            return std::unexpected(DataflowError("interface '" + def.name + "' declares a non-static data member (spec §11.2(1))"));
         }
         if (def.is_interface) {
             std::unordered_set<std::string> visiting;
-            validate_interface_bases(def, visiting);
+            if (auto _r = validate_interface_bases(def, visiting); !_r.has_value()) return std::unexpected(std::move(_r).error());
         }
-        validate_explicit_virtual_destructor(def);
+        if (auto _r = validate_explicit_virtual_destructor(def); !_r.has_value()) return std::unexpected(std::move(_r).error());
         for (const ClassField& field : def.fields) {
             if (type_forms_interface_object(field.type, program_)) {
-                throw DataflowError("class '" + def.name + "' forms an object of interface type in a non-static data member "
-                                    "declaration (spec §11.2(5.2))");
+                return std::unexpected(DataflowError("class '" + def.name + "' forms an object of interface type in a non-static data member "
+                                    "declaration (spec §11.2(5.2))"));
             }
         }
+        return {};
     }
 
-    void validate_interface_bases(const ClassDef& def, std::unordered_set<std::string>& visiting) {
-        if (!visiting.insert(def.name).second) return;
+    [[nodiscard]] std::expected<void, DataflowError> validate_interface_bases(const ClassDef& def, std::unordered_set<std::string>& visiting) {
+        if (!visiting.insert(def.name).second) return {};
         for (const BaseSpecifier& base : def.base_specifiers) {
             const ClassDef* base_def = find_class_def(program_, base.base_type.name);
             if (base_def == nullptr) continue;
             if (!base_def->is_interface) {
-                throw DataflowError("interface '" + def.name + "' inherits ordinary class '" + base_def->name +
-                                    "' through its base graph (spec §11.2(3))");
+                return std::unexpected(DataflowError("interface '" + def.name + "' inherits ordinary class '" + base_def->name +
+                                    "' through its base graph (spec §11.2(3))"));
             }
-            validate_interface_bases(*base_def, visiting);
+            if (auto _r = validate_interface_bases(*base_def, visiting); !_r.has_value()) return std::unexpected(std::move(_r).error());
         }
         visiting.erase(def.name);
+        return {};
     }
 
-    void validate_explicit_virtual_destructor(const ClassDef& def) {
+    [[nodiscard]] std::expected<void, DataflowError> validate_explicit_virtual_destructor(const ClassDef& def) {
         const Function* destructor = nullptr;
         for (const Function* fn : declared_members_of(def.name)) {
             if (is_destructor_slot(*fn)) {
@@ -306,12 +308,13 @@ private:
             }
         }
         if (destructor == nullptr) {
-            throw DataflowError("class '" + def.name + "' must declare an explicit virtual destructor (spec §11.5(1))");
+            return std::unexpected(DataflowError("class '" + def.name + "' must declare an explicit virtual destructor (spec §11.5(1))"));
         }
         bool overrides_base = false;
         std::string dtor_slot = slot_key(*destructor);
         for (const BaseSpecifier& base : def.base_specifiers) {
-            Analysis& base_analysis = analyze(base.base_type.name);
+            if (auto _r = ensure_analyzed(base.base_type.name); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            Analysis& base_analysis = analyses_.at(base.base_type.name);
             if (base_analysis.all_virtual_slots.contains(dtor_slot)) {
                 overrides_base = true;
                 break;
@@ -321,22 +324,23 @@ private:
             std::string template_source = instantiated_template_source_name(def.name);
             if (!template_source.empty()) {
                 for (const Function* fn : declared_members_of(template_source)) {
-                    if (is_destructor_slot(*fn) && (fn->is_virtual || fn->is_override)) return;
+                    if (is_destructor_slot(*fn) && (fn->is_virtual || fn->is_override)) return {};
                 }
             }
         }
         if (!destructor->is_virtual && !overrides_base) {
-            throw DataflowError("destructor of class '" + def.name + "' must be declared virtual or override a base "
+            return std::unexpected(DataflowError("destructor of class '" + def.name + "' must be declared virtual or override a base "
                                 "virtual destructor (spec §11.5(1)-(3))",
-                                destructor->loc);
+                                destructor->loc));
         }
+        return {};
     }
 
-    Analysis& analyze(const std::string& class_name) {
+    [[nodiscard]] std::expected<void, DataflowError> ensure_analyzed(const std::string& class_name) {
         Analysis& result = analyses_[class_name];
-        if (result.computed) return result;
+        if (result.computed) return {};
         if (!analysis_stack_.insert(class_name).second) {
-            throw DataflowError("cyclic class inheritance involving '" + class_name + "'");
+            return std::unexpected(DataflowError("cyclic class inheritance involving '" + class_name + "'"));
         }
         const ClassDef* def = class_defs_.at(class_name);
 
@@ -345,7 +349,8 @@ private:
         std::unordered_map<std::string, std::vector<Provider>> base_virtual_candidates;
         for (const BaseSpecifier& base : def->base_specifiers) {
             result.reachable_bases.insert(base.base_type.name);
-            Analysis& base_analysis = analyze(base.base_type.name);
+            if (auto _r = ensure_analyzed(base.base_type.name); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            Analysis& base_analysis = analyses_.at(base.base_type.name);
             result.reachable_bases.insert(base_analysis.reachable_bases.begin(), base_analysis.reachable_bases.end());
             for (const auto& [name, providers] : base_analysis.visible_names) {
                 auto& dest = base_visible_candidates[name];
@@ -368,14 +373,14 @@ private:
             std::string slot = slot_key(*fn);
             bool overrides = result.all_virtual_slots.contains(slot);
             if (overrides && !fn->is_override) {
-                throw DataflowError("member '" + name + "' of class '" + def->name +
+                return std::unexpected(DataflowError("member '" + name + "' of class '" + def->name +
                                     "' overrides a base virtual member but omits 'override' (spec §11.5(4))",
-                                    fn->loc);
+                                    fn->loc));
             }
             if (!overrides && fn->is_override) {
-                throw DataflowError("member '" + name + "' of class '" + def->name +
+                return std::unexpected(DataflowError("member '" + name + "' of class '" + def->name +
                                     "' is marked 'override' but does not override any base virtual member (spec §11.5(5))",
-                                    fn->loc);
+                                    fn->loc));
             }
             bool is_effectively_virtual = fn->is_virtual || overrides;
             if (is_effectively_virtual) {
@@ -387,14 +392,15 @@ private:
         std::unordered_map<std::string, std::vector<Provider>> using_names;
         for (const ClassUsingDeclaration& using_decl : def->using_declarations) {
             if (!result.reachable_bases.contains(using_decl.base_name)) {
-                throw DataflowError("class '" + def->name + "' names non-base class '" + using_decl.base_name +
-                                    "' in a using-declaration (spec §11.4)");
+                return std::unexpected(DataflowError("class '" + def->name + "' names non-base class '" + using_decl.base_name +
+                                    "' in a using-declaration (spec §11.4)"));
             }
-            Analysis& target_analysis = analyze(using_decl.base_name);
+            if (auto _r = ensure_analyzed(using_decl.base_name); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            Analysis& target_analysis = analyses_.at(using_decl.base_name);
             auto base_it = target_analysis.visible_names.find(using_decl.member_name);
             if (base_it == target_analysis.visible_names.end() || base_it->second.empty()) {
-                throw DataflowError("class '" + def->name + "' names missing member '" + using_decl.member_name +
-                                    "' in using " + using_decl.base_name + "::" + using_decl.member_name + "'");
+                return std::unexpected(DataflowError("class '" + def->name + "' names missing member '" + using_decl.member_name +
+                                    "' in using " + using_decl.base_name + "::" + using_decl.member_name + "'"));
             }
             auto& dest = using_names[using_decl.member_name];
             dest.insert(dest.end(), base_it->second.begin(), base_it->second.end());
@@ -420,9 +426,9 @@ private:
             auto candidates_it = base_visible_candidates.find(name);
             if (candidates_it == base_visible_candidates.end()) continue;
             if (base_visible_contributors[name].size() > 1) {
-                throw DataflowError("class '" + def->name + "' inherits ambiguous member name '" + name +
+                return std::unexpected(DataflowError("class '" + def->name + "' inherits ambiguous member name '" + name +
                                     "' from multiple bases without an overriding declaration or using-declaration "
-                                    "(spec §11.4(1)-(4))");
+                                    "(spec §11.4(1)-(4))"));
             }
             result.visible_names[name] = candidates_it->second;
         }
@@ -443,19 +449,19 @@ private:
                 }
             }
             if (distinct_owners.size() > 1) {
-                throw DataflowError("class '" + def->name +
+                return std::unexpected(DataflowError("class '" + def->name +
                                     "' needs its own overriding declaration to provide a unique final overrider for '" +
-                                    chosen.name + "' (spec §11.4(5)-(6))");
+                                    chosen.name + "' (spec §11.4(5)-(6))"));
             }
             if (have_chosen) result.effective_virtual_slots[slot] = chosen;
         }
 
         result.computed = true;
         analysis_stack_.erase(class_name);
-        return result;
+        return {};
     }
 
-    void validate_thread_contracts() {
+    [[nodiscard]] std::expected<void, DataflowError> validate_thread_contracts() {
         for (const ClassDef& def : program_.classes) {
             if (should_skip(def) || def.is_interface) continue;
             std::unordered_set<std::string> interfaces;
@@ -464,17 +470,26 @@ private:
                 const ClassDef* iface = find_class_def(program_, interface_name);
                 if (iface == nullptr) continue;
                 Type self = named_type(def.name);
-                if (iface->thread_movable_override && !thread_movable_of(self, program_)) {
-                    throw DataflowError("class '" + def.name + "' violates inherited thread-movable contract of interface '" +
-                                        interface_name + "' (spec §8.5(2)-(5))");
+                if (iface->thread_movable_override) {
+                    auto _r = thread_movable_of(self, program_);
+                    if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+                    if (!_r.value()) {
+                        return std::unexpected(DataflowError("class '" + def.name + "' violates inherited thread-movable contract of interface '" +
+                                            interface_name + "' (spec §8.5(2)-(5))"));
+                    }
                 }
-                if (iface->thread_shareable_override && !thread_shareable_of(self, program_)) {
-                    throw DataflowError("class '" + def.name +
-                                        "' violates inherited thread-shareable contract of interface '" +
-                                        interface_name + "' (spec §8.5(3)-(5))");
+                if (iface->thread_shareable_override) {
+                    auto _r = thread_shareable_of(self, program_);
+                    if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+                    if (!_r.value()) {
+                        return std::unexpected(DataflowError("class '" + def.name +
+                                            "' violates inherited thread-shareable contract of interface '" +
+                                            interface_name + "' (spec §8.5(3)-(5))"));
+                    }
                 }
             }
         }
+        return {};
     }
 
     void collect_interfaces(const std::string& class_name, std::unordered_set<std::string>& out) const {
@@ -488,88 +503,115 @@ private:
         }
     }
 
-    void validate_function_signature(const Function& fn) {
+    [[nodiscard]] std::expected<void, DataflowError> validate_function_signature(const Function& fn) {
         for (std::size_t i = 0; i < fn.params.size(); i++) {
             if (i == 0 && fn.params[i].name == "this") continue;
             if (type_forms_interface_object(fn.params[i].type, program_)) {
-                throw DataflowError("function '" + fn.name + "' forms an object of interface type in a by-value "
+                return std::unexpected(DataflowError("function '" + fn.name + "' forms an object of interface type in a by-value "
                                     "parameter declaration (spec §11.2(5.6))",
-                                    fn.loc);
+                                    fn.loc));
             }
         }
         if (type_forms_interface_object(fn.return_type, program_)) {
-            throw DataflowError("function '" + fn.name + "' returns an interface type by value (spec §11.2(5.7))",
-                                fn.loc);
+            return std::unexpected(DataflowError("function '" + fn.name + "' returns an interface type by value (spec §11.2(5.7))",
+                                fn.loc));
         }
+        return {};
     }
 
-    void validate_function_body(const Function& fn, const Stmt& body_stmt) {
+    [[nodiscard]] std::expected<void, DataflowError> validate_function_body(const Function& fn, const Stmt& body_stmt) {
         Body body = build_mir(fn);
         body.program = &program_;
-        walk_stmt(body_stmt, body);
+        return walk_stmt(body_stmt, body);
     }
 
-    void walk_stmt(const Stmt& stmt, const Body& body) {
+    [[nodiscard]] std::expected<void, DataflowError> walk_stmt(const Stmt& stmt, const Body& body) {
         switch (stmt.kind) {
             case StmtKind::VarDecl:
                 if (type_forms_interface_object(stmt.type, program_)) {
-                    throw DataflowError("a local variable definition forms an object of interface type (spec §11.2(5.1))",
-                                        stmt.loc);
+                    return std::unexpected(DataflowError("a local variable definition forms an object of interface type (spec §11.2(5.1))",
+                                        stmt.loc));
                 }
-                if (stmt.init) walk_expr(*stmt.init, body);
-                for (const ExprPtr& arg : stmt.ctor_args) walk_expr(*arg, body);
-                return;
+                if (stmt.init) {
+                    if (auto _r = walk_expr(*stmt.init, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                }
+                for (const ExprPtr& arg : stmt.ctor_args) {
+                    if (auto _r = walk_expr(*arg, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                }
+                return {};
             case StmtKind::Return:
             case StmtKind::ExprStmt:
-                if (stmt.expr) walk_expr(*stmt.expr, body);
-                return;
-            case StmtKind::If:
-                walk_expr(*stmt.condition, body);
-                walk_stmt(*stmt.then_branch, body);
-                if (stmt.else_branch) walk_stmt(*stmt.else_branch, body);
-                return;
-            case StmtKind::While:
-                walk_expr(*stmt.condition, body);
-                walk_stmt(*stmt.then_branch, body);
-                return;
-            case StmtKind::Switch:
-                walk_expr(*stmt.condition, body);
+                if (stmt.expr) return walk_expr(*stmt.expr, body);
+                return {};
+            case StmtKind::If: {
+                if (auto _r = walk_expr(*stmt.condition, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = walk_stmt(*stmt.then_branch, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (stmt.else_branch) return walk_stmt(*stmt.else_branch, body);
+                return {};
+            }
+            case StmtKind::While: {
+                if (auto _r = walk_expr(*stmt.condition, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                return walk_stmt(*stmt.then_branch, body);
+            }
+            case StmtKind::Switch: {
+                if (auto _r = walk_expr(*stmt.condition, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 for (const SwitchCase& switch_case : stmt.switch_cases) {
-                    if (switch_case.value) walk_expr(*switch_case.value, body);
-                    for (const StmtPtr& nested : switch_case.statements) walk_stmt(*nested, body);
+                    if (switch_case.value) {
+                        if (auto _r = walk_expr(*switch_case.value, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                    }
+                    for (const StmtPtr& nested : switch_case.statements) {
+                        if (auto _r = walk_stmt(*nested, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                    }
                 }
-                return;
+                return {};
+            }
             case StmtKind::Block:
-                for (const StmtPtr& nested : stmt.statements) walk_stmt(*nested, body);
-                return;
+                for (const StmtPtr& nested : stmt.statements) {
+                    if (auto _r = walk_stmt(*nested, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                }
+                return {};
             case StmtKind::Break:
             case StmtKind::Continue:
             case StmtKind::Fallthrough:
-                return;
+                return {};
         }
+        return {};
     }
 
-    void walk_expr(const Expr& expr, const Body& body) {
-        if (expr.lhs) walk_expr(*expr.lhs, body);
-        if (expr.rhs) walk_expr(*expr.rhs, body);
-        if (expr.third) walk_expr(*expr.third, body);
-        for (const ExprPtr& arg : expr.args) walk_expr(*arg, body);
-        for (const LambdaCapture& capture : expr.lambda_captures) {
-            if (capture.init) walk_expr(*capture.init, body);
+    [[nodiscard]] std::expected<void, DataflowError> walk_expr(const Expr& expr, const Body& body) {
+        if (expr.lhs) {
+            if (auto _r = walk_expr(*expr.lhs, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
         }
-        if (expr.lambda_body) walk_stmt(*expr.lambda_body, body);
+        if (expr.rhs) {
+            if (auto _r = walk_expr(*expr.rhs, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        }
+        if (expr.third) {
+            if (auto _r = walk_expr(*expr.third, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        }
+        for (const ExprPtr& arg : expr.args) {
+            if (auto _r = walk_expr(*arg, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        }
+        for (const LambdaCapture& capture : expr.lambda_captures) {
+            if (capture.init) {
+                if (auto _r = walk_expr(*capture.init, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            }
+        }
+        if (expr.lambda_body) {
+            if (auto _r = walk_stmt(*expr.lambda_body, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        }
         if (expr.kind == ExprKind::New && type_forms_interface_object(expr.type, program_)) {
-            throw DataflowError("a new-expression forms an object whose most-derived type is an interface (spec §11.2(5.4))",
-                                expr.loc);
+            return std::unexpected(DataflowError("a new-expression forms an object whose most-derived type is an interface (spec §11.2(5.4))",
+                                expr.loc));
         }
         if (expr.kind == ExprKind::Call || expr.kind == ExprKind::Cast) {
             std::optional<Type> inferred = infer_expr_type(expr, body, signatures_);
             if (inferred.has_value() && type_forms_interface_object(*inferred, program_)) {
-                throw DataflowError("an expression forms a temporary object whose most-derived type is an interface "
+                return std::unexpected(DataflowError("an expression forms a temporary object whose most-derived type is an interface "
                                     "(spec §11.2(5.5))",
-                                    expr.loc);
+                                    expr.loc));
             }
         }
+        return {};
     }
 };
 
@@ -580,8 +622,8 @@ private:
 // own, by design -- see Expr/Stmt's own comments in ast.cppm).
 
 
-void validate_class_semantics(const Program& program, const Signatures& signatures) {
-    ClassSemanticsValidator(program, signatures).run();
+[[nodiscard]] std::expected<void, DataflowError> validate_class_semantics(const Program& program, const Signatures& signatures) {
+    return ClassSemanticsValidator(program, signatures).run();
 }
 
 } // namespace scpp

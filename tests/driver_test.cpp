@@ -382,8 +382,10 @@ void run_error_location_tests() {
         cases_run++;
         try {
            scpp::Program program = parse_with_std_imports(c.source);
-           scpp::monomorphize_generics(program);
-           scpp::check_moves(program);
+           auto monomorphize_result = scpp::monomorphize_generics(program);
+           if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+           auto check_moves_result = scpp::check_moves(program);
+           if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
            expect(false, c.name + ": expected a DataflowError, none was thrown");
         } catch (const scpp::DataflowError& e) {
            expect(e.loc.is_known(), c.name + ": DataflowError has no location");
@@ -506,7 +508,8 @@ void run_module_system_tests() {
                 main_source, [&lib_program](const std::string&) -> const scpp::Program* { return &lib_program; });
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::check_moves(program);
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
         } catch (const scpp::DataflowError&) {
@@ -1217,8 +1220,10 @@ void run_concept_tests() {
             auto program_result = scpp::parse(source);
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
         } catch (const scpp::DataflowError&) {
@@ -1305,8 +1310,10 @@ int main() {
             auto program_result = scpp::parse(source);
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
         } catch (const scpp::DataflowError&) {
@@ -1352,8 +1359,10 @@ int main() {
             auto program_result = scpp::parse(source);
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
         } catch (const scpp::DataflowError&) {
@@ -1396,8 +1405,10 @@ int main() {
             auto program_result = scpp::parse(source);
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
         } catch (const scpp::DataflowError&) {
@@ -1435,8 +1446,10 @@ int main() {
             auto program_result = scpp::parse(source);
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
         } catch (const scpp::DataflowError&) {
@@ -1482,8 +1495,10 @@ void run_generic_pack_deduction_tests() {
             auto program_result = scpp::parse(source);
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
         } catch (const scpp::DataflowError&) {
@@ -1528,8 +1543,10 @@ void run_generic_pack_deduction_tests() {
             auto program_result = scpp::parse(source);
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
         } catch (const scpp::DataflowError&) {
@@ -1572,7 +1589,8 @@ void run_generic_pack_deduction_tests() {
             auto program_result = scpp::parse(source);
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         } catch (const scpp::CodegenError&) {
@@ -1608,8 +1626,10 @@ void run_generic_pack_deduction_tests() {
             auto program_result = scpp::parse(source);
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
         } catch (const scpp::DataflowError&) {
@@ -1647,7 +1667,8 @@ void run_generic_pack_deduction_tests() {
             auto program_result = scpp::parse(source);
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         } catch (const scpp::CodegenError&) {
@@ -1694,8 +1715,10 @@ void run_generic_pack_deduction_tests() {
             auto program_result = scpp::parse(source);
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
         } catch (const scpp::DataflowError&) {
@@ -1748,8 +1771,10 @@ void run_generic_pack_deduction_tests() {
             auto program_result = scpp::parse(source);
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
         } catch (const scpp::DataflowError&) {
@@ -1787,8 +1812,10 @@ void run_generic_function_overload_tests() {
             auto program_result = scpp::parse(source);
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
         } catch (const scpp::DataflowError&) {
@@ -1827,8 +1854,10 @@ void run_generic_function_overload_tests() {
             auto program_result = scpp::parse(source);
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
         } catch (const scpp::DataflowError&) {
@@ -1924,8 +1953,10 @@ void run_reference_overload_forwarding_tests() {
                 "}\n");
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
         } catch (const scpp::DataflowError&) {
@@ -1959,8 +1990,10 @@ void run_functional_tests() {
     bool threw = false;
     try {
         scpp::Program program = parse_with_std_imports(source);
-        scpp::monomorphize_generics(program);
-        scpp::check_moves(program);
+        auto monomorphize_result = scpp::monomorphize_generics(program);
+        if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+        auto check_moves_result = scpp::check_moves(program);
+        if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
         scpp::Codegen codegen("test_module");
         codegen.generate(program);
     } catch (const scpp::DataflowError&) {
@@ -1986,8 +2019,10 @@ void run_thread_tests() {
     bool threw = false;
     try {
         scpp::Program program = parse_with_std_imports(source);
-        scpp::monomorphize_generics(program);
-        scpp::check_moves(program);
+        auto monomorphize_result = scpp::monomorphize_generics(program);
+        if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+        auto check_moves_result = scpp::check_moves(program);
+        if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
         scpp::Codegen codegen("test_module");
         codegen.generate(program);
     } catch (const scpp::DataflowError&) {
@@ -2398,8 +2433,10 @@ void run_explicit_destructor_tests() {
                 "class Box { public: virtual ~Box() { return; } }; int main() { Box b{}; [[scpp::unsafe]] { b.~Box(); } return 0; }");
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
         } catch (const scpp::DataflowError&) {
@@ -5567,8 +5604,10 @@ void run_enum_tests() {
                 "int main() { return Color::red == Shape::red; }\n");
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
         } catch (const scpp::DataflowError&) {
@@ -5591,8 +5630,10 @@ void run_enum_tests() {
                 "int main() { Color color = static_cast<Color>(1); return 0; }\n");
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
         } catch (const scpp::DataflowError& e) {
@@ -5619,8 +5660,10 @@ void run_enum_tests() {
                 "int main() { int value = Color::red; return value; }\n");
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
             scpp::Codegen codegen("test_module");
             codegen.generate(program);
         } catch (const scpp::DataflowError&) {
@@ -5773,8 +5816,10 @@ void run_switch_tests() {
                 "}\n");
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
         } catch (const scpp::DataflowError& e) {
             threw = true;
             expect(std::string(e.what()).find("duplicate switch case value") != std::string::npos,
@@ -5799,8 +5844,10 @@ void run_switch_tests() {
                 "}\n");
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
         } catch (const scpp::DataflowError& e) {
             threw = true;
             expect(std::string(e.what()).find("integral or enum") != std::string::npos,
@@ -8201,8 +8248,10 @@ void run_member_lifetime_tests() {
             "};\n");
         bool threw = false;
         try {
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
         } catch (const scpp::DataflowError& e) {
             threw = true;
             expect(false, case_name + ": expected check_moves to accept receiver-tied member return, got '" + e.what() + "'");
@@ -8222,8 +8271,10 @@ void run_member_lifetime_tests() {
             "};\n");
         bool threw = false;
         try {
-            scpp::monomorphize_generics(program);
-            scpp::check_moves(program);
+            auto monomorphize_result = scpp::monomorphize_generics(program);
+            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            auto check_moves_result = scpp::check_moves(program);
+            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
         } catch (const scpp::DataflowError& e) {
             threw = true;
             expect(std::string(e.what()).find("not from lifetime group 'this'") != std::string::npos,

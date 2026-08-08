@@ -126,7 +126,7 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 [[nodiscard]] const MemberInitializer* find_explicit_interface_initializer(const Function& ctor,
                                                                            const ClassDef& interface_def);
 [[nodiscard]] const MemberInitializer* find_explicit_base_initializer(const Function& ctor, const ClassDef& def);
-void validate_constructor_member_initialization(const Function& ctor, const ClassDef& def, const Program& program);
+[[nodiscard]] std::expected<void, DataflowError> validate_constructor_member_initialization(const Function& ctor, const ClassDef& def, const Program& program);
 [[nodiscard]] bool is_copy_constructible(const std::string& class_name, const Program& program);
 [[nodiscard]] bool is_copy_assignable(const std::string& class_name, const Program& program);
 [[nodiscard]] bool is_freely_copyable_value_type(const Type& type, const Program& program);
@@ -135,23 +135,23 @@ void validate_constructor_member_initialization(const Function& ctor, const Clas
                                                                      const std::vector<ExprPtr>& ctor_args,
                                                                      const Body& body,
                                                                      const Signatures& signatures);
-void ensure_implicit_default_construction_is_valid(const std::string& class_name,
+[[nodiscard]] std::expected<void, DataflowError> ensure_implicit_default_construction_is_valid(const std::string& class_name,
                                                    std::string_view current_class,
                                                    const Body& body,
                                                    const Signatures& signatures,
                                                    const SourceLocation& loc,
                                                    std::string_view context_message);
-void validate_constructor_base_initialization(const Function& ctor, const ClassDef& def, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> validate_constructor_base_initialization(const Function& ctor, const ClassDef& def, const Body& body,
                                               const Signatures& signatures);
-void validate_constructor_virtual_interface_base_initialization(const Function& ctor, const ClassDef& def,
+[[nodiscard]] std::expected<void, DataflowError> validate_constructor_virtual_interface_base_initialization(const Function& ctor, const ClassDef& def,
                                                                 const Body& body,
                                                                 const Signatures& signatures);
-[[nodiscard]] std::optional<std::size_t> resolve_elided_param_index(const Function& fn);
+[[nodiscard]] std::expected<std::optional<std::size_t>, DataflowError> resolve_elided_param_index(const Function& fn);
 [[nodiscard]] std::vector<std::size_t> infer_pointer_return_source_param_indices(const Function& fn);
 [[nodiscard]] bool param_can_outlive_call_for_lifetime_return(const Param& param);
-void validate_lifetime_annotation_placement(const Function& fn);
-[[nodiscard]] std::vector<std::size_t> resolve_returned_lifetime_param_indices(const Function& fn);
-[[nodiscard]] Signatures build_signatures(const Program& program);
+[[nodiscard]] std::expected<void, DataflowError> validate_lifetime_annotation_placement(const Function& fn);
+[[nodiscard]] std::expected<std::vector<std::size_t>, DataflowError> resolve_returned_lifetime_param_indices(const Function& fn);
+[[nodiscard]] std::expected<Signatures, DataflowError> build_signatures(const Program& program);
 
 // spec §6.5: whether `class_name` has declared its own copy constructor
 // -- a function named "class_name_new" (see parse_class_def) whose sole
@@ -311,10 +311,10 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
     return nullptr;
 }
 
-void validate_constructor_member_initialization(const Function& ctor, const ClassDef& def, const Program& program) {
+[[nodiscard]] std::expected<void, DataflowError> validate_constructor_member_initialization(const Function& ctor, const ClassDef& def, const Program& program) {
     if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || def.is_forward_declaration ||
         is_defaulted_special_member_equivalent_to_implicit_omission(ctor)) {
-        return;
+        return {};
     }
     // A bodyless constructor is a stripped interface declaration (driver.cppm's
     // strip_concrete_function_bodies deliberately erases a concrete constructor's
@@ -325,18 +325,18 @@ void validate_constructor_member_initialization(const Function& ctor, const Clas
     // unstripped source, so there is nothing left here to (mis)diagnose as
     // "uninitialized" from a declaration that never had an init-list to begin
     // with.
-    if (!ctor.body) return;
-    if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return;
+    if (!ctor.body) return {};
+    if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return {};
     std::unordered_set<std::string> direct_field_names;
     for (const ClassField& field : def.fields) direct_field_names.insert(field.name);
     std::vector<const ClassDef*> interface_bases = collect_virtual_interface_bases_in_construction_order(program, def);
     const MemberInitializer* explicit_base_init = find_explicit_base_initializer(ctor, def);
     auto base = def.direct_ordinary_base();
     if (explicit_base_init != nullptr && base.has_value() && direct_field_names.contains(base->get().base_type.name)) {
-        throw DataflowError("constructor for class '" + def.name + "' cannot disambiguate '" + base->get().base_type.name +
+        return std::unexpected(DataflowError("constructor for class '" + def.name + "' cannot disambiguate '" + base->get().base_type.name +
                                 "' in its member-initializer-list because that name matches both a direct field and "
                                 "the direct base class",
-                            explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc);
+                            explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc));
     }
     for (const MemberInitializer& init : ctor.member_initializers) {
         if (&init == explicit_base_init) continue;
@@ -351,9 +351,9 @@ void validate_constructor_member_initialization(const Function& ctor, const Clas
         }
         if (names_interface_base) continue;
         if (!direct_field_names.contains(init.member_name)) {
-            throw DataflowError("constructor for class '" + def.name + "' names unknown member '" + init.member_name +
+            return std::unexpected(DataflowError("constructor for class '" + def.name + "' names unknown member '" + init.member_name +
                                     "' in its member-initializer-list",
-                                init.loc.is_known() ? init.loc : ctor.loc);
+                                init.loc.is_known() ? init.loc : ctor.loc));
         }
     }
     std::vector<std::string> missing;
@@ -369,21 +369,22 @@ void validate_constructor_member_initialization(const Function& ctor, const Clas
             if (i > 0) names += ", ";
             names += "'" + missing[i] + "'";
         }
-        throw DataflowError("constructor for class '" + def.name + "' leaves member(s) " + names +
+        return std::unexpected(DataflowError("constructor for class '" + def.name + "' leaves member(s) " + names +
                                 " uninitialized; each constructor must initialize every non-static data member "
                                 "either via its own member-initializer-list or an in-class default member "
                                 "initializer (spec §6.1(4))",
-                            ctor.loc);
+                            ctor.loc));
     }
+    return {};
 }
 
 [[nodiscard]] const FunctionSignature* resolve_constructor_signature(const std::string& class_name,
                                                                      const std::vector<ExprPtr>& ctor_args,
                                                                      const Body& body, const Signatures& signatures);
-void ensure_implicit_default_construction_is_valid(const std::string& class_name, std::string_view current_class,
+[[nodiscard]] std::expected<void, DataflowError> ensure_implicit_default_construction_is_valid(const std::string& class_name, std::string_view current_class,
                                                    const Body& body, const Signatures& signatures,
                                                    const SourceLocation& loc, std::string_view context_message);
-void validate_constructor_base_initialization(const Function& ctor, const ClassDef& def, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> validate_constructor_base_initialization(const Function& ctor, const ClassDef& def, const Body& body,
                                               const Signatures& signatures);
 
 // spec §6.5(2): a class has an implicitly-defined copy constructor iff
@@ -550,89 +551,89 @@ void validate_constructor_base_initialization(const Function& ctor, const ClassD
     return winner;
 }
 
-void ensure_implicit_default_construction_is_valid(const std::string& class_name, std::string_view current_class,
+[[nodiscard]] std::expected<void, DataflowError> ensure_implicit_default_construction_is_valid(const std::string& class_name, std::string_view current_class,
                                                    const Body& body, const Signatures& signatures,
                                                    const SourceLocation& loc, std::string_view context_message) {
-    if (body.program == nullptr) return;
+    if (body.program == nullptr) return {};
     const ClassDef* class_def = find_class_def(*body.program, class_name);
-    if (class_def == nullptr) return;
+    if (class_def == nullptr) return {};
     if (class_has_any_constructor(class_name, *body.program)) {
         static const std::vector<ExprPtr> no_ctor_args;
         const FunctionSignature* sig = resolve_constructor_signature(class_name, no_ctor_args, body, signatures);
         if (sig == nullptr) {
-            throw DataflowError(std::string(context_message) + ": base class '" + class_name +
+            return std::unexpected(DataflowError(std::string(context_message) + ": base class '" + class_name +
                                     "' has no default constructor; write an explicit base-class initializer",
-                                loc);
+                                loc));
         }
         if (sig->access == AccessSpecifier::Private && !sig->member_owner_class.empty() &&
             current_class != sig->member_owner_class) {
-            throw DataflowError(std::string(context_message) + ": base class '" + class_name +
+            return std::unexpected(DataflowError(std::string(context_message) + ": base class '" + class_name +
                                     "' default constructor is private; write an explicit base-class initializer "
                                     "calling an accessible constructor",
-                                loc);
+                                loc));
         }
         if (sig->is_unsafe) {
-            throw DataflowError(std::string(context_message) + ": base class '" + class_name +
+            return std::unexpected(DataflowError(std::string(context_message) + ": base class '" + class_name +
                                     "' default constructor is [[scpp::unsafe]]",
-                                loc);
+                                loc));
         }
-        return;
+        return {};
     }
     if (auto base = class_def->direct_ordinary_base()) {
-        ensure_implicit_default_construction_is_valid(base->get().base_type.name, current_class, body, signatures, loc,
+        return ensure_implicit_default_construction_is_valid(base->get().base_type.name, current_class, body, signatures, loc,
                                                       context_message);
     }
+    return {};
 }
 
-void validate_constructor_base_initialization(const Function& ctor, const ClassDef& def, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> validate_constructor_base_initialization(const Function& ctor, const ClassDef& def, const Body& body,
                                               const Signatures& signatures) {
     auto base = def.direct_ordinary_base();
     if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || !base.has_value() ||
         is_defaulted_special_member_equivalent_to_implicit_omission(ctor)) {
-        return;
+        return {};
     }
-    if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return;
+    if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return {};
     const MemberInitializer* explicit_base_init = find_explicit_base_initializer(ctor, def);
     std::string context_message =
         "constructor for class '" + def.name + "' must initialize its direct base class '" + base->get().base_type.name + "'";
     if (explicit_base_init == nullptr) {
-        ensure_implicit_default_construction_is_valid(base->get().base_type.name, def.name, body, signatures, ctor.loc,
+        return ensure_implicit_default_construction_is_valid(base->get().base_type.name, def.name, body, signatures, ctor.loc,
                                                       context_message);
-        return;
     }
     const FunctionSignature* sig =
         resolve_constructor_signature(base->get().base_type.name, explicit_base_init->initializer.brace_args, body, signatures);
     if (sig == nullptr) {
         if (body.program != nullptr && !class_has_any_constructor(base->get().base_type.name, *body.program) &&
             explicit_base_init->initializer.brace_args.empty()) {
-            ensure_implicit_default_construction_is_valid(base->get().base_type.name, def.name, body, signatures,
+            return ensure_implicit_default_construction_is_valid(base->get().base_type.name, def.name, body, signatures,
                                                           explicit_base_init->loc, context_message);
-            return;
         }
-        throw DataflowError("base-class initializer for '" + base->get().base_type.name +
+        return std::unexpected(DataflowError("base-class initializer for '" + base->get().base_type.name +
                                 "' does not match any constructor of that class",
-                            explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc);
+                            explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc));
     }
     if (sig->access == AccessSpecifier::Private && !sig->member_owner_class.empty() && def.name != sig->member_owner_class) {
-        throw DataflowError("cannot call private constructor of base class '" + base->get().base_type.name +
+        return std::unexpected(DataflowError("cannot call private constructor of base class '" + base->get().base_type.name +
                                 "' from derived class '" + def.name + "'",
-                            explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc);
+                            explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc));
     }
     if (sig->is_unsafe) {
-        throw DataflowError("cannot call base class '" + base->get().base_type.name +
+        return std::unexpected(DataflowError("cannot call base class '" + base->get().base_type.name +
                                 "' constructor outside '[[scpp::unsafe]] { }': its own declaration is marked "
                                 "'[[scpp::unsafe]]'",
-                            explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc);
+                            explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc));
     }
+    return {};
 }
 
-void validate_constructor_virtual_interface_base_initialization(const Function& ctor, const ClassDef& def, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> validate_constructor_virtual_interface_base_initialization(const Function& ctor, const ClassDef& def, const Body& body,
                                                                 const Signatures& signatures) {
     if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || body.program == nullptr ||
         is_defaulted_special_member_equivalent_to_implicit_omission(ctor)) {
-        return;
+        return {};
     }
-    if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return;
+    if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return {};
     std::vector<const ClassDef*> interface_bases = collect_virtual_interface_bases_in_construction_order(*body.program, def);
     for (const ClassDef* interface_def : interface_bases) {
         if (interface_def == nullptr) continue;
@@ -641,8 +642,11 @@ void validate_constructor_virtual_interface_base_initialization(const Function& 
             "constructor for class '" + def.name + "' must initialize virtual interface base '" + interface_def->name + "'";
         if (explicit_init == nullptr) {
             if (!def.is_interface) {
-                ensure_implicit_default_construction_is_valid(interface_def->name, def.name, body, signatures, ctor.loc,
+                if (auto _r = ensure_implicit_default_construction_is_valid(interface_def->name, def.name, body, signatures, ctor.loc,
                                                               context_message);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
             }
             continue;
         }
@@ -651,32 +655,36 @@ void validate_constructor_virtual_interface_base_initialization(const Function& 
         if (sig == nullptr) {
             if (!class_has_any_constructor(interface_def->name, *body.program) &&
                 explicit_init->initializer.brace_args.empty()) {
-                ensure_implicit_default_construction_is_valid(interface_def->name, def.name, body, signatures,
+                if (auto _r = ensure_implicit_default_construction_is_valid(interface_def->name, def.name, body, signatures,
                                                               explicit_init->loc.is_known() ? explicit_init->loc : ctor.loc,
                                                               context_message);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
                 continue;
             }
-            throw DataflowError("base-class initializer for '" + interface_def->name +
+            return std::unexpected(DataflowError("base-class initializer for '" + interface_def->name +
                                     "' does not match any constructor of that class",
-                                explicit_init->loc.is_known() ? explicit_init->loc : ctor.loc);
+                                explicit_init->loc.is_known() ? explicit_init->loc : ctor.loc));
         }
         if (sig->access == AccessSpecifier::Private && !sig->member_owner_class.empty() &&
             def.name != sig->member_owner_class) {
-            throw DataflowError("cannot call private constructor of base class '" + interface_def->name +
+            return std::unexpected(DataflowError("cannot call private constructor of base class '" + interface_def->name +
                                     "' from derived class '" + def.name + "'",
-                                explicit_init->loc.is_known() ? explicit_init->loc : ctor.loc);
+                                explicit_init->loc.is_known() ? explicit_init->loc : ctor.loc));
         }
         if (sig->is_unsafe) {
-            throw DataflowError("cannot call base class '" + interface_def->name +
+            return std::unexpected(DataflowError("cannot call base class '" + interface_def->name +
                                     "' constructor outside '[[scpp::unsafe]] { }': its own declaration is marked "
                                     "'[[scpp::unsafe]]'",
-                                explicit_init->loc.is_known() ? explicit_init->loc : ctor.loc);
+                                explicit_init->loc.is_known() ? explicit_init->loc : ctor.loc));
         }
     }
+    return {};
 }
-[[nodiscard]] std::optional<std::size_t> resolve_elided_param_index(const Function& fn) {
-    if (fn.return_lifetime.present()) return std::nullopt;
-    if (!is_reference(fn.return_type)) return std::nullopt;
+[[nodiscard]] std::expected<std::optional<std::size_t>, DataflowError> resolve_elided_param_index(const Function& fn) {
+    if (fn.return_lifetime.present()) return std::optional<std::size_t>(std::nullopt);
+    if (!is_reference(fn.return_type)) return std::optional<std::size_t>(std::nullopt);
 
     // ch04 §4.2/ch05 §5.9/spec §6.5: a method's own `this` (always
     // params[0], see make_this_param) is *always* the elision source
@@ -699,12 +707,12 @@ void validate_constructor_virtual_interface_base_initialization(const Function& 
     // well-understood shape.
     if (!fn.params.empty() && fn.params[0].name == "this" && is_reference(fn.params[0].type)) {
         if (fn.return_type.is_mutable_ref && !fn.params[0].type.is_mutable_ref) {
-            throw DataflowError("function '" + fn.name +
+            return std::unexpected(DataflowError("function '" + fn.name +
                                  "' returns a mutable reference ('T&') but its 'this' is a read-only ('const') "
                                  "receiver; a mutable reference cannot be manufactured from a shared one",
-                fn.loc);
+                fn.loc));
         }
-        return 0;
+        return std::optional<std::size_t>(0);
     }
 
     std::optional<std::size_t> found;
@@ -720,29 +728,29 @@ void validate_constructor_virtual_interface_base_initialization(const Function& 
         // rule out.
         if (!is_reference(fn.params[i].type) || fn.params[i].type.is_rvalue_ref) continue;
         if (found.has_value()) {
-            throw DataflowError(
+            return std::unexpected(DataflowError(
                 "function '" + fn.name +
                 "' returns a reference but has more than one reference parameter; scpp v0.1 can only infer a "
                 "returned reference's lifetime when there is exactly one (spec ch05.3) -- refactor to take a "
                 "single reference parameter, or return by value/std::unique_ptr instead",
-                fn.loc);
+                fn.loc));
         }
         found = i;
     }
     if (!found.has_value()) {
-        throw DataflowError(
+        return std::unexpected(DataflowError(
             "function '" + fn.name +
             "' returns a reference but has no reference parameter to infer its lifetime from (spec ch05.3) -- "
             "refactor to take a single reference parameter, or return by value/std::unique_ptr instead",
-            fn.loc);
+            fn.loc));
     }
     if (fn.return_type.is_mutable_ref && !fn.params[*found].type.is_mutable_ref) {
-        throw DataflowError("function '" + fn.name +
+        return std::unexpected(DataflowError("function '" + fn.name +
                              "' returns a mutable reference ('T&') but its sole reference parameter '" +
                              fn.params[*found].name +
                              "' is a shared reference ('const T&'); a mutable reference cannot be manufactured "
                              "from a shared one",
-            fn.loc);
+            fn.loc));
     }
     return found;
 }
@@ -771,22 +779,23 @@ void validate_constructor_virtual_interface_base_initialization(const Function& 
     return !(is_reference(param.type) && param.type.is_rvalue_ref);
 }
 
-void validate_lifetime_annotation_placement(const Function& fn) {
+[[nodiscard]] std::expected<void, DataflowError> validate_lifetime_annotation_placement(const Function& fn) {
     for (const Param& param : fn.params) {
         if (!param.lifetime.present()) continue;
         if (!is_pointer_return_lifetime_source_type(param.type)) {
-            throw DataflowError("parameter '" + param.name +
+            return std::unexpected(DataflowError("parameter '" + param.name +
                                     "' bears '[[scpp::lifetime(name)]]' but does not denote a reference, pointer, "
                                     "span, or std::reference_wrapper-carried reference",
-                                fn.loc);
+                                fn.loc));
         }
     }
     if (fn.return_lifetime.present() && !is_pointer_return_lifetime_source_type(fn.return_type)) {
-        throw DataflowError("function '" + fn.name +
+        return std::unexpected(DataflowError("function '" + fn.name +
                                 "' bears '[[scpp::lifetime(name)]]' on its declarator, but its return type is not "
                                 "a reference, pointer, span, or std::reference_wrapper-carried reference",
-                            fn.loc);
+                            fn.loc));
     }
+    return {};
 }
 
 [[nodiscard]] bool is_operator_arrow_function(const Function& fn) {
@@ -794,62 +803,64 @@ void validate_lifetime_annotation_placement(const Function& fn) {
            fn.params[0].name == "this";
 }
 
-void validate_equality_operator_signature(const Function& fn) {
+[[nodiscard]] std::expected<void, DataflowError> validate_equality_operator_signature(const Function& fn) {
     bool named_equality_operator =
         fn.name.ends_with("_operator_equal") || fn.name.ends_with("_operator_not_equal");
-    if (!named_equality_operator) return;
+    if (!named_equality_operator) return {};
     if (fn.is_static) {
-        throw DataflowError("equality operators of '" + fn.member_owner_class + "' shall not be static", fn.loc);
+        return std::unexpected(DataflowError("equality operators of '" + fn.member_owner_class + "' shall not be static", fn.loc));
     }
     if (fn.params.size() != 2) {
-        throw DataflowError("equality operators of '" + fn.member_owner_class + "' shall have exactly one parameter", fn.loc);
+        return std::unexpected(DataflowError("equality operators of '" + fn.member_owner_class + "' shall have exactly one parameter", fn.loc));
     }
     if (fn.return_type.kind != TypeKind::Named || fn.return_type.name != "bool") {
-        throw DataflowError("equality operators of '" + fn.member_owner_class + "' shall return bool", fn.loc);
+        return std::unexpected(DataflowError("equality operators of '" + fn.member_owner_class + "' shall return bool", fn.loc));
     }
     if (fn.is_defaulted) {
         if (!is_special_member_const_lvalue_self_param(fn.params[1].type, fn.member_owner_class) ||
             fn.receiver_ref_qualifier != ReceiverRefQualifier::None || fn.params[0].type.is_mutable_ref) {
-            throw DataflowError("a defaulted equality operator of '" + fn.member_owner_class +
+            return std::unexpected(DataflowError("a defaulted equality operator of '" + fn.member_owner_class +
                                     "' shall have signature 'bool operator==(const " + fn.member_owner_class +
                                     "&) const' (and likewise for operator!=)",
-                                fn.loc);
+                                fn.loc));
         }
     }
+    return {};
 }
 
-void validate_operator_arrow_signature(const Function& fn) {
-    if (!is_operator_arrow_function(fn)) return;
+[[nodiscard]] std::expected<void, DataflowError> validate_operator_arrow_signature(const Function& fn) {
+    if (!is_operator_arrow_function(fn)) return {};
     if (fn.params.size() != 1) {
-        throw DataflowError("operator-> of class '" + fn.member_owner_class + "' shall have no parameters", fn.loc);
+        return std::unexpected(DataflowError("operator-> of class '" + fn.member_owner_class + "' shall have no parameters", fn.loc));
     }
     const Type& ret = fn.return_type;
     bool returns_pointer = ret.kind == TypeKind::Pointer;
     bool returns_class = ret.kind == TypeKind::Named;
     bool returns_class_ref = ret.kind == TypeKind::Reference && ret.pointee != nullptr && ret.pointee->kind == TypeKind::Named;
     if (!returns_pointer && !returns_class && !returns_class_ref) {
-        throw DataflowError("operator-> of class '" + fn.member_owner_class +
+        return std::unexpected(DataflowError("operator-> of class '" + fn.member_owner_class +
                                 "' shall return a pointer, a class, or a reference to class",
-                            fn.loc);
+                            fn.loc));
     }
+    return {};
 }
 
-[[nodiscard]] std::vector<std::size_t> resolve_returned_lifetime_param_indices(const Function& fn) {
-    validate_lifetime_annotation_placement(fn);
+[[nodiscard]] std::expected<std::vector<std::size_t>, DataflowError> resolve_returned_lifetime_param_indices(const Function& fn) {
+    if (auto _r = validate_lifetime_annotation_placement(fn); !_r.has_value()) return std::unexpected(std::move(_r).error());
     if (fn.return_lifetime.present()) {
-        if (is_explicit_this_lifetime_annotation(fn)) return {0};
+        if (is_explicit_this_lifetime_annotation(fn)) return std::vector<std::size_t>{0};
         if (fn.return_lifetime.is_any()) {
-            throw DataflowError("function '" + fn.name +
+            return std::unexpected(DataflowError("function '" + fn.name +
                                     "' cannot name the reserved lifetime group 'any' in its return annotation",
-                                fn.loc);
+                                fn.loc));
         }
         std::vector<std::size_t> indices;
         for (std::size_t i = 0; i < fn.params.size(); i++) {
             if (fn.params[i].lifetime.name != fn.return_lifetime.name) continue;
             if (!param_can_outlive_call_for_lifetime_return(fn.params[i])) {
-                throw DataflowError("function '" + fn.name + "' ties its return to parameter '" + fn.params[i].name +
+                return std::unexpected(DataflowError("function '" + fn.name + "' ties its return to parameter '" + fn.params[i].name +
                                         "', but that parameter cannot outlive the call",
-                                    fn.loc);
+                                    fn.loc));
             }
             indices.push_back(i);
         }
@@ -859,27 +870,29 @@ void validate_operator_arrow_signature(const Function& fn) {
             indices.push_back(0);
         }
         if (indices.empty()) {
-            throw DataflowError("function '" + fn.name + "' names lifetime group '" + fn.return_lifetime.name +
+            return std::unexpected(DataflowError("function '" + fn.name + "' names lifetime group '" + fn.return_lifetime.name +
                                     "' in its return annotation, but no parameter belongs to that group",
-                                fn.loc);
+                                fn.loc));
         }
         return indices;
     }
-    if (!is_reference(fn.return_type) && fn.return_type.kind != TypeKind::Pointer) return {};
+    if (!is_reference(fn.return_type) && fn.return_type.kind != TypeKind::Pointer) return std::vector<std::size_t>{};
     if (fn.return_type.kind == TypeKind::Pointer) {
         std::vector<std::size_t> indices = infer_pointer_return_source_param_indices(fn);
         return indices.size() == 1 ? indices : std::vector<std::size_t>{};
     }
-    std::optional<std::size_t> elided = resolve_elided_param_index(fn);
-    if (!elided.has_value()) return {};
+    auto elided_result = resolve_elided_param_index(fn);
+    if (!elided_result.has_value()) return std::unexpected(std::move(elided_result).error());
+    std::optional<std::size_t> elided = elided_result.value();
+    if (!elided.has_value()) return std::vector<std::size_t>{};
     const Param& param = fn.params[*elided];
     if (param.lifetime.is_any()) {
-        throw DataflowError("function '" + fn.name +
+        return std::unexpected(DataflowError("function '" + fn.name +
                                 "' returns a value derived from reserved lifetime group 'any', which may not "
                                 "escape the call",
-                            fn.loc);
+                            fn.loc));
     }
-    return {*elided};
+    return std::vector<std::size_t>{*elided};
 }
 
 // Whether assigning through `expr` (used as an assignment's *target* --
@@ -898,11 +911,11 @@ void validate_operator_arrow_signature(const Function& fn) {
 // itself a reference/span) is always writable here -- move/
 // initialization-state legality is checked separately, this is purely
 // about const-ness.
-[[nodiscard]] Signatures build_signatures(const Program& program) {
+[[nodiscard]] std::expected<Signatures, DataflowError> build_signatures(const Program& program) {
     Signatures signatures;
     for (const Function& fn : program.functions) {
-        validate_equality_operator_signature(fn);
-        validate_operator_arrow_signature(fn);
+        if (auto _r = validate_equality_operator_signature(fn); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = validate_operator_arrow_signature(fn); !_r.has_value()) return std::unexpected(std::move(_r).error());
         FunctionSignature sig;
         sig.param_types.reserve(fn.params.size());
         sig.param_is_forwarding_reference.reserve(fn.params.size());
@@ -921,8 +934,16 @@ void validate_operator_arrow_signature(const Function& fn) {
         }
         sig.return_type = fn.return_type;
         sig.return_lifetime = fn.return_lifetime;
-        sig.returned_lifetime_param_indices = resolve_returned_lifetime_param_indices(fn);
-        sig.elided_param_index = fn.return_lifetime.present() ? std::nullopt : resolve_elided_param_index(fn);
+        auto returned_lifetime_result = resolve_returned_lifetime_param_indices(fn);
+        if (!returned_lifetime_result.has_value()) return std::unexpected(std::move(returned_lifetime_result).error());
+        sig.returned_lifetime_param_indices = std::move(returned_lifetime_result).value();
+        if (fn.return_lifetime.present()) {
+            sig.elided_param_index = std::nullopt;
+        } else {
+            auto elided_result = resolve_elided_param_index(fn);
+            if (!elided_result.has_value()) return std::unexpected(std::move(elided_result).error());
+            sig.elided_param_index = std::move(elided_result).value();
+        }
         sig.is_extern_c_declaration_only = fn.is_extern_c && fn.body == nullptr;
         sig.is_unsafe = fn.is_unsafe;
         sig.is_nodiscard = fn.is_nodiscard;
@@ -944,11 +965,11 @@ void validate_operator_arrow_signature(const Function& fn) {
                 same_params = types_equal(existing.param_types[i], sig.param_types[i]);
             }
             if (same_params && existing.receiver_ref_qualifier == sig.receiver_ref_qualifier) {
-                throw DataflowError("redefinition of '" + fn.name +
+                return std::unexpected(DataflowError("redefinition of '" + fn.name +
                                      "': a previous declaration with an identical parameter list already "
                                      "exists (ch05 §5.10 -- functions can only be overloaded by parameter "
                                      "list, return type alone doesn't count as a difference)",
-                    fn.loc);
+                    fn.loc));
             }
         }
         overloads.push_back(std::move(sig));
