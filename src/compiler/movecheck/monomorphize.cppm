@@ -15,7 +15,7 @@ import :lambdas;
 
 namespace scpp {
 
-void monomorphize_generics_impl(Program& program);
+[[nodiscard]] std::expected<void, DataflowError> monomorphize_generics_impl(Program& program);
 
 // ch05 §5.14: monomorphization pushes freshly synthesized definitions
 // into program_.functions/classes/structs *while* walking an existing
@@ -99,8 +99,12 @@ public:
         }
     }
 
-    void run() {
-        signatures_ = build_signatures(program_);
+    [[nodiscard]] std::expected<void, DataflowError> run() {
+        {
+            auto _r = build_signatures(program_);
+            if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+            signatures_ = std::move(_r).value();
+        }
         // ch05 §5.14: synthesizes a "forwarding stub" Function for every
         // inherited method/field access a derived class doesn't itself
         // override (see synthesize_inherited_method_forwards' own
@@ -120,8 +124,8 @@ public:
         // since neither depends on anything it does, and the ordinary
         // per-function walk just below would otherwise trip over an
         // unresolved generic-type Named type it can't make sense of.
-        resolve_generic_types();
-        check_generic_type_methods_once();
+        if (auto _r = resolve_generic_types(); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = check_generic_type_methods_once(); !_r.has_value()) return std::unexpected(std::move(_r).error());
         // resolve_generic_types/check_generic_type_methods_once may
         // monomorphize generic types and rewrite existing function
         // signatures/return types (e.g. `MyBox<int>` -> its concrete
@@ -129,7 +133,11 @@ public:
         // later overload resolution or generic-function constraint check
         // consults it, so those queries see the fully concrete program
         // shape rather than the pre-resolution templates.
-        signatures_ = build_signatures(program_);
+        {
+            auto _r = build_signatures(program_);
+            if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+            signatures_ = std::move(_r).value();
+        }
         // A snapshot of the function count *before* any clone is
         // injected: new clones/synthesized closure classes are appended
         // to program_.functions/program_.classes as we go (see
@@ -199,9 +207,12 @@ public:
             std::optional<Type> enclosing_this_type = this_type_of(program_.functions[i]);
             StmtPtr walk_body = deep_clone_stmt(*program_.functions[i].body);
             current_walk_return_type_ = program_.functions[i].return_type;
-            walk_stmt(*walk_body, body, enclosing_this_type, allow_generic_monomorphization);
+            if (auto _r = walk_stmt(*walk_body, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             program_.functions[i].body = std::move(walk_body);
         }
+        return {};
     }
 
 private:
@@ -429,7 +440,7 @@ private:
         std::string member_name;
     };
 
-    [[nodiscard]] std::optional<StaticTemplateCallResolution>
+    [[nodiscard]] std::expected<std::optional<StaticTemplateCallResolution>, DataflowError>
     resolve_static_template_call_target(const std::string& name, SourceLocation loc) {
         std::size_t scope = find_last_scope_outside_angles(name);
         if (scope == std::string::npos) return std::nullopt;
@@ -441,23 +452,34 @@ private:
         std::vector<Type> resolved_args;
         resolved_args.reserve(owner_type->template_args.size());
         for (const Type& arg : owner_type->template_args) {
-            resolved_args.push_back(resolve_generic_type(arg, loc));
+            auto resolved = resolve_generic_type(arg, loc);
+            if (!resolved.has_value()) return std::unexpected(std::move(resolved).error());
+            resolved_args.push_back(std::move(resolved).value());
         }
-        std::string concrete_class_name = instantiate_generic_type(owner_type->name, resolved_args, loc);
-        return StaticTemplateCallResolution{concrete_class_name, member_name};
+        auto concrete_class_name = instantiate_generic_type(owner_type->name, resolved_args, loc);
+        if (!concrete_class_name.has_value()) return std::unexpected(std::move(concrete_class_name).error());
+        return StaticTemplateCallResolution{std::move(concrete_class_name).value(), member_name};
     }
 
-    void walk_new_concrete_function(std::size_t fn_index) {
-        if (fn_index >= program_.functions.size()) return;
+    [[nodiscard]] std::expected<void, DataflowError> walk_new_concrete_function(std::size_t fn_index) {
+        if (fn_index >= program_.functions.size()) return {};
         Function& fn = program_.functions[fn_index];
-        if (fn.body == nullptr || !fn.template_params.empty()) return;
+        if (fn.body == nullptr || !fn.template_params.empty()) return {};
         rewrite_implicit_member_field_access(fn);
         rewrite_implicit_member_method_calls(fn);
-        signatures_ = build_signatures(program_);
+        {
+            auto _r = build_signatures(program_);
+            if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+            signatures_ = std::move(_r).value();
+        }
         Body body = build_mir(fn);
         body.program = &program_;
         current_walk_return_type_ = fn.return_type;
-        walk_stmt(*fn.body, body, this_type_of(fn), /*allow_generic_monomorphization=*/!fn.is_generic_template);
+        if (auto _r = walk_stmt(*fn.body, body, this_type_of(fn), /*allow_generic_monomorphization=*/!fn.is_generic_template);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+        return {};
     }
 
     void rewrite_implicit_member_field_access(Function& fn) {
@@ -1019,7 +1041,7 @@ private:
         return result;
     }
 
-    void clone_variadic_class_methods(const std::string& cache_key, const std::string& template_name,
+    [[nodiscard]] std::expected<void, DataflowError> clone_variadic_class_methods(const std::string& cache_key, const std::string& template_name,
                                       const std::string& owner_id, const std::vector<Function>& methods,
                                       const std::vector<GenericTypeParam>& template_params_copy,
                                       const std::vector<std::pair<std::string, Type>>& type_replacements,
@@ -1050,7 +1072,11 @@ private:
             clone.is_defaulted = method_tmpl.is_defaulted;
             clone.access = method_tmpl.access;
             clone.return_type = instantiate_type_pattern(method_tmpl.return_type, type_replacements, pack_replacements);
-            clone.return_type = resolve_generic_type(clone.return_type, method_tmpl.loc);
+            {
+                auto resolved = resolve_generic_type(clone.return_type, method_tmpl.loc);
+                if (!resolved.has_value()) return std::unexpected(std::move(resolved).error());
+                clone.return_type = std::move(resolved).value();
+            }
             clone.return_lifetime = method_tmpl.return_lifetime;
             std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
             clone.params.reserve(method_tmpl.params.size());
@@ -1079,7 +1105,11 @@ private:
                             std::vector<std::pair<std::string, Type>> param_replacements = type_replacements;
                             param_replacements.emplace_back(*pack_name, pack_it->second[j]);
                             np.type = instantiate_type_pattern(p.type, param_replacements, {});
-                            np.type = resolve_generic_type(np.type, method_tmpl.loc);
+                            {
+                                auto resolved = resolve_generic_type(np.type, method_tmpl.loc);
+                                if (!resolved.has_value()) return std::unexpected(std::move(resolved).error());
+                                np.type = std::move(resolved).value();
+                            }
                             clone.params.push_back(std::move(np));
                             pack_param_names[p.name].push_back(clone.params.back().name);
                         }
@@ -1088,7 +1118,11 @@ private:
                 }
                 Param np = p;
                 np.type = instantiate_type_pattern(p.type, type_replacements, pack_replacements);
-                np.type = resolve_generic_type(np.type, method_tmpl.loc);
+                {
+                    auto resolved = resolve_generic_type(np.type, method_tmpl.loc);
+                    if (!resolved.has_value()) return std::unexpected(std::move(resolved).error());
+                    np.type = std::move(resolved).value();
+                }
                 clone.params.push_back(std::move(np));
             }
             clone.member_initializers = method_tmpl.member_initializers;
@@ -1101,7 +1135,9 @@ private:
                         substitute_non_type_param_in_expr(*init.initializer.expr, template_params_copy[i].name,
                                                           non_type_args[i]);
                     }
-                    resolve_generic_types_in_expr(*init.initializer.expr);
+                    if (auto _r = resolve_generic_types_in_expr(*init.initializer.expr); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
                 for (ExprPtr& arg : init.initializer.brace_args) {
                     substitute_type_params_in_expr(*arg, type_replacements);
@@ -1110,7 +1146,9 @@ private:
                         if (!template_params_copy[i].is_non_type) continue;
                         substitute_non_type_param_in_expr(*arg, template_params_copy[i].name, non_type_args[i]);
                     }
-                    resolve_generic_types_in_expr(*arg);
+                    if (auto _r = resolve_generic_types_in_expr(*arg); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
             }
             clone.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
@@ -1125,18 +1163,27 @@ private:
                     expand_explicit_template_arg_packs_in_stmt(*clone.body, class_pack_name, concrete_pack_types);
                 }
                 for (const auto& [pack_param_name, concrete_names] : pack_param_names) {
-                    expand_pack_expansions_in_stmt(*clone.body, pack_param_name, concrete_names);
-                    expand_pack_folds_in_stmt(*clone.body, pack_param_name, concrete_names);
+                    if (auto _r = expand_pack_expansions_in_stmt(*clone.body, pack_param_name, concrete_names); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                    if (auto _r = expand_pack_folds_in_stmt(*clone.body, pack_param_name, concrete_names); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
-                resolve_generic_types_in_stmt(*clone.body);
+                if (auto _r = resolve_generic_types_in_stmt(*clone.body); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
             }
             known_function_names_.insert(clone.name);
             program_.functions.push_back(std::move(clone));
-            walk_new_concrete_function(program_.functions.size() - 1);
+            if (auto _r = walk_new_concrete_function(program_.functions.size() - 1); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             if (!program_.functions.back().template_params.empty()) {
                 generic_template_indices_[program_.functions.back().name].push_back(program_.functions.size() - 1);
             }
         }
+        return {};
     }
 
     [[nodiscard]] static const Type* find_type_replacement(const std::vector<std::pair<std::string, Type>>& replacements,
@@ -1303,7 +1350,7 @@ private:
         TemplateInstantiationBindings bindings;
     };
 
-    [[nodiscard]] OrdinaryClassTemplateSelection select_ordinary_class_template(
+    [[nodiscard]] std::expected<OrdinaryClassTemplateSelection, DataflowError> select_ordinary_class_template(
         const std::string& template_name, const std::vector<Type>& concrete_args, SourceLocation loc) const {
         OrdinaryClassTemplateSelection primary_selection;
         bool have_primary_definition = false;
@@ -1355,18 +1402,18 @@ private:
         }
 
         if (matching_specializations.size() > 1) {
-            throw DataflowError("multiple partial specializations of '" + template_name +
+            return std::unexpected(DataflowError("multiple partial specializations of '" + template_name +
                                     "' match this concrete argument list; this version requires an unambiguous "
                                     "single best match",
-                                loc);
+                                loc));
         }
         if (!matching_specializations.empty()) return matching_specializations.front();
         if (have_primary_definition) return primary_selection;
         if (have_primary_forward_decl) {
-            throw DataflowError("'" + template_name +
+            return std::unexpected(DataflowError("'" + template_name +
                                     "' has no matching class-template definition for these concrete arguments "
                                     "(the primary template is only forward-declared)",
-                                loc);
+                                loc));
         }
         return primary_selection;
     }
@@ -1544,29 +1591,25 @@ private:
     // never hits a zero-sized concrete T to begin with) already covers
     // those cases correctly on its own.
     [[nodiscard]] Type resolve_generic_type_optimistic(Type type, SourceLocation loc) {
-        try {
-            // Deliberately NOT std::move(type) -- `type` must stay
-            // valid/unmodified for the catch-fallback below.
-            return resolve_generic_type(type, loc);
-        } catch (const std::runtime_error&) {
-            return type;
-        }
+        // Deliberately NOT std::move(type) -- `type` must stay
+        // valid/unmodified for the fallback below.
+        auto result = resolve_generic_type(type, loc);
+        if (!result.has_value()) return type;
+        return std::move(result).value();
     }
 
     void resolve_generic_types_in_stmt_optimistic(Stmt& stmt) {
-        try {
-            resolve_generic_types_in_stmt(stmt);
-        } catch (const std::runtime_error&) {
-            // See resolve_generic_type_optimistic's own comment: leaves
-            // whatever prefix of `stmt` was already resolved before the
-            // failing reference in place (harmless -- is_synthetic_check_only,
-            // never reaches codegen) and simply stops short of resolving
-            // the rest, exactly as if this whole call had never been
-            // added.
-        }
+        auto result = resolve_generic_types_in_stmt(stmt);
+        // See resolve_generic_type_optimistic's own comment: leaves
+        // whatever prefix of `stmt` was already resolved before the
+        // failing reference in place (harmless -- is_synthetic_check_only,
+        // never reaches codegen) and simply stops short of resolving
+        // the rest, exactly as if this whole call had never been
+        // added.
+        (void)result;
     }
 
-    void check_generic_type_methods_once() {
+    [[nodiscard]] std::expected<void, DataflowError> check_generic_type_methods_once() {
         // Index-based, snapshotting the original class count up front --
         // same reasoning as resolve_generic_types: this loop's own body
         // pushes new entries into program_.classes/program_.functions
@@ -1651,12 +1694,16 @@ private:
                 if (program_.classes[i].thread_movable_if_movable_expr) {
                     check_class.thread_movable_if_movable_expr = clone_expr(*program_.classes[i].thread_movable_if_movable_expr);
                     substitute_type_params_in_expr(*check_class.thread_movable_if_movable_expr, type_replacements);
-                    resolve_generic_types_in_expr(*check_class.thread_movable_if_movable_expr);
+                    if (auto _r = resolve_generic_types_in_expr(*check_class.thread_movable_if_movable_expr); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
                 if (program_.classes[i].thread_movable_if_shareable_expr) {
                     check_class.thread_movable_if_shareable_expr = clone_expr(*program_.classes[i].thread_movable_if_shareable_expr);
                     substitute_type_params_in_expr(*check_class.thread_movable_if_shareable_expr, type_replacements);
-                    resolve_generic_types_in_expr(*check_class.thread_movable_if_shareable_expr);
+                    if (auto _r = resolve_generic_types_in_expr(*check_class.thread_movable_if_shareable_expr); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
                 std::unordered_map<std::string, Type> field_types;
                 for (const ClassField& f : fields_copy) {
@@ -1685,11 +1732,13 @@ private:
                         nf.default_initializer = f.default_initializer;
                         if (nf.default_initializer->expr) {
                             substitute_type_params_in_expr(*nf.default_initializer->expr, type_replacements);
-                            resolve_generic_types_in_expr(*nf.default_initializer->expr);
+                            if (auto _r = resolve_generic_types_in_expr(*nf.default_initializer->expr); !_r.has_value()) {
+                                return std::unexpected(std::move(_r).error());
+                            }
                         }
                         for (const ExprPtr& arg : nf.default_initializer->brace_args) {
                             substitute_type_params_in_expr(*arg, type_replacements);
-                            resolve_generic_types_in_expr(*arg);
+                            if (auto _r = resolve_generic_types_in_expr(*arg); !_r.has_value()) return std::unexpected(std::move(_r).error());
                         }
                     }
                     field_types[nf.name] = nf.type;
@@ -1761,11 +1810,13 @@ private:
                 for (MemberInitializer& init : check_fn.member_initializers) {
                     if (init.initializer.expr) {
                         substitute_type_params_in_expr(*init.initializer.expr, type_replacements);
-                        resolve_generic_types_in_expr(*init.initializer.expr);
+                        if (auto _r = resolve_generic_types_in_expr(*init.initializer.expr); !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
                     }
                     for (ExprPtr& arg : init.initializer.brace_args) {
                         substitute_type_params_in_expr(*arg, type_replacements);
-                        resolve_generic_types_in_expr(*arg);
+                        if (auto _r = resolve_generic_types_in_expr(*arg); !_r.has_value()) return std::unexpected(std::move(_r).error());
                     }
                 }
                 check_fn.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
@@ -1794,15 +1845,19 @@ private:
                     }
                 }
                 if (check_fn.body && uses_bare_witness) {
-                    reject_calls_on_bare_witness_type(*check_fn.body, check_class_name, bare_witness_struct_name(),
-                                                      field_types);
+                    if (auto _r = reject_calls_on_bare_witness_type(*check_fn.body, check_class_name, bare_witness_struct_name(),
+                                                      field_types); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
                 program_.functions.push_back(std::move(check_fn));
                 known_function_names_.insert(program_.functions.back().name);
                 if (program_.functions.back().is_generic_template) {
                     generic_template_indices_[program_.functions.back().name].push_back(program_.functions.size() - 1);
                 }
-                walk_new_concrete_function(program_.functions.size() - 1);
+                if (auto _r = walk_new_concrete_function(program_.functions.size() - 1); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
                 // See classes_before_method's own comment above: every
                 // ClassDef pushed while witness-checking this one method
                 // (check_class itself, already marked above, plus any
@@ -1814,6 +1869,7 @@ private:
                 }
             }
         }
+        return {};
     }
 
     // ch05 §5.11/§5.14: recursively walks `stmt` (a synthesized check
@@ -1837,7 +1893,7 @@ private:
     // (ClassDef::is_synthetic_check_only) -- codegen's own "call to
     // unknown function" check, which every real, compiled method call
     // still gets, never runs for it at all.
-    void reject_calls_on_bare_witness_type(const Stmt& stmt, const std::string& this_class_name,
+    [[nodiscard]] std::expected<void, DataflowError> reject_calls_on_bare_witness_type(const Stmt& stmt, const std::string& this_class_name,
                                             const std::string& bare_witness_name,
                                             const std::unordered_map<std::string, Type>& field_types) {
         // Resolves `expr`'s own type, restricted to exactly the two
@@ -1859,36 +1915,62 @@ private:
             }
             return std::nullopt;
         };
-        std::function<void(const Expr&)> walk_expr = [&](const Expr& e) {
+        std::function<std::expected<void, DataflowError>(const Expr&)> walk_expr =
+            [&](const Expr& e) -> std::expected<void, DataflowError> {
             if (e.kind == ExprKind::Call) {
                 if (e.lhs) {
                     std::optional<std::string> receiver_type = resolve_type_name(*e.lhs);
                     if (receiver_type.has_value() && *receiver_type == bare_witness_name) {
-                        throw DataflowError(
+                        return std::unexpected(DataflowError(
                             "cannot call method '" + e.name +
                                 "' on a value of a bare (unconstrained) generic type parameter -- it guarantees no "
                                 "methods at all (spec ch05 §5.11/§5.14); constrain it with a concept to allow this",
-                            e.loc);
+                            e.loc));
                     }
-                    walk_expr(*e.lhs);
+                    if (auto _r = walk_expr(*e.lhs); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 }
-                for (const auto& arg : e.args) walk_expr(*arg);
-                return;
+                for (const auto& arg : e.args) {
+                    if (auto _r = walk_expr(*arg); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                }
+                return {};
             }
-            if (e.lhs) walk_expr(*e.lhs);
-            if (e.rhs) walk_expr(*e.rhs);
-            for (const auto& arg : e.args) walk_expr(*arg);
+            if (e.lhs) {
+                if (auto _r = walk_expr(*e.lhs); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            }
+            if (e.rhs) {
+                if (auto _r = walk_expr(*e.rhs); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            }
+            for (const auto& arg : e.args) {
+                if (auto _r = walk_expr(*arg); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            }
+            return {};
         };
-        std::function<void(const Stmt&)> walk_stmt = [&](const Stmt& s) {
-            if (s.init) walk_expr(*s.init);
-            for (const auto& arg : s.ctor_args) walk_expr(*arg);
-            if (s.expr) walk_expr(*s.expr);
-            if (s.condition) walk_expr(*s.condition);
-            if (s.then_branch) walk_stmt(*s.then_branch);
-            if (s.else_branch) walk_stmt(*s.else_branch);
-            for (const auto& inner : s.statements) walk_stmt(*inner);
+        std::function<std::expected<void, DataflowError>(const Stmt&)> walk_stmt =
+            [&](const Stmt& s) -> std::expected<void, DataflowError> {
+            if (s.init) {
+                if (auto _r = walk_expr(*s.init); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            }
+            for (const auto& arg : s.ctor_args) {
+                if (auto _r = walk_expr(*arg); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            }
+            if (s.expr) {
+                if (auto _r = walk_expr(*s.expr); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            }
+            if (s.condition) {
+                if (auto _r = walk_expr(*s.condition); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            }
+            if (s.then_branch) {
+                if (auto _r = walk_stmt(*s.then_branch); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            }
+            if (s.else_branch) {
+                if (auto _r = walk_stmt(*s.else_branch); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            }
+            for (const auto& inner : s.statements) {
+                if (auto _r = walk_stmt(*inner); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            }
+            return {};
         };
-        walk_stmt(stmt);
+        return walk_stmt(stmt);
     }
 
 
@@ -1920,7 +2002,7 @@ private:
     // instantiation never depends on anything else being walked -- but
     // this mirrors the natural "declarations before bodies" order), then
     // every function body's own VarDecls.
-    void resolve_generic_types() {
+    [[nodiscard]] std::expected<void, DataflowError> resolve_generic_types() {
         // ch05 §5.14: index-based throughout, snapshotting each original
         // count up front -- resolving one field/parameter/return-type
         // may itself synthesize new struct/class/function entries
@@ -1939,8 +2021,9 @@ private:
             std::size_t field_count = program_.structs[i].fields.size();
             for (std::size_t j = 0; j < field_count; j++) {
                 Type old_type = program_.structs[i].fields[j].type;
-                Type new_type = resolve_generic_type(old_type, SourceLocation{});
-                program_.structs[i].fields[j].type = new_type;
+                auto new_type = resolve_generic_type(old_type, SourceLocation{});
+                if (!new_type.has_value()) return std::unexpected(std::move(new_type).error());
+                program_.structs[i].fields[j].type = std::move(new_type).value();
             }
         }
         std::size_t original_class_count = program_.classes.size();
@@ -1958,14 +2041,19 @@ private:
             std::size_t field_count = program_.classes[i].fields.size();
             for (std::size_t j = 0; j < field_count; j++) {
                 Type old_type = program_.classes[i].fields[j].type;
-                Type new_type = resolve_generic_type(old_type, SourceLocation{});
-                program_.classes[i].fields[j].type = new_type;
+                auto new_type = resolve_generic_type(old_type, SourceLocation{});
+                if (!new_type.has_value()) return std::unexpected(std::move(new_type).error());
+                program_.classes[i].fields[j].type = std::move(new_type).value();
             }
             if (program_.classes[i].thread_movable_if_movable_expr) {
-                resolve_generic_types_in_expr(*program_.classes[i].thread_movable_if_movable_expr);
+                if (auto _r = resolve_generic_types_in_expr(*program_.classes[i].thread_movable_if_movable_expr); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
             }
             if (program_.classes[i].thread_movable_if_shareable_expr) {
-                resolve_generic_types_in_expr(*program_.classes[i].thread_movable_if_shareable_expr);
+                if (auto _r = resolve_generic_types_in_expr(*program_.classes[i].thread_movable_if_shareable_expr); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
             }
         }
         std::size_t original_count = program_.functions.size();
@@ -2003,8 +2091,9 @@ private:
                     type_depends_on_template_params(old_type, program_.functions[i].template_params)) {
                     continue;
                 }
-                Type new_type = resolve_generic_type(old_type, loc);
-                program_.functions[i].params[j].type = new_type;
+                auto new_type = resolve_generic_type(old_type, loc);
+                if (!new_type.has_value()) return std::unexpected(std::move(new_type).error());
+                program_.functions[i].params[j].type = std::move(new_type).value();
                 // ch05 §5.14: a class-typed default argument value (e.g.
                 // `std::shared_ptr<const std::string> source_path = {}`,
                 // parsed as an ExprKind::ValueInit whose own `.type` is
@@ -2024,15 +2113,18 @@ private:
                 // resolved into the concrete, registered form
                 // to_llvm_type/find_class_def expect.
                 if (program_.functions[i].params[j].default_expr) {
-                    resolve_generic_types_in_expr(*program_.functions[i].params[j].default_expr);
+                    if (auto _r = resolve_generic_types_in_expr(*program_.functions[i].params[j].default_expr); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
             }
             if (program_.functions[i].template_params.empty() ||
                 !type_depends_on_template_params(program_.functions[i].return_type,
                                                  program_.functions[i].template_params)) {
                 Type old_return = program_.functions[i].return_type;
-                Type new_return = resolve_generic_type(old_return, loc);
-                program_.functions[i].return_type = new_return;
+                auto new_return = resolve_generic_type(old_return, loc);
+                if (!new_return.has_value()) return std::unexpected(std::move(new_return).error());
+                program_.functions[i].return_type = std::move(new_return).value();
             }
             // A full-header-form generic function's own *body* is left
             // untouched here regardless (mirroring exactly how an
@@ -2052,75 +2144,118 @@ private:
             // place (see resolve_generic_types_in_stmt/_in_expr).
             if (program_.functions[i].body) {
                 StmtPtr body_clone = deep_clone_stmt(*program_.functions[i].body);
-                resolve_generic_types_in_stmt(*body_clone);
+                if (auto _r = resolve_generic_types_in_stmt(*body_clone); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 program_.functions[i].body = std::move(body_clone);
             }
         }
+        return {};
     }
 
-    void resolve_generic_types_in_stmt(Stmt& stmt) {
+    [[nodiscard]] std::expected<void, DataflowError> resolve_generic_types_in_stmt(Stmt& stmt) {
         switch (stmt.kind) {
-            case StmtKind::VarDecl:
-                stmt.type = resolve_generic_type(stmt.type, stmt.loc);
-                if (stmt.init) resolve_generic_types_in_expr(*stmt.init);
-                for (ExprPtr& arg : stmt.ctor_args) resolve_generic_types_in_expr(*arg);
-                return;
+            case StmtKind::VarDecl: {
+                auto resolved = resolve_generic_type(stmt.type, stmt.loc);
+                if (!resolved.has_value()) return std::unexpected(std::move(resolved).error());
+                stmt.type = std::move(resolved).value();
+                if (stmt.init) {
+                    if (auto _r = resolve_generic_types_in_expr(*stmt.init); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                }
+                for (ExprPtr& arg : stmt.ctor_args) {
+                    if (auto _r = resolve_generic_types_in_expr(*arg); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                }
+                return {};
+            }
             case StmtKind::Return:
             case StmtKind::ExprStmt:
-                if (stmt.expr) resolve_generic_types_in_expr(*stmt.expr);
-                return;
-            case StmtKind::If:
-                resolve_generic_types_in_expr(*stmt.condition);
-                resolve_generic_types_in_stmt(*stmt.then_branch);
-                if (stmt.else_branch) resolve_generic_types_in_stmt(*stmt.else_branch);
-                return;
-            case StmtKind::While:
-                resolve_generic_types_in_expr(*stmt.condition);
-                resolve_generic_types_in_stmt(*stmt.then_branch);
-                return;
-            case StmtKind::Switch:
-                resolve_generic_types_in_expr(*stmt.condition);
+                if (stmt.expr) return resolve_generic_types_in_expr(*stmt.expr);
+                return {};
+            case StmtKind::If: {
+                if (auto _r = resolve_generic_types_in_expr(*stmt.condition); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (auto _r = resolve_generic_types_in_stmt(*stmt.then_branch); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (stmt.else_branch) return resolve_generic_types_in_stmt(*stmt.else_branch);
+                return {};
+            }
+            case StmtKind::While: {
+                if (auto _r = resolve_generic_types_in_expr(*stmt.condition); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                return resolve_generic_types_in_stmt(*stmt.then_branch);
+            }
+            case StmtKind::Switch: {
+                if (auto _r = resolve_generic_types_in_expr(*stmt.condition); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 for (SwitchCase& switch_case : stmt.switch_cases) {
-                    if (switch_case.value) resolve_generic_types_in_expr(*switch_case.value);
-                    for (StmtPtr& s : switch_case.statements) resolve_generic_types_in_stmt(*s);
+                    if (switch_case.value) {
+                        if (auto _r = resolve_generic_types_in_expr(*switch_case.value); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                    }
+                    for (StmtPtr& s : switch_case.statements) {
+                        if (auto _r = resolve_generic_types_in_stmt(*s); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                    }
                 }
-                return;
+                return {};
+            }
             case StmtKind::Break:
             case StmtKind::Continue:
             case StmtKind::Fallthrough:
-                return;
+                return {};
             case StmtKind::Block:
-                for (StmtPtr& s : stmt.statements) resolve_generic_types_in_stmt(*s);
-                return;
+                for (StmtPtr& s : stmt.statements) {
+                    if (auto _r = resolve_generic_types_in_stmt(*s); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                }
+                return {};
         }
+        return {};
     }
 
-    void resolve_generic_types_in_expr(Expr& expr) {
+    [[nodiscard]] std::expected<void, DataflowError> resolve_generic_types_in_expr(Expr& expr) {
         // MakeUnique's element type / Lambda's explicit return type --
         // safe to mutate directly (see resolve_generic_types' own
         // comment: Expr nodes are stable, independent heap allocations).
-        expr.type = resolve_generic_type(expr.type, expr.loc);
-        if (expr.lhs) resolve_generic_types_in_expr(*expr.lhs);
-        if (expr.rhs) resolve_generic_types_in_expr(*expr.rhs);
-        if (expr.third) resolve_generic_types_in_expr(*expr.third);
-        for (ExprPtr& arg : expr.args) resolve_generic_types_in_expr(*arg);
+        {
+            auto resolved = resolve_generic_type(expr.type, expr.loc);
+            if (!resolved.has_value()) return std::unexpected(std::move(resolved).error());
+            expr.type = std::move(resolved).value();
+        }
+        if (expr.lhs) {
+            if (auto _r = resolve_generic_types_in_expr(*expr.lhs); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        }
+        if (expr.rhs) {
+            if (auto _r = resolve_generic_types_in_expr(*expr.rhs); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        }
+        if (expr.third) {
+            if (auto _r = resolve_generic_types_in_expr(*expr.third); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        }
+        for (ExprPtr& arg : expr.args) {
+            if (auto _r = resolve_generic_types_in_expr(*arg); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        }
         for (ExplicitTemplateArg& arg : expr.explicit_template_args) {
-            if (!arg.is_type && arg.value) resolve_generic_types_in_expr(*arg.value);
+            if (!arg.is_type && arg.value) {
+                if (auto _r = resolve_generic_types_in_expr(*arg.value); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            }
         }
-        for (Param& p : expr.lambda_params) p.type = resolve_generic_type(p.type, expr.loc);
+        for (Param& p : expr.lambda_params) {
+            auto resolved = resolve_generic_type(p.type, expr.loc);
+            if (!resolved.has_value()) return std::unexpected(std::move(resolved).error());
+            p.type = std::move(resolved).value();
+        }
         for (LambdaCapture& c : expr.lambda_captures) {
-            if (c.init) resolve_generic_types_in_expr(*c.init);
+            if (c.init) {
+                if (auto _r = resolve_generic_types_in_expr(*c.init); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            }
         }
-        if (expr.lambda_body) resolve_generic_types_in_stmt(*expr.lambda_body);
+        if (expr.lambda_body) {
+            if (auto _r = resolve_generic_types_in_stmt(*expr.lambda_body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        }
         if (expr.kind == ExprKind::Call && expr.lhs == nullptr) {
-            if (std::optional<StaticTemplateCallResolution> resolved =
-                    resolve_static_template_call_target(expr.name, expr.loc)) {
-                expr.name = resolved->concrete_class_name + "_" + resolved->member_name;
+            auto resolved_static_call = resolve_static_template_call_target(expr.name, expr.loc);
+            if (!resolved_static_call.has_value()) return std::unexpected(std::move(resolved_static_call).error());
+            if (resolved_static_call->has_value()) {
+                expr.name = (*resolved_static_call)->concrete_class_name + "_" + (*resolved_static_call)->member_name;
                 expr.explicit_global_qualification = false;
             }
         }
         if (expr.kind == ExprKind::TypeTrait) {
-            bool value = expr.name == "is_thread_movable" ? is_thread_movable(expr.type) : is_thread_shareable(expr.type);
+            std::expected<bool, DataflowError> value_r =
+                expr.name == "is_thread_movable" ? is_thread_movable(expr.type) : is_thread_shareable(expr.type);
+            if (!value_r.has_value()) return std::unexpected(std::move(value_r).error());
+            bool value = value_r.value();
             expr.kind = ExprKind::BoolLiteral;
             expr.bool_value = value;
             expr.name.clear();
@@ -2128,6 +2263,7 @@ private:
             expr.rhs.reset();
             expr.args.clear();
         }
+        return {};
     }
 
     // ch05 §5.14: resolves a (possibly not-yet-resolved) generic-type
@@ -2144,7 +2280,7 @@ private:
     // every caller reads into a local copy and writes the result back
     // via a fresh index-based access afterward, never holding a
     // reference across the call.
-    [[nodiscard]] Type resolve_generic_type(Type type, SourceLocation loc) {
+    [[nodiscard]] std::expected<Type, DataflowError> resolve_generic_type(Type type, SourceLocation loc) {
         // ch05 §5.14: a variadic generic type (`Tuple<int,bool,char>`,
         // or even the zero-argument `Tuple<>` base case) is checked
         // *before* the ordinary "template_args empty means not a
@@ -2159,7 +2295,11 @@ private:
         if (variadic_generic_type_names_.contains(type.name)) {
             std::vector<Type> resolved_args;
             resolved_args.reserve(type.template_args.size());
-            for (const Type& arg : type.template_args) resolved_args.push_back(resolve_generic_type(arg, loc));
+            for (const Type& arg : type.template_args) {
+                auto resolved = resolve_generic_type(arg, loc);
+                if (!resolved.has_value()) return std::unexpected(std::move(resolved).error());
+                resolved_args.push_back(std::move(resolved).value());
+            }
             // ch05 §5.14: this Type's own non_type_args (e.g. the "0" in
             // `TupleImpl<0, int, bool, char>`) are ordinary, self-
             // contained expressions at a top-level use site like this
@@ -2172,11 +2312,14 @@ private:
             std::vector<int> resolved_non_type_args;
             resolved_non_type_args.reserve(type.non_type_args.size());
             for (const std::shared_ptr<Expr>& arg : type.non_type_args) {
-                resolved_non_type_args.push_back(evaluate_non_type_arg(*arg, {}));
+                auto value = evaluate_non_type_arg(*arg, {});
+                if (!value.has_value()) return std::unexpected(std::move(value).error());
+                resolved_non_type_args.push_back(value.value());
             }
-            std::string concrete_name =
+            auto concrete_name =
                 instantiate_variadic_generic_type(type.name, resolved_non_type_args, resolved_args, loc);
-            type.name = concrete_name;
+            if (!concrete_name.has_value()) return std::unexpected(std::move(concrete_name).error());
+            type.name = std::move(concrete_name).value();
             type.template_args.clear();
             type.non_type_args.clear();
             return type;
@@ -2186,25 +2329,41 @@ private:
                 std::vector<int> resolved_non_type_args;
                 resolved_non_type_args.reserve(type.non_type_args.size());
                 for (const std::shared_ptr<Expr>& arg : type.non_type_args) {
-                    resolved_non_type_args.push_back(evaluate_non_type_arg(*arg, {}));
+                    auto value = evaluate_non_type_arg(*arg, {});
+                    if (!value.has_value()) return std::unexpected(std::move(value).error());
+                    resolved_non_type_args.push_back(value.value());
                 }
-                std::string concrete_name = instantiate_non_type_generic_type(type.name, resolved_non_type_args, loc);
-                type.name = concrete_name;
+                auto concrete_name = instantiate_non_type_generic_type(type.name, resolved_non_type_args, loc);
+                if (!concrete_name.has_value()) return std::unexpected(std::move(concrete_name).error());
+                type.name = std::move(concrete_name).value();
                 type.non_type_args.clear();
                 return type;
             }
-            if (type.pointee) type.pointee = std::make_shared<Type>(resolve_generic_type(*type.pointee, loc));
-            if (type.element) type.element = std::make_shared<Type>(resolve_generic_type(*type.element, loc));
+            if (type.pointee) {
+                auto resolved = resolve_generic_type(*type.pointee, loc);
+                if (!resolved.has_value()) return std::unexpected(std::move(resolved).error());
+                type.pointee = std::make_shared<Type>(std::move(resolved).value());
+            }
+            if (type.element) {
+                auto resolved = resolve_generic_type(*type.element, loc);
+                if (!resolved.has_value()) return std::unexpected(std::move(resolved).error());
+                type.element = std::make_shared<Type>(std::move(resolved).value());
+            }
             return type;
         }
         std::vector<Type> resolved_args;
         resolved_args.reserve(type.template_args.size());
-        for (const Type& arg : type.template_args) resolved_args.push_back(resolve_generic_type(arg, loc));
+        for (const Type& arg : type.template_args) {
+            auto resolved = resolve_generic_type(arg, loc);
+            if (!resolved.has_value()) return std::unexpected(std::move(resolved).error());
+            resolved_args.push_back(std::move(resolved).value());
+        }
         bool wrapper_lifetime_source =
             type.name == "std::reference_wrapper" ||
             (type.name == "std::optional" && resolved_args.size() == 1 && resolved_args[0].is_reference_wrapper_lifetime_source);
-        std::string concrete_name = instantiate_generic_type(type.name, resolved_args, loc);
-        type.name = concrete_name;
+        auto concrete_name = instantiate_generic_type(type.name, resolved_args, loc);
+        if (!concrete_name.has_value()) return std::unexpected(std::move(concrete_name).error());
+        type.name = std::move(concrete_name).value();
         type.template_args.clear();
         type.is_reference_wrapper_lifetime_source = wrapper_lifetime_source;
         return type;
@@ -2227,7 +2386,7 @@ private:
     // an ordinary generic function's own body (ch05 §5.11) rather than
     // a bespoke "precise diagnostic" message this version doesn't
     // implement.
-    [[nodiscard]] std::string instantiate_generic_type(const std::string& template_name,
+    [[nodiscard]] std::expected<std::string, DataflowError> instantiate_generic_type(const std::string& template_name,
                                                         const std::vector<Type>& concrete_args,
                                                         SourceLocation loc) {
         std::string cache_key = template_name;
@@ -2242,32 +2401,49 @@ private:
         // self-reference cache entry just inserted above (a recursion
         // guard for a self-referential generic type, e.g. a linked-list
         // node instantiating itself) must not survive if anything below
-        // throws -- e.g. resolve_generic_type failing on one of this
+        // fails -- e.g. resolve_generic_type failing on one of this
         // template's own fields/methods for a *witness* type (unlike any
         // real, concrete argument, a witness can legitimately fail to
         // satisfy a nested constraint -- see resolve_generic_type_
         // optimistic's own comment). Left in place, a *later* attempt to
         // instantiate this exact cache_key (from a different field/
         // param/return type elsewhere, or resolve_generic_type_
-        // optimistic's own retry after catching this exact exception)
-        // would find that stale cache_key -> cache_key sentinel and
-        // silently "succeed" with that name, even though no real
-        // ClassDef/StructDef/Function of that name was ever actually
-        // finished and pushed -- surfacing far downstream (inside
-        // layout_of_type, e.g.) as a confusing "unsupported type" error
-        // instead of cleanly re-attempting (and re-throwing the
-        // *original*, meaningful diagnostic) as if this failed attempt
-        // had never happened. Everything this failed attempt already
-        // pushed to program_.classes/structs/functions before the throw
-        // (including via a nested nested instantiate_generic_type call,
-        // which rolls back identically on its own failure before
-        // re-throwing here) is likewise truncated away, to avoid leaving
-        // an orphaned, half-built duplicate of `cache_key` behind for a
-        // retry to collide with.
+        // optimistic's own retry after this exact failure) would find
+        // that stale cache_key -> cache_key sentinel and silently
+        // "succeed" with that name, even though no real ClassDef/
+        // StructDef/Function of that name was ever actually finished and
+        // pushed -- surfacing far downstream (inside layout_of_type,
+        // e.g.) as a confusing "unsupported type" error instead of
+        // cleanly re-attempting (and re-propagating the *original*,
+        // meaningful diagnostic) as if this failed attempt had never
+        // happened. Everything this failed attempt already pushed to
+        // program_.classes/structs/functions before the failure
+        // (including via a nested instantiate_generic_type call, which
+        // rolls back identically on its own failure before propagating
+        // it here) is likewise truncated away, via the `fail` helper
+        // below, to avoid leaving an orphaned, half-built duplicate of
+        // `cache_key` behind for a retry to collide with.
         std::size_t classes_before_instantiation = program_.classes.size();
         std::size_t structs_before_instantiation = program_.structs.size();
         std::size_t functions_before_instantiation = program_.functions.size();
-        try {
+        auto fail = [&](DataflowError err) -> std::unexpected<DataflowError> {
+            for (std::size_t k = functions_before_instantiation; k < program_.functions.size(); ++k) {
+                known_function_names_.erase(program_.functions[k].name);
+                generic_template_indices_.erase(program_.functions[k].name);
+            }
+            if (program_.functions.size() > functions_before_instantiation) {
+                program_.functions.resize(functions_before_instantiation);
+            }
+            if (program_.classes.size() > classes_before_instantiation) {
+                program_.classes.resize(classes_before_instantiation);
+            }
+            if (program_.structs.size() > structs_before_instantiation) {
+                program_.structs.resize(structs_before_instantiation);
+            }
+            ordinary_generic_instance_info_.erase(cache_key);
+            generic_type_instance_cache_.erase(cache_key);
+            return std::unexpected(std::move(err));
+        };
 
         std::vector<Type> named_concretes;
         named_concretes.reserve(concrete_args.size());
@@ -2282,19 +2458,22 @@ private:
         for (const StructDef& tmpl : program_.structs) {
             if (tmpl.name != template_name || tmpl.template_params.empty()) continue;
             if (tmpl.template_params.size() != named_concretes.size()) {
-                throw DataflowError("'" + template_name + "' takes exactly " +
+                return fail(DataflowError("'" + template_name + "' takes exactly " +
                                         std::to_string(tmpl.template_params.size()) + " template argument(s)",
-                                    loc);
+                                    loc));
             }
             std::vector<std::pair<std::string, Type>> type_replacements;
             type_replacements.reserve(tmpl.template_params.size());
             for (std::size_t param_index = 0; param_index < tmpl.template_params.size(); ++param_index) {
                 const GenericTypeParam& type_param = tmpl.template_params[param_index];
                 if (type_param.is_non_type) {
-                    throw DataflowError("'" + template_name + "' is not a type-parameter generic class/struct",
-                                        loc);
+                    return fail(DataflowError("'" + template_name + "' is not a type-parameter generic class/struct",
+                                        loc));
                 }
-                check_type_param_constraint(type_param, named_concretes[param_index], template_name, loc);
+                if (auto _r = check_type_param_constraint(type_param, named_concretes[param_index], template_name, loc);
+                    !_r.has_value()) {
+                    return fail(std::move(_r).error());
+                }
                 type_replacements.emplace_back(type_param.name, named_concretes[param_index]);
             }
             StructDef concrete;
@@ -2306,16 +2485,22 @@ private:
                 StructField nf;
                 nf.name = f.name;
                 nf.type = substitute_type_params(f.type, type_replacements);
-                nf.type = resolve_generic_type(nf.type, loc);
+                {
+                    auto _resolved = resolve_generic_type(nf.type, loc);
+                    if (!_resolved.has_value()) return fail(std::move(_resolved).error());
+                    nf.type = std::move(_resolved).value();
+                }
                 if (f.default_initializer) {
                     nf.default_initializer = f.default_initializer;
                     if (nf.default_initializer->expr) {
                         substitute_type_params_in_expr(*nf.default_initializer->expr, type_replacements);
-                        resolve_generic_types_in_expr(*nf.default_initializer->expr);
+                        if (auto _r = resolve_generic_types_in_expr(*nf.default_initializer->expr); !_r.has_value()) {
+                            return fail(std::move(_r).error());
+                        }
                     }
                     for (const ExprPtr& arg : nf.default_initializer->brace_args) {
                         substitute_type_params_in_expr(*arg, type_replacements);
-                        resolve_generic_types_in_expr(*arg);
+                        if (auto _r = resolve_generic_types_in_expr(*arg); !_r.has_value()) return fail(std::move(_r).error());
                     }
                 }
                 concrete.fields.push_back(std::move(nf));
@@ -2325,7 +2510,9 @@ private:
             return cache_key;
         }
 
-        OrdinaryClassTemplateSelection class_selection = select_ordinary_class_template(template_name, named_concretes, loc);
+        auto _class_selection_r = select_ordinary_class_template(template_name, named_concretes, loc);
+        if (!_class_selection_r.has_value()) return fail(std::move(_class_selection_r).error());
+        OrdinaryClassTemplateSelection class_selection = std::move(_class_selection_r).value();
         if (class_selection.def != nullptr) {
             const ClassDef& tmpl = *class_selection.def;
             std::string tmpl_owner_id = tmpl.template_owner_id;
@@ -2341,27 +2528,31 @@ private:
             std::vector<Function> methods = method_templates_of_owner(tmpl_owner_id);
             for (const GenericTypeParam& type_param : template_params_copy) {
                 if (type_param.is_non_type) {
-                    throw DataflowError("'" + template_name + "' is not a type-parameter generic class/struct", loc);
+                    return fail(DataflowError("'" + template_name + "' is not a type-parameter generic class/struct", loc));
                 }
                 if (type_param.is_pack) {
                     auto pack_it = class_selection.bindings.type_pack_replacements.find(type_param.name);
                     if (pack_it == class_selection.bindings.type_pack_replacements.end()) {
-                        throw DataflowError("partial specialization of '" + template_name +
+                        return fail(DataflowError("partial specialization of '" + template_name +
                                                 "' did not bind required type pack parameter '" + type_param.name + "'",
-                                            loc);
+                                            loc));
                     }
                     for (const Type& concrete : pack_it->second) {
-                        check_type_param_constraint(type_param, concrete, template_name, loc);
+                        if (auto _r = check_type_param_constraint(type_param, concrete, template_name, loc); !_r.has_value()) {
+                            return fail(std::move(_r).error());
+                        }
                     }
                     continue;
                 }
                 const Type* bound = find_type_replacement(class_selection.bindings.type_replacements, type_param.name);
                 if (bound == nullptr) {
-                    throw DataflowError("partial specialization of '" + template_name +
+                    return fail(DataflowError("partial specialization of '" + template_name +
                                             "' did not bind required type parameter '" + type_param.name + "'",
-                                        loc);
+                                        loc));
                 }
-                check_type_param_constraint(type_param, *bound, template_name, loc);
+                if (auto _r = check_type_param_constraint(type_param, *bound, template_name, loc); !_r.has_value()) {
+                    return fail(std::move(_r).error());
+                }
             }
 
             std::vector<ClassField> fields_copy = tmpl.fields;
@@ -2379,13 +2570,17 @@ private:
                 concrete.thread_movable_if_movable_expr = std::move(tmpl_thread_movable_if_movable_expr);
                 substitute_type_params_in_expr(*concrete.thread_movable_if_movable_expr,
                                                class_selection.bindings.type_replacements);
-                resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr);
+                if (auto _r = resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr); !_r.has_value()) {
+                    return fail(std::move(_r).error());
+                }
             }
             if (tmpl_thread_movable_if_shareable_expr) {
                 concrete.thread_movable_if_shareable_expr = std::move(tmpl_thread_movable_if_shareable_expr);
                 substitute_type_params_in_expr(*concrete.thread_movable_if_shareable_expr,
                                                class_selection.bindings.type_replacements);
-                resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr);
+                if (auto _r = resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr); !_r.has_value()) {
+                    return fail(std::move(_r).error());
+                }
             }
             for (const ClassField& f : fields_copy) {
                 ClassField nf;
@@ -2393,17 +2588,23 @@ private:
                 nf.access = f.access;
                 nf.type = instantiate_type_pattern(f.type, class_selection.bindings.type_replacements,
                                                    class_selection.bindings.type_pack_replacements);
-                nf.type = resolve_generic_type(nf.type, loc);
+                {
+                    auto _resolved = resolve_generic_type(nf.type, loc);
+                    if (!_resolved.has_value()) return fail(std::move(_resolved).error());
+                    nf.type = std::move(_resolved).value();
+                }
                 if (f.default_initializer) {
                     nf.default_initializer = f.default_initializer;
                     if (nf.default_initializer->expr) {
                         substitute_type_params_in_expr(*nf.default_initializer->expr,
                                                        class_selection.bindings.type_replacements);
-                        resolve_generic_types_in_expr(*nf.default_initializer->expr);
+                        if (auto _r = resolve_generic_types_in_expr(*nf.default_initializer->expr); !_r.has_value()) {
+                            return fail(std::move(_r).error());
+                        }
                     }
                     for (const ExprPtr& arg : nf.default_initializer->brace_args) {
                         substitute_type_params_in_expr(*arg, class_selection.bindings.type_replacements);
-                        resolve_generic_types_in_expr(*arg);
+                        if (auto _r = resolve_generic_types_in_expr(*arg); !_r.has_value()) return fail(std::move(_r).error());
                     }
                 }
                 concrete.fields.push_back(std::move(nf));
@@ -2447,7 +2648,11 @@ private:
                 clone.access = method_tmpl.access;
                 clone.return_type = instantiate_type_pattern(method_tmpl.return_type, class_selection.bindings.type_replacements,
                                                              class_selection.bindings.type_pack_replacements);
-                clone.return_type = resolve_generic_type(clone.return_type, method_tmpl.loc);
+                {
+                    auto _resolved = resolve_generic_type(clone.return_type, method_tmpl.loc);
+                    if (!_resolved.has_value()) return fail(std::move(_resolved).error());
+                    clone.return_type = std::move(_resolved).value();
+                }
                 clone.return_lifetime = method_tmpl.return_lifetime;
                 std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
                 clone.params.reserve(method_tmpl.params.size());
@@ -2478,7 +2683,11 @@ private:
                                     class_selection.bindings.type_replacements;
                                 param_replacements.emplace_back(*pack_name, pack_it->second[j]);
                                 np.type = instantiate_type_pattern(p.type, param_replacements, {});
-                                np.type = resolve_generic_type(np.type, method_tmpl.loc);
+                                {
+                                    auto _resolved = resolve_generic_type(np.type, method_tmpl.loc);
+                                    if (!_resolved.has_value()) return fail(std::move(_resolved).error());
+                                    np.type = std::move(_resolved).value();
+                                }
                                 clone.params.push_back(std::move(np));
                                 pack_param_names[p.name].push_back(clone.params.back().name);
                             }
@@ -2488,7 +2697,11 @@ private:
                     Param np = p;
                     np.type = instantiate_type_pattern(p.type, class_selection.bindings.type_replacements,
                                                        class_selection.bindings.type_pack_replacements);
-                    np.type = resolve_generic_type(np.type, method_tmpl.loc);
+                    {
+                        auto _resolved = resolve_generic_type(np.type, method_tmpl.loc);
+                        if (!_resolved.has_value()) return fail(std::move(_resolved).error());
+                        np.type = std::move(_resolved).value();
+                    }
                     clone.params.push_back(std::move(np));
                 }
                 clone.member_initializers = method_tmpl.member_initializers;
@@ -2498,12 +2711,14 @@ private:
                                                        class_selection.bindings.type_replacements);
                         substitute_type_packs_in_expr(*init.initializer.expr,
                                                       class_selection.bindings.type_pack_replacements);
-                        resolve_generic_types_in_expr(*init.initializer.expr);
+                        if (auto _r = resolve_generic_types_in_expr(*init.initializer.expr); !_r.has_value()) {
+                            return fail(std::move(_r).error());
+                        }
                     }
                     for (ExprPtr& arg : init.initializer.brace_args) {
                         substitute_type_params_in_expr(*arg, class_selection.bindings.type_replacements);
                         substitute_type_packs_in_expr(*arg, class_selection.bindings.type_pack_replacements);
-                        resolve_generic_types_in_expr(*arg);
+                        if (auto _r = resolve_generic_types_in_expr(*arg); !_r.has_value()) return fail(std::move(_r).error());
                     }
                 }
                 clone.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
@@ -2513,14 +2728,16 @@ private:
                         expand_explicit_template_arg_packs_in_stmt(*clone.body, class_pack_name, concrete_pack_types);
                     }
                     for (const auto& [pack_param_name, concrete_names] : pack_param_names) {
-                        expand_pack_expansions_in_stmt(*clone.body, pack_param_name, concrete_names);
-                        expand_pack_folds_in_stmt(*clone.body, pack_param_name, concrete_names);
+                        if (auto _r = expand_pack_expansions_in_stmt(*clone.body, pack_param_name, concrete_names); !_r.has_value()) return fail(std::move(_r).error());
+                        if (auto _r = expand_pack_folds_in_stmt(*clone.body, pack_param_name, concrete_names); !_r.has_value()) return fail(std::move(_r).error());
                     }
-                    resolve_generic_types_in_stmt(*clone.body);
+                    if (auto _r = resolve_generic_types_in_stmt(*clone.body); !_r.has_value()) return fail(std::move(_r).error());
                 }
                 known_function_names_.insert(clone.name);
                 program_.functions.push_back(std::move(clone));
-                walk_new_concrete_function(program_.functions.size() - 1);
+                if (auto _r = walk_new_concrete_function(program_.functions.size() - 1); !_r.has_value()) {
+                    return fail(std::move(_r).error());
+                }
                 if (!program_.functions.back().template_params.empty()) {
                     generic_template_indices_[program_.functions.back().name].push_back(program_.functions.size() - 1);
                 }
@@ -2528,9 +2745,28 @@ private:
             return cache_key;
         }
 
-        throw DataflowError("'" + template_name + "' is not a declared generic type (ch05 §5.14)", loc);
+        return fail(DataflowError("'" + template_name + "' is not a declared generic type (ch05 §5.14)", loc));
+    }
 
-        } catch (...) {
+    [[nodiscard]] std::expected<std::string, DataflowError> instantiate_non_type_generic_type(const std::string& template_name,
+                                                                const std::vector<int>& non_type_args,
+                                                                SourceLocation loc) {
+        std::string cache_key = template_name;
+        for (int value : non_type_args) cache_key += "." + std::to_string(value);
+        auto cached = generic_type_instance_cache_.find(cache_key);
+        if (cached != generic_type_instance_cache_.end()) return cached->second;
+        generic_type_instance_cache_[cache_key] = cache_key;
+
+        // ch05 §5.14: same cache-poisoning hazard as
+        // instantiate_generic_type's own identical guard above -- see
+        // its comment for the full rationale. Rolled back via the
+        // `fail` helper on any failure below (e.g. a witness type
+        // failing one of this non-type generic's own field/method type
+        // resolutions).
+        std::size_t classes_before_instantiation = program_.classes.size();
+        std::size_t structs_before_instantiation = program_.structs.size();
+        std::size_t functions_before_instantiation = program_.functions.size();
+        auto fail = [&](DataflowError err) -> std::unexpected<DataflowError> {
             for (std::size_t k = functions_before_instantiation; k < program_.functions.size(); ++k) {
                 known_function_names_.erase(program_.functions[k].name);
                 generic_template_indices_.erase(program_.functions[k].name);
@@ -2544,30 +2780,9 @@ private:
             if (program_.structs.size() > structs_before_instantiation) {
                 program_.structs.resize(structs_before_instantiation);
             }
-            ordinary_generic_instance_info_.erase(cache_key);
             generic_type_instance_cache_.erase(cache_key);
-            throw;
-        }
-    }
-
-    [[nodiscard]] std::string instantiate_non_type_generic_type(const std::string& template_name,
-                                                                const std::vector<int>& non_type_args,
-                                                                SourceLocation loc) {
-        std::string cache_key = template_name;
-        for (int value : non_type_args) cache_key += "." + std::to_string(value);
-        auto cached = generic_type_instance_cache_.find(cache_key);
-        if (cached != generic_type_instance_cache_.end()) return cached->second;
-        generic_type_instance_cache_[cache_key] = cache_key;
-
-        // ch05 §5.14: same cache-poisoning hazard as
-        // instantiate_generic_type's own identical guard above -- see
-        // its comment for the full rationale. Rolled back on any throw
-        // below (e.g. a witness type failing one of this non-type
-        // generic's own field/method type resolutions).
-        std::size_t classes_before_instantiation = program_.classes.size();
-        std::size_t structs_before_instantiation = program_.structs.size();
-        std::size_t functions_before_instantiation = program_.functions.size();
-        try {
+            return std::unexpected(std::move(err));
+        };
 
         for (const StructDef& tmpl : program_.structs) {
             if (tmpl.name != template_name || tmpl.template_params.size() != non_type_args.size() ||
@@ -2601,11 +2816,15 @@ private:
             concrete.nodiscard_reason = tmpl.nodiscard_reason;
             if (tmpl.thread_movable_if_movable_expr) {
                 concrete.thread_movable_if_movable_expr = clone_expr(*tmpl.thread_movable_if_movable_expr);
-                resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr);
+                if (auto _r = resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr); !_r.has_value()) {
+                    return fail(std::move(_r).error());
+                }
             }
             if (tmpl.thread_movable_if_shareable_expr) {
                 concrete.thread_movable_if_shareable_expr = clone_expr(*tmpl.thread_movable_if_shareable_expr);
-                resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr);
+                if (auto _r = resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr); !_r.has_value()) {
+                    return fail(std::move(_r).error());
+                }
             }
             for (const ClassField& field : fields_copy) concrete.fields.push_back(field);
             program_.classes.push_back(std::move(concrete));
@@ -2673,7 +2892,9 @@ private:
                 }
                 known_function_names_.insert(clone.name);
                 program_.functions.push_back(std::move(clone));
-                walk_new_concrete_function(program_.functions.size() - 1);
+                if (auto _r = walk_new_concrete_function(program_.functions.size() - 1); !_r.has_value()) {
+                    return fail(std::move(_r).error());
+                }
                 if (!program_.functions.back().template_params.empty()) {
                     generic_template_indices_[program_.functions.back().name].push_back(program_.functions.size() - 1);
                 }
@@ -2681,25 +2902,7 @@ private:
             return cache_key;
         }
 
-        throw DataflowError("'" + template_name + "' is not a declared generic type (ch05 §5.14)", loc);
-
-        } catch (...) {
-            for (std::size_t k = functions_before_instantiation; k < program_.functions.size(); ++k) {
-                known_function_names_.erase(program_.functions[k].name);
-                generic_template_indices_.erase(program_.functions[k].name);
-            }
-            if (program_.functions.size() > functions_before_instantiation) {
-                program_.functions.resize(functions_before_instantiation);
-            }
-            if (program_.classes.size() > classes_before_instantiation) {
-                program_.classes.resize(classes_before_instantiation);
-            }
-            if (program_.structs.size() > structs_before_instantiation) {
-                program_.structs.resize(structs_before_instantiation);
-            }
-            generic_type_instance_cache_.erase(cache_key);
-            throw;
-        }
+        return fail(DataflowError("'" + template_name + "' is not a declared generic type (ch05 §5.14)", loc));
     }
 
     // ch05 §5.14: synthesizes (or reuses an already-cached) concrete
@@ -2723,7 +2926,7 @@ private:
     // indistinguishable by a `this`-type-pointee-name scan alone, so
     // naively reusing it here would be unsound (a known, deliberately
     // out-of-scope gap for now).
-    [[nodiscard]] std::string instantiate_variadic_generic_type(const std::string& template_name,
+    [[nodiscard]] std::expected<std::string, DataflowError> instantiate_variadic_generic_type(const std::string& template_name,
                                                                  const std::vector<int>& non_type_args,
                                                                  const std::vector<Type>& type_args,
                                                                  SourceLocation loc) {
@@ -2737,15 +2940,33 @@ private:
 
         // ch05 §5.14: same cache-poisoning hazard as
         // instantiate_generic_type's own identical guard above -- see
-        // its comment for the full rationale. Rolled back on any throw
-        // below, including one propagating up from a nested recursive
-        // instantiate_variadic_generic_type call (which rolls back
-        // identically on its own failure before re-throwing here, so
-        // only this level's own additional pushes need undoing).
+        // its comment for the full rationale. Rolled back via the
+        // `fail` helper on any failure below, including one propagating
+        // up from a nested recursive instantiate_variadic_generic_type
+        // call (which rolls back identically on its own failure before
+        // propagating it here, so only this level's own additional
+        // pushes need undoing).
         std::size_t classes_before_instantiation = program_.classes.size();
         std::size_t structs_before_instantiation = program_.structs.size();
         std::size_t functions_before_instantiation = program_.functions.size();
-        try {
+        auto fail = [&](DataflowError err) -> std::unexpected<DataflowError> {
+            for (std::size_t k = functions_before_instantiation; k < program_.functions.size(); ++k) {
+                known_function_names_.erase(program_.functions[k].name);
+                generic_template_indices_.erase(program_.functions[k].name);
+            }
+            if (program_.functions.size() > functions_before_instantiation) {
+                program_.functions.resize(functions_before_instantiation);
+            }
+            if (program_.classes.size() > classes_before_instantiation) {
+                program_.classes.resize(classes_before_instantiation);
+            }
+            if (program_.structs.size() > structs_before_instantiation) {
+                program_.structs.resize(structs_before_instantiation);
+            }
+            variadic_instance_info_.erase(cache_key);
+            generic_type_instance_cache_.erase(cache_key);
+            return std::unexpected(std::move(err));
+        };
 
         if (type_args.empty()) {
             // The empty-pack base case: `template<> class Tuple<>
@@ -2766,10 +2987,10 @@ private:
                 }
             }
             if (!base_case_tmpl) {
-                throw DataflowError("'" + template_name + "' has no declared empty-pack base-case specialization "
+                return fail(DataflowError("'" + template_name + "' has no declared empty-pack base-case specialization "
                                                             "matching " +
                                          std::to_string(non_type_args.size()) + " non-type argument(s) (ch05 §5.14)",
-                    loc);
+                    loc));
             }
             std::vector<GenericTypeParam> params_copy = base_case_tmpl->template_params;
             std::string owner_id_copy = base_case_tmpl->template_owner_id;
@@ -2784,16 +3005,23 @@ private:
             concrete.nodiscard_reason = base_case_tmpl->nodiscard_reason;
             if (base_case_tmpl->thread_movable_if_movable_expr) {
                 concrete.thread_movable_if_movable_expr = clone_expr(*base_case_tmpl->thread_movable_if_movable_expr);
-                resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr);
+                if (auto _r = resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr); !_r.has_value()) {
+                    return fail(std::move(_r).error());
+                }
             }
             if (base_case_tmpl->thread_movable_if_shareable_expr) {
                 concrete.thread_movable_if_shareable_expr = clone_expr(*base_case_tmpl->thread_movable_if_shareable_expr);
-                resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr);
+                if (auto _r = resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr); !_r.has_value()) {
+                    return fail(std::move(_r).error());
+                }
             }
             for (const ClassField& field : fields_copy) concrete.fields.push_back(field);
             program_.classes.push_back(std::move(concrete));
-            clone_variadic_class_methods(cache_key, template_name, owner_id_copy, methods, params_copy,
+            if (auto _r = clone_variadic_class_methods(cache_key, template_name, owner_id_copy, methods, params_copy,
                                          /*type_replacements=*/{}, /*pack_replacements=*/{}, non_type_args);
+                !_r.has_value()) {
+                return fail(std::move(_r).error());
+            }
             variadic_instance_info_[cache_key] = VariadicInstanceInfo{template_name, non_type_args, type_args};
             return cache_key;
         }
@@ -2809,10 +3037,10 @@ private:
             }
         }
         if (!recursive_tmpl) {
-            throw DataflowError("'" + template_name + "' has no declared recursive-case specialization to match " +
+            return fail(DataflowError("'" + template_name + "' has no declared recursive-case specialization to match " +
                                      std::to_string(non_type_args.size()) + " non-type and " +
                                      std::to_string(type_args.size()) + " type argument(s) (ch05 §5.14)",
-                loc);
+                loc));
         }
 
         // Copy everything needed out of `recursive_tmpl` *before* the
@@ -2852,7 +3080,9 @@ private:
 
         Type head_concrete = type_args[0];
         std::vector<Type> tail_concrete(type_args.begin() + 1, type_args.end());
-        check_type_param_constraint(head_param, head_concrete, template_name, loc);
+        if (auto _r = check_type_param_constraint(head_param, head_concrete, template_name, loc); !_r.has_value()) {
+            return fail(std::move(_r).error());
+        }
         std::vector<std::pair<std::string, Type>> type_replacements = {{head_param.name, head_concrete}};
         std::unordered_map<std::string, std::vector<Type>> pack_replacements;
         pack_replacements[template_params_copy[leading_non_type_count + 1].name] = tail_concrete;
@@ -2871,11 +3101,14 @@ private:
                 for (std::size_t i = 0; i < leading_non_type_params.size(); i++) {
                     param_values[leading_non_type_params[i].name] = non_type_args[i];
                 }
-                base_non_type_args.push_back(evaluate_non_type_arg(*base_non_type_arg_expr, param_values));
+                auto _value = evaluate_non_type_arg(*base_non_type_arg_expr, param_values);
+                if (!_value.has_value()) return fail(std::move(_value).error());
+                base_non_type_args.push_back(std::move(_value).value());
             }
 
-            base_concrete_name =
-                instantiate_variadic_generic_type(base_template_name, base_non_type_args, tail_concrete, loc);
+            auto _base_concrete_name = instantiate_variadic_generic_type(base_template_name, base_non_type_args, tail_concrete, loc);
+            if (!_base_concrete_name.has_value()) return fail(std::move(_base_concrete_name).error());
+            base_concrete_name = std::move(_base_concrete_name).value();
         }
 
         ClassDef concrete;
@@ -2897,56 +3130,50 @@ private:
         if (thread_movable_if_movable_expr_copy) {
             concrete.thread_movable_if_movable_expr = std::move(thread_movable_if_movable_expr_copy);
             substitute_type_params_in_expr(*concrete.thread_movable_if_movable_expr, type_replacements);
-            resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr);
+            if (auto _r = resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr); !_r.has_value()) {
+                return fail(std::move(_r).error());
+            }
         }
         if (thread_movable_if_shareable_expr_copy) {
             concrete.thread_movable_if_shareable_expr = std::move(thread_movable_if_shareable_expr_copy);
             substitute_type_params_in_expr(*concrete.thread_movable_if_shareable_expr, type_replacements);
-            resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr);
+            if (auto _r = resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr); !_r.has_value()) {
+                return fail(std::move(_r).error());
+            }
         }
         for (const ClassField& f : fields_copy) {
             ClassField nf;
             nf.name = f.name;
             nf.access = f.access;
             nf.type = instantiate_type_pattern(f.type, type_replacements, pack_replacements);
-            nf.type = resolve_generic_type(nf.type, loc);
+            {
+                auto _resolved = resolve_generic_type(nf.type, loc);
+                if (!_resolved.has_value()) return fail(std::move(_resolved).error());
+                nf.type = std::move(_resolved).value();
+            }
             if (f.default_initializer) {
                 nf.default_initializer = f.default_initializer;
                 if (nf.default_initializer->expr) {
                     substitute_type_params_in_expr(*nf.default_initializer->expr, type_replacements);
-                    resolve_generic_types_in_expr(*nf.default_initializer->expr);
+                    if (auto _r = resolve_generic_types_in_expr(*nf.default_initializer->expr); !_r.has_value()) {
+                        return fail(std::move(_r).error());
+                    }
                 }
                 for (const ExprPtr& arg : nf.default_initializer->brace_args) {
                     substitute_type_params_in_expr(*arg, type_replacements);
-                    resolve_generic_types_in_expr(*arg);
+                    if (auto _r = resolve_generic_types_in_expr(*arg); !_r.has_value()) return fail(std::move(_r).error());
                 }
             }
             concrete.fields.push_back(std::move(nf));
         }
         program_.classes.push_back(std::move(concrete));
-        clone_variadic_class_methods(cache_key, template_name, owner_id_copy, methods, template_params_copy,
+        if (auto _r = clone_variadic_class_methods(cache_key, template_name, owner_id_copy, methods, template_params_copy,
                                      type_replacements, pack_replacements, non_type_args);
+            !_r.has_value()) {
+            return fail(std::move(_r).error());
+        }
         variadic_instance_info_[cache_key] = VariadicInstanceInfo{template_name, non_type_args, type_args};
         return cache_key;
-
-        } catch (...) {
-            for (std::size_t k = functions_before_instantiation; k < program_.functions.size(); ++k) {
-                known_function_names_.erase(program_.functions[k].name);
-                generic_template_indices_.erase(program_.functions[k].name);
-            }
-            if (program_.functions.size() > functions_before_instantiation) {
-                program_.functions.resize(functions_before_instantiation);
-            }
-            if (program_.classes.size() > classes_before_instantiation) {
-                program_.classes.resize(classes_before_instantiation);
-            }
-            if (program_.structs.size() > structs_before_instantiation) {
-                program_.structs.resize(structs_before_instantiation);
-            }
-            variadic_instance_info_.erase(cache_key);
-            generic_type_instance_cache_.erase(cache_key);
-            throw;
-        }
     }
 
     // ch05 §5.14: evaluates a variadic generic type's own non-type
@@ -2960,28 +3187,31 @@ private:
     // type's own recursive indexing, not a general `consteval`
     // mechanism). Throws a precise DataflowError for any other shape,
     // or an identifier not found in `param_values`.
-    [[nodiscard]] int evaluate_non_type_arg(const Expr& expr, const std::unordered_map<std::string, int>& param_values) {
+    [[nodiscard]] std::expected<int, DataflowError> evaluate_non_type_arg(const Expr& expr, const std::unordered_map<std::string, int>& param_values) {
         switch (expr.kind) {
             case ExprKind::IntegerLiteral: return static_cast<int>(expr.int_value);
             case ExprKind::Identifier: {
                 auto it = param_values.find(expr.name);
                 if (it == param_values.end()) {
-                    throw DataflowError("'" + expr.name +
+                    return std::unexpected(DataflowError("'" + expr.name +
                                          "' does not name a known non-type template parameter here (ch05 §5.14)",
-                        expr.loc);
+                        expr.loc));
                 }
                 return it->second;
             }
             case ExprKind::Binary:
                 if (expr.binary_op == BinaryOp::Add) {
-                    return evaluate_non_type_arg(*expr.lhs, param_values) +
-                           evaluate_non_type_arg(*expr.rhs, param_values);
+                    auto lhs_val = evaluate_non_type_arg(*expr.lhs, param_values);
+                    if (!lhs_val.has_value()) return std::unexpected(std::move(lhs_val).error());
+                    auto rhs_val = evaluate_non_type_arg(*expr.rhs, param_values);
+                    if (!rhs_val.has_value()) return std::unexpected(std::move(rhs_val).error());
+                    return lhs_val.value() + rhs_val.value();
                 }
                 [[fallthrough]];
             default:
-                throw DataflowError("unsupported non-type template argument expression (ch05 §5.14 only supports "
+                return std::unexpected(DataflowError("unsupported non-type template argument expression (ch05 §5.14 only supports "
                                      "an integer literal, a bare parameter name, or a '+' of the two)",
-                    expr.loc);
+                    expr.loc));
         }
     }
 
@@ -3006,7 +3236,7 @@ private:
     // since every level's own flattened layout is already byte-
     // compatible with its base, see ClassDef::base_specifiers' own
     // comment; this is purely a scpp-level type-compatibility fact).
-    void deduce_via_base_class_chain(const Expr& expr, std::size_t arg_index, const Type& pattern, Body& body,
+    [[nodiscard]] std::expected<void, DataflowError> deduce_via_base_class_chain(const Expr& expr, std::size_t arg_index, const Type& pattern, Body& body,
                                       std::unordered_map<std::string, Type>& type_bindings,
                                       std::unordered_map<std::string, int>& value_bindings,
                                       std::unordered_map<std::string, std::vector<Type>>& pack_bindings,
@@ -3014,13 +3244,15 @@ private:
         std::vector<int> search_non_type_values;
         search_non_type_values.reserve(pattern.non_type_args.size());
         for (const std::shared_ptr<Expr>& e : pattern.non_type_args) {
-            search_non_type_values.push_back(evaluate_non_type_arg(*e, value_bindings));
+            auto value = evaluate_non_type_arg(*e, value_bindings);
+            if (!value.has_value()) return std::unexpected(std::move(value).error());
+            search_non_type_values.push_back(value.value());
         }
 
         std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_index], body, signatures_);
         if (!arg_type.has_value()) {
-            throw DataflowError("cannot resolve the type of this argument for base-class deduction (ch05 §5.14)",
-                expr.loc);
+            return std::unexpected(DataflowError("cannot resolve the type of this argument for base-class deduction (ch05 §5.14)",
+                expr.loc));
         }
         Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
 
@@ -3047,10 +3279,10 @@ private:
             current_name = base->get().base_type.name;
         }
         if (!matched) {
-            throw DataflowError("no base class (direct or indirect) of the argument's own type matches the "
+            return std::unexpected(DataflowError("no base class (direct or indirect) of the argument's own type matches the "
                                  "pattern '" +
                                      pattern.name + "<...>' (ch05 §5.14 base-class deduction)",
-                expr.loc);
+                expr.loc));
         }
 
         std::size_t ti = 0;
@@ -3059,17 +3291,17 @@ private:
                 std::vector<Type> remaining_types;
                 for (; ti < matched->type_args.size(); ti++) remaining_types.push_back(matched->type_args[ti]);
                 if (!bind_type_pack_binding(pack_bindings, sym.name, remaining_types)) {
-                    throw DataflowError("deduced types for template parameter pack '" + sym.name +
+                    return std::unexpected(DataflowError("deduced types for template parameter pack '" + sym.name +
                                             "' disagree across base-class-deduction and later arguments",
-                        expr.loc);
+                        expr.loc));
                 }
                 break;
             }
             if (ti < matched->type_args.size()) {
                 if (!bind_type_binding(type_bindings, sym.name, matched->type_args[ti])) {
-                    throw DataflowError("deduced type for template parameter '" + sym.name +
+                    return std::unexpected(DataflowError("deduced type for template parameter '" + sym.name +
                                             "' disagrees across base-class-deduction and later arguments",
-                        expr.loc);
+                        expr.loc));
                 }
                 ti++;
             }
@@ -3079,6 +3311,7 @@ private:
         target.kind = TypeKind::Named;
         target.name = matched_name;
         upcasts.emplace_back(arg_index, std::move(target));
+        return {};
     }
 
     // ch05 §5.15: is `name` one of the scalar type names this version
@@ -3102,15 +3335,15 @@ private:
     // computation (e.g. Rust's `Send`/`Sync` auto-derivation) handles a
     // recursive type without looping forever.
 
-[[nodiscard]] bool evaluate_thread_bool_constant_expr(const Expr& expr, std::unordered_set<std::string> visiting = {}) {
+[[nodiscard]] std::expected<bool, DataflowError> evaluate_thread_bool_constant_expr(const Expr& expr, std::unordered_set<std::string> visiting = {}) {
     return evaluate_thread_bool_constant_expr_for_program(expr, program_, std::move(visiting));
 }
 
-[[nodiscard]] bool is_thread_movable(const Type& type, std::unordered_set<std::string> visiting = {}) {
+[[nodiscard]] std::expected<bool, DataflowError> is_thread_movable(const Type& type, std::unordered_set<std::string> visiting = {}) {
     return thread_movable_of(type, program_, std::move(visiting));
 }
 
-[[nodiscard]] bool is_thread_shareable(const Type& type, std::unordered_set<std::string> visiting = {}) {
+[[nodiscard]] std::expected<bool, DataflowError> is_thread_shareable(const Type& type, std::unordered_set<std::string> visiting = {}) {
     return thread_shareable_of(type, program_, std::move(visiting));
 }
 
@@ -3363,7 +3596,7 @@ private:
         return type_depends_on_template_params(type, template_params);
     }
 
-    [[nodiscard]] Type apply_template_bindings_to_type(
+    [[nodiscard]] std::expected<Type, DataflowError> apply_template_bindings_to_type(
         Type type, const std::unordered_map<std::string, Type>& type_bindings,
         const std::unordered_map<std::string, std::vector<Type>>& pack_bindings, SourceLocation loc) {
         for (const auto& [name, replacement] : type_bindings) type = substitute_type_param(type, name, replacement);
@@ -3377,26 +3610,37 @@ private:
         Type parameter_type_pattern;
     };
 
-    void check_thread_safety_constraints(const Expr& expr, const Function& tmpl,
+    [[nodiscard]] std::expected<void, DataflowError> check_thread_safety_constraints(const Expr& expr, const Function& tmpl,
                                          const std::unordered_map<std::string, Type>& type_bindings,
                                          const std::unordered_map<std::string, std::vector<Type>>& pack_bindings) {
         for (std::size_t i = 0; i < tmpl.params.size(); i++) {
             const Param& param = tmpl.params[i];
             if (!param.require_thread_movable && !param.require_thread_shareable) continue;
-            Type concrete = apply_template_bindings_to_type(param.type, type_bindings, pack_bindings, expr.loc);
-            if (param.require_thread_movable && !is_thread_movable(concrete)) {
-                throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
-                                         tmpl.name +
-                                         "' does not satisfy '[[scpp::thread_movable]]' (ch05 §5.15)",
-                    expr.loc);
+            auto _concrete = apply_template_bindings_to_type(param.type, type_bindings, pack_bindings, expr.loc);
+            if (!_concrete.has_value()) return std::unexpected(std::move(_concrete).error());
+            Type concrete = std::move(_concrete).value();
+            if (param.require_thread_movable) {
+                auto _movable = is_thread_movable(concrete);
+                if (!_movable.has_value()) return std::unexpected(std::move(_movable).error());
+                if (!_movable.value()) {
+                    return std::unexpected(DataflowError("argument for parameter '" + param.name + "' of generic function '" +
+                                             tmpl.name +
+                                             "' does not satisfy '[[scpp::thread_movable]]' (ch05 §5.15)",
+                        expr.loc));
+                }
             }
-            if (param.require_thread_shareable && !is_thread_shareable(concrete)) {
-                throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
-                                         tmpl.name +
-                                         "' does not satisfy '[[scpp::thread_shareable]]' (ch05 §5.15)",
-                    expr.loc);
+            if (param.require_thread_shareable) {
+                auto _shareable = is_thread_shareable(concrete);
+                if (!_shareable.has_value()) return std::unexpected(std::move(_shareable).error());
+                if (!_shareable.value()) {
+                    return std::unexpected(DataflowError("argument for parameter '" + param.name + "' of generic function '" +
+                                             tmpl.name +
+                                             "' does not satisfy '[[scpp::thread_shareable]]' (ch05 §5.15)",
+                        expr.loc));
+                }
             }
         }
+        return {};
     }
 
     [[maybe_unused]] void maybe_instantiate_generic_constructor_overloads(const std::string& class_name,
@@ -3405,7 +3649,7 @@ private:
         std::string ctor_name = class_name + "_new";
         for (const Function& tmpl : program_.functions) {
             if (!(tmpl.name == ctor_name || tmpl.name.starts_with(ctor_name + ".")) || tmpl.template_params.empty()) continue;
-            try {
+            auto _candidate = [&]() -> std::expected<void, DataflowError> {
                 std::unordered_map<std::string, Type> type_bindings;
                 std::unordered_map<std::string, int> value_bindings;
                 std::unordered_map<std::string, std::vector<Type>> pack_bindings;
@@ -3445,8 +3689,9 @@ private:
                             Type substituted = pack_type_name.has_value()
                                                    ? substitute_type_param(tmpl.params[i].type, *pack_type_name, replacement)
                                                    : tmpl.params[i].type;
-                            substituted = resolve_generic_type(std::move(substituted), loc);
-                            concrete_pack_param_types[i].push_back(std::move(substituted));
+                            auto _substituted = resolve_generic_type(std::move(substituted), loc);
+                            if (!_substituted.has_value()) return std::unexpected(std::move(_substituted).error());
+                            concrete_pack_param_types[i].push_back(std::move(_substituted).value());
                         }
                         continue;
                     }
@@ -3461,9 +3706,10 @@ private:
                             Expr fake_call;
                             fake_call.loc = loc;
                             for (const ExprPtr& arg : args) fake_call.args.push_back(clone_expr(*arg));
-                            deduce_via_base_class_chain(fake_call, arg_cursor, underlying, body, type_bindings,
+                            auto _deduced = deduce_via_base_class_chain(fake_call, arg_cursor, underlying, body, type_bindings,
                                                         value_bindings, pack_bindings,
                                                         upcasts);
+                            if (!_deduced.has_value()) return std::unexpected(std::move(_deduced).error());
                         } else {
                             deduce_template_bindings_from_type_pattern(underlying, concrete, tmpl.template_params,
                                                                        type_bindings, value_bindings, pack_bindings);
@@ -3475,12 +3721,14 @@ private:
                 for (const GenericTypeParam& tp : tmpl.template_params) {
                     if (tp.is_pack) continue;
                     bool bound = tp.is_non_type ? value_bindings.contains(tp.name) : type_bindings.contains(tp.name);
-                    if (!bound) throw DataflowError("constructor template parameter not deduced", loc);
+                    if (!bound) return std::unexpected(DataflowError("constructor template parameter not deduced", loc));
                 }
 
                 Expr fake_call;
                 fake_call.loc = loc;
-                check_thread_safety_constraints(fake_call, tmpl, type_bindings, {});
+                if (auto _r = check_thread_safety_constraints(fake_call, tmpl, type_bindings, {}); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
 
                 std::string cache_key = tmpl.name;
                 for (const GenericTypeParam& tp : tmpl.template_params) {
@@ -3500,7 +3748,7 @@ private:
                     if (!tmpl.params[i].is_parameter_pack) continue;
                     for (const Type& t : concrete_pack_param_types[i]) cache_key += "." + mangle_type_for_clone_name(t);
                 }
-                if (generic_function_clone_cache_.contains(cache_key)) continue;
+                if (generic_function_clone_cache_.contains(cache_key)) return {};
                 generic_function_clone_cache_[cache_key] = tmpl.name;
 
                 Function clone;
@@ -3522,7 +3770,9 @@ private:
                 for (const auto& [name, replacement] : type_bindings) {
                     clone.return_type = substitute_type_param(clone.return_type, name, replacement);
                 }
-                clone.return_type = resolve_generic_type(clone.return_type, tmpl.loc);
+                auto _return_type = resolve_generic_type(clone.return_type, tmpl.loc);
+                if (!_return_type.has_value()) return std::unexpected(std::move(_return_type).error());
+                clone.return_type = std::move(_return_type).value();
                 clone.params.reserve(tmpl.params.size());
                 std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
                 for (std::size_t i = 0; i < tmpl.params.size(); i++) {
@@ -3561,7 +3811,9 @@ private:
                             p.type = substitute_type_param(p.type, name, replacement);
                         }
                     }
-                    p.type = resolve_generic_type(p.type, tmpl.loc);
+                    auto _p_type = resolve_generic_type(p.type, tmpl.loc);
+                    if (!_p_type.has_value()) return std::unexpected(std::move(_p_type).error());
+                    p.type = std::move(_p_type).value();
                     if (is_forwarding_reference_parameter(tmpl.params[i], tmpl.template_params) && arg_cursor > 0) {
                         std::optional<Type> instantiated_arg_type = infer_expr_type(*args[arg_cursor - 1], body, signatures_);
                         if (instantiated_arg_type.has_value()) {
@@ -3576,21 +3828,31 @@ private:
                         substitute_type_param_in_stmt(*clone.body, name, replacement);
                     }
                     for (const auto& [pack_name, concrete_names] : pack_param_names) {
-                        expand_pack_expansions_in_stmt(*clone.body, pack_name, concrete_names);
-                        expand_pack_folds_in_stmt(*clone.body, pack_name, concrete_names);
+                        if (auto _r = expand_pack_expansions_in_stmt(*clone.body, pack_name, concrete_names); !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
+                        if (auto _r = expand_pack_folds_in_stmt(*clone.body, pack_name, concrete_names); !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
                     }
-                    resolve_generic_types_in_stmt(*clone.body);
+                    if (auto _r = resolve_generic_types_in_stmt(*clone.body); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
                 known_function_names_.insert(clone.name);
                 program_.functions.push_back(std::move(clone));
-                walk_new_concrete_function(program_.functions.size() - 1);
-            } catch (const DataflowError&) {
+                if (auto _r = walk_new_concrete_function(program_.functions.size() - 1); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                return {};
+            }();
+            if (!_candidate.has_value()) {
                 continue;
             }
         }
     }
 
-    std::string instantiate_full_header_generic_clone(const Function& tmpl,
+    [[nodiscard]] std::expected<std::string, DataflowError> instantiate_full_header_generic_clone(const Function& tmpl,
                                                       const std::unordered_map<std::string, Type>& type_bindings,
                                                       const std::unordered_map<std::string, int>& value_bindings,
                                                       const std::unordered_map<std::string, std::vector<Type>>& pack_bindings,
@@ -3640,7 +3902,9 @@ private:
         clone.receiver_ref_qualifier = tmpl.receiver_ref_qualifier;
         clone.is_static = tmpl.is_static;
         clone.access = tmpl.access;
-        clone.return_type = apply_template_bindings_to_type(tmpl.return_type, type_bindings, pack_bindings, tmpl.loc);
+        auto _clone_return_type = apply_template_bindings_to_type(tmpl.return_type, type_bindings, pack_bindings, tmpl.loc);
+        if (!_clone_return_type.has_value()) return std::unexpected(std::move(_clone_return_type).error());
+        clone.return_type = std::move(_clone_return_type).value();
         clone.return_lifetime = tmpl.return_lifetime;
         clone.params.reserve(tmpl.params.size());
         std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
@@ -3678,7 +3942,9 @@ private:
                 if (i < concrete_param_types.size() && i < use_concrete_param_types.size() && use_concrete_param_types[i]) {
                     p.type = concrete_param_types[i];
                 } else {
-                    p.type = apply_template_bindings_to_type(p.type, type_bindings, pack_bindings, tmpl.loc);
+                    auto _p_type = apply_template_bindings_to_type(p.type, type_bindings, pack_bindings, tmpl.loc);
+                    if (!_p_type.has_value()) return std::unexpected(std::move(_p_type).error());
+                    p.type = std::move(_p_type).value();
                 }
             }
             clone.params.push_back(std::move(p));
@@ -3688,18 +3954,26 @@ private:
             substitute_type_bindings_in_stmt(*clone.body, type_bindings);
             substitute_type_packs_in_stmt(*clone.body, pack_bindings);
             for (const auto& [pack_name, concrete_names] : pack_param_names) {
-                expand_pack_expansions_in_stmt(*clone.body, pack_name, concrete_names);
-                expand_pack_folds_in_stmt(*clone.body, pack_name, concrete_names);
+                if (auto _r = expand_pack_expansions_in_stmt(*clone.body, pack_name, concrete_names); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                if (auto _r = expand_pack_folds_in_stmt(*clone.body, pack_name, concrete_names); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
             }
-            resolve_generic_types_in_stmt(*clone.body);
+            if (auto _r = resolve_generic_types_in_stmt(*clone.body); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
         known_function_names_.insert(clone.name);
         program_.functions.push_back(std::move(clone));
-        walk_new_concrete_function(program_.functions.size() - 1);
+        if (auto _r = walk_new_concrete_function(program_.functions.size() - 1); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
         return cache_key;
     }
 
-    void seed_explicit_template_arguments(const Expr& expr, const Function& tmpl,
+    [[nodiscard]] std::expected<void, DataflowError> seed_explicit_template_arguments(const Expr& expr, const Function& tmpl,
                                           std::unordered_map<std::string, Type>& type_bindings,
                                           std::unordered_map<std::string, int>& value_bindings,
                                           std::unordered_map<std::string, std::vector<Type>>& pack_bindings) {
@@ -3711,9 +3985,9 @@ private:
                 while (explicit_index < expr.explicit_template_args.size()) {
                     const ExplicitTemplateArg& arg = expr.explicit_template_args[explicit_index++];
                     if (!arg.is_type) {
-                        throw DataflowError("template parameter pack '" + tp.name + "' of generic function '" +
+                        return std::unexpected(DataflowError("template parameter pack '" + tp.name + "' of generic function '" +
                                                 tmpl.name + "' only accepts type arguments in this version",
-                            expr.loc);
+                            expr.loc));
                     }
                     pack.push_back(arg.type);
                 }
@@ -3724,27 +3998,30 @@ private:
             const ExplicitTemplateArg& arg = expr.explicit_template_args[explicit_index++];
             if (tp.is_non_type) {
                 if (arg.is_type || !arg.value) {
-                    throw DataflowError("template parameter '" + tp.name + "' of generic function '" + tmpl.name +
+                    return std::unexpected(DataflowError("template parameter '" + tp.name + "' of generic function '" + tmpl.name +
                                             "' is a non-type parameter, but a type argument was given (ch05 §5.11)",
-                        expr.loc);
+                        expr.loc));
                 }
-                value_bindings[tp.name] = evaluate_non_type_arg(*arg.value, value_bindings);
+                auto _value = evaluate_non_type_arg(*arg.value, value_bindings);
+                if (!_value.has_value()) return std::unexpected(std::move(_value).error());
+                value_bindings[tp.name] = _value.value();
             } else {
                 if (!arg.is_type) {
-                    throw DataflowError("template parameter '" + tp.name + "' of generic function '" + tmpl.name +
+                    return std::unexpected(DataflowError("template parameter '" + tp.name + "' of generic function '" + tmpl.name +
                                             "' is a type parameter, but a non-type argument was given (ch05 §5.11)",
-                        expr.loc);
+                        expr.loc));
                 }
                 type_bindings[tp.name] = arg.type;
             }
         }
         if (explicit_index != expr.explicit_template_args.size()) {
-            throw DataflowError("too many explicit template arguments for generic function '" + tmpl.name + "'",
-                expr.loc);
+            return std::unexpected(DataflowError("too many explicit template arguments for generic function '" + tmpl.name + "'",
+                expr.loc));
         }
+        return {};
     }
 
-    void populate_concrete_pack_param_types(
+    [[nodiscard]] std::expected<void, DataflowError> populate_concrete_pack_param_types(
         const Function& tmpl, const std::unordered_map<std::string, std::vector<Type>>& pack_bindings,
         std::vector<std::vector<Type>>& concrete_pack_param_types) {
         for (std::size_t i = 0; i < tmpl.params.size(); i++) {
@@ -3755,10 +4032,12 @@ private:
             auto pack_it = pack_bindings.find(*pack_type_name);
             if (pack_it == pack_bindings.end()) continue;
             for (const Type& concrete : pack_it->second) {
-                concrete_pack_param_types[i].push_back(
-                    resolve_generic_type(substitute_type_param(tmpl.params[i].type, *pack_type_name, concrete), tmpl.loc));
+                auto _resolved = resolve_generic_type(substitute_type_param(tmpl.params[i].type, *pack_type_name, concrete), tmpl.loc);
+                if (!_resolved.has_value()) return std::unexpected(std::move(_resolved).error());
+                concrete_pack_param_types[i].push_back(std::move(_resolved).value());
             }
         }
+        return {};
     }
 
     [[nodiscard]] bool has_non_generic_overload(const std::string& name) const {
@@ -3786,133 +4065,141 @@ private:
     [[nodiscard]] bool try_resolve_full_header_generic_function_call(const Expr& expr, const Function& tmpl, Body& body,
                                                                      std::size_t param_offset,
                                                                      FullHeaderGenericCallResolution& resolution) {
-        try {
-            Function tmpl_snapshot = clone_function(tmpl);
-            const Function& stable_tmpl = tmpl_snapshot;
-            resolution.type_bindings.clear();
-            resolution.value_bindings.clear();
-            resolution.pack_bindings.clear();
-            resolution.upcasts.clear();
-            resolution.deferred_obligations.clear();
-            resolution.concrete_pack_param_types.assign(stable_tmpl.params.size(), {});
+        Function tmpl_snapshot = clone_function(tmpl);
+        const Function& stable_tmpl = tmpl_snapshot;
+        resolution.type_bindings.clear();
+        resolution.value_bindings.clear();
+        resolution.pack_bindings.clear();
+        resolution.upcasts.clear();
+        resolution.deferred_obligations.clear();
+        resolution.concrete_pack_param_types.assign(stable_tmpl.params.size(), {});
 
-            ExprPtr expr_copy = clone_expr(expr);
-            seed_explicit_template_arguments(*expr_copy, stable_tmpl, resolution.type_bindings, resolution.value_bindings,
-                                             resolution.pack_bindings);
+        ExprPtr expr_copy = clone_expr(expr);
+        if (auto _r = seed_explicit_template_arguments(*expr_copy, stable_tmpl, resolution.type_bindings, resolution.value_bindings,
+                                         resolution.pack_bindings);
+            !_r.has_value()) {
+            return false;
+        }
 
-            std::size_t arg_cursor = 0;
-            std::size_t param_cursor = param_offset;
-            for (; param_cursor < stable_tmpl.params.size() && arg_cursor < expr.args.size(); param_cursor++) {
-                if (stable_tmpl.params[param_cursor].is_parameter_pack) {
-                    std::optional<std::string> pack_type_name =
-                        referenced_type_pack_param_name(stable_tmpl.params[param_cursor].type, stable_tmpl.template_params);
-                    const Type& pack_param_type = stable_tmpl.params[param_cursor].type;
-                    const Type& underlying = pack_param_type.kind == TypeKind::Reference ? *pack_param_type.pointee
-                                                                                         : pack_param_type;
-                    bool direct_pack = pack_type_name.has_value() && underlying.is_pack_expansion &&
-                                       underlying.kind == TypeKind::Named && underlying.template_args.empty() &&
-                                       underlying.non_type_args.empty() && underlying.name == *pack_type_name;
-                    std::vector<Type> deduced_pack_types;
-                    for (; arg_cursor < expr.args.size(); arg_cursor++) {
-                        std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
-                        if (!arg_type.has_value()) return false;
-                        Type concrete = is_forwarding_reference_parameter(stable_tmpl.params[param_cursor], stable_tmpl.template_params)
-                                            ? forwarding_reference_deduced_type(*expr.args[arg_cursor], *arg_type, body)
-                                            : (arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type);
-                        if (pack_type_name.has_value() && !direct_pack) {
-                            std::unordered_map<std::string, Type> arg_type_bindings;
-                            std::unordered_map<std::string, int> arg_value_bindings;
-                            std::unordered_map<std::string, std::vector<Type>> arg_pack_bindings;
-                            if (!deduce_template_bindings_from_type_pattern(
-                                    underlying, concrete, stable_tmpl.template_params, arg_type_bindings,
-                                    arg_value_bindings, arg_pack_bindings)) {
-                                return false;
-                            }
-                            for (const auto& [name, type] : arg_type_bindings) {
-                                if (!bind_type_binding(resolution.type_bindings, name, type)) return false;
-                            }
-                            auto pack_it = arg_pack_bindings.find(*pack_type_name);
-                            if (pack_it == arg_pack_bindings.end()) return false;
-                            deduced_pack_types.insert(
-                                deduced_pack_types.end(), pack_it->second.begin(), pack_it->second.end());
-                        } else {
-                            deduced_pack_types.push_back(concrete);
-                        }
-                    }
-                    if (pack_type_name.has_value() &&
-                        !bind_type_pack_binding(resolution.pack_bindings, *pack_type_name, deduced_pack_types)) {
-                        return false;
-                    }
-                    continue;
-                }
-                const Type& param_type = stable_tmpl.params[param_cursor].type;
-                const Type& underlying = param_type.kind == TypeKind::Reference ? *param_type.pointee : param_type;
-                std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
-                if (!arg_type.has_value()) return false;
-                Type concrete = is_forwarding_reference_parameter(stable_tmpl.params[param_cursor],
-                                                                  stable_tmpl.template_params)
-                                    ? forwarding_reference_deduced_type(*expr.args[arg_cursor], *arg_type, body)
-                                    : (arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type);
-                if (underlying.kind == TypeKind::Named && variadic_generic_type_names_.contains(underlying.name)) {
-                    if (argument_type_can_participate_in_variadic_base_deduction(*expr_copy, arg_cursor, underlying.name,
-                                                                                 body)) {
-                        ExprPtr expr_copy_for_base_deduction = clone_expr(expr);
-                        deduce_via_base_class_chain(*expr_copy_for_base_deduction, arg_cursor, underlying, body,
-                                                    resolution.type_bindings, resolution.value_bindings,
-                                                    resolution.pack_bindings, resolution.upcasts);
-                    }
-                } else {
-                    if (!deduce_template_bindings_from_type_pattern(underlying, concrete, stable_tmpl.template_params,
-                                                                    resolution.type_bindings, resolution.value_bindings,
-                                                                    resolution.pack_bindings)) {
-                        return false;
-                    }
-                }
-                if (type_depends_on_template_params(param_type, stable_tmpl.template_params)) {
-                    if (type_still_depends_on_unbound_template_params(param_type, stable_tmpl.template_params,
-                                                                      resolution.type_bindings,
-                                                                      resolution.pack_bindings)) {
-                        resolution.deferred_obligations.push_back(
-                            DeferredTemplateObligation{param_cursor, arg_cursor, param_type});
-                    }
-                }
-                arg_cursor++;
-            }
-            if (arg_cursor != expr.args.size()) return false;
-            for (; param_cursor < stable_tmpl.params.size(); param_cursor++) {
-                if (stable_tmpl.params[param_cursor].is_parameter_pack) continue;
-                if (stable_tmpl.params[param_cursor].default_expr == nullptr) return false;
-            }
-
-            populate_concrete_pack_param_types(stable_tmpl, resolution.pack_bindings, resolution.concrete_pack_param_types);
-
-            for (const GenericTypeParam& tp : stable_tmpl.template_params) {
-                if (tp.is_pack) continue;
-                bool bound =
-                    tp.is_non_type ? resolution.value_bindings.contains(tp.name) : resolution.type_bindings.contains(tp.name);
-                if (!bound) return false;
-            }
-
-            for (const DeferredTemplateObligation& obligation : resolution.deferred_obligations) {
-                Type concrete_pattern = apply_template_bindings_to_type(
-                    obligation.parameter_type_pattern, resolution.type_bindings, resolution.pack_bindings, expr.loc);
-                if (is_forwarding_reference_parameter(stable_tmpl.params[obligation.param_index],
-                                                      stable_tmpl.template_params)) {
-                    std::optional<Type> arg_type = infer_expr_type(*expr.args[obligation.arg_index], body, signatures_);
+        std::size_t arg_cursor = 0;
+        std::size_t param_cursor = param_offset;
+        for (; param_cursor < stable_tmpl.params.size() && arg_cursor < expr.args.size(); param_cursor++) {
+            if (stable_tmpl.params[param_cursor].is_parameter_pack) {
+                std::optional<std::string> pack_type_name =
+                    referenced_type_pack_param_name(stable_tmpl.params[param_cursor].type, stable_tmpl.template_params);
+                const Type& pack_param_type = stable_tmpl.params[param_cursor].type;
+                const Type& underlying = pack_param_type.kind == TypeKind::Reference ? *pack_param_type.pointee
+                                                                                     : pack_param_type;
+                bool direct_pack = pack_type_name.has_value() && underlying.is_pack_expansion &&
+                                   underlying.kind == TypeKind::Named && underlying.template_args.empty() &&
+                                   underlying.non_type_args.empty() && underlying.name == *pack_type_name;
+                std::vector<Type> deduced_pack_types;
+                for (; arg_cursor < expr.args.size(); arg_cursor++) {
+                    std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
                     if (!arg_type.has_value()) return false;
-                    concrete_pattern = forwarding_reference_deduced_type(*expr.args[obligation.arg_index], *arg_type, body);
+                    Type concrete = is_forwarding_reference_parameter(stable_tmpl.params[param_cursor], stable_tmpl.template_params)
+                                        ? forwarding_reference_deduced_type(*expr.args[arg_cursor], *arg_type, body)
+                                        : (arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type);
+                    if (pack_type_name.has_value() && !direct_pack) {
+                        std::unordered_map<std::string, Type> arg_type_bindings;
+                        std::unordered_map<std::string, int> arg_value_bindings;
+                        std::unordered_map<std::string, std::vector<Type>> arg_pack_bindings;
+                        if (!deduce_template_bindings_from_type_pattern(
+                                underlying, concrete, stable_tmpl.template_params, arg_type_bindings,
+                                arg_value_bindings, arg_pack_bindings)) {
+                            return false;
+                        }
+                        for (const auto& [name, type] : arg_type_bindings) {
+                            if (!bind_type_binding(resolution.type_bindings, name, type)) return false;
+                        }
+                        auto pack_it = arg_pack_bindings.find(*pack_type_name);
+                        if (pack_it == arg_pack_bindings.end()) return false;
+                        deduced_pack_types.insert(
+                            deduced_pack_types.end(), pack_it->second.begin(), pack_it->second.end());
+                    } else {
+                        deduced_pack_types.push_back(concrete);
+                    }
                 }
-                if (type_depends_on_template_params(concrete_pattern, stable_tmpl.template_params)) return false;
-                if (!argument_matches_parameter(*expr.args[obligation.arg_index], concrete_pattern, body, signatures_)) {
+                if (pack_type_name.has_value() &&
+                    !bind_type_pack_binding(resolution.pack_bindings, *pack_type_name, deduced_pack_types)) {
+                    return false;
+                }
+                continue;
+            }
+            const Type& param_type = stable_tmpl.params[param_cursor].type;
+            const Type& underlying = param_type.kind == TypeKind::Reference ? *param_type.pointee : param_type;
+            std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
+            if (!arg_type.has_value()) return false;
+            Type concrete = is_forwarding_reference_parameter(stable_tmpl.params[param_cursor],
+                                                              stable_tmpl.template_params)
+                                ? forwarding_reference_deduced_type(*expr.args[arg_cursor], *arg_type, body)
+                                : (arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type);
+            if (underlying.kind == TypeKind::Named && variadic_generic_type_names_.contains(underlying.name)) {
+                if (argument_type_can_participate_in_variadic_base_deduction(*expr_copy, arg_cursor, underlying.name,
+                                                                             body)) {
+                    ExprPtr expr_copy_for_base_deduction = clone_expr(expr);
+                    auto _deduced = deduce_via_base_class_chain(*expr_copy_for_base_deduction, arg_cursor, underlying, body,
+                                                resolution.type_bindings, resolution.value_bindings,
+                                                resolution.pack_bindings, resolution.upcasts);
+                    if (!_deduced.has_value()) return false;
+                }
+            } else {
+                if (!deduce_template_bindings_from_type_pattern(underlying, concrete, stable_tmpl.template_params,
+                                                                resolution.type_bindings, resolution.value_bindings,
+                                                                resolution.pack_bindings)) {
                     return false;
                 }
             }
+            if (type_depends_on_template_params(param_type, stable_tmpl.template_params)) {
+                if (type_still_depends_on_unbound_template_params(param_type, stable_tmpl.template_params,
+                                                                  resolution.type_bindings,
+                                                                  resolution.pack_bindings)) {
+                    resolution.deferred_obligations.push_back(
+                        DeferredTemplateObligation{param_cursor, arg_cursor, param_type});
+                }
+            }
+            arg_cursor++;
+        }
+        if (arg_cursor != expr.args.size()) return false;
+        for (; param_cursor < stable_tmpl.params.size(); param_cursor++) {
+            if (stable_tmpl.params[param_cursor].is_parameter_pack) continue;
+            if (stable_tmpl.params[param_cursor].default_expr == nullptr) return false;
+        }
 
-            check_thread_safety_constraints(*expr_copy, stable_tmpl, resolution.type_bindings, resolution.pack_bindings);
-            return true;
-        } catch (const DataflowError&) {
+        if (auto _r = populate_concrete_pack_param_types(stable_tmpl, resolution.pack_bindings, resolution.concrete_pack_param_types);
+            !_r.has_value()) {
             return false;
         }
+
+        for (const GenericTypeParam& tp : stable_tmpl.template_params) {
+            if (tp.is_pack) continue;
+            bool bound =
+                tp.is_non_type ? resolution.value_bindings.contains(tp.name) : resolution.type_bindings.contains(tp.name);
+            if (!bound) return false;
+        }
+
+        for (const DeferredTemplateObligation& obligation : resolution.deferred_obligations) {
+            auto _concrete_pattern = apply_template_bindings_to_type(
+                obligation.parameter_type_pattern, resolution.type_bindings, resolution.pack_bindings, expr.loc);
+            if (!_concrete_pattern.has_value()) return false;
+            Type concrete_pattern = std::move(_concrete_pattern).value();
+            if (is_forwarding_reference_parameter(stable_tmpl.params[obligation.param_index],
+                                                  stable_tmpl.template_params)) {
+                std::optional<Type> arg_type = infer_expr_type(*expr.args[obligation.arg_index], body, signatures_);
+                if (!arg_type.has_value()) return false;
+                concrete_pattern = forwarding_reference_deduced_type(*expr.args[obligation.arg_index], *arg_type, body);
+            }
+            if (type_depends_on_template_params(concrete_pattern, stable_tmpl.template_params)) return false;
+            if (!argument_matches_parameter(*expr.args[obligation.arg_index], concrete_pattern, body, signatures_)) {
+                return false;
+            }
+        }
+
+        if (auto _r = check_thread_safety_constraints(*expr_copy, stable_tmpl, resolution.type_bindings, resolution.pack_bindings);
+            !_r.has_value()) {
+            return false;
+        }
+        return true;
     }
 
     struct AbbreviatedGenericCallResolution {
@@ -3985,15 +4272,25 @@ private:
             const std::vector<Type>* types_to_check = param.is_parameter_pack ? &resolution.concrete_pack_param_types[i]
                                                                               : nullptr;
             if (types_to_check == nullptr) {
-                if (param.require_thread_movable && !is_thread_movable(resolution.concrete_param_types[i])) return false;
-                if (param.require_thread_shareable && !is_thread_shareable(resolution.concrete_param_types[i])) {
-                    return false;
+                if (param.require_thread_movable) {
+                    auto _movable = is_thread_movable(resolution.concrete_param_types[i]);
+                    if (!_movable.has_value() || !_movable.value()) return false;
+                }
+                if (param.require_thread_shareable) {
+                    auto _shareable = is_thread_shareable(resolution.concrete_param_types[i]);
+                    if (!_shareable.has_value() || !_shareable.value()) return false;
                 }
                 continue;
             }
             for (const Type& concrete_type : *types_to_check) {
-                if (param.require_thread_movable && !is_thread_movable(concrete_type)) return false;
-                if (param.require_thread_shareable && !is_thread_shareable(concrete_type)) return false;
+                if (param.require_thread_movable) {
+                    auto _movable = is_thread_movable(concrete_type);
+                    if (!_movable.has_value() || !_movable.value()) return false;
+                }
+                if (param.require_thread_shareable) {
+                    auto _shareable = is_thread_shareable(concrete_type);
+                    if (!_shareable.has_value() || !_shareable.value()) return false;
+                }
             }
         }
         return true;
@@ -4023,7 +4320,7 @@ private:
         return std::nullopt;
     }
 
-    [[nodiscard]] Type apply_explicit_generic_type_arguments(const std::string& template_name,
+    [[nodiscard]] std::expected<Type, DataflowError> apply_explicit_generic_type_arguments(const std::string& template_name,
                                                              const std::vector<GenericTypeParam>& template_params,
                                                              const Expr& expr) {
         std::unordered_map<std::string, Type> type_bindings;
@@ -4037,9 +4334,9 @@ private:
                 while (explicit_index < expr.explicit_template_args.size()) {
                     const ExplicitTemplateArg& arg = expr.explicit_template_args[explicit_index++];
                     if (!arg.is_type) {
-                        throw DataflowError("template parameter pack '" + tp.name + "' of generic type '" +
+                        return std::unexpected(DataflowError("template parameter pack '" + tp.name + "' of generic type '" +
                                                 template_name + "' only accepts type arguments in this version",
-                                            expr.loc);
+                                            expr.loc));
                     }
                     pack.push_back(arg.type);
                 }
@@ -4047,29 +4344,31 @@ private:
                 continue;
             }
             if (explicit_index >= expr.explicit_template_args.size()) {
-                throw DataflowError("not enough explicit template arguments for generic type '" + template_name + "'",
-                                    expr.loc);
+                return std::unexpected(DataflowError("not enough explicit template arguments for generic type '" + template_name + "'",
+                                    expr.loc));
             }
             const ExplicitTemplateArg& arg = expr.explicit_template_args[explicit_index++];
             if (tp.is_non_type) {
                 if (arg.is_type || !arg.value) {
-                    throw DataflowError("template parameter '" + tp.name + "' of generic type '" + template_name +
+                    return std::unexpected(DataflowError("template parameter '" + tp.name + "' of generic type '" + template_name +
                                             "' is a non-type parameter, but a type argument was given",
-                                        expr.loc);
+                                        expr.loc));
                 }
-                value_bindings[tp.name] = evaluate_non_type_arg(*arg.value, value_bindings);
+                auto _value = evaluate_non_type_arg(*arg.value, value_bindings);
+                if (!_value.has_value()) return std::unexpected(std::move(_value).error());
+                value_bindings[tp.name] = _value.value();
             } else {
                 if (!arg.is_type) {
-                    throw DataflowError("template parameter '" + tp.name + "' of generic type '" + template_name +
+                    return std::unexpected(DataflowError("template parameter '" + tp.name + "' of generic type '" + template_name +
                                             "' is a type parameter, but a non-type argument was given",
-                                        expr.loc);
+                                        expr.loc));
                 }
                 type_bindings[tp.name] = arg.type;
             }
         }
         if (explicit_index != expr.explicit_template_args.size()) {
-            throw DataflowError("too many explicit template arguments for generic type '" + template_name + "'",
-                                expr.loc);
+            return std::unexpected(DataflowError("too many explicit template arguments for generic type '" + template_name + "'",
+                                expr.loc));
         }
         Type type;
         type.kind = TypeKind::Named;
@@ -4084,9 +4383,9 @@ private:
             if (tp.is_non_type) {
                 auto value_it = value_bindings.find(tp.name);
                 if (value_it == value_bindings.end()) {
-                    throw DataflowError("cannot form generic type '" + template_name +
+                    return std::unexpected(DataflowError("cannot form generic type '" + template_name +
                                             "': missing explicit argument for non-type parameter '" + tp.name + "'",
-                                        expr.loc);
+                                        expr.loc));
                 }
                 type.non_type_args.push_back(
                     std::shared_ptr<Expr>(make_integer_literal_expr(expr.loc, value_it->second).release()));
@@ -4094,16 +4393,16 @@ private:
             }
             auto type_it = type_bindings.find(tp.name);
             if (type_it == type_bindings.end()) {
-                throw DataflowError("cannot form generic type '" + template_name +
+                return std::unexpected(DataflowError("cannot form generic type '" + template_name +
                                         "': missing explicit argument for type parameter '" + tp.name + "'",
-                                    expr.loc);
+                                    expr.loc));
             }
             type.template_args.push_back(type_it->second);
         }
         return resolve_generic_type(std::move(type), expr.loc);
     }
 
-    [[nodiscard]] Type build_deduced_generic_type(const std::string& template_name,
+    [[nodiscard]] std::expected<Type, DataflowError> build_deduced_generic_type(const std::string& template_name,
                                                   const std::vector<GenericTypeParam>& template_params,
                                                   const FullHeaderGenericCallResolution& resolution,
                                                   SourceLocation loc) {
@@ -4120,9 +4419,9 @@ private:
             if (tp.is_non_type) {
                 auto value_it = resolution.value_bindings.find(tp.name);
                 if (value_it == resolution.value_bindings.end()) {
-                    throw DataflowError("cannot deduce template parameter '" + tp.name + "' of generic type '" +
+                    return std::unexpected(DataflowError("cannot deduce template parameter '" + tp.name + "' of generic type '" +
                                             template_name + "' from this constructor call",
-                                        loc);
+                                        loc));
                 }
                 type.non_type_args.push_back(
                     std::shared_ptr<Expr>(make_integer_literal_expr(loc, value_it->second).release()));
@@ -4130,27 +4429,29 @@ private:
             }
             auto type_it = resolution.type_bindings.find(tp.name);
             if (type_it == resolution.type_bindings.end()) {
-                throw DataflowError("cannot deduce template parameter '" + tp.name + "' of generic type '" +
+                return std::unexpected(DataflowError("cannot deduce template parameter '" + tp.name + "' of generic type '" +
                                         template_name + "' from this constructor call",
-                                    loc);
+                                    loc));
             }
             type.template_args.push_back(type_it->second);
         }
         return resolve_generic_type(std::move(type), loc);
     }
 
-    [[nodiscard]] bool maybe_resolve_generic_type_constructor_call(Expr& expr, Body& body) {
+    [[nodiscard]] std::expected<bool, DataflowError> maybe_resolve_generic_type_constructor_call(Expr& expr, Body& body) {
         if (expr.kind != ExprKind::Call || expr.lhs != nullptr || !generic_type_template_names_.contains(expr.name)) {
             return false;
         }
         if (!expr.explicit_template_args.empty()) {
             std::optional<std::vector<GenericTypeParam>> template_params = primary_generic_type_template_params(expr.name);
             if (!template_params.has_value()) {
-                throw DataflowError("internal error: missing primary template metadata for generic type '" + expr.name +
+                return std::unexpected(DataflowError("internal error: missing primary template metadata for generic type '" + expr.name +
                                         "'",
-                                    expr.loc);
+                                    expr.loc));
             }
-            Type concrete = apply_explicit_generic_type_arguments(expr.name, *template_params, expr);
+            auto _concrete = apply_explicit_generic_type_arguments(expr.name, *template_params, expr);
+            if (!_concrete.has_value()) return std::unexpected(std::move(_concrete).error());
+            Type concrete = std::move(_concrete).value();
             expr.name = concrete.name;
             expr.explicit_template_args.clear();
             expr.explicit_global_qualification = false;
@@ -4159,8 +4460,8 @@ private:
 
         std::optional<std::vector<GenericTypeParam>> template_params = primary_generic_type_template_params(expr.name);
         if (!template_params.has_value()) {
-            throw DataflowError("internal error: missing primary template metadata for generic type '" + expr.name + "'",
-                                expr.loc);
+            return std::unexpected(DataflowError("internal error: missing primary template metadata for generic type '" + expr.name + "'",
+                                expr.loc));
         }
 
         std::optional<Type> resolved_type;
@@ -4184,28 +4485,30 @@ private:
             if (!try_resolve_full_header_generic_function_call(expr, deduction_tmpl, body, /*param_offset=*/1, resolution)) {
                 continue;
             }
-            Type candidate = build_deduced_generic_type(expr.name, *template_params, resolution, expr.loc);
+            auto _candidate = build_deduced_generic_type(expr.name, *template_params, resolution, expr.loc);
+            if (!_candidate.has_value()) return std::unexpected(std::move(_candidate).error());
+            Type candidate = std::move(_candidate).value();
             if (!resolved_type.has_value()) {
                 resolved_type = std::move(candidate);
                 continue;
             }
             if (!types_equal(*resolved_type, candidate)) {
-                throw DataflowError("class template argument deduction for generic type '" + expr.name +
+                return std::unexpected(DataflowError("class template argument deduction for generic type '" + expr.name +
                                         "' is ambiguous for this constructor call",
-                                    expr.loc);
+                                    expr.loc));
             }
         }
         if (!resolved_type.has_value()) {
-            throw DataflowError("cannot deduce template arguments for generic type '" + expr.name +
+            return std::unexpected(DataflowError("cannot deduce template arguments for generic type '" + expr.name +
                                     "' from this constructor call",
-                                expr.loc);
+                                expr.loc));
         }
         expr.name = resolved_type->name;
         expr.explicit_global_qualification = false;
         return true;
     }
 
-    void monomorphize_abbreviated_generic_function_call(Expr& expr, const Function& tmpl, Body& body, std::size_t param_offset = 0,
+    [[nodiscard]] std::expected<void, DataflowError> monomorphize_abbreviated_generic_function_call(Expr& expr, const Function& tmpl, Body& body, std::size_t param_offset = 0,
                                                         const std::string& cloned_method_suffix_prefix = "") {
         // ch05 §5.11/§5.12: `tmpl` is frequently a reference straight
         // into `program_.functions` (e.g. the synthesized closure "call"
@@ -4238,18 +4541,18 @@ private:
             if (param.is_parameter_pack) {
                 for (; arg_cursor < expr.args.size(); arg_cursor++) {
                     std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
-                    if (!arg_type.has_value()) return;
+                    if (!arg_type.has_value()) return {};
                     Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
                     if (param.generic_concept != "$auto") {
                         auto concept_it = concepts_by_name_.find(param.generic_concept);
-                        if (concept_it == concepts_by_name_.end()) return;
+                        if (concept_it == concepts_by_name_.end()) return {};
                         if (!type_satisfies_concept(named, *concept_it->second, program_)) {
-                            throw DataflowError("argument type '" + named.name + "' does not satisfy concept '" +
+                            return std::unexpected(DataflowError("argument type '" + named.name + "' does not satisfy concept '" +
                                                     param.generic_concept + "' required by generic function '" +
                                                     stable_tmpl.name +
                                                     "' (ch05 §5.11 -- every requirement's method must exist with a "
                                                     "matching signature)",
-                                expr.loc);
+                                expr.loc));
                         }
                     }
                     concrete_pack_param_types[i].push_back(
@@ -4264,19 +4567,19 @@ private:
                 arg_cursor++;
                 continue;
             }
-            if (arg_cursor >= expr.args.size()) return;
+            if (arg_cursor >= expr.args.size()) return {};
             std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
-            if (!arg_type.has_value()) return;
+            if (!arg_type.has_value()) return {};
             Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
             if (param.generic_concept != "$auto") {
                 auto concept_it = concepts_by_name_.find(param.generic_concept);
-                if (concept_it == concepts_by_name_.end()) return;
+                if (concept_it == concepts_by_name_.end()) return {};
                 if (!type_satisfies_concept(named, *concept_it->second, program_)) {
-                    throw DataflowError("argument type '" + named.name + "' does not satisfy concept '" +
+                    return std::unexpected(DataflowError("argument type '" + named.name + "' does not satisfy concept '" +
                                            param.generic_concept + "' required by generic function '" + stable_tmpl.name +
                                            "' (ch05 §5.11 -- every requirement's method must exist with a matching "
                                            "signature)",
-                        expr.loc);
+                        expr.loc));
                 }
             }
             concrete_param_types.push_back(
@@ -4289,68 +4592,96 @@ private:
             if (!param.require_thread_movable && !param.require_thread_shareable) continue;
             const std::vector<Type>* types_to_check = param.is_parameter_pack ? &concrete_pack_param_types[i] : nullptr;
             if (types_to_check == nullptr) {
-                if (param.require_thread_movable && !is_thread_movable(concrete_param_types[i])) {
-                    throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
+                if (param.require_thread_movable) {
+                    auto _movable = is_thread_movable(concrete_param_types[i]);
+                    if (!_movable.has_value()) return std::unexpected(std::move(_movable).error());
+                    if (!_movable.value()) {
+                        return std::unexpected(DataflowError("argument for parameter '" + param.name + "' of generic function '" +
                                             stable_tmpl.name +
                                             "' does not satisfy '[[scpp::thread_movable]]' (ch05 §5.15)",
-                        expr.loc);
+                        expr.loc));
+                    }
                 }
-                if (param.require_thread_shareable && !is_thread_shareable(concrete_param_types[i])) {
-                    throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
+                if (param.require_thread_shareable) {
+                    auto _shareable = is_thread_shareable(concrete_param_types[i]);
+                    if (!_shareable.has_value()) return std::unexpected(std::move(_shareable).error());
+                    if (!_shareable.value()) {
+                        return std::unexpected(DataflowError("argument for parameter '" + param.name + "' of generic function '" +
                                             stable_tmpl.name +
                                             "' does not satisfy '[[scpp::thread_shareable]]' (ch05 §5.15)",
-                        expr.loc);
+                        expr.loc));
+                    }
                 }
                 continue;
             }
             for (const Type& concrete_type : *types_to_check) {
-                if (param.require_thread_movable && !is_thread_movable(concrete_type)) {
-                    throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
+                if (param.require_thread_movable) {
+                    auto _movable = is_thread_movable(concrete_type);
+                    if (!_movable.has_value()) return std::unexpected(std::move(_movable).error());
+                    if (!_movable.value()) {
+                        return std::unexpected(DataflowError("argument for parameter '" + param.name + "' of generic function '" +
                                             stable_tmpl.name +
                                             "' does not satisfy '[[scpp::thread_movable]]' (ch05 §5.15)",
-                        expr.loc);
+                        expr.loc));
+                    }
                 }
-                if (param.require_thread_shareable && !is_thread_shareable(concrete_type)) {
-                    throw DataflowError("argument for parameter '" + param.name + "' of generic function '" +
+                if (param.require_thread_shareable) {
+                    auto _shareable = is_thread_shareable(concrete_type);
+                    if (!_shareable.has_value()) return std::unexpected(std::move(_shareable).error());
+                    if (!_shareable.value()) {
+                        return std::unexpected(DataflowError("argument for parameter '" + param.name + "' of generic function '" +
                                             stable_tmpl.name +
                                             "' does not satisfy '[[scpp::thread_shareable]]' (ch05 §5.15)",
-                        expr.loc);
+                        expr.loc));
+                    }
                 }
             }
         }
 
-        std::string clone_name = get_or_create_clone(stable_tmpl, concrete_param_types, concrete_pack_param_types);
+        auto _clone = get_or_create_clone(stable_tmpl, concrete_param_types, concrete_pack_param_types);
+        if (!_clone.has_value()) return std::unexpected(std::move(_clone).error());
+        std::string clone_name = std::move(_clone).value();
         append_default_arguments_to_call(expr, stable_tmpl, param_offset);
         if (expr.lhs == nullptr) {
             expr.name = std::move(clone_name);
         } else {
             expr.name = clone_name.substr(cloned_method_suffix_prefix.size());
         }
+        return {};
     }
 
-    void monomorphize_generic_function_designator(Expr& expr, const Function& tmpl) {
+    [[nodiscard]] std::expected<void, DataflowError> monomorphize_generic_function_designator(Expr& expr, const Function& tmpl) {
         std::unordered_map<std::string, Type> type_bindings;
         std::unordered_map<std::string, int> value_bindings;
         std::unordered_map<std::string, std::vector<Type>> explicit_pack_bindings;
         std::vector<std::vector<Type>> concrete_pack_param_types(tmpl.params.size());
 
-        seed_explicit_template_arguments(expr, tmpl, type_bindings, value_bindings, explicit_pack_bindings);
-        populate_concrete_pack_param_types(tmpl, explicit_pack_bindings, concrete_pack_param_types);
+        if (auto _r = seed_explicit_template_arguments(expr, tmpl, type_bindings, value_bindings, explicit_pack_bindings);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+        if (auto _r = populate_concrete_pack_param_types(tmpl, explicit_pack_bindings, concrete_pack_param_types);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
 
         for (const GenericTypeParam& tp : tmpl.template_params) {
             if (tp.is_pack) continue;
             bool bound = tp.is_non_type ? value_bindings.contains(tp.name) : type_bindings.contains(tp.name);
             if (!bound) {
-                throw DataflowError("cannot form a function designator for generic function '" + tmpl.name +
+                return std::unexpected(DataflowError("cannot form a function designator for generic function '" + tmpl.name +
                                         "' without an explicit argument for template parameter '" + tp.name + "'",
-                    expr.loc);
+                    expr.loc));
             }
         }
 
-        expr.name = instantiate_full_header_generic_clone(tmpl, type_bindings, value_bindings, explicit_pack_bindings,
+        auto _clone_name = instantiate_full_header_generic_clone(tmpl, type_bindings, value_bindings, explicit_pack_bindings,
                                                           concrete_pack_param_types);
+        if (!_clone_name.has_value()) return std::unexpected(std::move(_clone_name).error());
+        expr.name = std::move(_clone_name).value();
         expr.explicit_global_qualification = false;
         expr.explicit_template_args.clear();
+        return {};
     }
 
     void append_default_arguments_to_call(Expr& expr, const Function& fn, std::size_t param_offset) {
@@ -4388,7 +4719,7 @@ private:
     // to it. The template definition itself lives in `program_.functions`,
     // so recursive generic instantiation can reallocate that vector; take
     // a deep snapshot first and read everything from it.
-    void monomorphize_generic_function_call(Expr& expr, const Function& tmpl, Body& body, std::size_t param_offset = 0,
+    [[nodiscard]] std::expected<void, DataflowError> monomorphize_generic_function_call(Expr& expr, const Function& tmpl, Body& body, std::size_t param_offset = 0,
                                             const std::string& member_name_prefix = "") {
         Function tmpl_snapshot = clone_function(tmpl);
         const Function& stable_tmpl = tmpl_snapshot;
@@ -4401,7 +4732,10 @@ private:
         std::vector<bool> have_concrete_param_types(stable_tmpl.params.size(), false);
         std::vector<std::vector<Type>> concrete_pack_param_types(stable_tmpl.params.size());
 
-        seed_explicit_template_arguments(expr, stable_tmpl, type_bindings, value_bindings, pack_bindings);
+        if (auto _r = seed_explicit_template_arguments(expr, stable_tmpl, type_bindings, value_bindings, pack_bindings);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
 
         std::size_t arg_cursor = 0;
         std::size_t param_cursor = param_offset;
@@ -4430,22 +4764,22 @@ private:
                         if (!deduce_template_bindings_from_type_pattern(
                                 underlying, concrete, stable_tmpl.template_params, arg_type_bindings,
                                 arg_value_bindings, arg_pack_bindings)) {
-                            throw DataflowError("cannot deduce template parameter pack types for generic function '" +
+                            return std::unexpected(DataflowError("cannot deduce template parameter pack types for generic function '" +
                                                     stable_tmpl.name + "' from this argument list",
-                                expr.loc);
+                                expr.loc));
                         }
                         for (const auto& [name, type] : arg_type_bindings) {
                             if (!bind_type_binding(type_bindings, name, type)) {
-                                throw DataflowError("deduced type for template parameter of generic function '" +
+                                return std::unexpected(DataflowError("deduced type for template parameter of generic function '" +
                                                         stable_tmpl.name + "' disagrees across arguments",
-                                    expr.loc);
+                                    expr.loc));
                             }
                         }
                         auto pack_it = arg_pack_bindings.find(*pack_type_name);
                         if (pack_it == arg_pack_bindings.end()) {
-                            throw DataflowError("cannot deduce template parameter pack types for generic function '" +
+                            return std::unexpected(DataflowError("cannot deduce template parameter pack types for generic function '" +
                                                     stable_tmpl.name + "' from this argument list",
-                                expr.loc);
+                                expr.loc));
                         }
                         deduced_pack_types.insert(deduced_pack_types.end(), pack_it->second.begin(), pack_it->second.end());
                     } else {
@@ -4453,9 +4787,9 @@ private:
                     }
                 }
                 if (pack_type_name.has_value() && !bind_type_pack_binding(pack_bindings, *pack_type_name, deduced_pack_types)) {
-                        throw DataflowError("deduced template parameter pack types for generic function '" +
+                        return std::unexpected(DataflowError("deduced template parameter pack types for generic function '" +
                                                 stable_tmpl.name + "' disagree across arguments",
-                            expr.loc);
+                            expr.loc));
                 }
                 if (!deduced_pack_types.empty()) {
                     concrete_param_types[param_cursor] = deduced_pack_types[0];
@@ -4475,8 +4809,9 @@ private:
                     // Case A: a base-class-deduction pattern (e.g.
                     // "TupleImpl<I, Head, Tail...>& t").
                     if (argument_type_can_participate_in_variadic_base_deduction(expr, arg_cursor, underlying.name, body)) {
-                        deduce_via_base_class_chain(expr, arg_cursor, underlying, body, type_bindings, value_bindings,
+                        auto _deduced = deduce_via_base_class_chain(expr, arg_cursor, underlying, body, type_bindings, value_bindings,
                                                     pack_bindings, upcasts);
+                        if (!_deduced.has_value()) return std::unexpected(std::move(_deduced).error());
                     }
                 } else {
                     if (!deduce_template_bindings_from_type_pattern(underlying, concrete, stable_tmpl.template_params,
@@ -4500,9 +4835,9 @@ private:
                             !type_depends_on_template_params(param_type, stable_tmpl.template_params) &&
                             argument_matches_parameter(*expr.args[arg_cursor], param_type, body, signatures_);
                         if (!matches_via_conversion) {
-                            throw DataflowError("no overload of generic function '" + stable_tmpl.name +
+                            return std::unexpected(DataflowError("no overload of generic function '" + stable_tmpl.name +
                                                     "' matches this argument list",
-                                                expr.loc);
+                                                expr.loc));
                         }
                     }
                 }
@@ -4525,13 +4860,16 @@ private:
         for (; param_cursor < stable_tmpl.params.size(); param_cursor++) {
             if (stable_tmpl.params[param_cursor].is_parameter_pack) continue;
             if (stable_tmpl.params[param_cursor].default_expr == nullptr) {
-                throw DataflowError("no overload of generic function '" + stable_tmpl.name +
+                return std::unexpected(DataflowError("no overload of generic function '" + stable_tmpl.name +
                                         "' matches this argument list",
-                                    expr.loc);
+                                    expr.loc));
             }
         }
 
-        populate_concrete_pack_param_types(stable_tmpl, pack_bindings, concrete_pack_param_types);
+        if (auto _r = populate_concrete_pack_param_types(stable_tmpl, pack_bindings, concrete_pack_param_types);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
 
         for (const GenericTypeParam& tp : stable_tmpl.template_params) {
             // ch05 §5.14: a *pack* template parameter (e.g. "Tail") can
@@ -4544,34 +4882,36 @@ private:
             if (tp.is_pack) continue;
             bool bound = tp.is_non_type ? value_bindings.contains(tp.name) : type_bindings.contains(tp.name);
             if (!bound) {
-                throw DataflowError("cannot deduce template parameter '" + tp.name + "' of generic function '" +
+                return std::unexpected(DataflowError("cannot deduce template parameter '" + tp.name + "' of generic function '" +
                                          stable_tmpl.name + "', and no explicit argument was given for it (ch05 §5.11)",
-                    expr.loc);
+                    expr.loc));
             }
         }
 
         for (const DeferredTemplateObligation& obligation : deferred_obligations) {
-            Type concrete_pattern =
+            auto _concrete_pattern =
                 apply_template_bindings_to_type(obligation.parameter_type_pattern, type_bindings, pack_bindings, expr.loc);
+            if (!_concrete_pattern.has_value()) return std::unexpected(std::move(_concrete_pattern).error());
+            Type concrete_pattern = std::move(_concrete_pattern).value();
             if (is_forwarding_reference_parameter(stable_tmpl.params[obligation.param_index], stable_tmpl.template_params)) {
                 std::optional<Type> arg_type = infer_expr_type(*expr.args[obligation.arg_index], body, signatures_);
                 if (!arg_type.has_value()) {
-                    throw DataflowError("cannot resolve the type of this forwarding-reference argument", expr.loc);
+                    return std::unexpected(DataflowError("cannot resolve the type of this forwarding-reference argument", expr.loc));
                 }
                 concrete_pattern = forwarding_reference_deduced_type(*expr.args[obligation.arg_index], *arg_type, body);
             }
             if (type_depends_on_template_params(concrete_pattern, stable_tmpl.template_params)) {
-                throw DataflowError("cannot deduce every template argument needed by parameter '" +
+                return std::unexpected(DataflowError("cannot deduce every template argument needed by parameter '" +
                                         stable_tmpl.params[obligation.param_index].name + "' of generic function '" +
                                         stable_tmpl.name +
                                         "' after scanning the whole call",
-                    expr.loc);
+                    expr.loc));
             }
             if (!argument_matches_parameter(*expr.args[obligation.arg_index], concrete_pattern, body, signatures_)) {
-                throw DataflowError("argument for parameter '" + stable_tmpl.params[obligation.param_index].name +
+                return std::unexpected(DataflowError("argument for parameter '" + stable_tmpl.params[obligation.param_index].name +
                                         "' of generic function '" + stable_tmpl.name +
                                         "' is incompatible after substituting deduced template arguments",
-                    expr.args[obligation.arg_index]->loc);
+                    expr.args[obligation.arg_index]->loc));
             }
             concrete_param_types[obligation.param_index] = concrete_pattern;
             have_concrete_param_types[obligation.param_index] = true;
@@ -4583,15 +4923,20 @@ private:
         // (post-substitution) type actually satisfies what it requires
         // -- before synthesizing/caching a clone, so a violation is
         // reported at the call site that triggered it.
-        check_thread_safety_constraints(expr, stable_tmpl, type_bindings, pack_bindings);
+        if (auto _r = check_thread_safety_constraints(expr, stable_tmpl, type_bindings, pack_bindings); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
 
-        std::string clone_name = instantiate_full_header_generic_clone(
+        auto _clone_name = instantiate_full_header_generic_clone(
             stable_tmpl, type_bindings, value_bindings, pack_bindings, concrete_pack_param_types, concrete_param_types,
             have_concrete_param_types, upcasts);
+        if (!_clone_name.has_value()) return std::unexpected(std::move(_clone_name).error());
+        std::string clone_name = std::move(_clone_name).value();
         append_instantiated_default_arguments_to_call(expr, stable_tmpl, param_offset, type_bindings, value_bindings,
                                                       pack_bindings);
         expr.name = member_name_prefix.empty() ? clone_name : clone_name.substr(member_name_prefix.size());
         expr.explicit_template_args.clear();
+        return {};
     }
 
 
@@ -4599,27 +4944,33 @@ private:
     // a precise error if `type_param` is concept-constrained and
     // `concrete_arg` doesn't structurally satisfy it -- a no-op when
     // `type_param` is bare (nothing to check).
-    void check_type_param_constraint(const GenericTypeParam& type_param, const Type& concrete_arg,
+    [[nodiscard]] std::expected<void, DataflowError> check_type_param_constraint(const GenericTypeParam& type_param, const Type& concrete_arg,
                                       const std::string& template_name, SourceLocation loc) {
-        if (type_param.concept_name.empty()) return;
+        if (type_param.concept_name.empty()) return {};
         auto concept_it = concepts_by_name_.find(type_param.concept_name);
         if (concept_it != concepts_by_name_.end() &&
             type_satisfies_concept(concrete_arg, *concept_it->second, program_)) {
-            return;
+            return {};
         }
-        throw DataflowError("type argument '" + concrete_arg.name + "' does not satisfy concept '" +
+        return std::unexpected(DataflowError("type argument '" + concrete_arg.name + "' does not satisfy concept '" +
                              type_param.concept_name + "' required by generic type '" + template_name +
                              "' (ch05 §5.14)",
-            loc);
+            loc));
     }
 
-    void walk_stmt(Stmt& stmt, Body& body, const std::optional<Type>& enclosing_this_type,
+    [[nodiscard]] std::expected<void, DataflowError> walk_stmt(Stmt& stmt, Body& body, const std::optional<Type>& enclosing_this_type,
                    bool allow_generic_monomorphization) {
         switch (stmt.kind) {
             case StmtKind::VarDecl:
-                if (stmt.init) walk_expr(*stmt.init, body, enclosing_this_type, allow_generic_monomorphization);
+                if (stmt.init) {
+                    if (auto _r = walk_expr(*stmt.init, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
                 for (ExprPtr& arg : stmt.ctor_args) {
-                    walk_expr(*arg, body, enclosing_this_type, allow_generic_monomorphization);
+                    if (auto _r = walk_expr(*arg, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
                 if (!stmt.ctor_args.empty() && stmt.type.kind == TypeKind::Named) {
                     Type concrete_ctor_type = stmt.type;
@@ -4640,13 +4991,13 @@ private:
                 // any resolution ran).
                 if (stmt.type.kind == TypeKind::Named && stmt.type.name == "auto") {
                     if (!stmt.init) {
-                        throw DataflowError("'auto' requires an initializer", stmt.loc);
+                        return std::unexpected(DataflowError("'auto' requires an initializer", stmt.loc));
                     }
                     std::optional<Type> inferred = infer_expr_type(*stmt.init, body, signatures_);
                     if (!inferred.has_value()) {
-                        throw DataflowError(
+                        return std::unexpected(DataflowError(
                             "cannot infer 'auto' variable '" + stmt.var_name + "'s type from its initializer",
-                            stmt.loc);
+                            stmt.loc));
                     }
                     // Mirrors real C++'s own `auto&& __range = range_expr;`
                     // range-for desugaring: a synthesized `$for_range_N`
@@ -4692,53 +5043,76 @@ private:
                 } else if (stmt.type.kind == TypeKind::Reference && stmt.type.pointee != nullptr &&
                            stmt.type.pointee->kind == TypeKind::Named && stmt.type.pointee->name == "auto") {
                     if (!stmt.init) {
-                        throw DataflowError("'auto' requires an initializer", stmt.loc);
+                        return std::unexpected(DataflowError("'auto' requires an initializer", stmt.loc));
                     }
                     std::optional<Type> inferred = infer_expr_type(*stmt.init, body, signatures_);
                     if (!inferred.has_value()) {
-                        throw DataflowError(
-                            "cannot infer 'auto' variable '" + stmt.var_name + "'s type from its initializer", stmt.loc);
+                        return std::unexpected(DataflowError(
+                            "cannot infer 'auto' variable '" + stmt.var_name + "'s type from its initializer", stmt.loc));
                     }
                     stmt.type.pointee = std::make_shared<Type>(*inferred);
                     body.local_types[stmt.var_name] = stmt.type;
                 }
-                return;
+                return {};
             case StmtKind::Return:
             case StmtKind::ExprStmt:
-                if (stmt.expr) walk_expr(*stmt.expr, body, enclosing_this_type, allow_generic_monomorphization);
-                return;
-            case StmtKind::If:
-                walk_expr(*stmt.condition, body, enclosing_this_type, allow_generic_monomorphization);
-                walk_stmt(*stmt.then_branch, body, enclosing_this_type, allow_generic_monomorphization);
-                if (stmt.else_branch) {
-                    walk_stmt(*stmt.else_branch, body, enclosing_this_type, allow_generic_monomorphization);
+                if (stmt.expr) {
+                    if (auto _r = walk_expr(*stmt.expr, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
-                return;
+                return {};
+            case StmtKind::If:
+                if (auto _r = walk_expr(*stmt.condition, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                if (auto _r = walk_stmt(*stmt.then_branch, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                if (stmt.else_branch) {
+                    if (auto _r = walk_stmt(*stmt.else_branch, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
+                return {};
             case StmtKind::While:
-                walk_expr(*stmt.condition, body, enclosing_this_type, allow_generic_monomorphization);
-                walk_stmt(*stmt.then_branch, body, enclosing_this_type, allow_generic_monomorphization);
-                return;
+                if (auto _r = walk_expr(*stmt.condition, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                if (auto _r = walk_stmt(*stmt.then_branch, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                return {};
             case StmtKind::Switch:
-                walk_expr(*stmt.condition, body, enclosing_this_type, allow_generic_monomorphization);
+                if (auto _r = walk_expr(*stmt.condition, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
                 for (SwitchCase& switch_case : stmt.switch_cases) {
                     if (switch_case.value) {
-                        walk_expr(*switch_case.value, body, enclosing_this_type, allow_generic_monomorphization);
+                        if (auto _r = walk_expr(*switch_case.value, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
                     }
                     for (StmtPtr& s : switch_case.statements) {
-                        walk_stmt(*s, body, enclosing_this_type, allow_generic_monomorphization);
+                        if (auto _r = walk_stmt(*s, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
                     }
                 }
-                return;
+                return {};
             case StmtKind::Break:
             case StmtKind::Continue:
             case StmtKind::Fallthrough:
-                return;
+                return {};
             case StmtKind::Block:
                 for (StmtPtr& s : stmt.statements) {
-                    walk_stmt(*s, body, enclosing_this_type, allow_generic_monomorphization);
+                    if (auto _r = walk_stmt(*s, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
-                return;
+                return {};
         }
+        return {};
     }
 
     [[nodiscard]] ExprPtr make_deref_expr(ExprPtr operand, SourceLocation loc, bool implicit_arrow_deref = false,
@@ -4753,13 +5127,13 @@ private:
         return deref;
     }
 
-    [[nodiscard]] ExprPtr rewrite_arrow_receiver(ExprPtr receiver, Body& body, const SourceLocation& loc) {
+    [[nodiscard]] std::expected<ExprPtr, DataflowError> rewrite_arrow_receiver(ExprPtr receiver, Body& body, const SourceLocation& loc) {
         std::optional<Type> receiver_type = infer_expr_type(*receiver, body, signatures_);
         bool selected_any_operator_arrow = false;
         bool all_steps_receiver_tied = true;
         for (int depth = 0; depth < 64; depth++) {
             if (!receiver_type.has_value()) {
-                throw DataflowError("operator-> chain did not yield a pointer", loc);
+                return std::unexpected(DataflowError("operator-> chain did not yield a pointer", loc));
             }
             const Type& effective =
                 receiver_type->kind == TypeKind::Reference && receiver_type->pointee ? *receiver_type->pointee : *receiver_type;
@@ -4767,7 +5141,7 @@ private:
                 return make_deref_expr(std::move(receiver), loc, selected_any_operator_arrow, all_steps_receiver_tied);
             }
             if (effective.kind != TypeKind::Named) {
-                throw DataflowError("operator-> chain did not yield a pointer", loc);
+                return std::unexpected(DataflowError("operator-> chain did not yield a pointer", loc));
             }
             auto call = std::make_unique<Expr>();
             call->kind = ExprKind::Call;
@@ -4778,11 +5152,11 @@ private:
             const FunctionSignature* sig = resolve_overload(*call, callee, body, signatures_);
             if (sig == nullptr) {
                 if (!selected_any_operator_arrow) {
-                    throw DataflowError("cannot use '->' on class type '" + effective.name +
+                    return std::unexpected(DataflowError("cannot use '->' on class type '" + effective.name +
                                             "': it has no matching operator->()",
-                                        loc);
+                                        loc));
                 }
-                throw DataflowError("operator-> chain did not yield a pointer", loc);
+                return std::unexpected(DataflowError("operator-> chain did not yield a pointer", loc));
             }
             selected_any_operator_arrow = true;
             all_steps_receiver_tied =
@@ -4790,10 +5164,10 @@ private:
             receiver = std::move(call);
             receiver_type = infer_expr_type(*receiver, body, signatures_);
         }
-        throw DataflowError("operator-> chain did not yield a pointer", loc);
+        return std::unexpected(DataflowError("operator-> chain did not yield a pointer", loc));
     }
 
-    void walk_expr(Expr& expr, Body& body, const std::optional<Type>& enclosing_this_type,
+    [[nodiscard]] std::expected<void, DataflowError> walk_expr(Expr& expr, Body& body, const std::optional<Type>& enclosing_this_type,
                    bool allow_generic_monomorphization) {
         // ch05 §5.12: a Lambda's own sub-tree (captures' init-exprs,
         // params, body) is handled entirely inside resolve_lambda --
@@ -4802,8 +5176,10 @@ private:
         // since captures/params/body are Lambda's own dedicated fields,
         // not lhs/rhs/args -- see ast.cppm's Expr).
         if (expr.kind == ExprKind::Lambda) {
-            resolve_lambda(expr, body, enclosing_this_type);
-            return;
+            if (auto _r = resolve_lambda(expr, body, enclosing_this_type); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            return {};
         }
 
         // A bare `return {};` (ast.cppm's ExprKind::ValueInit) has no
@@ -4816,7 +5192,7 @@ private:
         // into.
         if (expr.kind == ExprKind::ValueInit) {
             expr.type = current_walk_return_type_;
-            return;
+            return {};
         }
 
         // ch05 §5.9/§5.11/§5.12: a bare (no-receiver) Call whose own
@@ -4850,12 +5226,32 @@ private:
             }
         }
 
-        if (expr.lhs) walk_expr(*expr.lhs, body, enclosing_this_type, allow_generic_monomorphization);
-        if (expr.rhs) walk_expr(*expr.rhs, body, enclosing_this_type, allow_generic_monomorphization);
-        if (expr.third) walk_expr(*expr.third, body, enclosing_this_type, allow_generic_monomorphization);
-        for (ExprPtr& arg : expr.args) walk_expr(*arg, body, enclosing_this_type, allow_generic_monomorphization);
+        if (expr.lhs) {
+            if (auto _r = walk_expr(*expr.lhs, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        if (expr.rhs) {
+            if (auto _r = walk_expr(*expr.rhs, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        if (expr.third) {
+            if (auto _r = walk_expr(*expr.third, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        for (ExprPtr& arg : expr.args) {
+            if (auto _r = walk_expr(*arg, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
         for (ExplicitTemplateArg& arg : expr.explicit_template_args) {
-            if (!arg.is_type && arg.value) walk_expr(*arg.value, body, enclosing_this_type, allow_generic_monomorphization);
+            if (!arg.is_type && arg.value) {
+                if (auto _r = walk_expr(*arg.value, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
         }
         if (expr.kind == ExprKind::Call && expr.lhs == nullptr) {
             rewrite_type_alias_constructor_call(expr, body);
@@ -4866,7 +5262,9 @@ private:
             maybe_instantiate_generic_constructor_overloads(concrete_ctor_type.name, expr.args, body, expr.loc);
         }
         if (expr.kind == ExprKind::Call && expr.lhs == nullptr) {
-            (void)maybe_resolve_generic_type_constructor_call(expr, body);
+            if (auto _r = maybe_resolve_generic_type_constructor_call(expr, body); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
         if (expr.kind == ExprKind::Call && expr.lhs == nullptr) {
             std::optional<Type> direct_call_type = infer_expr_type(expr, body, signatures_);
@@ -4904,7 +5302,9 @@ private:
         }
 
         if ((expr.kind == ExprKind::Member || expr.kind == ExprKind::Call) && expr.through_arrow && expr.lhs != nullptr) {
-            expr.lhs = rewrite_arrow_receiver(std::move(expr.lhs), body, expr.loc);
+            auto _rewritten = rewrite_arrow_receiver(std::move(expr.lhs), body, expr.loc);
+            if (!_rewritten.has_value()) return std::unexpected(std::move(_rewritten).error());
+            expr.lhs = std::move(_rewritten).value();
             expr.through_arrow = false;
         }
 
@@ -4922,60 +5322,68 @@ private:
         // walking a generic template's own body (see run()'s own
         // comment): a nested generic-to-generic call is left targeting
         // the original, codegen-excluded template instead.
-        if (!allow_generic_monomorphization) return;
+        if (!allow_generic_monomorphization) return {};
         if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::AddressOf && expr.lhs &&
             expr.lhs->kind == ExprKind::Identifier && !expr.lhs->explicit_template_args.empty()) {
-            walk_expr(*expr.lhs, body, enclosing_this_type, allow_generic_monomorphization);
-            return;
+            if (auto _r = walk_expr(*expr.lhs, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            return {};
         }
         if (expr.kind == ExprKind::Identifier && !expr.explicit_template_args.empty()) {
             auto template_it = generic_template_indices_.find(expr.name);
-            if (template_it == generic_template_indices_.end()) return;
+            if (template_it == generic_template_indices_.end()) return {};
             std::vector<std::size_t> matching_candidates;
             for (std::size_t candidate_index : template_it->second) {
                 const Function& tmpl = program_.functions[candidate_index];
                 if (!compile_time_dependency_visible(tmpl, body)) continue;
                 if (tmpl.template_params.empty()) continue;
-                try {
-                    ExprPtr expr_copy = clone_expr(expr);
-                    std::unordered_map<std::string, Type> type_bindings;
-                    std::unordered_map<std::string, int> value_bindings;
-                    std::unordered_map<std::string, std::vector<Type>> explicit_pack_bindings;
-                    std::vector<std::vector<Type>> concrete_pack_param_types(tmpl.params.size());
-                    seed_explicit_template_arguments(*expr_copy, tmpl, type_bindings, value_bindings, explicit_pack_bindings);
-                    populate_concrete_pack_param_types(tmpl, explicit_pack_bindings, concrete_pack_param_types);
-                    bool every_non_pack_bound = true;
-                    for (const GenericTypeParam& tp : tmpl.template_params) {
-                        if (tp.is_pack) continue;
-                        bool bound = tp.is_non_type ? value_bindings.contains(tp.name) : type_bindings.contains(tp.name);
-                        every_non_pack_bound = every_non_pack_bound && bound;
-                    }
-                    if (every_non_pack_bound) matching_candidates.push_back(candidate_index);
-                } catch (const DataflowError&) {
+                ExprPtr expr_copy = clone_expr(expr);
+                std::unordered_map<std::string, Type> type_bindings;
+                std::unordered_map<std::string, int> value_bindings;
+                std::unordered_map<std::string, std::vector<Type>> explicit_pack_bindings;
+                std::vector<std::vector<Type>> concrete_pack_param_types(tmpl.params.size());
+                if (auto _r = seed_explicit_template_arguments(*expr_copy, tmpl, type_bindings, value_bindings, explicit_pack_bindings);
+                    !_r.has_value()) {
+                    continue;
                 }
+                if (auto _r = populate_concrete_pack_param_types(tmpl, explicit_pack_bindings, concrete_pack_param_types);
+                    !_r.has_value()) {
+                    continue;
+                }
+                bool every_non_pack_bound = true;
+                for (const GenericTypeParam& tp : tmpl.template_params) {
+                    if (tp.is_pack) continue;
+                    bool bound = tp.is_non_type ? value_bindings.contains(tp.name) : type_bindings.contains(tp.name);
+                    every_non_pack_bound = every_non_pack_bound && bound;
+                }
+                if (every_non_pack_bound) matching_candidates.push_back(candidate_index);
             }
-            if (matching_candidates.empty()) return;
+            if (matching_candidates.empty()) return {};
             if (matching_candidates.size() > 1) {
-                throw DataflowError("ambiguous generic function designator '" + expr.name + "'", expr.loc);
+                return std::unexpected(DataflowError("ambiguous generic function designator '" + expr.name + "'", expr.loc));
             }
-            monomorphize_generic_function_designator(expr, program_.functions[matching_candidates[0]]);
-            return;
+            if (auto _r = monomorphize_generic_function_designator(expr, program_.functions[matching_candidates[0]]);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            return {};
         }
-        if (expr.kind != ExprKind::Call) return;
+        if (expr.kind != ExprKind::Call) return {};
         std::string generic_template_name = expr.name;
         std::size_t param_offset = 0;
         std::string cloned_method_suffix_prefix;
         if (expr.lhs != nullptr) {
             std::optional<Type> receiver = infer_expr_type(*expr.lhs, body, signatures_);
-            if (!receiver.has_value()) return;
+            if (!receiver.has_value()) return {};
             const Type& receiver_named = receiver->kind == TypeKind::Reference ? *receiver->pointee : *receiver;
-            if (receiver_named.kind != TypeKind::Named) return;
+            if (receiver_named.kind != TypeKind::Named) return {};
             generic_template_name = receiver_named.name + "_" + expr.name;
             param_offset = 1;
             cloned_method_suffix_prefix = receiver_named.name + "_";
         }
         auto template_it = generic_template_indices_.find(generic_template_name);
-        if (template_it == generic_template_indices_.end()) return;
+        if (template_it == generic_template_indices_.end()) return {};
         const bool ordinary_overload_exists = [&]() {
             for (const Function& fn : program_.functions) {
                 if (fn.name == generic_template_name && !fn.is_generic_template &&
@@ -4991,20 +5399,26 @@ private:
                 visible_template_candidates.push_back(candidate_index);
             }
         }
-        if (visible_template_candidates.empty()) return;
+        if (visible_template_candidates.empty()) return {};
         if (ordinary_overload_exists) {
             CalleeSignature ordinary_callee{generic_template_name, param_offset, std::nullopt};
             const FunctionSignature* ordinary = resolve_overload(expr, ordinary_callee, body, signatures_);
-            if (ordinary != nullptr && !ordinary->is_generic_template) return;
+            if (ordinary != nullptr && !ordinary->is_generic_template) return {};
         }
         if (visible_template_candidates.size() == 1 && !ordinary_overload_exists) {
             const Function& tmpl = program_.functions[visible_template_candidates[0]];
             if (!tmpl.template_params.empty()) {
-                monomorphize_generic_function_call(expr, tmpl, body, param_offset, cloned_method_suffix_prefix);
+                if (auto _r = monomorphize_generic_function_call(expr, tmpl, body, param_offset, cloned_method_suffix_prefix);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
             } else {
-                monomorphize_abbreviated_generic_function_call(expr, tmpl, body, param_offset, cloned_method_suffix_prefix);
+                if (auto _r = monomorphize_abbreviated_generic_function_call(expr, tmpl, body, param_offset, cloned_method_suffix_prefix);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
             }
-            return;
+            return {};
         }
 
         std::vector<std::size_t> matching_candidates;
@@ -5024,22 +5438,29 @@ private:
         }
 
         if (matching_candidates.empty()) {
-            if (ordinary_overload_exists) return;
-            throw DataflowError("no generic overload of '" + generic_template_name + "' matches these argument types",
-                                expr.loc);
+            if (ordinary_overload_exists) return {};
+            return std::unexpected(DataflowError("no generic overload of '" + generic_template_name + "' matches these argument types",
+                                expr.loc));
         }
         if (matching_candidates.size() > 1) {
-            throw DataflowError("ambiguous call to overloaded generic function '" + generic_template_name + "'",
-                                expr.loc);
+            return std::unexpected(DataflowError("ambiguous call to overloaded generic function '" + generic_template_name + "'",
+                                expr.loc));
         }
 
         const Function& selected = program_.functions[matching_candidates[0]];
         if (!selected.template_params.empty()) {
-            monomorphize_generic_function_call(expr, selected, body, param_offset, cloned_method_suffix_prefix);
+            if (auto _r = monomorphize_generic_function_call(expr, selected, body, param_offset, cloned_method_suffix_prefix);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         } else {
-            monomorphize_abbreviated_generic_function_call(expr, selected, body, param_offset,
+            if (auto _r = monomorphize_abbreviated_generic_function_call(expr, selected, body, param_offset,
                                                            cloned_method_suffix_prefix);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
+        return {};
     }
 
     // ch05 §5.12: resolves a single Lambda expression node in place --
@@ -5052,7 +5473,7 @@ private:
     // codegen/movecheck need from here on to treat this literal exactly
     // like an ordinary class construction (see codegen's own Lambda
     // case).
-    void resolve_lambda(Expr& expr, Body& enclosing_body, const std::optional<Type>& enclosing_this_type) {
+    [[nodiscard]] std::expected<void, DataflowError> resolve_lambda(Expr& expr, Body& enclosing_body, const std::optional<Type>& enclosing_this_type) {
         if (expr.lambda_blanket_mode != LambdaCaptureMode::None) {
             std::unordered_set<std::string> excluded;
             for (const Param& p : expr.lambda_params) excluded.insert(p.name);
@@ -5102,26 +5523,26 @@ private:
             Type captured_type;
             if (capture.name == "this") {
                 if (!enclosing_this_type.has_value()) {
-                    throw DataflowError(
+                    return std::unexpected(DataflowError(
                         "a lambda captures 'this', but is not itself inside a method body (ch05 §5.12)",
-                        expr.loc);
+                        expr.loc));
                 }
                 captured_type = *enclosing_this_type;
             } else if (capture.init) {
                 std::optional<Type> t = infer_expr_type(*capture.init, enclosing_body, signatures_);
                 if (!t.has_value()) {
-                    throw DataflowError("cannot determine the type of init-capture '" + capture.name +
+                    return std::unexpected(DataflowError("cannot determine the type of init-capture '" + capture.name +
                                              "' (ch05 §5.12)",
-                        expr.loc);
+                        expr.loc));
                 }
                 captured_type = std::move(*t);
             } else {
                 auto it = enclosing_body.local_types.find(capture.name);
                 if (it == enclosing_body.local_types.end()) {
-                    throw DataflowError("lambda captures '" + capture.name +
+                    return std::unexpected(DataflowError("lambda captures '" + capture.name +
                                              "', which is not a local variable or parameter in this scope (ch05 "
                                              "§5.12)",
-                        expr.loc);
+                        expr.loc));
                 }
                 captured_type = it->second;
             }
@@ -5193,7 +5614,9 @@ private:
         lambda_ctor.return_type = named_type("void");
         program_.functions.push_back(std::move(lambda_ctor));
         known_function_names_.insert(program_.functions.back().name);
-        walk_new_concrete_function(program_.functions.size() - 1);
+        if (auto _r = walk_new_concrete_function(program_.functions.size() - 1); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
 
         Function call_method;
         call_method.name = class_name + "_call";
@@ -5265,7 +5688,9 @@ private:
         // ordinary bare Identifier, so no field-type information is
         // needed (see the function's own comment).
         if (call_method.body && !expr.lambda_is_mutable) {
-            reject_write_to_nonmutable_by_value_capture(*call_method.body, by_value_names);
+            if (auto _r = reject_write_to_nonmutable_by_value_capture(*call_method.body, by_value_names); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
         // Return-type inference must likewise run on the *original*
         // (pre-rewrite) body: infer_expr_type has no Program access to
@@ -5333,7 +5758,11 @@ private:
         // (e.g. `auto p = [...](...) {...}; ... auto r = p(x);`) --
         // surfacing, confusingly, as an unrelated "cannot infer 'auto'
         // variable's type" error at that later call site instead.
-        signatures_ = build_signatures(program_);
+        {
+            auto _r = build_signatures(program_);
+            if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+            signatures_ = std::move(_r).value();
+        }
 
         expr.name = class_name;
 
@@ -5350,9 +5779,13 @@ private:
             Body synthesized_body = build_mir(synthesized);
             synthesized_body.program = &program_;
             current_walk_return_type_ = synthesized.return_type;
-            walk_stmt(*synthesized.body, synthesized_body, this_type_of(synthesized),
+            if (auto _r = walk_stmt(*synthesized.body, synthesized_body, this_type_of(synthesized),
                       /*allow_generic_monomorphization=*/!synthesized.is_generic_template);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
+        return {};
     }
 
     // ch05 §5.12: infers a lambda's return type from a single top-level
@@ -5583,18 +6016,18 @@ private:
         return result;
     }
 
-    [[nodiscard]] ExprPtr expand_fold_for_pack(const Expr& fold_expr, const std::string& pack_name,
+    [[nodiscard]] std::expected<ExprPtr, DataflowError> expand_fold_for_pack(const Expr& fold_expr, const std::string& pack_name,
                                                const std::vector<std::string>& concrete_names) {
         if (fold_expr.kind != ExprKind::Fold) return clone_expr(fold_expr);
         if (fold_expr.fold_ellipsis_on_left) {
             if (fold_expr.rhs != nullptr) {
-                throw DataflowError("binary left folds are not supported in this version", fold_expr.loc);
+                return std::unexpected(DataflowError("binary left folds are not supported in this version", fold_expr.loc));
             }
             if (concrete_names.empty()) {
                 ExprPtr identity = make_fold_identity(fold_expr.binary_op, fold_expr.loc);
                 if (identity) return identity;
-                throw DataflowError("empty fold requires an operator identity this version does not implement",
-                                    fold_expr.loc);
+                return std::unexpected(DataflowError("empty fold requires an operator identity this version does not implement",
+                                    fold_expr.loc));
             }
             ExprPtr result = instantiate_pack_operand(*fold_expr.lhs, pack_name, concrete_names[0]);
             for (std::size_t i = 1; i < concrete_names.size(); i++) {
@@ -5608,8 +6041,8 @@ private:
             if (concrete_names.empty()) {
                 ExprPtr identity = make_fold_identity(fold_expr.binary_op, fold_expr.loc);
                 if (identity) return identity;
-                throw DataflowError("empty fold requires an operator identity this version does not implement",
-                                    fold_expr.loc);
+                return std::unexpected(DataflowError("empty fold requires an operator identity this version does not implement",
+                                    fold_expr.loc));
             }
             ExprPtr result =
                 instantiate_pack_operand(*fold_expr.lhs, pack_name, concrete_names[concrete_names.size() - 1]);
@@ -5624,8 +6057,8 @@ private:
         bool lhs_mentions = expr_mentions_identifier(*fold_expr.lhs, pack_name);
         bool rhs_mentions = expr_mentions_identifier(*fold_expr.rhs, pack_name);
         if (lhs_mentions == rhs_mentions) {
-            throw DataflowError("fold expression must mention the parameter pack on exactly one side of '...'",
-                                fold_expr.loc);
+            return std::unexpected(DataflowError("fold expression must mention the parameter pack on exactly one side of '...'",
+                                fold_expr.loc));
         }
         if (concrete_names.empty()) {
             return lhs_mentions ? clone_expr(*fold_expr.rhs) : clone_expr(*fold_expr.lhs);
@@ -5647,7 +6080,7 @@ private:
         return result;
     }
 
-    [[nodiscard]] std::vector<ExprPtr> expand_pack_argument(const Expr& expr, const std::string& pack_name,
+    [[nodiscard]] std::expected<std::vector<ExprPtr>, DataflowError> expand_pack_argument(const Expr& expr, const std::string& pack_name,
                                                             const std::vector<std::string>& concrete_names) {
         if (expr.kind != ExprKind::PackExpansion || expr.lhs == nullptr) {
             std::vector<ExprPtr> single;
@@ -5655,7 +6088,7 @@ private:
             return single;
         }
         if (!expr_mentions_identifier(*expr.lhs, pack_name)) {
-            throw DataflowError("pack expansion does not mention parameter pack '" + pack_name + "'", expr.loc);
+            return std::unexpected(DataflowError("pack expansion does not mention parameter pack '" + pack_name + "'", expr.loc));
         }
         std::vector<ExprPtr> expanded;
         expanded.reserve(concrete_names.size());
@@ -5743,11 +6176,23 @@ private:
         }
     }
 
-    void expand_pack_expansions_in_expr(Expr& expr, const std::string& pack_name,
+    [[nodiscard]] std::expected<void, DataflowError> expand_pack_expansions_in_expr(Expr& expr, const std::string& pack_name,
                                         const std::vector<std::string>& concrete_names) {
-        if (expr.lhs) expand_pack_expansions_in_expr(*expr.lhs, pack_name, concrete_names);
-        if (expr.rhs) expand_pack_expansions_in_expr(*expr.rhs, pack_name, concrete_names);
-        for (ExprPtr& arg : expr.args) expand_pack_expansions_in_expr(*arg, pack_name, concrete_names);
+        if (expr.lhs) {
+            if (auto _r = expand_pack_expansions_in_expr(*expr.lhs, pack_name, concrete_names); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        if (expr.rhs) {
+            if (auto _r = expand_pack_expansions_in_expr(*expr.rhs, pack_name, concrete_names); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        for (ExprPtr& arg : expr.args) {
+            if (auto _r = expand_pack_expansions_in_expr(*arg, pack_name, concrete_names); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
         if (!expr.explicit_template_args.empty()) {
             std::vector<ExplicitTemplateArg> expanded_template_args;
             for (ExplicitTemplateArg& arg : expr.explicit_template_args) {
@@ -5768,15 +6213,25 @@ private:
         if (!expr.args.empty()) {
             std::vector<ExprPtr> expanded_args;
             for (ExprPtr& arg : expr.args) {
-                std::vector<ExprPtr> expanded = expand_pack_argument(*arg, pack_name, concrete_names);
-                for (ExprPtr& item : expanded) expanded_args.push_back(std::move(item));
+                auto _expanded = expand_pack_argument(*arg, pack_name, concrete_names);
+                if (!_expanded.has_value()) return std::unexpected(std::move(_expanded).error());
+                for (ExprPtr& item : *_expanded) expanded_args.push_back(std::move(item));
             }
             expr.args = std::move(expanded_args);
         }
         for (LambdaCapture& capture : expr.lambda_captures) {
-            if (capture.init) expand_pack_expansions_in_expr(*capture.init, pack_name, concrete_names);
+            if (capture.init) {
+                if (auto _r = expand_pack_expansions_in_expr(*capture.init, pack_name, concrete_names); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
         }
-        if (expr.lambda_body) expand_pack_expansions_in_stmt(*expr.lambda_body, pack_name, concrete_names);
+        if (expr.lambda_body) {
+            if (auto _r = expand_pack_expansions_in_stmt(*expr.lambda_body, pack_name, concrete_names); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        return {};
     }
 
     void expand_explicit_template_arg_packs_in_stmt(Stmt& stmt, const std::string& pack_name,
@@ -5820,108 +6275,205 @@ private:
         }
     }
 
-    void expand_pack_folds_in_expr(Expr& expr, const std::string& pack_name, const std::vector<std::string>& concrete_names) {
+    [[nodiscard]] std::expected<void, DataflowError> expand_pack_folds_in_expr(Expr& expr, const std::string& pack_name, const std::vector<std::string>& concrete_names) {
         if (expr.kind == ExprKind::Fold &&
             (expr_mentions_identifier(expr, pack_name) ||
              (!expr.rhs && expr_mentions_identifier(*expr.lhs, pack_name)))) {
-            ExprPtr expanded = expand_fold_for_pack(expr, pack_name, concrete_names);
-            expr = std::move(*expanded);
+            auto _expanded = expand_fold_for_pack(expr, pack_name, concrete_names);
+            if (!_expanded.has_value()) return std::unexpected(std::move(_expanded).error());
+            expr = std::move(**_expanded);
         }
-        if (expr.lhs) expand_pack_folds_in_expr(*expr.lhs, pack_name, concrete_names);
-        if (expr.rhs) expand_pack_folds_in_expr(*expr.rhs, pack_name, concrete_names);
-        for (ExprPtr& arg : expr.args) expand_pack_folds_in_expr(*arg, pack_name, concrete_names);
+        if (expr.lhs) {
+            if (auto _r = expand_pack_folds_in_expr(*expr.lhs, pack_name, concrete_names); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        if (expr.rhs) {
+            if (auto _r = expand_pack_folds_in_expr(*expr.rhs, pack_name, concrete_names); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        for (ExprPtr& arg : expr.args) {
+            if (auto _r = expand_pack_folds_in_expr(*arg, pack_name, concrete_names); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
         for (LambdaCapture& capture : expr.lambda_captures) {
-            if (capture.init) expand_pack_folds_in_expr(*capture.init, pack_name, concrete_names);
+            if (capture.init) {
+                if (auto _r = expand_pack_folds_in_expr(*capture.init, pack_name, concrete_names); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
         }
-        if (expr.lambda_body) expand_pack_folds_in_stmt(*expr.lambda_body, pack_name, concrete_names);
+        if (expr.lambda_body) {
+            if (auto _r = expand_pack_folds_in_stmt(*expr.lambda_body, pack_name, concrete_names); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        return {};
     }
 
-    void expand_pack_folds_in_stmt(Stmt& stmt, const std::string& pack_name, const std::vector<std::string>& concrete_names) {
+    [[nodiscard]] std::expected<void, DataflowError> expand_pack_folds_in_stmt(Stmt& stmt, const std::string& pack_name, const std::vector<std::string>& concrete_names) {
         switch (stmt.kind) {
             case StmtKind::VarDecl:
-                if (stmt.init) expand_pack_folds_in_expr(*stmt.init, pack_name, concrete_names);
-                for (ExprPtr& arg : stmt.ctor_args) expand_pack_folds_in_expr(*arg, pack_name, concrete_names);
-                return;
+                if (stmt.init) {
+                    if (auto _r = expand_pack_folds_in_expr(*stmt.init, pack_name, concrete_names); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
+                for (ExprPtr& arg : stmt.ctor_args) {
+                    if (auto _r = expand_pack_folds_in_expr(*arg, pack_name, concrete_names); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
+                return {};
             case StmtKind::Return:
             case StmtKind::ExprStmt:
-                if (stmt.expr) expand_pack_folds_in_expr(*stmt.expr, pack_name, concrete_names);
-                return;
-            case StmtKind::If:
-                expand_pack_folds_in_expr(*stmt.condition, pack_name, concrete_names);
-                expand_pack_folds_in_stmt(*stmt.then_branch, pack_name, concrete_names);
-                if (stmt.else_branch) expand_pack_folds_in_stmt(*stmt.else_branch, pack_name, concrete_names);
-                return;
-            case StmtKind::While:
-                expand_pack_folds_in_expr(*stmt.condition, pack_name, concrete_names);
-                expand_pack_folds_in_stmt(*stmt.then_branch, pack_name, concrete_names);
-                return;
-            case StmtKind::Switch:
-                expand_pack_folds_in_expr(*stmt.condition, pack_name, concrete_names);
-                for (SwitchCase& switch_case : stmt.switch_cases) {
-                    if (switch_case.value) expand_pack_folds_in_expr(*switch_case.value, pack_name, concrete_names);
-                    for (StmtPtr& s : switch_case.statements) expand_pack_folds_in_stmt(*s, pack_name, concrete_names);
+                if (stmt.expr) {
+                    if (auto _r = expand_pack_folds_in_expr(*stmt.expr, pack_name, concrete_names); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
-                return;
+                return {};
+            case StmtKind::If:
+                if (auto _r = expand_pack_folds_in_expr(*stmt.condition, pack_name, concrete_names); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                if (auto _r = expand_pack_folds_in_stmt(*stmt.then_branch, pack_name, concrete_names); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                if (stmt.else_branch) {
+                    if (auto _r = expand_pack_folds_in_stmt(*stmt.else_branch, pack_name, concrete_names); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
+                return {};
+            case StmtKind::While:
+                if (auto _r = expand_pack_folds_in_expr(*stmt.condition, pack_name, concrete_names); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                if (auto _r = expand_pack_folds_in_stmt(*stmt.then_branch, pack_name, concrete_names); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                return {};
+            case StmtKind::Switch:
+                if (auto _r = expand_pack_folds_in_expr(*stmt.condition, pack_name, concrete_names); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                for (SwitchCase& switch_case : stmt.switch_cases) {
+                    if (switch_case.value) {
+                        if (auto _r = expand_pack_folds_in_expr(*switch_case.value, pack_name, concrete_names); !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
+                    }
+                    for (StmtPtr& s : switch_case.statements) {
+                        if (auto _r = expand_pack_folds_in_stmt(*s, pack_name, concrete_names); !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
+                    }
+                }
+                return {};
             case StmtKind::Break:
             case StmtKind::Continue:
             case StmtKind::Fallthrough:
-                return;
+                return {};
             case StmtKind::Block:
-                for (StmtPtr& s : stmt.statements) expand_pack_folds_in_stmt(*s, pack_name, concrete_names);
-                return;
+                for (StmtPtr& s : stmt.statements) {
+                    if (auto _r = expand_pack_folds_in_stmt(*s, pack_name, concrete_names); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
+                return {};
         }
+        return {};
     }
 
-    void expand_pack_expansions_in_stmt(Stmt& stmt, const std::string& pack_name,
+    [[nodiscard]] std::expected<void, DataflowError> expand_pack_expansions_in_stmt(Stmt& stmt, const std::string& pack_name,
                                         const std::vector<std::string>& concrete_names) {
         switch (stmt.kind) {
             case StmtKind::VarDecl:
-                if (stmt.init) expand_pack_expansions_in_expr(*stmt.init, pack_name, concrete_names);
+                if (stmt.init) {
+                    if (auto _r = expand_pack_expansions_in_expr(*stmt.init, pack_name, concrete_names); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
                 if (!stmt.ctor_args.empty()) {
-                    for (ExprPtr& arg : stmt.ctor_args) expand_pack_expansions_in_expr(*arg, pack_name, concrete_names);
+                    for (ExprPtr& arg : stmt.ctor_args) {
+                        if (auto _r = expand_pack_expansions_in_expr(*arg, pack_name, concrete_names); !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
+                    }
                     std::vector<ExprPtr> expanded_args;
                     for (ExprPtr& arg : stmt.ctor_args) {
-                        std::vector<ExprPtr> expanded = expand_pack_argument(*arg, pack_name, concrete_names);
-                        for (ExprPtr& item : expanded) expanded_args.push_back(std::move(item));
+                        auto _expanded = expand_pack_argument(*arg, pack_name, concrete_names);
+                        if (!_expanded.has_value()) return std::unexpected(std::move(_expanded).error());
+                        for (ExprPtr& item : *_expanded) expanded_args.push_back(std::move(item));
                     }
                     stmt.ctor_args = std::move(expanded_args);
                 }
-                return;
+                return {};
             case StmtKind::Return:
             case StmtKind::ExprStmt:
-                if (stmt.expr) expand_pack_expansions_in_expr(*stmt.expr, pack_name, concrete_names);
-                return;
-            case StmtKind::If:
-                expand_pack_expansions_in_expr(*stmt.condition, pack_name, concrete_names);
-                expand_pack_expansions_in_stmt(*stmt.then_branch, pack_name, concrete_names);
-                if (stmt.else_branch) expand_pack_expansions_in_stmt(*stmt.else_branch, pack_name, concrete_names);
-                return;
-            case StmtKind::While:
-                expand_pack_expansions_in_expr(*stmt.condition, pack_name, concrete_names);
-                expand_pack_expansions_in_stmt(*stmt.then_branch, pack_name, concrete_names);
-                return;
-            case StmtKind::Switch:
-                expand_pack_expansions_in_expr(*stmt.condition, pack_name, concrete_names);
-                for (SwitchCase& switch_case : stmt.switch_cases) {
-                    if (switch_case.value) {
-                        expand_pack_expansions_in_expr(*switch_case.value, pack_name, concrete_names);
-                    }
-                    for (StmtPtr& s : switch_case.statements) {
-                        expand_pack_expansions_in_stmt(*s, pack_name, concrete_names);
+                if (stmt.expr) {
+                    if (auto _r = expand_pack_expansions_in_expr(*stmt.expr, pack_name, concrete_names); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
                     }
                 }
-                return;
+                return {};
+            case StmtKind::If:
+                if (auto _r = expand_pack_expansions_in_expr(*stmt.condition, pack_name, concrete_names); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                if (auto _r = expand_pack_expansions_in_stmt(*stmt.then_branch, pack_name, concrete_names); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                if (stmt.else_branch) {
+                    if (auto _r = expand_pack_expansions_in_stmt(*stmt.else_branch, pack_name, concrete_names); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
+                return {};
+            case StmtKind::While:
+                if (auto _r = expand_pack_expansions_in_expr(*stmt.condition, pack_name, concrete_names); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                if (auto _r = expand_pack_expansions_in_stmt(*stmt.then_branch, pack_name, concrete_names); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                return {};
+            case StmtKind::Switch:
+                if (auto _r = expand_pack_expansions_in_expr(*stmt.condition, pack_name, concrete_names); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                for (SwitchCase& switch_case : stmt.switch_cases) {
+                    if (switch_case.value) {
+                        if (auto _r = expand_pack_expansions_in_expr(*switch_case.value, pack_name, concrete_names); !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
+                    }
+                    for (StmtPtr& s : switch_case.statements) {
+                        if (auto _r = expand_pack_expansions_in_stmt(*s, pack_name, concrete_names); !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
+                    }
+                }
+                return {};
             case StmtKind::Break:
             case StmtKind::Continue:
             case StmtKind::Fallthrough:
-                return;
+                return {};
             case StmtKind::Block:
-                for (StmtPtr& s : stmt.statements) expand_pack_expansions_in_stmt(*s, pack_name, concrete_names);
-                return;
+                for (StmtPtr& s : stmt.statements) {
+                    if (auto _r = expand_pack_expansions_in_stmt(*s, pack_name, concrete_names); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
+                return {};
         }
+        return {};
     }
 
-    std::string get_or_create_clone(const Function& tmpl, const std::vector<Type>& concrete_param_types,
+    std::expected<std::string, DataflowError> get_or_create_clone(const Function& tmpl, const std::vector<Type>& concrete_param_types,
                                     const std::vector<std::vector<Type>>& concrete_pack_param_types) {
         std::string cache_key = tmpl.name;
         for (std::size_t i = 0; i < tmpl.params.size(); i++) {
@@ -5997,7 +6549,9 @@ private:
                 substitute_type_param_in_stmt(*clone.body, witness_name, concrete);
             }
             for (const auto& [pack_name, concrete_names] : pack_param_names) {
-                expand_pack_folds_in_stmt(*clone.body, pack_name, concrete_names);
+                if (auto _r = expand_pack_folds_in_stmt(*clone.body, pack_name, concrete_names); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
             }
         }
         // is_generic_template stays false (default): the clone is an
@@ -6028,15 +6582,17 @@ private:
         // own body (e.g. a further nested clone of this very template,
         // as the recursive case above does) cannot invalidate it.
         program_.functions.push_back(std::move(clone));
-        walk_new_concrete_function(program_.functions.size() - 1);
+        if (auto _r = walk_new_concrete_function(program_.functions.size() - 1); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
         return cache_key;
     }
 };
 
 
-void monomorphize_generics_impl(Program& program) {
+[[nodiscard]] std::expected<void, DataflowError> monomorphize_generics_impl(Program& program) {
     Monomorphizer monomorphizer(program);
-    monomorphizer.run();
+    return monomorphizer.run();
 }
 
 } // namespace scpp

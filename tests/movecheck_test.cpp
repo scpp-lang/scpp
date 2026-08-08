@@ -109,8 +109,10 @@ std::optional<std::string> move_error_message(std::string_view source) {
         // signature *before* this rewrite; concept-satisfaction
         // rejection also only happens here, so a movetest_source case
         // exercising either would otherwise never see it.
-        scpp::monomorphize_generics(program);
-        scpp::check_moves(program);
+        auto monomorphize_result = scpp::monomorphize_generics(program);
+        if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+        auto check_moves_result = scpp::check_moves(program);
+        if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
     } catch (const scpp::ParseError& e) {
         return e.what();
     } catch (const scpp::DataflowError& e) {
@@ -420,7 +422,57 @@ void test_lambda_by_reference_capture_still_rejects_mutation_through_const_refer
               (error.has_value() ? *error : std::string("<no error>")) + "'");
 }
 
+// The two tests below exercise scpp::monomorphize_generics/scpp::check_moves's
+// std::expected<void, DataflowError> API shape directly, without going
+// through move_error_message's try/catch convenience wrapper -- mirroring
+// parser_test.cpp's test_parse_returns_engaged_expected_on_success/
+// test_parse_returns_disengaged_expected_on_failure_without_throwing added
+// when parser.cppm made this same exceptions -> std::expected transition.
+void test_check_moves_returns_engaged_expected_on_success() {
+    cases_run++;
+    scpp::Program program = parse_with_std_imports(
+        "int main() {\n"
+        "    return 0;\n"
+        "}\n");
+    std::expected<void, scpp::DataflowError> monomorphize_result = scpp::monomorphize_generics(program);
+    expect(monomorphize_result.has_value(),
+           "check_moves_returns_engaged_expected_on_success: expected monomorphize_generics's has_value() to be true");
+    std::expected<void, scpp::DataflowError> check_result = scpp::check_moves(program);
+    expect(check_result.has_value(),
+           "check_moves_returns_engaged_expected_on_success: expected check_moves's has_value() to be true");
+}
+
+void test_check_moves_returns_disengaged_expected_on_failure_without_throwing() {
+    cases_run++;
+    // No try/catch here at all -- if scpp::check_moves still threw instead
+    // of returning std::expected, this call itself would already have
+    // aborted the test binary before reaching any of the expect() calls
+    // below, since nothing in this function catches exceptions.
+    scpp::Program program = parse_with_std_imports(
+        "int f(int* p) {\n"
+        "    return *p;\n"
+        "}\n"
+        "int main() {\n"
+        "    return 0;\n"
+        "}\n");
+    std::expected<void, scpp::DataflowError> monomorphize_result = scpp::monomorphize_generics(program);
+    expect(monomorphize_result.has_value(),
+           "check_moves_returns_disengaged_expected_on_failure_without_throwing: expected monomorphize_generics to "
+           "succeed");
+    std::expected<void, scpp::DataflowError> result = scpp::check_moves(program);
+    expect(!result.has_value(),
+           "check_moves_returns_disengaged_expected_on_failure_without_throwing: expected has_value() to be false");
+    if (result.has_value()) return;
+    const scpp::DataflowError& error = result.error();
+    expect(error.loc.is_known(),
+           "check_moves_returns_disengaged_expected_on_failure_without_throwing: expected a known error location");
+    expect(std::string(error.what()).size() > 0,
+           "check_moves_returns_disengaged_expected_on_failure_without_throwing: expected a non-empty diagnostic "
+           "message");
+}
+
 } // namespace
+
 
 int main() {
     run_test_case_files();
@@ -439,6 +491,8 @@ int main() {
     test_switch_with_default_rejects_post_switch_use_of_maybe_moved_value();
     test_lambda_by_reference_capture_preserves_const_reference_readonlyness();
     test_lambda_by_reference_capture_still_rejects_mutation_through_const_reference();
+    test_check_moves_returns_engaged_expected_on_success();
+    test_check_moves_returns_disengaged_expected_on_failure_without_throwing();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

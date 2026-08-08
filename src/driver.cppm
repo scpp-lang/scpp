@@ -2647,14 +2647,16 @@ void emit_object_file_for_program(Program& program, const std::string& object_pa
     // to happen first (movecheck's ordinary exact-type-match call-
     // argument checking can only work once every call site targets an
     // already-concrete function).
-    monomorphize_generics(program);
+    auto monomorphize_result = monomorphize_generics(program);
+    if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
     try {
         fold_immediate_calls(program);
     } catch (const ConstexprError& error) {
         throw DriverError(error.what());
     }
     try {
-        check_moves(program);
+        auto check_moves_result = check_moves(program);
+        if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
 
         // Real llvm-c/Target.h's own llvm::LLVMInitializeNativeTarget/
         // llvm::LLVMInitializeNativeAsmPrinter are header-only `static inline`

@@ -21,43 +21,43 @@ namespace scpp {
                                                     const Signatures& signatures);
 [[nodiscard]] bool binary_expr_has_valid_arithmetic_types(const Expr& expr, const Body& body,
                                                           const Signatures& signatures);
-void check_binary_expr_operand_types(const Expr& expr, const Body& body, const Signatures& signatures,
+[[nodiscard]] std::expected<void, DataflowError> check_binary_expr_operand_types(const Expr& expr, const Body& body, const Signatures& signatures,
                                      const SourceLocation& loc);
 [[nodiscard]] std::optional<Type> resolve_member_field_type(const Expr& member_expr, const Body& body,
                                                             const DataflowState& state, const Signatures& signatures);
-void validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
                          const Signatures& signatures);
-void apply_deref(const Expr& expr, const DataflowState& state, const Body& body, const Signatures& signatures,
+[[nodiscard]] std::expected<void, DataflowError> apply_deref(const Expr& expr, const DataflowState& state, const Body& body, const Signatures& signatures,
                  bool report_errors);
-void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
                 const Signatures& signatures, bool report_errors);
-void check_call_arguments(const Expr& expr, DataflowState& state, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> check_call_arguments(const Expr& expr, DataflowState& state, const Body& body,
                           const Signatures& signatures, bool report_errors);
-void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowState& state,
+[[nodiscard]] std::expected<void, DataflowError> apply_reference_argument(const Expr& arg, const Type& param_type, DataflowState& state,
                               BorrowMap& in_call_borrows, const Body& body,
                               const Signatures& signatures, bool report_errors);
-void check_constructor_arguments(const Type& constructed_type, const std::vector<ExprPtr>& ctor_args,
+[[nodiscard]] std::expected<void, DataflowError> check_constructor_arguments(const Type& constructed_type, const std::vector<ExprPtr>& ctor_args,
                                  DataflowState& state, const Body& body, const Signatures& signatures,
                                  bool report_errors);
-void validate_increment_decrement_expr(const Expr& expr, DataflowState& state, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> validate_increment_decrement_expr(const Expr& expr, DataflowState& state, const Body& body,
                                        const Signatures& signatures, bool report_errors);
 [[nodiscard]] bool write_is_licensed_by_mutable_reborrow_lender(const Expr& target, const DataflowState& state,
                                                                 const Body& body, const Signatures& signatures);
 [[nodiscard]] bool is_lvalue_copy_source_shape(const Expr& expr);
 [[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type,
                                                  const Body& body, const Signatures& signatures);
-void apply_statement(const MirStatement& stmt, DataflowState& state, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> apply_statement(const MirStatement& stmt, DataflowState& state, const Body& body,
                      const Signatures& signatures, bool report_errors);
-void check_terminator(const Terminator& term, DataflowState& state, const Function& fn, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> check_terminator(const Terminator& term, DataflowState& state, const Function& fn, const Body& body,
                       const Signatures& signatures);
-void check_function(const Function& fn, const Program& program, const Signatures& signatures,
+[[nodiscard]] std::expected<void, DataflowError> check_function(const Function& fn, const Program& program, const Signatures& signatures,
                     const std::unordered_set<std::string>& class_names,
                     const ClassFieldTypes& class_field_types,
                     const ClassFieldAccess& class_field_access,
                     const std::unordered_set<std::string>& classes_with_copy_ctor,
                     const std::unordered_set<std::string>& classes_with_copy_assign,
                     const std::unordered_set<std::string>& witness_class_names);
-void check_moves_impl(const Program& program);
+[[nodiscard]] std::expected<void, DataflowError> check_moves_impl(const Program& program);
 
 [[nodiscard]] bool is_wrapper_constructor_call_compatible_with_lifetime_return(const Expr& expr, const Type& target_type,
                                                                                const Body& body,
@@ -189,52 +189,59 @@ void check_moves_impl(const Program& program);
             type.name == "float32_t" || type.name == "float64_t");
 }
 
-void validate_increment_decrement_expr(const Expr& expr, DataflowState& state, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> validate_increment_decrement_expr(const Expr& expr, DataflowState& state, const Body& body,
                                        const Signatures& signatures, bool report_errors) {
-    apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
-    if (!report_errors) return;
+    if (auto _r = apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors); !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
+    if (!report_errors) return {};
     std::optional<Type> operand_type = infer_expr_type(*expr.lhs, body, signatures);
-    if (!operand_type.has_value()) return;
+    if (!operand_type.has_value()) return {};
     const Type& effective = operand_type->kind == TypeKind::Reference && operand_type->pointee != nullptr
                                 ? *operand_type->pointee
                                 : *operand_type;
     if (!is_increment_decrement_numeric_type(effective)) {
-        throw DataflowError("operand of '" +
+        return std::unexpected(DataflowError("operand of '" +
                                 std::string(expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PostInc ? "++" : "--") +
                                 "' must be a builtin numeric lvalue",
-                            expr.loc);
+                            expr.loc));
     }
-    RootSet write_roots = resolve_borrow_source_root(*expr.lhs, state, body, signatures, /*report_errors=*/false);
+    auto write_roots_result = resolve_borrow_source_root(*expr.lhs, state, body, signatures, /*report_errors=*/false);
+    if (!write_roots_result.has_value()) return std::unexpected(std::move(write_roots_result).error());
+    RootSet write_roots = std::move(write_roots_result).value();
     if (write_roots.empty()) {
-        throw DataflowError("operand of '" +
+        return std::unexpected(DataflowError("operand of '" +
                                 std::string(expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PostInc ? "++" : "--") +
                                 "' must be an assignable place",
-                            expr.loc);
+                            expr.loc));
     }
     if (assignment_target_is_read_only(*expr.lhs, body, signatures)) {
-        throw DataflowError("cannot apply '" +
+        return std::unexpected(DataflowError("cannot apply '" +
                                 std::string(expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PostInc ? "++" : "--") +
                                 "' to this place: it is reached through a read-only (const) reference",
-                            expr.loc);
+                            expr.loc));
     }
     if (std::optional<std::string> lender = resolve_reborrow_lender(*expr.lhs, body, signatures); lender.has_value()) {
-        validate_reborrow_lender_write(*lender, state, report_errors);
+        if (auto _r = validate_reborrow_lender_write(*lender, state, report_errors); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
     }
     if (!write_is_licensed_by_mutable_reborrow_lender(*expr.lhs, state, body, signatures)) {
         for (const std::string& root : write_roots) {
             auto borrow_it = state.borrows.find(root);
             if (borrow_it != state.borrows.end() &&
                 (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-                throw DataflowError("cannot apply '" +
+                return std::unexpected(DataflowError("cannot apply '" +
                                         std::string(expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PostInc ? "++" : "--") +
                                         "' to this place: '" + root + "' is currently borrowed",
-                                    expr.loc);
+                                    expr.loc));
             }
         }
     }
     if (expr.lhs->kind == ExprKind::Identifier) {
         state.locals[expr.lhs->name] = LocalState::Initialized;
     }
+    return {};
 }
 
 [[nodiscard]] bool binary_expr_has_compatible_types(const Expr& expr, const Body& body, const Signatures& signatures) {
@@ -272,14 +279,18 @@ void validate_increment_decrement_expr(const Expr& expr, DataflowState& state, c
     return lookup(state.locals, *lender) == LocalState::Initialized;
 }
 
-void validate_compound_assignment_expr(const Expr& expr, DataflowState& state, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> validate_compound_assignment_expr(const Expr& expr, DataflowState& state, const Body& body,
                                        const Signatures& signatures, bool report_errors) {
-    apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
-    apply_expr(*expr.rhs, false, state, body, signatures, report_errors);
-    if (!report_errors) return;
+    if (auto _r = apply_expr(*expr.lhs, false, state, body, signatures, report_errors); !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
+    if (auto _r = apply_expr(*expr.rhs, false, state, body, signatures, report_errors); !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
+    if (!report_errors) return {};
     std::optional<Type> lhs_type = infer_expr_type(*expr.lhs, body, signatures);
     std::optional<Type> rhs_type = infer_expr_type(*expr.rhs, body, signatures);
-    if (!lhs_type.has_value() || !rhs_type.has_value()) return;
+    if (!lhs_type.has_value() || !rhs_type.has_value()) return {};
     const Type& lhs_operand = binary_operand_type(*lhs_type);
     const Type& rhs_operand = binary_operand_type(*rhs_type);
     bool string_add_assign =
@@ -290,77 +301,84 @@ void validate_compound_assignment_expr(const Expr& expr, DataflowState& state, c
         arithmetic_check.binary_op = compound_base_operator(expr.binary_op);
         arithmetic_check.lhs = deep_clone_expr(*expr.lhs);
         arithmetic_check.rhs = deep_clone_expr(*expr.rhs);
-        check_binary_expr_operand_types(arithmetic_check, body, signatures, expr.loc);
+        if (auto _r = check_binary_expr_operand_types(arithmetic_check, body, signatures, expr.loc); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
     }
     if (assignment_target_is_read_only(*expr.lhs, body, signatures)) {
-        throw DataflowError("cannot assign to this place: it is reached through a read-only (const) reference",
-                            state.current_loc);
+        return std::unexpected(DataflowError("cannot assign to this place: it is reached through a read-only (const) reference",
+                            state.current_loc));
     }
     if (std::optional<std::string> lender = resolve_reborrow_lender(*expr.lhs, body, signatures); lender.has_value()) {
-        validate_reborrow_lender_write(*lender, state, report_errors);
+        if (auto _r = validate_reborrow_lender_write(*lender, state, report_errors); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
     }
     bool write_through_mutable_reborrow = write_is_licensed_by_mutable_reborrow_lender(*expr.lhs, state, body, signatures);
     RootSet write_roots;
     if (std::optional<std::string> root = direct_write_root(*expr.lhs, body)) {
         write_roots = single_root(*root);
     } else {
-        write_roots = resolve_borrow_source_root(*expr.lhs, state, body, signatures, /*report_errors=*/false);
+        auto write_roots_result = resolve_borrow_source_root(*expr.lhs, state, body, signatures, /*report_errors=*/false);
+        if (!write_roots_result.has_value()) return std::unexpected(std::move(write_roots_result).error());
+        write_roots = std::move(write_roots_result).value();
     }
     if (write_roots.empty()) {
-        throw DataflowError("left operand of '" + std::string(compound_operator_spelling(expr.binary_op)) +
+        return std::unexpected(DataflowError("left operand of '" + std::string(compound_operator_spelling(expr.binary_op)) +
                                 "' must be an assignable place",
-                            expr.loc);
+                            expr.loc));
     }
     if (!write_through_mutable_reborrow) {
         for (const std::string& root : write_roots) {
             auto borrow_it = state.borrows.find(root);
             if (borrow_it != state.borrows.end() &&
                 (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-                throw DataflowError("cannot assign to this place: '" + root + "' is currently borrowed", state.current_loc);
+                return std::unexpected(DataflowError("cannot assign to this place: '" + root + "' is currently borrowed", state.current_loc));
             }
         }
     }
     if (expr.lhs->kind == ExprKind::Identifier) state.locals[expr.lhs->name] = LocalState::Initialized;
+    return {};
 }
 
-void check_binary_expr_operand_types(const Expr& expr, const Body& body, const Signatures& signatures,
+[[nodiscard]] std::expected<void, DataflowError> check_binary_expr_operand_types(const Expr& expr, const Body& body, const Signatures& signatures,
                                      const SourceLocation& loc) {
-    if (expr.binary_op == BinaryOp::Assign) return;
-    if (expr.binary_op == BinaryOp::And || expr.binary_op == BinaryOp::Or) return;
+    if (expr.binary_op == BinaryOp::Assign) return {};
+    if (expr.binary_op == BinaryOp::And || expr.binary_op == BinaryOp::Or) return {};
     std::optional<Type> lhs_type = infer_expr_type(*expr.lhs, body, signatures);
     std::optional<Type> rhs_type = infer_expr_type(*expr.rhs, body, signatures);
     bool lhs_is_enum = lhs_type.has_value() && is_enum_type(binary_operand_type(*lhs_type), body.program);
     bool rhs_is_enum = rhs_type.has_value() && is_enum_type(binary_operand_type(*rhs_type), body.program);
     if ((lhs_is_enum || rhs_is_enum) && expr.binary_op != BinaryOp::Eq && expr.binary_op != BinaryOp::Ne) {
-        throw DataflowError("enum class values only support '==' and '!=' in this version", loc);
+        return std::unexpected(DataflowError("enum class values only support '==' and '!=' in this version", loc));
     }
     bool arithmetic_op = expr.binary_op == BinaryOp::Add || expr.binary_op == BinaryOp::Sub || expr.binary_op == BinaryOp::Mul ||
                          expr.binary_op == BinaryOp::Div;
     if (arithmetic_op) {
-        if (binary_expr_has_valid_arithmetic_types(expr, body, signatures)) return;
-        if (!lhs_type.has_value() || !rhs_type.has_value()) return;
+        if (binary_expr_has_valid_arithmetic_types(expr, body, signatures)) return {};
+        if (!lhs_type.has_value() || !rhs_type.has_value()) return {};
         const Type& lhs_operand = binary_operand_type(*lhs_type);
         const Type& rhs_operand = binary_operand_type(*rhs_type);
         if (lhs_operand.kind == TypeKind::Pointer || rhs_operand.kind == TypeKind::Pointer) {
-            throw DataflowError("pointer arithmetic requires 'pointer +/- integer' or 'pointer - pointer' with matching "
+            return std::unexpected(DataflowError("pointer arithmetic requires 'pointer +/- integer' or 'pointer - pointer' with matching "
                                 "non-void pointer types",
-                loc);
+                loc));
         }
-        throw DataflowError("binary operator requires operands of the same type; scpp has no implicit conversion between '" +
+        return std::unexpected(DataflowError("binary operator requires operands of the same type; scpp has no implicit conversion between '" +
                                 lhs_operand.name + "' and '" + rhs_operand.name + "' (ch06)",
-            loc);
+            loc));
     }
     if (expr.binary_op != BinaryOp::Eq && expr.binary_op != BinaryOp::Ne && expr.binary_op != BinaryOp::Lt &&
         expr.binary_op != BinaryOp::Gt && expr.binary_op != BinaryOp::Le && expr.binary_op != BinaryOp::Ge) {
-        return;
+        return {};
     }
-    if (binary_expr_has_compatible_types(expr, body, signatures)) return;
-    if (!lhs_type.has_value() || !rhs_type.has_value()) return;
+    if (binary_expr_has_compatible_types(expr, body, signatures)) return {};
+    if (!lhs_type.has_value() || !rhs_type.has_value()) return {};
     const Type& lhs_operand = binary_operand_type(*lhs_type);
     const Type& rhs_operand = binary_operand_type(*rhs_type);
-    throw DataflowError("binary operator requires operands of the same type; scpp has no implicit conversion between '" +
+    return std::unexpected(DataflowError("binary operator requires operands of the same type; scpp has no implicit conversion between '" +
                             lhs_operand.name + "' and '" + rhs_operand.name + "' (ch06)",
-                        loc);
+                        loc));
 }
 
 // Resolves a `base.field` Member expression's own declared field type --
@@ -404,7 +422,7 @@ void check_binary_expr_operand_types(const Expr& expr, const Body& body, const S
 // is implicitly always considered "Initialized, unborrowed" -- only its
 // *type* (and, for a raw pointer, the enclosing unsafe context) is
 // checked.
-void validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
                          const Signatures& signatures) {
     const Expr& operand = *expr.lhs;
     std::string describe = operand.kind == ExprKind::Member ? operand.lhs->name + "." + operand.name
@@ -430,15 +448,15 @@ void validate_deref_expr(const Expr& expr, const DataflowState& state, const Bod
     bool is_this_ref = resolved.has_value() && operand.kind == ExprKind::Identifier && operand.name == "this" &&
                        resolved->kind == TypeKind::Reference;
     if (!is_raw_ptr && !is_fn_ptr && !is_class_deref && !is_this_ref) {
-        throw DataflowError("cannot dereference ('*') '" + describe +
+        return std::unexpected(DataflowError("cannot dereference ('*') '" + describe +
                              "': only a raw pointer (inside '[[scpp::unsafe]] { }'), a function pointer "
                              "being called, a class with operator*, or '*this' is supported here",
-            state.current_loc);
+            state.current_loc));
     }
     if (is_raw_ptr && state.unsafe_depth == 0 && !(expr.implicit_arrow_deref && expr.implicit_arrow_chain_safe)) {
-        throw DataflowError("cannot dereference raw pointer '" + describe +
+        return std::unexpected(DataflowError("cannot dereference raw pointer '" + describe +
                              "': requires '[[scpp::unsafe]] { }' (spec ch01 §1.3/ch02)",
-            state.current_loc);
+            state.current_loc));
     }
     if (operand.kind == ExprKind::Member || operand.kind == ExprKind::Call || expr.implicit_arrow_deref) {
         // No separate per-field state for a Member (see above), and no
@@ -448,7 +466,7 @@ void validate_deref_expr(const Expr& expr, const DataflowState& state, const Bod
         // isn't a tracked local, so looking it up in state.locals below
         // would (incorrectly) report it as "out of scope" instead of just
         // relying on the type-only checks already done above.
-        return;
+        return {};
     }
     LocalState current = body.local_types.contains(operand.name)
                              ? lookup(state.locals, operand.name)
@@ -456,9 +474,10 @@ void validate_deref_expr(const Expr& expr, const DataflowState& state, const Bod
                                     ? LocalState::Initialized
                                     : lookup(state.locals, operand.name));
     if (current != LocalState::Initialized) {
-        throw DataflowError(describe_bad_state(operand.name, current),
-            state.current_loc);
+        return std::unexpected(DataflowError(describe_bad_state(operand.name, current),
+            state.current_loc));
     }
+    return {};
 }
 
 // Handles a raw-pointer/function-pointer/`*this` Deref expression used as
@@ -468,17 +487,15 @@ void validate_deref_expr(const Expr& expr, const DataflowState& state, const Bod
 // entirely. A raw pointer has no ownership/move state of its own to
 // disturb. `*this` is likewise just an explicit spelling of the receiver
 // object itself (ch05 §5.9), so it behaves exactly like reading `this`.
-void apply_deref(const Expr& expr, const DataflowState& state, const Body& body, const Signatures& signatures,
+[[nodiscard]] std::expected<void, DataflowError> apply_deref(const Expr& expr, const DataflowState& state, const Body& body, const Signatures& signatures,
                  bool report_errors) {
     if (is_explicit_star_this(expr)) {
-        if (!report_errors) return;
-        validate_deref_expr(expr, state, body, signatures);
-        return;
+        if (!report_errors) return {};
+        return validate_deref_expr(expr, state, body, signatures);
     }
     if (expr.implicit_arrow_deref) {
-        if (!report_errors) return;
-        validate_deref_expr(expr, state, body, signatures);
-        return;
+        if (!report_errors) return {};
+        return validate_deref_expr(expr, state, body, signatures);
     }
     bool is_plain_identifier = expr.lhs->kind == ExprKind::Identifier;
     // ch05 §5.12: `*this.p`/`*p`, where a captured raw/function pointer was
@@ -491,16 +508,16 @@ void apply_deref(const Expr& expr, const DataflowState& state, const Body& body,
         (expr.lhs->lhs->kind == ExprKind::Identifier || is_explicit_star_this(*expr.lhs->lhs));
     if (!is_plain_identifier && !is_member_of_identifier) {
         if (report_errors) {
-            throw DataflowError("dereference ('*') currently only supports a plain local raw/function pointer "
+            return std::unexpected(DataflowError("dereference ('*') currently only supports a plain local raw/function pointer "
                                  "variable, '*this', or a captured field of one ('this.field') (not a subscript "
                                  "or other expression)",
-                state.current_loc);
+                state.current_loc));
         }
-        return;
+        return {};
     }
-    if (!report_errors) return; // purely diagnostic: doesn't move p or change any tracked state
-    validate_deref_expr(expr, state, body, signatures);
-    if (!is_plain_identifier) return; // no separate borrow-tracking key for a field -- see the comment above
+    if (!report_errors) return {}; // purely diagnostic: doesn't move p or change any tracked state
+    if (auto _r = validate_deref_expr(expr, state, body, signatures); !_r.has_value()) return std::unexpected(std::move(_r).error());
+    if (!is_plain_identifier) return {}; // no separate borrow-tracking key for a field -- see the comment above
     const std::string& name = expr.lhs->name;
     auto borrow_it = state.borrows.find(name);
     if (borrow_it != state.borrows.end() && borrow_it->second.mutable_borrow) {
@@ -508,9 +525,10 @@ void apply_deref(const Expr& expr, const DataflowState& state, const Body& body,
         // `state.current_loc` (the enclosing `*`/Deref's own position,
         // one token earlier) -- both checks above are about `name`
         // specifically, so pointing at it directly is more precise.
-        throw DataflowError("cannot use '" + name + "' while it is mutably borrowed",
-            expr.lhs->loc);
+        return std::unexpected(DataflowError("cannot use '" + name + "' while it is mutably borrowed",
+            expr.lhs->loc));
     }
+    return {};
 }
 
 // Resolves `name` to the root place its borrow-tracking should apply to.
@@ -525,7 +543,7 @@ void apply_deref(const Expr& expr, const DataflowState& state, const Body& body,
 // caller-side place to resolve to, so its own name is treated as its own
 // root; see the Call/apply_reference_argument handling for how the
 // caller-side place is checked instead, at each call site).
-void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowState& state,
+[[nodiscard]] std::expected<void, DataflowError> apply_reference_argument(const Expr& arg, const Type& param_type, DataflowState& state,
                                BorrowMap& in_call_borrows, const Body& body, const Signatures& signatures,
                                bool report_errors) {
     // ch05 §5.x: a *const* reference parameter bound directly to a fresh
@@ -542,8 +560,7 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
     // resolve_borrow_source_root/every borrow-conflict check below
     // entirely (there is no "root" at all for a temporary).
     if (const_reference_binds_materialized_temporary(arg, param_type, body, signatures)) {
-        apply_expr(arg, /*is_move_target_context=*/arg.kind == ExprKind::Move, state, body, signatures, report_errors);
-        return;
+        return apply_expr(arg, /*is_move_target_context=*/arg.kind == ExprKind::Move, state, body, signatures, report_errors);
     }
 
     // resolve_borrow_source_root may have real (move-tracking) side
@@ -553,8 +570,10 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
     // diagnostic (a call argument's borrow never outlives the call, so
     // there's nothing else here for a later statement's fixed-point
     // computation to observe).
-    RootSet roots = resolve_borrow_source_root(arg, state, body, signatures, report_errors);
-    if (!report_errors) return;
+    auto roots_result = resolve_borrow_source_root(arg, state, body, signatures, report_errors);
+    if (!roots_result.has_value()) return std::unexpected(std::move(roots_result).error());
+    RootSet roots = std::move(roots_result).value();
+    if (!report_errors) return {};
 
     if (body.program != nullptr && param_type.pointee != nullptr && param_type.pointee->kind == TypeKind::Named) {
         const ClassDef* param_interface = find_class_def(*body.program, param_type.pointee->name);
@@ -563,7 +582,7 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
         if (source_type.has_value() &&
             !types_equal(*source_type, param_type) &&
             !types_compatible_with_base_conversion(*source_type, param_type, *body.program, enclosing_class_name(body))) {
-            throw DataflowError("cannot bind reference parameter from an incompatible source type", state.current_loc);
+            return std::unexpected(DataflowError("cannot bind reference parameter from an incompatible source type", state.current_loc));
         }
         }
     }
@@ -586,7 +605,9 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
     bool lender_is_mutable =
         lender.has_value() && is_reborrowable_local_type(body.local_types.at(*lender)) && body.local_types.at(*lender).is_mutable_ref;
     if (lender.has_value() && lender_is_mutable) {
-        validate_reborrow_lender(*lender, is_mutable, state, body, report_errors);
+        if (auto _r = validate_reborrow_lender(*lender, is_mutable, state, body, report_errors); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
     } else {
         // The general case: `arg` isn't itself a directly-named, locally-
         // bound reference (that narrower case is handled above), so it
@@ -599,9 +620,9 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
         // reference out of a read-only one (spec ch05 §5.7's "projection
         // chain's const-reachability").
         if (is_mutable && is_read_only_reachable(arg, body, signatures)) {
-            throw DataflowError("cannot pass " + format_roots(roots) + " by mutable reference: it is only reachable "
+            return std::unexpected(DataflowError("cannot pass " + format_roots(roots) + " by mutable reference: it is only reachable "
                                                           "through a read-only (const) reference",
-                state.current_loc);
+                state.current_loc));
         }
         for (const std::string& root : roots) {
             auto persistent_it = state.borrows.find(root);
@@ -610,9 +631,9 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
                 (is_mutable ? (persistent_it->second.mutable_borrow || persistent_it->second.shared_count > 0)
                             : persistent_it->second.mutable_borrow);
             if (persistent_conflict) {
-                throw DataflowError("cannot pass '" + root + "' by " + std::string(is_mutable ? "mutable " : "") +
+                return std::unexpected(DataflowError("cannot pass '" + root + "' by " + std::string(is_mutable ? "mutable " : "") +
                                         "reference: it is already borrowed",
-                                    state.current_loc);
+                                    state.current_loc));
             }
         }
     }
@@ -624,9 +645,9 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
             (is_mutable ? (in_call_it->second.mutable_borrow || in_call_it->second.shared_count > 0)
                         : in_call_it->second.mutable_borrow);
         if (in_call_conflict) {
-            throw DataflowError("cannot pass '" + root + "' by " + std::string(is_mutable ? "mutable " : "") +
+            return std::unexpected(DataflowError("cannot pass '" + root + "' by " + std::string(is_mutable ? "mutable " : "") +
                                     "reference more than once in the same call",
-                                state.current_loc);
+                                state.current_loc));
         }
 
         BorrowState& borrow = in_call_borrows[root];
@@ -636,6 +657,7 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
             borrow.shared_count++;
         }
     }
+    return {};
 }
 
 // ch04 §4.2/[expr.prim.lambda]: whether `state`'s current lexical
@@ -676,7 +698,7 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
 // codegen-only builtins are never in `signatures` at all, so they're
 // always callable regardless of context, same as they already bypass
 // every other signature-based check in this file.
-void check_call_arguments(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
+[[nodiscard]] std::expected<void, DataflowError> check_call_arguments(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
                            bool report_errors) {
     // A method call's receiver (`obj.method(...)`/`this->method(...)`,
     // stored in `expr.lhs`, never part of `expr.args` -- see
@@ -701,8 +723,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     std::optional<Type> direct_call_type = expr.lhs == nullptr ? infer_expr_type(expr, body, signatures) : std::nullopt;
     if (!expr.lhs && direct_call_type.has_value() && direct_call_type->kind == TypeKind::Named &&
         state.class_names != nullptr && state.class_names->contains(expr.name)) {
-        check_constructor_arguments(*direct_call_type, expr.args, state, body, signatures, report_errors);
-        return;
+        return check_constructor_arguments(*direct_call_type, expr.args, state, body, signatures, report_errors);
     }
     CalleeSignature callee = resolve_callee_signature(expr, body, signatures, state.class_field_types);
     auto name_it = signatures.find(callee.key);
@@ -711,8 +732,10 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
         bool receiver_is_reference =
             sig != nullptr && !sig->param_types.empty() && is_reference(sig->param_types[0]) && !sig->param_types[0].is_rvalue_ref;
         (void)receiver_is_reference;
-        apply_expr(*expr.lhs, /*is_move_target_context=*/expr.lhs->kind == ExprKind::Move, state, body, signatures,
-                   report_errors);
+        if (auto _r = apply_expr(*expr.lhs, /*is_move_target_context=*/expr.lhs->kind == ExprKind::Move, state, body, signatures,
+                   report_errors); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
     }
     std::string callee_display = expr.name;
     if (callee_display.empty()) {
@@ -730,39 +753,39 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     // check; preserved here unchanged).
     if (report_errors && name_it != signatures.end() && sig == nullptr) {
         if (find_const_blocked_method_candidate(expr, callee, body, signatures) != nullptr) {
-            throw DataflowError("cannot call non-const member function '" + callee_display +
+            return std::unexpected(DataflowError("cannot call non-const member function '" + callee_display +
                                     "' through a read-only (const) receiver",
-                state.current_loc);
+                state.current_loc));
         }
-        throw DataflowError("no overload of '" + expr.name +
+        return std::unexpected(DataflowError("no overload of '" + expr.name +
                              "' matches these argument types (spec ch05.10 -- overload resolution is exact "
                              "type match only; an explicit cast may be required)",
-            state.current_loc);
+            state.current_loc));
     }
     if (report_errors && sig != nullptr && sig->access == AccessSpecifier::Private &&
         !sig->member_owner_class.empty() && !grants_private_access(state, sig->member_owner_class)) {
-        throw DataflowError("cannot call private member function '" + callee_display + "' of class '" +
+        return std::unexpected(DataflowError("cannot call private member function '" + callee_display + "' of class '" +
                              sig->member_owner_class + "' from outside its own methods",
-            state.current_loc);
+            state.current_loc));
     }
     if (report_errors && sig != nullptr && sig->is_extern_c_declaration_only && state.unsafe_depth == 0) {
-        throw DataflowError("cannot call 'extern \"C\"' function '" + callee_display +
+        return std::unexpected(DataflowError("cannot call 'extern \"C\"' function '" + callee_display +
                              "' outside '[[scpp::unsafe]] { }': no scpp compiler ever sees its real "
                              "implementation to check it (spec ch01 §1.3/ch02)",
-            state.current_loc);
+            state.current_loc));
     }
     if (report_errors && sig != nullptr && sig->is_unsafe && state.unsafe_depth == 0) {
-        throw DataflowError("cannot call '" + callee_display +
+        return std::unexpected(DataflowError("cannot call '" + callee_display +
                              "' outside '[[scpp::unsafe]] { }': its own declaration is marked "
                              "'[[scpp::unsafe]]', so its soundness depends on a precondition only the "
                              "caller can guarantee (ch01 §1.2/§1.3)",
-            state.current_loc);
+            state.current_loc));
     }
     // Scratch borrow-map shared by every reference argument of *this*
     // call only (see apply_reference_argument) -- never merged into
     // `state`, since none of these transient borrows outlive the call.
     BorrowMap in_call_borrows;
-    auto apply_one_argument = [&](const Expr& arg, std::size_t param_index) {
+    auto apply_one_argument = [&](const Expr& arg, std::size_t param_index) -> std::expected<void, DataflowError> {
         Type effective_param_type;
         bool have_effective_param_type = false;
         if (sig != nullptr && param_index < sig->param_types.size()) {
@@ -797,15 +820,19 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             // argument below) for its own side effects -- e.g.
             // std::move(x) marking x moved-out in `state`.
             if (report_errors && !produces_rvalue_of_type(arg, *effective_param_type.pointee, body, signatures)) {
-                throw DataflowError(
+                return std::unexpected(DataflowError(
                     "argument to an rvalue-reference ('T&&') parameter must be a fresh value -- "
                     "std::move(x), std::make_unique<T>(...), a literal, or a call returning by value; "
                     "an existing named variable must be moved explicitly (spec ch03/ch05 §5.11)",
-                    state.current_loc);
+                    state.current_loc));
             }
-            apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
+            if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         } else if (param_is_reference) {
-            apply_reference_argument(arg, effective_param_type, state, in_call_borrows, body, signatures, report_errors);
+            if (auto _r = apply_reference_argument(arg, effective_param_type, state, in_call_borrows, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         } else {
             if (report_errors && sig != nullptr && param_index < sig->param_types.size() &&
                 sig->param_types[param_index].kind == TypeKind::Pointer) {
@@ -855,9 +882,9 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                     !raw_pointer_implicitly_convertible(*arg_type, sig->param_types[param_index]) &&
                     !types_compatible_with_base_conversion(*arg_type, sig->param_types[param_index], *body.program,
                                                            enclosing_class_name(body))) {
-                    throw DataflowError("cannot pass an incompatible pointer type to parameter '" +
+                    return std::unexpected(DataflowError("cannot pass an incompatible pointer type to parameter '" +
                                             sig->param_names[param_index] + "'",
-                                        state.current_loc);
+                                        state.current_loc));
                 }
             }
             bool class_value_param =
@@ -873,18 +900,18 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                                   : nullptr;
             if (report_errors && class_value_param && !copyable_lvalue_source && !freely_copyable_value_source &&
                 !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures) && converting_ctor == nullptr) {
-                throw DataflowError("passing class '" + sig->param_types[param_index].name +
+                return std::unexpected(DataflowError("passing class '" + sig->param_types[param_index].name +
                                      "' by value requires either an implicitly copyable same-type source or "
                                      "a fresh value such as std::move(x) or a call returning by value",
-                    state.current_loc);
+                    state.current_loc));
             }
             if (converting_ctor != nullptr) {
                 if (report_errors && converting_ctor->is_unsafe && state.unsafe_depth == 0) {
-                    throw DataflowError("cannot use '" + sig->param_types[param_index].name +
+                    return std::unexpected(DataflowError("cannot use '" + sig->param_types[param_index].name +
                                          "'s converting constructor outside '[[scpp::unsafe]] { }': its own declaration is "
                                          "marked '[[scpp::unsafe]]', so its soundness depends on a precondition only the "
                                          "caller can guarantee (ch01 §1.2/§1.3)",
-                        state.current_loc);
+                        state.current_loc));
                 }
                 Type ctor_param_type = converting_ctor->param_types[1];
                 if (!converting_ctor->is_generic_template && is_reference(ctor_param_type) &&
@@ -894,26 +921,37 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                 }
                 if (is_reference(ctor_param_type) && ctor_param_type.is_rvalue_ref) {
                     if (report_errors && !produces_rvalue_of_type(arg, *ctor_param_type.pointee, body, signatures)) {
-                        throw DataflowError(
+                        return std::unexpected(DataflowError(
                             "argument to an rvalue-reference ('T&&') parameter must be a fresh value -- "
                             "std::move(x), std::make_unique<T>(...), a literal, or a call returning by value; "
                             "an existing named variable must be moved explicitly (spec ch03/ch05 §5.11)",
-                            state.current_loc);
+                            state.current_loc));
                     }
-                    apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
+                    if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 } else if (is_reference(ctor_param_type)) {
-                    apply_reference_argument(arg, ctor_param_type, state, in_call_borrows, body, signatures, report_errors);
+                    if (auto _r = apply_reference_argument(arg, ctor_param_type, state, in_call_borrows, body, signatures, report_errors); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 } else {
-                    apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
+                    if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
                 if (report_errors && sig != nullptr) {
-                    enforce_thread_safety_constraints_for_argument(arg, *sig, param_index, "function", callee_display, body,
+                    if (auto _r = enforce_thread_safety_constraints_for_argument(arg, *sig, param_index, "function", callee_display, body,
                                                                    signatures, state.current_loc);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
-                return;
+                return {};
             }
-            apply_expr(arg, /*is_move_target_context=*/!(copyable_lvalue_source || freely_copyable_value_source), state,
-                       body, signatures, report_errors);
+            if (auto _r = apply_expr(arg, /*is_move_target_context=*/!(copyable_lvalue_source || freely_copyable_value_source), state,
+                       body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
 
             // `&expr` (ch05 §5.7) passed directly as a call argument --
             // the primary motivating use case (an `extern "C"` out
@@ -935,25 +973,36 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                 sig->param_types[param_index].is_mutable_pointee;
             if (report_errors && param_wants_mutable_pointer && arg.kind == ExprKind::Unary &&
                 arg.unary_op == UnaryOp::AddressOf && is_read_only_reachable(*arg.lhs, body, signatures)) {
-                throw DataflowError("cannot pass '&' of a read-only-reachable place as a mutable 'T*' "
+                return std::unexpected(DataflowError("cannot pass '&' of a read-only-reachable place as a mutable 'T*' "
                                     "argument (would need 'const T*', which this parameter doesn't accept)",
-                    state.current_loc);
+                    state.current_loc));
             }
         }
         if (report_errors && sig != nullptr) {
-            enforce_thread_safety_constraints_for_argument(arg, *sig, param_index, "function", callee_display, body,
+            if (auto _r = enforce_thread_safety_constraints_for_argument(arg, *sig, param_index, "function", callee_display, body,
                                                            signatures, state.current_loc);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
+        return {};
     };
-    for (std::size_t i = 0; i < expr.args.size(); i++) apply_one_argument(*expr.args[i], i + callee.param_offset);
+    for (std::size_t i = 0; i < expr.args.size(); i++) {
+        if (auto _r = apply_one_argument(*expr.args[i], i + callee.param_offset); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    }
     if (sig != nullptr) {
         for (std::size_t param_index = expr.args.size() + callee.param_offset; param_index < sig->param_types.size();
              param_index++) {
             if (sig->param_default_exprs[param_index] == nullptr) break;
             ExprPtr default_arg = deep_clone_expr_with_loc(*sig->param_default_exprs[param_index], state.current_loc);
-            apply_one_argument(*default_arg, param_index);
+            if (auto _r = apply_one_argument(*default_arg, param_index); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
     }
+    return {};
 }
 
 // ch04 §4.2 / spec §6.1: checks every argument of a
@@ -980,7 +1029,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
 // pattern -- except for zero-argument/default-brace construction, which
 // must be diagnosed here as "no default constructor" rather than
 // slipping through to codegen and crashing LLVM module verification.
-void check_constructor_arguments(const Type& constructed_type, const std::vector<ExprPtr>& ctor_args,
+[[nodiscard]] std::expected<void, DataflowError> check_constructor_arguments(const Type& constructed_type, const std::vector<ExprPtr>& ctor_args,
                                   DataflowState& state, const Body& body, const Signatures& signatures,
                                   bool report_errors) {
     std::string class_name = constructed_type.name;
@@ -1061,39 +1110,42 @@ void check_constructor_arguments(const Type& constructed_type, const std::vector
     if (sig == nullptr && report_errors && ctor_args.empty()) {
         static const std::vector<ExprPtr> no_ctor_args;
         if (body.program != nullptr && !class_has_any_constructor(class_name, *body.program)) {
-            ensure_implicit_default_construction_is_valid(class_name, state.current_class, body, signatures,
+            if (auto _r = ensure_implicit_default_construction_is_valid(class_name, state.current_class, body, signatures,
                                                           state.current_loc,
                                                           "implicit default construction of class '" + class_name +
                                                               "' is ill-formed");
-            return;
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            return {};
         }
         sig = resolve_constructor_signature(class_name, no_ctor_args, body, signatures);
         if (sig == nullptr) {
-            throw DataflowError("type '" + class_name +
+            return std::unexpected(DataflowError("type '" + class_name +
                                     "' has no default constructor; no constructor of '" + class_name +
                                     "' matches 0 arguments",
-                                state.current_loc);
+                                state.current_loc));
         }
     }
     if (report_errors && sig != nullptr && sig->access == AccessSpecifier::Private &&
         !sig->member_owner_class.empty() && !grants_private_access(state, sig->member_owner_class)) {
-        throw DataflowError("cannot call private constructor of class '" + class_name +
+        return std::unexpected(DataflowError("cannot call private constructor of class '" + class_name +
                              "' from outside its own methods",
-            state.current_loc);
+            state.current_loc));
     }
     if (report_errors && sig != nullptr && sig->is_unsafe && state.unsafe_depth == 0) {
-        throw DataflowError("cannot call '" + class_name +
+        return std::unexpected(DataflowError("cannot call '" + class_name +
                              "'s constructor outside '[[scpp::unsafe]] { }': its own declaration is marked "
                              "'[[scpp::unsafe]]', so its soundness depends on a precondition only the "
                              "caller can guarantee (ch01 §1.2/§1.3)",
-            state.current_loc);
+            state.current_loc));
     }
     BorrowMap in_call_borrows;
     bool constructed_state_can_carry_lifetimes =
         report_errors && body.program != nullptr &&
         type_contains_lifetime_carrying_state(constructed_type, *body.program) &&
         !constructed_type.is_reference_wrapper_lifetime_source;
-    auto apply_one_argument = [&](const Expr& arg, std::size_t param_index) {
+    auto apply_one_argument = [&](const Expr& arg, std::size_t param_index) -> std::expected<void, DataflowError> {
         Type effective_param_type;
         bool have_effective_param_type = false;
         const Type* destination_type = &constructed_type;
@@ -1109,8 +1161,11 @@ void check_constructor_arguments(const Type& constructed_type, const std::vector
             destination_type = &sig->param_types[param_index];
         }
         if (constructed_state_can_carry_lifetimes) {
-            reject_lifetime_group_state_embedding(arg, state, body, signatures, report_errors, "constructed object state",
+            if (auto _r = reject_lifetime_group_state_embedding(arg, state, body, signatures, report_errors, "constructed object state",
                                                   destination_type);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
         bool param_is_reference = have_effective_param_type && is_reference(effective_param_type);
         bool param_is_rvalue_reference = param_is_reference && effective_param_type.is_rvalue_ref;
@@ -1120,18 +1175,24 @@ void check_constructor_arguments(const Type& constructed_type, const std::vector
         if (param_is_rvalue_reference) {
             if (report_errors &&
                 !produces_rvalue_of_type(arg, *effective_param_type.pointee, body, signatures)) {
-                throw DataflowError(
+                return std::unexpected(DataflowError(
                     "argument to an rvalue-reference ('T&&') parameter must be a fresh value -- "
                     "std::move(x), std::make_unique<T>(...), a literal, or a call returning by value; "
                     "an existing named variable must be moved explicitly (spec ch03/ch05 §5.11)",
-                    state.current_loc);
+                    state.current_loc));
             }
-            apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
+            if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         } else if (param_is_reference && allow_temporary_reference_binding) {
-            apply_expr(arg, /*is_move_target_context=*/arg.kind == ExprKind::Move, state, body, signatures, report_errors);
+            if (auto _r = apply_expr(arg, /*is_move_target_context=*/arg.kind == ExprKind::Move, state, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         } else if (param_is_reference) {
-            apply_reference_argument(arg, effective_param_type, state, in_call_borrows, body, signatures,
-                                      report_errors);
+            if (auto _r = apply_reference_argument(arg, effective_param_type, state, in_call_borrows, body, signatures,
+                                      report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         } else {
             bool class_value_param =
                 sig != nullptr && param_index < sig->param_types.size() &&
@@ -1143,27 +1204,40 @@ void check_constructor_arguments(const Type& constructed_type, const std::vector
             if (arg.kind == ExprKind::Lambda) freely_copyable_value_source = class_value_param;
             if (report_errors && class_value_param && !copyable_lvalue_source && !freely_copyable_value_source &&
                 !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures)) {
-                throw DataflowError("passing class '" + sig->param_types[param_index].name +
+                return std::unexpected(DataflowError("passing class '" + sig->param_types[param_index].name +
                                      "' by value requires either an implicitly copyable same-type source or "
                                      "a fresh value such as std::move(x) or a call returning by value",
-                    state.current_loc);
+                    state.current_loc));
             }
-            apply_expr(arg, /*is_move_target_context=*/!(copyable_lvalue_source || freely_copyable_value_source), state,
-                       body, signatures, report_errors);
+            if (auto _r = apply_expr(arg, /*is_move_target_context=*/!(copyable_lvalue_source || freely_copyable_value_source), state,
+                       body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
         if (report_errors && sig != nullptr) {
-            enforce_thread_safety_constraints_for_argument(arg, *sig, param_index, "constructor", class_name, body,
+            if (auto _r = enforce_thread_safety_constraints_for_argument(arg, *sig, param_index, "constructor", class_name, body,
                                                            signatures, state.current_loc);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
+        return {};
     };
-    for (std::size_t i = 0; i < ctor_args.size(); i++) apply_one_argument(*ctor_args[i], i + 1);
+    for (std::size_t i = 0; i < ctor_args.size(); i++) {
+        if (auto _r = apply_one_argument(*ctor_args[i], i + 1); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    }
     if (sig != nullptr) {
         for (std::size_t param_index = ctor_args.size() + 1; param_index < sig->param_types.size(); param_index++) {
             if (sig->param_default_exprs[param_index] == nullptr) break;
             ExprPtr default_arg = deep_clone_expr_with_loc(*sig->param_default_exprs[param_index], state.current_loc);
-            apply_one_argument(*default_arg, param_index);
+            if (auto _r = apply_one_argument(*default_arg, param_index); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
     }
+    return {};
 }
 
 // Walks `expr`, updating `state` for any std::move / assignment / borrow
@@ -1185,7 +1259,7 @@ void check_constructor_arguments(const Type& constructed_type, const std::vector
 // stable per-block states) and once more in the final reporting pass
 // (report_errors=true). Both runs must apply the *same* state mutations so
 // the two phases stay consistent.
-void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
                  const Signatures& signatures, bool report_errors) {
     // Refreshed on every call (including each recursive call for a child
     // sub-expression) so that, by the time *this* node's own checks run
@@ -1202,14 +1276,22 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
         case ExprKind::CharLiteral:
         case ExprKind::StringLiteral:
         case ExprKind::TypeTrait:
-            return;
+            return {};
 
         case ExprKind::Sizeof:
-            if (report_errors) validate_sizeof_operand(expr, body, signatures, state.current_loc);
-            return;
+            if (report_errors) {
+                if (auto _r = validate_sizeof_operand(expr, body, signatures, state.current_loc); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+            return {};
         case ExprKind::Alignof:
-            if (report_errors) validate_alignof_operand(expr, body, state.current_loc);
-            return;
+            if (report_errors) {
+                if (auto _r = validate_alignof_operand(expr, body, state.current_loc); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+            return {};
         case ExprKind::ValueInit:
             // `return {};` (ast.cppm's ExprKind::ValueInit) value-
             // initializes `expr.type` (filled in by monomorphization from
@@ -1217,20 +1299,24 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             // Monomorphizer::walk_expr) with zero constructor arguments,
             // so it needs exactly the same "no default constructor"
             // validation as an empty-braced `Type var{};` VarDecl.
-            if (report_errors) check_constructor_arguments(expr.type, {}, state, body, signatures, report_errors);
-            return;
+            if (report_errors) {
+                if (auto _r = check_constructor_arguments(expr.type, {}, state, body, signatures, report_errors); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+            return {};
 
         case ExprKind::Identifier: {
-            if (!report_errors) return;
+            if (!report_errors) return {};
             auto type_it = expr.explicit_global_qualification ? body.local_types.end() : body.local_types.find(expr.name);
             if (type_it == body.local_types.end() &&
                 find_visible_global_for_name(expr.name, expr.explicit_global_qualification, body) == nullptr) {
-                return; // unknown name: left to codegen's own check
+                return {}; // unknown name: left to codegen's own check
             }
             LocalState current = type_it != body.local_types.end() ? lookup(state.locals, expr.name) : LocalState::Initialized;
             if (current != LocalState::Initialized) {
-                throw DataflowError(describe_bad_state(expr.name, current),
-                    state.current_loc);
+                return std::unexpected(DataflowError(describe_bad_state(expr.name, current),
+                    state.current_loc));
             }
             // A direct read is rejected if `expr.name` is currently
             // serving as the root of an active *mutable* borrow --
@@ -1246,20 +1332,20 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             // other local reference borrows from) is.
             auto borrow_it = state.borrows.find(expr.name);
             if (borrow_it != state.borrows.end() && borrow_it->second.mutable_borrow) {
-                throw DataflowError("cannot use '" + expr.name + "' while it is mutably borrowed",
-                    state.current_loc);
+                return std::unexpected(DataflowError("cannot use '" + expr.name + "' while it is mutably borrowed",
+                    state.current_loc));
             }
-            return;
+            return {};
         }
 
         case ExprKind::Move: {
             if (expr.lhs->kind != ExprKind::Identifier) {
                 if (report_errors) {
-                    throw DataflowError("std::move currently only supports a plain local variable "
+                    return std::unexpected(DataflowError("std::move currently only supports a plain local variable "
                                          "(not a member, subscript, or other expression)",
-                        state.current_loc);
+                        state.current_loc));
                 }
-                return;
+                return {};
             }
             const std::string& name = expr.lhs->name;
             auto type_it = body.local_types.find(name);
@@ -1271,34 +1357,34 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             // local/parameter moved-out exactly like any other local name.
             if (type_it == body.local_types.end()) {
                 if (find_visible_global_for_name(name, expr.lhs->explicit_global_qualification, body) != nullptr) {
-                    return;
+                    return {};
                 }
                 if (report_errors) {
-                    throw DataflowError("unknown variable '" + name + "'",
-                        state.current_loc);
+                    return std::unexpected(DataflowError("unknown variable '" + name + "'",
+                        state.current_loc));
                 }
-                return;
+                return {};
             }
             LocalState current = lookup(state.locals, name);
             if (report_errors && current != LocalState::Initialized) {
-                throw DataflowError(describe_bad_state(name, current),
-                    state.current_loc);
+                return std::unexpected(DataflowError(describe_bad_state(name, current),
+                    state.current_loc));
             }
             if (report_errors) {
                 auto borrow_it = state.borrows.find(name);
                 if (borrow_it != state.borrows.end() &&
                     (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-                    throw DataflowError("cannot move '" + name + "' while it is borrowed",
-                        state.current_loc);
+                    return std::unexpected(DataflowError("cannot move '" + name + "' while it is borrowed",
+                        state.current_loc));
                 }
             }
             state.locals[name] = LocalState::MovedOut;
             if (report_errors && !is_move_target_context) {
-                throw DataflowError("std::move(" + name + ") must be used to initialize, assign into, return, "
+                return std::unexpected(DataflowError("std::move(" + name + ") must be used to initialize, assign into, return, "
                                                             "pass, or capture a value",
-                    state.current_loc);
+                    state.current_loc));
             }
-            return;
+            return {};
         }
 
         // `static_cast<T>(expr)`/`(T)expr` (ch06 §6): visits the operand
@@ -1310,14 +1396,16 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
         // raw-pointer-to-raw-pointer only inside an unsafe context
         // (spec §5.1(5.2)).
         case ExprKind::Cast: {
-            apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+            if (auto _r = apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             if (report_errors) {
                 std::optional<Type> source_type = infer_expr_type(*expr.lhs, body, signatures);
                 if ((source_type.has_value() && is_interface_representation_type(*source_type, *body.program)) ||
                     is_interface_representation_type(expr.type, *body.program)) {
-                    throw DataflowError("cannot cast interface-typed pointers or references to other scalar or raw "
+                    return std::unexpected(DataflowError("cannot cast interface-typed pointers or references to other scalar or raw "
                                             "pointer representations",
-                                        state.current_loc);
+                                        state.current_loc));
                 }
                 // A reference-returning call/field (e.g. `std::string_view::
                 // at`'s `const char&`) is just as castable as the plain value
@@ -1329,15 +1417,15 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                 bool scalar_source = source_operand != nullptr && source_operand->kind == TypeKind::Named &&
                                      is_scalar_type_name(source_operand->name);
                 bool scalar_target = expr.type.kind == TypeKind::Named && is_scalar_type_name(expr.type.name);
-                if (scalar_source && scalar_target) return;
+                if (scalar_source && scalar_target) return {};
 
                 bool integral_source = source_operand != nullptr && source_operand->kind == TypeKind::Named &&
                                        is_integral_scalar_type_name(source_operand->name);
                 bool target_is_enum = is_enum_type(expr.type, body.program);
                 if (integral_source && target_is_enum) {
-                    throw DataflowError("cannot cast an integer value to enum class '" + expr.type.name +
+                    return std::unexpected(DataflowError("cannot cast an integer value to enum class '" + expr.type.name +
                                             "'; use scpp::enum_cast<" + expr.type.name + ">(value) instead",
-                                        state.current_loc);
+                                        state.current_loc));
                 }
 
                 const Type* source_enum_underlying =
@@ -1345,62 +1433,63 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                                                                                     : nullptr;
                 if (source_operand != nullptr && source_enum_underlying != nullptr && expr.type.kind == TypeKind::Named &&
                     types_equal(*source_enum_underlying, expr.type)) {
-                    return;
+                    return {};
                 }
 
                 bool raw_pointer_source = source_operand != nullptr && source_operand->kind == TypeKind::Pointer;
                 bool raw_pointer_target = expr.type.kind == TypeKind::Pointer;
                 if (raw_pointer_source && raw_pointer_target) {
                     if (state.unsafe_depth == 0) {
-                        throw DataflowError("cannot cast between raw pointer types outside '[[scpp::unsafe]] { }' "
+                        return std::unexpected(DataflowError("cannot cast between raw pointer types outside '[[scpp::unsafe]] { }' "
                                                 "(spec §5.1(5.2))",
-                                            state.current_loc);
+                                            state.current_loc));
                     }
-                    return;
+                    return {};
                 }
 
                 {
-                    throw DataflowError(
+                    return std::unexpected(DataflowError(
                         "a cast is only supported between two builtin scalar types, from an enum class to its "
                         "underlying integer type, or between two raw pointer types inside '[[scpp::unsafe]] { }', in "
                         "this version",
-                        state.current_loc);
+                        state.current_loc));
                 }
             }
-            return;
+            return {};
         }
 
         case ExprKind::Unary:
             if (expr.unary_op == UnaryOp::Deref) {
-                apply_deref(expr, state, body, signatures, report_errors);
-                return;
+                return apply_deref(expr, state, body, signatures, report_errors);
             }
             if (expr.unary_op == UnaryOp::AddressOf) {
-                apply_address_of(expr, state, body, signatures, report_errors);
-                return;
+                if (auto _r = apply_address_of(expr, state, body, signatures, report_errors); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                return {};
             }
             if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec ||
                 expr.unary_op == UnaryOp::PostInc || expr.unary_op == UnaryOp::PostDec) {
-                validate_increment_decrement_expr(expr, state, body, signatures, report_errors);
-                return;
+                return validate_increment_decrement_expr(expr, state, body, signatures, report_errors);
             }
-            apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
-            return;
+            return apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
 
         case ExprKind::New:
             if (report_errors && state.unsafe_depth == 0) {
-                throw DataflowError("cannot use 'new' outside '[[scpp::unsafe]] { }' (spec §5.1(5.4))",
-                                    state.current_loc);
+                return std::unexpected(DataflowError("cannot use 'new' outside '[[scpp::unsafe]] { }' (spec §5.1(5.4))",
+                                    state.current_loc));
             }
             if (expr.lhs) {
-                apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+                if (auto _r = apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
                 if (report_errors) {
                     std::optional<Type> placement_type = infer_expr_type(*expr.lhs, body, signatures);
                     if (!placement_type.has_value() || placement_type->kind != TypeKind::Pointer ||
                         placement_type->pointee == nullptr || !types_equal(*placement_type->pointee, expr.type)) {
-                        throw DataflowError("placement 'new' requires a raw pointer to the constructed type in this "
+                        return std::unexpected(DataflowError("placement 'new' requires a raw pointer to the constructed type in this "
                                                 "version",
-                                            state.current_loc);
+                                            state.current_loc));
                     }
                 }
             }
@@ -1411,83 +1500,109 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                     expr.args.size() == 1 &&
                     is_freely_copyable_class_value_source(*expr.args[0], expr.type, body, signatures);
                 if (move_shape) {
-                    apply_expr(*expr.args[0], /*is_move_target_context=*/true, state, body, signatures, report_errors);
+                    if (auto _r = apply_expr(*expr.args[0], /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 } else if (freely_copyable_copy_shape) {
-                    apply_expr(*expr.args[0], /*is_move_target_context=*/false, state, body, signatures, report_errors);
+                    if (auto _r = apply_expr(*expr.args[0], /*is_move_target_context=*/false, state, body, signatures, report_errors); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 } else if (expr.args.size() == 1 &&
                            body.program != nullptr && !has_user_declared_copy_ctor(expr.type.name, *body.program) &&
                            is_copyable_class_lvalue_boundary_source(*expr.args[0], expr.type, body, signatures)) {
-                    apply_expr(*expr.args[0], /*is_move_target_context=*/false, state, body, signatures, report_errors);
+                    if (auto _r = apply_expr(*expr.args[0], /*is_move_target_context=*/false, state, body, signatures, report_errors); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 } else {
-                    check_constructor_arguments(expr.type, expr.args, state, body, signatures, report_errors);
+                    if (auto _r = check_constructor_arguments(expr.type, expr.args, state, body, signatures, report_errors); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
-                return;
+                return {};
             }
             for (const auto& arg : expr.args) {
-                apply_expr(*arg, /*is_move_target_context=*/arg->kind == ExprKind::Move, state, body, signatures,
-                           report_errors);
+                if (auto _r = apply_expr(*arg, /*is_move_target_context=*/arg->kind == ExprKind::Move, state, body, signatures,
+                           report_errors); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
             }
-            return;
+            return {};
 
         case ExprKind::Delete:
-            apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+            if (auto _r = apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             if (report_errors && state.unsafe_depth == 0) {
-                throw DataflowError("cannot use 'delete' outside '[[scpp::unsafe]] { }' (spec §5.1(5.4))",
-                                    state.current_loc);
+                return std::unexpected(DataflowError("cannot use 'delete' outside '[[scpp::unsafe]] { }' (spec §5.1(5.4))",
+                                    state.current_loc));
             }
             if (report_errors) {
                 std::optional<Type> operand_type = infer_expr_type(*expr.lhs, body, signatures);
                 if (!operand_type.has_value() || operand_type->kind != TypeKind::Pointer) {
-                    throw DataflowError("'delete' requires a raw pointer operand in this version",
-                                        state.current_loc);
+                    return std::unexpected(DataflowError("'delete' requires a raw pointer operand in this version",
+                                        state.current_loc));
                 }
             }
-            return;
+            return {};
 
         case ExprKind::Destroy:
-            apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
-            if (!report_errors) return;
+            if (auto _r = apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            if (!report_errors) return {};
             if (state.unsafe_depth == 0) {
-                throw DataflowError("cannot call an explicit destructor outside '[[scpp::unsafe]] { }'", state.current_loc);
+                return std::unexpected(DataflowError("cannot call an explicit destructor outside '[[scpp::unsafe]] { }'", state.current_loc));
             }
             if (!expr.destroy_through_pointer) {
-                throw DataflowError("explicit destructor calls currently require the pointer form 'ptr->~T()'",
-                                    state.current_loc);
+                return std::unexpected(DataflowError("explicit destructor calls currently require the pointer form 'ptr->~T()'",
+                                    state.current_loc));
             }
             {
                 std::optional<Type> operand_type = infer_expr_type(*expr.lhs, body, signatures);
                 if (!operand_type.has_value() || operand_type->kind != TypeKind::Pointer || operand_type->pointee == nullptr ||
                     !types_equal(*operand_type->pointee, expr.type)) {
-                    throw DataflowError("explicit destructor calls require a raw pointer to the named type in this version",
-                                        state.current_loc);
+                    return std::unexpected(DataflowError("explicit destructor calls require a raw pointer to the named type in this version",
+                                        state.current_loc));
                 }
             }
-            return;
+            return {};
 
         case ExprKind::Fold:
-            apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
-            if (expr.rhs) apply_expr(*expr.rhs, false, state, body, signatures, report_errors);
-            return;
+            if (auto _r = apply_expr(*expr.lhs, false, state, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            if (expr.rhs) {
+                if (auto _r = apply_expr(*expr.rhs, false, state, body, signatures, report_errors); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+            return {};
 
         case ExprKind::Conditional:
-            apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
-            apply_expr(*expr.rhs, false, state, body, signatures, report_errors);
-            apply_expr(*expr.third, false, state, body, signatures, report_errors);
+            if (auto _r = apply_expr(*expr.lhs, false, state, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            if (auto _r = apply_expr(*expr.rhs, false, state, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            if (auto _r = apply_expr(*expr.third, false, state, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             if (report_errors) {
                 std::optional<Type> condition_type = infer_expr_type(*expr.lhs, body, signatures);
                 if (!condition_type.has_value() || condition_type->kind != TypeKind::Named ||
                     condition_type->name != "bool") {
-                    throw DataflowError("conditional operator requires a 'bool' condition", state.current_loc);
+                    return std::unexpected(DataflowError("conditional operator requires a 'bool' condition", state.current_loc));
                 }
                 std::optional<Type> then_type = infer_expr_type(*expr.rhs, body, signatures);
                 std::optional<Type> else_type = infer_expr_type(*expr.third, body, signatures);
                 if (then_type.has_value() && else_type.has_value() &&
                     !conditional_arm_types_agree(*expr.rhs, *then_type, *expr.third, *else_type)) {
-                    throw DataflowError("conditional operator requires both arms to have the same type",
-                                        state.current_loc);
+                    return std::unexpected(DataflowError("conditional operator requires both arms to have the same type",
+                                        state.current_loc));
                 }
             }
-            return;
+            return {};
 
         case ExprKind::Binary:
             if (expr.binary_op == BinaryOp::Assign) {
@@ -1544,37 +1659,54 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                     is_bare_same_type_copy_source(*expr.rhs, *target_class_type, body, signatures) &&
                     (state.classes_with_copy_assign == nullptr ||
                      !state.classes_with_copy_assign->contains(target_class_type->name))) {
-                    throw DataflowError("class '" + target_class_type->name +
+                    return std::unexpected(DataflowError("class '" + target_class_type->name +
                                          "' is not copy-assignable (spec §6.5(3)) -- this assignment is not "
                                          "licensed",
-                        state.current_loc);
+                        state.current_loc));
                 }
                 bool is_move_target = target_is_movable_class || expr.rhs->kind == ExprKind::Move;
-                apply_expr(*expr.rhs, is_move_target, state, body, signatures, report_errors);
+                if (auto _r = apply_expr(*expr.rhs, is_move_target, state, body, signatures, report_errors); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
                 if (expr.lhs->kind == ExprKind::Member || expr.lhs->kind == ExprKind::Subscript) {
-                    reject_lifetime_group_state_embedding(*expr.rhs, state, body, signatures, report_errors,
+                    if (auto _r = reject_lifetime_group_state_embedding(*expr.rhs, state, body, signatures, report_errors,
                                                           expr.lhs->kind == ExprKind::Member ? "object state"
                                                                                             : "an array element",
                                                           nullptr);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
                 if (expr.lhs->kind == ExprKind::Identifier) {
                     auto it = body.local_types.find(expr.lhs->name);
                     if (it != body.local_types.end()) {
-                        check_function_pointer_assignment(it->second, *expr.rhs, body, signatures, state.current_loc,
+                        if (auto _r = check_function_pointer_assignment(it->second, *expr.rhs, body, signatures, state.current_loc,
                                                           expr.lhs->name, report_errors);
+                            !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
                         if (report_errors) {
-                            check_enum_conversion_compatibility(it->second, *expr.rhs, body, signatures,
+                            if (auto _r = check_enum_conversion_compatibility(it->second, *expr.rhs, body, signatures,
                                                                 state.current_loc);
+                                !_r.has_value()) {
+                                return std::unexpected(std::move(_r).error());
+                            }
                         }
                     }
                 } else if (expr.lhs->kind == ExprKind::Member) {
                     std::optional<Type> field_type = resolve_member_field_type(*expr.lhs, body, state, signatures);
                     if (field_type.has_value()) {
-                        check_function_pointer_assignment(*field_type, *expr.rhs, body, signatures, state.current_loc,
+                        if (auto _r = check_function_pointer_assignment(*field_type, *expr.rhs, body, signatures, state.current_loc,
                                                           expr.lhs->name, report_errors);
+                            !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
                         if (report_errors) {
-                            check_enum_conversion_compatibility(*field_type, *expr.rhs, body, signatures,
+                            if (auto _r = check_enum_conversion_compatibility(*field_type, *expr.rhs, body, signatures,
                                                                 state.current_loc);
+                                !_r.has_value()) {
+                                return std::unexpected(std::move(_r).error());
+                            }
                         }
                     }
                 }
@@ -1588,16 +1720,20 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                     // object/index are evaluated (as addresses / an
                     // index value), not read as "the assignment target",
                     // so still worth walking for nested reads.
-                    apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
+                    if (auto _r = apply_expr(*expr.lhs, false, state, body, signatures, report_errors); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                     if (report_errors) {
                         if (assignment_target_is_read_only(*expr.lhs, body, signatures)) {
-                            throw DataflowError("cannot assign to this place: it is reached through a "
+                            return std::unexpected(DataflowError("cannot assign to this place: it is reached through a "
                                                  "read-only (const) reference",
-                                state.current_loc);
+                                state.current_loc));
                         }
                         if (std::optional<std::string> lender = resolve_reborrow_lender(*expr.lhs, body, signatures);
                             lender.has_value()) {
-                            validate_reborrow_lender_write(*lender, state, report_errors);
+                            if (auto _r = validate_reborrow_lender_write(*lender, state, report_errors); !_r.has_value()) {
+                                return std::unexpected(std::move(_r).error());
+                            }
                         }
                         bool write_through_mutable_reborrow =
                             write_is_licensed_by_mutable_reborrow_lender(*expr.lhs, state, body, signatures);
@@ -1605,26 +1741,27 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                         if (std::optional<std::string> root = direct_write_root(*expr.lhs, body)) {
                             write_roots = single_root(*root);
                         } else {
-                            write_roots = resolve_borrow_source_root(*expr.lhs, state, body, signatures, /*report_errors=*/false);
+                            auto write_roots_result = resolve_borrow_source_root(*expr.lhs, state, body, signatures, /*report_errors=*/false);
+                            if (!write_roots_result.has_value()) return std::unexpected(std::move(write_roots_result).error());
+                            write_roots = std::move(write_roots_result).value();
                         }
                         if (!write_through_mutable_reborrow) {
                             for (const std::string& root : write_roots) {
                                 auto borrow_it = state.borrows.find(root);
                                 if (borrow_it != state.borrows.end() &&
                                     (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-                                    throw DataflowError("cannot assign to this place: '" + root +
+                                    return std::unexpected(DataflowError("cannot assign to this place: '" + root +
                                                             "' is currently borrowed",
-                                                        state.current_loc);
+                                                        state.current_loc));
                                 }
                             }
                         }
                     };
                 }
-                return;
+                return {};
             }
             if (is_supported_compound_assignment(expr.binary_op)) {
-                validate_compound_assignment_expr(expr, state, body, signatures, report_errors);
-                return;
+                return validate_compound_assignment_expr(expr, state, body, signatures, report_errors);
             }
             if (expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne) {
                 std::optional<Type> lhs_type = infer_expr_type(*expr.lhs, body, signatures);
@@ -1638,19 +1775,23 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                                                                                                          : *rhs_type)
                                          : nullptr;
                 auto maybe_check_equality_overload = [&](const Expr& receiver_expr, const Expr& arg_expr,
-                                                         const Type* receiver_named) {
+                                                         const Type* receiver_named) -> std::expected<bool, DataflowError> {
                     if (receiver_named == nullptr || receiver_named->kind != TypeKind::Named) return false;
                     std::string overload_name = receiver_named->name + "_" + equality_operator_method_name(expr.binary_op);
                     if (!signatures.contains(overload_name)) return false;
                     ExprPtr overload_call =
                         make_overloaded_equality_call_expr(receiver_expr, arg_expr, expr.binary_op, expr.loc);
-                    check_call_arguments(*overload_call, state, body, signatures, report_errors);
+                    if (auto _r = check_call_arguments(*overload_call, state, body, signatures, report_errors); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                     return true;
                 };
-                if (maybe_check_equality_overload(*expr.lhs, *expr.rhs, lhs_named) ||
-                    maybe_check_equality_overload(*expr.rhs, *expr.lhs, rhs_named)) {
-                    return;
-                }
+                auto _lhs_overload = maybe_check_equality_overload(*expr.lhs, *expr.rhs, lhs_named);
+                if (!_lhs_overload.has_value()) return std::unexpected(std::move(_lhs_overload).error());
+                if (_lhs_overload.value()) return {};
+                auto _rhs_overload = maybe_check_equality_overload(*expr.rhs, *expr.lhs, rhs_named);
+                if (!_rhs_overload.has_value()) return std::unexpected(std::move(_rhs_overload).error());
+                if (_rhs_overload.value()) return {};
                 bool lhs_is_record = lhs_named != nullptr && lhs_named->kind == TypeKind::Named &&
                                      body.program != nullptr &&
                                      (find_class_def(*body.program, lhs_named->name) != nullptr ||
@@ -1662,27 +1803,35 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                 if (report_errors && (lhs_is_record || rhs_is_record)) {
                     std::string receiver_name = lhs_is_record ? lhs_named->name : rhs_named->name;
                     std::string receiver_side = lhs_is_record ? "left" : "right";
-                    throw DataflowError("operator '" + std::string(expr.binary_op == BinaryOp::Eq ? "==" : "!=") +
+                    return std::unexpected(DataflowError("operator '" + std::string(expr.binary_op == BinaryOp::Eq ? "==" : "!=") +
                                             "' requires a matching overloaded member operator on " + receiver_side +
                                             " operand type '" + receiver_name + "'",
-                                        state.current_loc);
+                                        state.current_loc));
                 }
             }
-            apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
-            apply_expr(*expr.rhs, false, state, body, signatures, report_errors);
-            if (report_errors) check_binary_expr_operand_types(expr, body, signatures, state.current_loc);
-            return;
+            if (auto _r = apply_expr(*expr.lhs, false, state, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            if (auto _r = apply_expr(*expr.rhs, false, state, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            if (report_errors) {
+                if (auto _r = check_binary_expr_operand_types(expr, body, signatures, state.current_loc); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+            return {};
 
         case ExprKind::Call:
             if (is_for_range_size_builtin(expr)) {
-                apply_expr(*expr.args[0], false, state, body, signatures, report_errors);
-                return;
+                return apply_expr(*expr.args[0], false, state, body, signatures, report_errors);
             }
-            check_call_arguments(expr, state, body, signatures, report_errors);
-            return;
+            return check_call_arguments(expr, state, body, signatures, report_errors);
 
         case ExprKind::Member: {
-            apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
+            if (auto _r = apply_expr(*expr.lhs, false, state, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             if (report_errors && body.program != nullptr) {
                 std::optional<Type> base_type = infer_expr_type(*expr.lhs, body, signatures);
                 if (base_type.has_value()) {
@@ -1690,9 +1839,9 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                     if (named.kind == TypeKind::Named) {
                         for (const StructDef& def : body.program->structs) {
                             if (def.name == named.name && def.is_union && state.unsafe_depth == 0) {
-                                throw DataflowError("accessing a union member requires [[scpp::unsafe]] "
+                                return std::unexpected(DataflowError("accessing a union member requires [[scpp::unsafe]] "
                                                     "(FFI union storage may alias multiple representations)",
-                                    state.current_loc);
+                                    state.current_loc));
                             }
                         }
                     }
@@ -1728,27 +1877,28 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                             }
                         }
                         if (access == AccessSpecifier::Private) {
-                            throw DataflowError("cannot access private member '" + expr.name + "' of class '" +
+                            return std::unexpected(DataflowError("cannot access private member '" + expr.name + "' of class '" +
                                                  class_name + "' from outside its own methods (ch04 §4.2)",
-                                state.current_loc);
+                                state.current_loc));
                         }
                     }
                 }
             }
-            return;
+            return {};
         }
 
         case ExprKind::Subscript:
-            apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
-            apply_expr(*expr.rhs, false, state, body, signatures, report_errors);
-            return;
+            if (auto _r = apply_expr(*expr.lhs, false, state, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            return apply_expr(*expr.rhs, false, state, body, signatures, report_errors);
 
         case ExprKind::PackExpansion:
             if (report_errors) {
-                throw DataflowError("unexpanded parameter-pack expression reached move checking",
-                                    state.current_loc);
+                return std::unexpected(DataflowError("unexpanded parameter-pack expression reached move checking",
+                                    state.current_loc));
             }
-            return;
+            return {};
 
         case ExprKind::Lambda: {
             // ch05 §5.12: a resolved lambda literal constructs a fresh
@@ -1764,8 +1914,10 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             // -- see apply_lambda_captures' own comment for the shared
             // per-capture logic.
             BorrowMap capture_borrows;
-            apply_lambda_captures(expr, state, capture_borrows, body, signatures, report_errors);
-            return;
+            if (auto _r = apply_lambda_captures(expr, state, capture_borrows, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            return {};
         }
     }
 }
@@ -1779,7 +1931,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
 // the place's *root* (see resolve_borrow_source_root), not necessarily
 // `place` itself, so a chain of reference-to-reference bindings (and a
 // `.field`/`[index]` projection off a plain place) is tracked precisely.
-void apply_reference_binding(const MirStatement& stmt, DataflowState& state, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> apply_reference_binding(const MirStatement& stmt, DataflowState& state, const Body& body,
                               const Signatures& signatures, bool report_errors) {
     if (stmt.expr == nullptr) {
         // No initializer (`int& r;` / `std::span<int> s;`): illegal,
@@ -1791,12 +1943,12 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
         // either).
         if (report_errors) {
             const char* kind_name = is_span(stmt.type) ? "span" : "reference";
-            throw DataflowError(std::string(kind_name) + " '" + stmt.local +
+            return std::unexpected(DataflowError(std::string(kind_name) + " '" + stmt.local +
                                  "' must be initialized (bound to a variable) at declaration",
-                state.current_loc);
+                state.current_loc));
         }
         state.locals[stmt.local] = LocalState::Initialized;
-        return;
+        return {};
     }
 
     // ch05 §5.x: `const T& r = <rvalue>;` (a literal, std::move/
@@ -1813,10 +1965,12 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
     // just evaluate the initializer for its own side effects and mark
     // `stmt.local` initialized.
     if (const_reference_binds_materialized_temporary(*stmt.expr, stmt.type, body, signatures)) {
-        apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body, signatures,
-                   report_errors);
+        if (auto _r = apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body, signatures,
+                   report_errors); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
         state.locals[stmt.local] = LocalState::Initialized;
-        return;
+        return {};
     }
 
     if (report_errors && !is_span(stmt.type)) {
@@ -1834,13 +1988,15 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
             }
         }
         if (!reference_binding_compatible) {
-            throw DataflowError("cannot bind reference '" + stmt.local +
+            return std::unexpected(DataflowError("cannot bind reference '" + stmt.local +
                                  "' from an incompatible source type",
-                                state.current_loc);
+                                state.current_loc));
         }
     }
 
-    RootSet roots = resolve_borrow_source_root(*stmt.expr, state, body, signatures, report_errors);
+    auto roots_result = resolve_borrow_source_root(*stmt.expr, state, body, signatures, report_errors);
+    if (!roots_result.has_value()) return std::unexpected(std::move(roots_result).error());
+    RootSet roots = std::move(roots_result).value();
     if (roots.empty()) {
         // Only reachable when report_errors=false and the source
         // expression's shape isn't (yet) a supported borrow source --
@@ -1850,7 +2006,7 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
         // itself readable so this (discarded) silent fixed-point
         // iteration has *some* defined state to continue from.
         state.locals[stmt.local] = LocalState::Initialized;
-        return;
+        return {};
     }
 
     bool is_mutable = stmt.type.is_mutable_ref;
@@ -1859,7 +2015,9 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
         lender.has_value() && is_reborrowable_local_type(body.local_types.at(*lender)) && body.local_types.at(*lender).is_mutable_ref;
     bool uses_lender_suspension = lender.has_value() && lender_is_mutable;
     if (uses_lender_suspension) {
-        validate_reborrow_lender(*lender, is_mutable, state, body, report_errors);
+        if (auto _r = validate_reborrow_lender(*lender, is_mutable, state, body, report_errors); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
     }
 
     // Reject manufacturing a mutable `T&`/`std::span<T>` out of a place
@@ -1871,9 +2029,9 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
     // regardless (read-only never needs to widen).
     if (report_errors && is_mutable && is_read_only_reachable(*stmt.expr, body, signatures)) {
         const char* kind_name = is_span(stmt.type) ? "span" : "reference";
-        throw DataflowError(std::string("cannot bind a mutable ") + kind_name + " '" + stmt.local +
+        return std::unexpected(DataflowError(std::string("cannot bind a mutable ") + kind_name + " '" + stmt.local +
                              "': its source is only reachable through a read-only (const) reference",
-            state.current_loc);
+            state.current_loc));
     }
 
     if (!uses_lender_suspension) {
@@ -1881,12 +2039,12 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
             BorrowState& borrow = state.borrows[root];
             if (report_errors) {
                 if (is_mutable && (borrow.mutable_borrow || borrow.shared_count > 0)) {
-                    throw DataflowError("cannot mutably borrow '" + root + "': it is already borrowed",
-                                        state.current_loc);
+                    return std::unexpected(DataflowError("cannot mutably borrow '" + root + "': it is already borrowed",
+                                        state.current_loc));
                 }
                 if (!is_mutable && borrow.mutable_borrow) {
-                    throw DataflowError("cannot borrow '" + root + "': it is already mutably borrowed",
-                                        state.current_loc);
+                    return std::unexpected(DataflowError("cannot borrow '" + root + "': it is already mutably borrowed",
+                                        state.current_loc));
                 }
             }
             if (is_mutable) {
@@ -1903,6 +2061,7 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
     state.ref_targets[stmt.local] = RefTarget{roots, uses_lender_suspension ? *lender : "", is_mutable};
     state.local_lifetime_sources[stmt.local] = roots;
     state.locals[stmt.local] = LocalState::Initialized;
+    return {};
 }
 
 // Handles a plain `r = expr;` MIR Assign statement where `r` was
@@ -1914,23 +2073,25 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
 // check needed here, since `r` holding a live mutable borrow *is* the
 // license to write through it (see the Identifier-case comment in
 // apply_expr for the symmetric read-side reasoning).
-void apply_reference_write_through(const MirStatement& stmt, DataflowState& state, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> apply_reference_write_through(const MirStatement& stmt, DataflowState& state, const Body& body,
                                     const Signatures& signatures, bool report_errors) {
     const Type& ref_type = body.local_types.at(stmt.local);
     if (report_errors) {
-        validate_reborrow_lender_write(stmt.local, state, report_errors);
+        if (auto _r = validate_reborrow_lender_write(stmt.local, state, report_errors); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
         if (!ref_type.is_mutable_ref) {
-            throw DataflowError("cannot assign through '" + stmt.local +
+            return std::unexpected(DataflowError("cannot assign through '" + stmt.local +
                                  "': it is a read-only (const) reference",
-                state.current_loc);
+                state.current_loc));
         }
         LocalState current = lookup(state.locals, stmt.local);
         if (current != LocalState::Initialized) {
-            throw DataflowError(describe_bad_state(stmt.local, current),
-                state.current_loc);
+            return std::unexpected(DataflowError(describe_bad_state(stmt.local, current),
+                state.current_loc));
         }
     }
-    apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body,
+    return apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body,
                signatures, report_errors);
 }
 
@@ -2018,7 +2179,7 @@ void apply_reference_write_through(const MirStatement& stmt, DataflowState& stat
             types_equal(*source_type->pointee, target_type));
 }
 
-void apply_statement(const MirStatement& stmt, DataflowState& state, const Body& body, const Signatures& signatures,
+[[nodiscard]] std::expected<void, DataflowError> apply_statement(const MirStatement& stmt, DataflowState& state, const Body& body, const Signatures& signatures,
                       bool report_errors) {
     // See apply_expr's identical opening comment -- same reasoning, one
     // level up (statement rather than expression granularity).
@@ -2035,20 +2196,28 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
             // constructor-overload argument checking.
             if (stmt.ctor_args != nullptr) {
                 if (is_move_construction_shape(*stmt.ctor_args, stmt.type, body)) {
-                    apply_expr(*(*stmt.ctor_args)[0], /*is_move_target_context=*/true, state, body, signatures,
-                               report_errors);
+                    if (auto _r = apply_expr(*(*stmt.ctor_args)[0], /*is_move_target_context=*/true, state, body, signatures,
+                               report_errors); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 } else if (stmt.ctor_args->size() == 1 &&
                            is_freely_copyable_class_value_source(*(*stmt.ctor_args)[0], stmt.type, body, signatures)) {
-                    apply_expr(*(*stmt.ctor_args)[0], /*is_move_target_context=*/false, state, body, signatures,
-                               report_errors);
+                    if (auto _r = apply_expr(*(*stmt.ctor_args)[0], /*is_move_target_context=*/false, state, body, signatures,
+                               report_errors); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 } else if (stmt.ctor_args->size() == 1 &&
                            body.program != nullptr && !has_user_declared_copy_ctor(stmt.type.name, *body.program) &&
                            is_copyable_class_lvalue_boundary_source(*(*stmt.ctor_args)[0], stmt.type, body, signatures)) {
-                    apply_expr(*(*stmt.ctor_args)[0], /*is_move_target_context=*/false, state, body, signatures,
-                               report_errors);
+                    if (auto _r = apply_expr(*(*stmt.ctor_args)[0], /*is_move_target_context=*/false, state, body, signatures,
+                               report_errors); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 } else {
-                    check_constructor_arguments(stmt.type, *stmt.ctor_args, state, body, signatures,
-                                                 report_errors);
+                    if (auto _r = check_constructor_arguments(stmt.type, *stmt.ctor_args, state, body, signatures,
+                                                 report_errors); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
             }
             // scpp has no "uninitialized" state (see the LocalState
@@ -2063,11 +2232,10 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
             } else if (is_lifetime_eligible_type(stmt.type)) {
                 state.local_lifetime_sources.erase(stmt.local);
             }
-            return;
+            return {};
 
         case MirStatementKind::BindReference:
-            apply_reference_binding(stmt, state, body, signatures, report_errors);
-            return;
+            return apply_reference_binding(stmt, state, body, signatures, report_errors);
 
         case MirStatementKind::Assign: {
             auto type_it = body.local_types.find(stmt.local);
@@ -2086,23 +2254,27 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
             if (report_errors &&
                 ((body.const_locals.contains(stmt.local) && state.locals.contains(stmt.local)) ||
                  is_visible_global_const(stmt.local, /*explicit_global_qualification=*/false, body))) {
-                throw DataflowError("cannot reassign 'const' variable '" + stmt.local + "' after initialization",
-                    state.current_loc);
+                return std::unexpected(DataflowError("cannot reassign 'const' variable '" + stmt.local + "' after initialization",
+                    state.current_loc));
             }
             if (type_it == body.local_types.end()) {
                 std::optional<Type> global_type =
                     find_visible_global_type(stmt.local, /*explicit_global_qualification=*/false, body);
-                if (!global_type.has_value()) return;
-                check_function_pointer_assignment(*global_type, *stmt.expr, body, signatures, state.current_loc, stmt.local,
+                if (!global_type.has_value()) return {};
+                if (auto _r = check_function_pointer_assignment(*global_type, *stmt.expr, body, signatures, state.current_loc, stmt.local,
                                                   report_errors);
-                check_raw_pointer_assignment(*global_type, *stmt.expr, body, signatures, state.current_loc, stmt.local,
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                if (auto _r = check_raw_pointer_assignment(*global_type, *stmt.expr, body, signatures, state.current_loc, stmt.local,
                                              report_errors);
-                apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
-                return;
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                return apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
             }
             if (type_it != body.local_types.end() && is_reference(type_it->second)) {
-                apply_reference_write_through(stmt, state, body, signatures, report_errors);
-                return;
+                return apply_reference_write_through(stmt, state, body, signatures, report_errors);
             }
             if (type_it != body.local_types.end() && is_span(type_it->second)) {
                 // Unlike real C++ (where std::span is an ordinary,
@@ -2112,11 +2284,11 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                 // BindReference comment) -- lifting that is a follow-up,
                 // not a soundness requirement.
                 if (report_errors) {
-                    throw DataflowError("std::span '" + stmt.local +
+                    return std::unexpected(DataflowError("std::span '" + stmt.local +
                                          "' cannot be reassigned after initialization in this version",
-                        state.current_loc);
+                        state.current_loc));
                 }
-                return;
+                return {};
             }
             if (type_it != body.local_types.end() && state.class_names != nullptr &&
                 type_it->second.kind == TypeKind::Named && state.class_names->contains(type_it->second.name)) {
@@ -2182,23 +2354,25 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                             }
                         }
                         if (has_reference_member) {
-                            throw DataflowError(
+                            return std::unexpected(DataflowError(
                                 "class '" + type_it->second.name +
                                     "' has a reference-typed member, so it has no move assignment operator "
                                     "(spec §6.4(3)) -- '" + stmt.local + "' cannot be reassigned",
-                                state.current_loc);
+                                state.current_loc));
                         }
                         auto borrow_it = state.borrows.find(stmt.local);
                         if (borrow_it != state.borrows.end() &&
                             (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-                            throw DataflowError("cannot assign to class variable '" + stmt.local +
+                            return std::unexpected(DataflowError("cannot assign to class variable '" + stmt.local +
                                                  "': it is currently borrowed",
-                                state.current_loc);
+                                state.current_loc));
                         }
                     }
-                    apply_expr(*stmt.expr, /*is_move_target_context=*/true, state, body, signatures, report_errors);
+                    if (auto _r = apply_expr(*stmt.expr, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                     state.locals[stmt.local] = LocalState::Initialized;
-                    return;
+                    return {};
                 }
                 // spec §6.5(3): `y = x;` (a bare, non-move reassignment)
                 // is copy assignment when `x` is a plain variable of the
@@ -2223,29 +2397,31 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                         if (!freely_copyable_assign_source &&
                             (state.classes_with_copy_assign == nullptr ||
                              !state.classes_with_copy_assign->contains(type_it->second.name))) {
-                            throw DataflowError("class '" + type_it->second.name +
+                            return std::unexpected(DataflowError("class '" + type_it->second.name +
                                                  "' is not copy-assignable (spec §6.5(3)) -- '" + stmt.local +
                                                  "' cannot be reassigned this way",
-                                state.current_loc);
+                                state.current_loc));
                         }
                         auto borrow_it = state.borrows.find(stmt.local);
                         if (borrow_it != state.borrows.end() &&
                             (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-                            throw DataflowError("cannot assign to class variable '" + stmt.local +
+                            return std::unexpected(DataflowError("cannot assign to class variable '" + stmt.local +
                                                  "': it is currently borrowed",
-                                state.current_loc);
+                                state.current_loc));
                         }
                     }
-                    apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body,
-                               signatures, report_errors);
+                    if (auto _r = apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body,
+                               signatures, report_errors); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                     state.locals[stmt.local] = LocalState::Initialized;
-                    return;
+                    return {};
                 }
                 if (report_errors && state.locals.contains(stmt.local)) {
-                    throw DataflowError("class '" + type_it->second.name + "'-typed variable '" + stmt.local +
+                    return std::unexpected(DataflowError("class '" + type_it->second.name + "'-typed variable '" + stmt.local +
                                          "' cannot be reassigned after construction in this version (no copy "
                                          "semantics are defined yet -- see ch04 §4.2)",
-                        state.current_loc);
+                        state.current_loc));
                 }
                 if (stmt.expr->kind == ExprKind::Lambda) {
                     // ch05 §5.12: unlike a *transient* lambda literal
@@ -2259,17 +2435,22 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                     // throwaway map that apply_expr's generic Lambda
                     // handling would otherwise use.
                     std::vector<ClosureCaptureBorrow> closure_capture_borrows;
-                    apply_lambda_captures(*stmt.expr, state, state.borrows, body, signatures, report_errors,
+                    if (auto _r = apply_lambda_captures(*stmt.expr, state, state.borrows, body, signatures, report_errors,
                                           &closure_capture_borrows);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                     if (!closure_capture_borrows.empty()) {
                         state.closure_capture_borrows[stmt.local] = std::move(closure_capture_borrows);
                     }
                 } else {
                     if (produces_rvalue_of_type(*stmt.expr, type_it->second, body, signatures)) {
-                        apply_expr(*stmt.expr, /*is_move_target_context=*/true, state, body, signatures,
-                                   report_errors);
+                        if (auto _r = apply_expr(*stmt.expr, /*is_move_target_context=*/true, state, body, signatures,
+                                   report_errors); !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
                         state.locals[stmt.local] = LocalState::Initialized;
-                        return;
+                        return {};
                     }
                     // spec §6.5: `ClassName y = x;` (a bare, non-move,
                     // non-lambda initializer -- this variable's first-
@@ -2290,41 +2471,54 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                             is_freely_copyable_class_value_source(*stmt.expr, type_it->second, body, signatures);
                         if (!is_bare_same_type_copy_source(*stmt.expr, type_it->second, body, signatures) &&
                             !freely_copyable_init_source) {
-                            throw DataflowError(
+                            return std::unexpected(DataflowError(
                                 "class '" + type_it->second.name + "'-typed variable '" + stmt.local +
                                     "' can only be initialized via constructor-call syntax ('" +
                                     type_it->second.name + " " + stmt.local +
                                     "(args);'), std::move of the same type, or (if the class is copy-"
                                     "constructible, spec §6.5) an implicitly copyable source of another '" +
                                     type_it->second.name + "' value",
-                                state.current_loc);
+                                state.current_loc));
                         }
                         if (!freely_copyable_init_source &&
                             (state.classes_with_copy_ctor == nullptr ||
                              !state.classes_with_copy_ctor->contains(type_it->second.name))) {
-                            throw DataflowError("class '" + type_it->second.name +
+                            return std::unexpected(DataflowError("class '" + type_it->second.name +
                                                  "' is not copy-constructible (spec §6.5(2)) -- '" + stmt.local +
                                                  "' cannot be initialized this way",
-                                state.current_loc);
+                                state.current_loc));
                         }
                     }
-                    apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures,
-                               report_errors);
+                    if (auto _r = apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures,
+                               report_errors); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
                 state.locals[stmt.local] = LocalState::Initialized;
-                return;
+                return {};
             }
 
-            apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body,
-                       signatures, report_errors);
+            if (auto _r = apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body,
+                       signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             if (type_it != body.local_types.end()) {
-                check_function_pointer_assignment(type_it->second, *stmt.expr, body, signatures, state.current_loc,
+                if (auto _r = check_function_pointer_assignment(type_it->second, *stmt.expr, body, signatures, state.current_loc,
                                                   stmt.local, report_errors);
-                check_raw_pointer_assignment(type_it->second, *stmt.expr, body, signatures, state.current_loc,
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                if (auto _r = check_raw_pointer_assignment(type_it->second, *stmt.expr, body, signatures, state.current_loc,
                                              stmt.local, report_errors);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
                 if (report_errors) {
-                    check_enum_conversion_compatibility(type_it->second, *stmt.expr, body, signatures,
+                    if (auto _r = check_enum_conversion_compatibility(type_it->second, *stmt.expr, body, signatures,
                                                         state.current_loc);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
             }
 
@@ -2340,18 +2534,18 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
             if (report_errors && type_it != body.local_types.end() && type_it->second.kind == TypeKind::Pointer &&
                 type_it->second.is_mutable_pointee && stmt.expr->kind == ExprKind::Unary &&
                 stmt.expr->unary_op == UnaryOp::AddressOf && is_read_only_reachable(*stmt.expr->lhs, body, signatures)) {
-                throw DataflowError("cannot assign '&' of a read-only-reachable place to '" + stmt.local +
+                return std::unexpected(DataflowError("cannot assign '&' of a read-only-reachable place to '" + stmt.local +
                                     "' (a mutable 'T*'): would need 'const T*', which '" + stmt.local +
                                     "' isn't declared as",
-                    state.current_loc);
+                    state.current_loc));
             }
 
             if (report_errors) {
                 auto borrow_it = state.borrows.find(stmt.local);
                 if (borrow_it != state.borrows.end() &&
                     (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-                    throw DataflowError("cannot assign to '" + stmt.local + "' while it is borrowed",
-                        state.current_loc);
+                    return std::unexpected(DataflowError("cannot assign to '" + stmt.local + "' while it is borrowed",
+                        state.current_loc));
                 }
             }
             state.locals[stmt.local] = LocalState::Initialized;
@@ -2359,24 +2553,26 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
                 state.local_lifetime_sources[stmt.local] =
                     resolve_lifetime_source_roots(*stmt.expr, state, body, signatures, report_errors);
             }
-            return;
+            return {};
         }
 
         case MirStatementKind::Eval:
-            apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+            if (auto _r = apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             if (report_errors) {
                 if (const NodiscardInfo* info = nodiscard_info_for_discarded_call(*stmt.expr, body, signatures)) {
                     std::string message = "discarded return value of nodiscard " + info->subject;
                     if (!info->reason.empty()) message += ": " + info->reason;
-                    throw DataflowError(message, stmt.expr->loc);
+                    return std::unexpected(DataflowError(message, stmt.expr->loc));
                 }
             }
-            return;
+            return {};
 
         case MirStatementKind::Drop:
             // Purely a codegen-facing marker (no-op until heap-allocated
             // owning types exist); no dataflow state effect here.
-            return;
+            return {};
 
         case MirStatementKind::ScopeExit: {
             // Releases `stmt.local`'s borrow, in the (unusual) case it's
@@ -2402,38 +2598,36 @@ void apply_statement(const MirStatement& stmt, DataflowState& state, const Body&
             // analysis no longer cares about.
             state.locals.erase(stmt.local);
             state.local_lifetime_sources.erase(stmt.local);
-            return;
+            return {};
         }
 
         case MirStatementKind::UnsafeEnter:
             state.unsafe_depth++;
-            return;
+            return {};
 
         case MirStatementKind::UnsafeExit:
             state.unsafe_depth--;
-            return;
+            return {};
     }
 }
 
-void check_terminator(const Terminator& term, DataflowState& state, const Function& fn, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> check_terminator(const Terminator& term, DataflowState& state, const Function& fn, const Body& body,
                        const Signatures& signatures) {
     // See apply_expr's identical opening comment.
     state.current_loc = term.loc;
     switch (term.kind) {
         case TerminatorKind::Branch:
         case TerminatorKind::Switch:
-            apply_expr(*term.condition, false, state, body, signatures, /*report_errors=*/true);
-            return;
+            return apply_expr(*term.condition, false, state, body, signatures, /*report_errors=*/true);
         case TerminatorKind::Return: {
-            if (term.return_value == nullptr) return;
+            if (term.return_value == nullptr) return {};
             if (is_pointer_return_lifetime_source_type(fn.return_type)) {
                 bool null_pointer_return =
                     fn.return_type.kind == TypeKind::Pointer &&
                     expr_is_definitely_null_pointer(*term.return_value, state, body);
                 if (null_pointer_return) {
-                    apply_expr(*term.return_value, /*is_move_target_context=*/false, state, body, signatures,
+                    return apply_expr(*term.return_value, /*is_move_target_context=*/false, state, body, signatures,
                                /*report_errors=*/true);
-                    return;
                 }
                 std::optional<Type> returned_type = infer_expr_type(*term.return_value, body, signatures);
                 // ch05 §5.14: check_generic_type_methods_once
@@ -2515,7 +2709,7 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                 RootSet returned_roots =
                     resolve_lifetime_source_roots(*term.return_value, state, body, signatures, /*report_errors=*/true);
                 if (fn.return_type.is_reference_wrapper_lifetime_source && returned_roots.empty()) {
-                    return;
+                    return {};
                 }
                 if (!return_type_compatible && fn.return_type.is_reference_wrapper_lifetime_source && !returned_roots.empty()) {
                     return_type_compatible = true;
@@ -2532,12 +2726,12 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                     // statement -- bail out entirely rather than risk a
                     // second, equally spurious "derived from <unknown>"
                     // diagnosis immediately after.
-                    if (is_synthetic_check_only_function) return;
-                    throw DataflowError("function '" + fn.name + "' returns a lifetime-tracked value from an incompatible source type",
-                                        state.current_loc);
+                    if (is_synthetic_check_only_function) return {};
+                    return std::unexpected(DataflowError("function '" + fn.name + "' returns a lifetime-tracked value from an incompatible source type",
+                                        state.current_loc));
                 }
                 if (fn.return_type.kind == TypeKind::Pointer && returned_roots.empty()) {
-                    return;
+                    return {};
                 }
                 // ch05 §5.14: is_synthetic_check_only_function's own gap,
                 // completed -- `return_type_compatible` (just above) and
@@ -2570,41 +2764,43 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                 // instantiate_generic_type path, every concrete type fully
                 // monomorphized, every callee genuinely resolvable) is
                 // checked separately and unaffected by this tolerance.
-                if (is_synthetic_check_only_function) return;
+                if (is_synthetic_check_only_function) return {};
                 if (fn.return_lifetime.present()) {
                     if (!roots_satisfy_named_lifetime_group(returned_roots, fn, fn.return_lifetime.name)) {
-                        throw DataflowError("function '" + fn.name + "' returns a value derived from " +
+                        return std::unexpected(DataflowError("function '" + fn.name + "' returns a value derived from " +
                                                 format_roots(returned_roots) + ", not from lifetime group '" +
                                                 fn.return_lifetime.name + "'",
-                                            state.current_loc);
+                                            state.current_loc));
                     }
                 } else if (is_reference(fn.return_type) || fn.return_type.kind == TypeKind::Pointer) {
                     if (fn.return_type.kind == TypeKind::Pointer && roots_are_program_lifetime_only(returned_roots)) {
-                        return;
+                        return {};
                     }
-                    std::vector<std::size_t> source_indices = resolve_returned_lifetime_param_indices(fn);
+                    auto source_indices_result = resolve_returned_lifetime_param_indices(fn);
+                    if (!source_indices_result.has_value()) return std::unexpected(std::move(source_indices_result).error());
+                    std::vector<std::size_t> source_indices = std::move(source_indices_result).value();
                     if (fn.return_type.kind == TypeKind::Pointer && source_indices.empty()) {
                         std::vector<std::size_t> inferred_pointer_sources = infer_pointer_return_source_param_indices(fn);
                         if (inferred_pointer_sources.empty()) {
-                            throw DataflowError(
+                            return std::unexpected(DataflowError(
                                 "function '" + fn.name +
                                     "' returns a raw pointer but has no eligible source parameter to infer its "
                                     "lifetime from (reference, pointer, span, or std::reference_wrapper-carried "
                                     "reference; spec ch05.3) -- add an explicit lifetime annotation, return "
                                     "nullptr, or refactor to return by value/std::unique_ptr instead",
-                                state.current_loc);
+                                state.current_loc));
                         }
-                        throw DataflowError(
+                        return std::unexpected(DataflowError(
                             "function '" + fn.name +
                                 "' returns a raw pointer but has more than one eligible source parameter; scpp "
                                 "v0.1 can only infer a returned pointer's lifetime when there is exactly one "
                                 "eligible source parameter (spec ch05.3) -- add an explicit lifetime annotation "
                                 "or refactor the signature",
-                            state.current_loc);
+                            state.current_loc));
                     }
                     if (!source_indices.empty() &&
                         !return_roots_are_proven_to_outlive_call(returned_roots, fn.params[source_indices.front()].name)) {
-                        throw DataflowError(
+                        return std::unexpected(DataflowError(
                             "function '" + fn.name + "' returns " +
                                 std::string(is_reference(fn.return_type) ? "a reference" : "a raw pointer") +
                                 " derived from " + format_roots(returned_roots) +
@@ -2612,10 +2808,10 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                                 fn.params[source_indices.front()].name +
                                 "'; scpp v0.1 can only prove the returned value doesn't dangle when it "
                                 "borrows (directly or transitively) from that parameter (spec ch05.3)",
-                            state.current_loc);
+                            state.current_loc));
                     }
                 }
-                return;
+                return {};
             }
             bool return_is_class_value = is_named_class_type(fn.return_type, body);
             bool implicit_move_source =
@@ -2653,28 +2849,30 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                                        : nullptr;
             bool move_target_context =
                 (return_is_class_value && !freely_copyable_return_source) || term.return_value->kind == ExprKind::Move;
-            apply_expr(*term.return_value, move_target_context, state, body, signatures, /*report_errors=*/true);
+            if (auto _r = apply_expr(*term.return_value, move_target_context, state, body, signatures, /*report_errors=*/true); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             if (return_is_class_value && !implicit_move_source && !freely_copyable_return_source &&
                 !produces_rvalue_of_type(*term.return_value, fn.return_type, body, signatures) &&
                 return_converting_ctor == nullptr) {
-                throw DataflowError("returning class '" + fn.return_type.name +
+                return std::unexpected(DataflowError("returning class '" + fn.return_type.name +
                                      "' by value requires either an implicitly copyable same-type source or "
                                      "a fresh value such as std::move(x) or a call returning by value",
-                    state.current_loc);
+                    state.current_loc));
             }
             if (return_converting_ctor != nullptr && return_converting_ctor->is_unsafe && state.unsafe_depth == 0) {
-                throw DataflowError("cannot use '" + fn.return_type.name +
+                return std::unexpected(DataflowError("cannot use '" + fn.return_type.name +
                                      "'s converting constructor outside '[[scpp::unsafe]] { }': its own declaration is "
                                      "marked '[[scpp::unsafe]]', so its soundness depends on a precondition only the "
                                      "caller can guarantee (ch01 §1.2/§1.3)",
-                    state.current_loc);
+                    state.current_loc));
             }
-            return;
+            return {};
         }
         case TerminatorKind::Goto:
         case TerminatorKind::Unreachable:
         case TerminatorKind::None:
-            return;
+            return {};
     }
 }
 
@@ -2692,7 +2890,7 @@ struct SwitchCaseKey {
     return std::nullopt;
 }
 
-[[nodiscard]] SwitchCaseKey normalize_switch_case_label(const Expr& expr, const Type& condition_type, const Body& body,
+[[nodiscard]] std::expected<SwitchCaseKey, DataflowError> normalize_switch_case_label(const Expr& expr, const Type& condition_type, const Body& body,
                                                         const Signatures& signatures) {
     const Type& operand_type = binary_operand_type(condition_type);
     if (is_enum_type(operand_type, body.program)) {
@@ -2700,15 +2898,15 @@ struct SwitchCaseKey {
         const EnumVariant* variant = expr.kind == ExprKind::Identifier ? find_enum_variant(body.program, expr.name, &owning_enum)
                                                                        : nullptr;
         if (variant == nullptr || owning_enum == nullptr || owning_enum->name != operand_type.name) {
-            throw DataflowError("switch on enum type '" + operand_type.name +
+            return std::unexpected(DataflowError("switch on enum type '" + operand_type.name +
                                     "' requires each 'case' label to name an enumerator of that same enum",
-                                expr.loc);
+                                expr.loc));
         }
         return SwitchCaseKey{variant->value};
     }
     if (!(operand_type.kind == TypeKind::Named &&
           (operand_type.name == "bool" || is_integral_scalar_type_name(operand_type.name)))) {
-        throw DataflowError("switch requires an integral or enum condition expression", expr.loc);
+        return std::unexpected(DataflowError("switch requires an integral or enum condition expression", expr.loc));
     }
     if (std::optional<long long> literal = integer_case_label_value(expr)) {
         return SwitchCaseKey{*literal};
@@ -2716,13 +2914,13 @@ struct SwitchCaseKey {
     std::optional<Type> label_type = infer_expr_type(expr, body, signatures);
     if (label_type.has_value() && binary_operand_type(*label_type).kind == TypeKind::Named &&
         binary_operand_type(*label_type).name == operand_type.name && expr.kind == ExprKind::Identifier) {
-        throw DataflowError("switch case labels must be integer literals in this version", expr.loc);
+        return std::unexpected(DataflowError("switch case labels must be integer literals in this version", expr.loc));
     }
-    throw DataflowError("switch case labels must be integer literals (or enum enumerators for enum switches) in this version",
-                        expr.loc);
+    return std::unexpected(DataflowError("switch case labels must be integer literals (or enum enumerators for enum switches) in this version",
+                        expr.loc));
 }
 
-void validate_switch_stmt_tree(const Stmt& stmt, const Body& body, const Signatures& signatures) {
+[[nodiscard]] std::expected<void, DataflowError> validate_switch_stmt_tree(const Stmt& stmt, const Body& body, const Signatures& signatures) {
     switch (stmt.kind) {
         case StmtKind::VarDecl:
         case StmtKind::Return:
@@ -2730,17 +2928,29 @@ void validate_switch_stmt_tree(const Stmt& stmt, const Body& body, const Signatu
         case StmtKind::Continue:
         case StmtKind::Fallthrough:
         case StmtKind::ExprStmt:
-            return;
+            return {};
         case StmtKind::If:
-            if (stmt.then_branch) validate_switch_stmt_tree(*stmt.then_branch, body, signatures);
-            if (stmt.else_branch) validate_switch_stmt_tree(*stmt.else_branch, body, signatures);
-            return;
+            if (stmt.then_branch) {
+                if (auto _r = validate_switch_stmt_tree(*stmt.then_branch, body, signatures); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+            if (stmt.else_branch) {
+                if (auto _r = validate_switch_stmt_tree(*stmt.else_branch, body, signatures); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+            return {};
         case StmtKind::While:
-            if (stmt.then_branch) validate_switch_stmt_tree(*stmt.then_branch, body, signatures);
-            return;
+            if (stmt.then_branch) return validate_switch_stmt_tree(*stmt.then_branch, body, signatures);
+            return {};
         case StmtKind::Block:
-            for (const StmtPtr& nested : stmt.statements) validate_switch_stmt_tree(*nested, body, signatures);
-            return;
+            for (const StmtPtr& nested : stmt.statements) {
+                if (auto _r = validate_switch_stmt_tree(*nested, body, signatures); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+            return {};
         case StmtKind::Switch: {
             std::optional<Type> condition_type = infer_expr_type(*stmt.condition, body, signatures);
             if (condition_type.has_value()) {
@@ -2750,32 +2960,39 @@ void validate_switch_stmt_tree(const Stmt& stmt, const Body& body, const Signatu
                     (operand_type.kind == TypeKind::Named &&
                      (operand_type.name == "bool" || is_integral_scalar_type_name(operand_type.name)));
                 if (!condition_ok) {
-                    throw DataflowError("switch requires an integral or enum condition expression", stmt.condition->loc);
+                    return std::unexpected(DataflowError("switch requires an integral or enum condition expression", stmt.condition->loc));
                 }
                 std::unordered_map<long long, SourceLocation> seen_labels;
                 for (const SwitchCase& switch_case : stmt.switch_cases) {
                     if (switch_case.value) {
-                        SwitchCaseKey key =
+                        auto key_result =
                             normalize_switch_case_label(*switch_case.value, operand_type, body, signatures);
+                        if (!key_result.has_value()) return std::unexpected(std::move(key_result).error());
+                        SwitchCaseKey key = std::move(key_result).value();
                         if (seen_labels.contains(key.value)) {
-                            throw DataflowError("duplicate switch case value", switch_case.value->loc);
+                            return std::unexpected(DataflowError("duplicate switch case value", switch_case.value->loc));
                         }
                         seen_labels[key.value] = switch_case.value->loc;
                     }
                     for (const StmtPtr& nested : switch_case.statements) {
-                        validate_switch_stmt_tree(*nested, body, signatures);
+                        if (auto _r = validate_switch_stmt_tree(*nested, body, signatures); !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
                     }
                 }
             } else {
                 for (const SwitchCase& switch_case : stmt.switch_cases) {
                     for (const StmtPtr& nested : switch_case.statements) {
-                        validate_switch_stmt_tree(*nested, body, signatures);
+                        if (auto _r = validate_switch_stmt_tree(*nested, body, signatures); !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
                     }
                 }
             }
-            return;
+            return {};
         }
     }
+    return {};
 }
 
 // Runs the worklist algorithm (see spec ch07/M3) to a fixed point over
@@ -2785,7 +3002,7 @@ void validate_switch_stmt_tree(const Stmt& stmt, const Body& body, const Signatu
 // Splitting into these two phases avoids both false positives (from
 // not-yet-stable intermediate states) and duplicate diagnostics (a block
 // can be visited many times during fixed-point iteration).
-void check_function(const Function& fn, const Program& program, const Signatures& signatures,
+[[nodiscard]] std::expected<void, DataflowError> check_function(const Function& fn, const Program& program, const Signatures& signatures,
                      const std::unordered_set<std::string>& class_names,
                      const ClassFieldTypes& class_field_types, const ClassFieldAccess& class_field_access,
                      const std::unordered_set<std::string>& classes_with_copy_ctor,
@@ -2793,7 +3010,11 @@ void check_function(const Function& fn, const Program& program, const Signatures
                      [[maybe_unused]] const std::unordered_set<std::string>& witness_class_names) {
     Body body = build_mir(fn);
     body.program = &program;
-    if (fn.body) validate_switch_stmt_tree(*fn.body, body, signatures);
+    if (fn.body) {
+        if (auto _r = validate_switch_stmt_tree(*fn.body, body, signatures); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    }
 
     std::size_t n = body.blocks.size();
 
@@ -2876,8 +3097,13 @@ void check_function(const Function& fn, const Program& program, const Signatures
 
     if (is_constructor_function(fn)) {
         if (const ClassDef* owner = find_class_def(program, fn.member_owner_class)) {
-            validate_constructor_base_initialization(fn, *owner, body, signatures);
-            validate_constructor_virtual_interface_base_initialization(fn, *owner, body, signatures);
+            if (auto _r = validate_constructor_base_initialization(fn, *owner, body, signatures); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            if (auto _r = validate_constructor_virtual_interface_base_initialization(fn, *owner, body, signatures);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
     }
 
@@ -2906,7 +3132,10 @@ void check_function(const Function& fn, const Program& program, const Signatures
 
         DataflowState new_out = new_in;
         for (std::size_t i = 0; i < body.blocks[b].statements.size(); i++) {
-            apply_statement(body.blocks[b].statements[i], new_out, body, signatures, /*report_errors=*/false);
+            if (auto _r = apply_statement(body.blocks[b].statements[i], new_out, body, signatures, /*report_errors=*/false);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             release_dead_references(new_out, body, live_after[b][i]);
         }
 
@@ -2929,11 +3158,17 @@ void check_function(const Function& fn, const Program& program, const Signatures
     for (std::size_t b = 0; b < n; b++) {
         DataflowState state = in_states[b];
         for (std::size_t i = 0; i < body.blocks[b].statements.size(); i++) {
-            apply_statement(body.blocks[b].statements[i], state, body, signatures, /*report_errors=*/true);
+            if (auto _r = apply_statement(body.blocks[b].statements[i], state, body, signatures, /*report_errors=*/true);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             release_dead_references(state, body, live_after[b][i]);
         }
-        check_terminator(body.blocks[b].terminator, state, fn, body, signatures);
+        if (auto _r = check_terminator(body.blocks[b].terminator, state, fn, body, signatures); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
     }
+    return {};
 }
 
 // Builds the ch05 §5.10 overload-resolution signature map from every
@@ -2945,9 +3180,11 @@ void check_function(const Function& fn, const Program& program, const Signatures
 // possibly surfaced slightly earlier in the pipeline now that
 // monomorphization runs before check_moves (see driver.cppm) -- the
 // error is exactly as correct either way.
-void check_moves_impl(const Program& program) {
-    Signatures signatures = build_signatures(program);
-    validate_class_semantics(program, signatures);
+[[nodiscard]] std::expected<void, DataflowError> check_moves_impl(const Program& program) {
+    auto signatures_result = build_signatures(program);
+    if (!signatures_result.has_value()) return std::unexpected(std::move(signatures_result).error());
+    Signatures signatures = std::move(signatures_result).value();
+    if (auto _r = validate_class_semantics(program, signatures); !_r.has_value()) return std::unexpected(std::move(_r).error());
     // ch04 §4.2: every class name in the program, so Member-access
     // checking (apply_expr's own Member case) can tell a class-typed
     // base (access-controlled) apart from a struct-typed one (never
@@ -2992,7 +3229,9 @@ void check_moves_impl(const Program& program) {
     }
     for (const ClassDef& def : program.classes) {
         for (const Function& fn : program.functions) {
-            validate_constructor_member_initialization(fn, def, program);
+            if (auto _r = validate_constructor_member_initialization(fn, def, program); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
     }
     // ch05 §5.11: every concept/bare-`auto` witness class (never a real,
@@ -3028,9 +3267,13 @@ void check_moves_impl(const Program& program) {
         // deduction-pattern complexity.
         if (!fn.template_params.empty()) continue;
         if (!fn.generic_method_owner_id.empty()) continue;
-        check_function(fn, program, signatures, class_names, class_field_types, class_field_access, classes_with_copy_ctor,
+        if (auto _r = check_function(fn, program, signatures, class_names, class_field_types, class_field_access, classes_with_copy_ctor,
                        classes_with_copy_assign, witness_class_names);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
     }
+    return {};
 }
 
 } // namespace scpp

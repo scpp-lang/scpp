@@ -18,9 +18,9 @@ using LiveSet = std::unordered_set<std::string>;
 RootSet resolve_root_place(const std::string& name, const DataflowState& state);
 std::optional<std::string> resolve_reborrow_lender(const Expr& expr, const Body& body,
                                                    const Signatures& signatures);
-void validate_reborrow_lender(const std::string& lender, bool child_is_mutable, const DataflowState& state,
+[[nodiscard]] std::expected<void, DataflowError> validate_reborrow_lender(const std::string& lender, bool child_is_mutable, const DataflowState& state,
                               const Body& body, bool report_errors);
-void validate_reborrow_lender_write(const std::string& lender, const DataflowState& state,
+[[nodiscard]] std::expected<void, DataflowError> validate_reborrow_lender_write(const std::string& lender, const DataflowState& state,
                                     bool report_errors);
 void release_reference_borrow(const std::string& name, DataflowState& state, const Body& body);
 void release_closure_capture_borrows(const std::string& name, DataflowState& state);
@@ -33,7 +33,7 @@ std::vector<std::vector<LiveSet>> compute_reference_liveness(const Body& body,
                                                              const std::vector<std::vector<std::size_t>>& preds);
 void release_dead_references(DataflowState& state, const Body& body, const LiveSet& live_after_stmt);
 
-[[nodiscard]] RootSet resolve_borrow_source_root(const Expr& expr, DataflowState& state, const Body& body,
+[[nodiscard]] std::expected<RootSet, DataflowError> resolve_borrow_source_root(const Expr& expr, DataflowState& state, const Body& body,
                                                  const Signatures& signatures, bool report_errors);
 [[nodiscard]] RootSet resolve_lifetime_source_roots(const Expr& expr, DataflowState& state, const Body& body,
                                                     const Signatures& signatures, bool report_errors);
@@ -41,14 +41,14 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
 [[nodiscard]] bool roots_satisfy_named_lifetime_group(const RootSet& roots, const Function& fn,
                                                       std::string_view group_name);
 [[nodiscard]] bool roots_include_parameter_lifetime(const RootSet& roots, const DataflowState& state);
-void reject_lifetime_group_state_embedding(const Expr& expr, DataflowState& state, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> reject_lifetime_group_state_embedding(const Expr& expr, DataflowState& state, const Body& body,
                                            const Signatures& signatures, bool report_errors,
                                            std::string_view context,
                                            const Type* destination_type = nullptr);
 [[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
-void validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
                          const Signatures& signatures);
-void apply_address_of(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
+[[nodiscard]] std::expected<void, DataflowError> apply_address_of(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
                       bool report_errors);
 
 [[nodiscard]] bool is_single_arg_lifetime_wrapper_call(const Expr& expr) {
@@ -174,14 +174,14 @@ std::optional<std::string> resolve_reborrow_lender(const Expr& expr, const Body&
     }
 }
 
-void validate_reborrow_lender(const std::string& lender, bool child_is_mutable, const DataflowState& state,
+std::expected<void, DataflowError> validate_reborrow_lender(const std::string& lender, bool child_is_mutable, const DataflowState& state,
                               const Body& body, bool report_errors) {
-    if (!report_errors) return;
+    if (!report_errors) return {};
     const Type& lender_type = body.local_types.at(lender);
     if (child_is_mutable && !lender_type.is_mutable_ref) {
-        throw DataflowError("cannot reborrow '" + lender + "' as mutable: it is itself only a shared (const) "
+        return std::unexpected(DataflowError("cannot reborrow '" + lender + "' as mutable: it is itself only a shared (const) "
                             "reference/view",
-            state.current_loc);
+            state.current_loc));
     }
     // A new *mutable* reborrow needs exclusivity against every other
     // reborrow, shared or mutable alike -- but a new *shared* reborrow
@@ -193,19 +193,21 @@ void validate_reborrow_lender(const std::string& lender, bool child_is_mutable, 
     bool conflicts = child_is_mutable ? local_is_suspended_for_reborrow(lender, state)
                                        : local_has_mutable_reborrow_suspended(lender, state);
     if (conflicts) {
-        throw DataflowError("cannot form another reborrow from '" + lender +
+        return std::unexpected(DataflowError("cannot form another reborrow from '" + lender +
                                  "' while a nested reborrow derived from it is still live",
-            state.current_loc);
+            state.current_loc));
     }
+    return {};
 }
 
-void validate_reborrow_lender_write(const std::string& lender, const DataflowState& state, bool report_errors) {
-    if (!report_errors) return;
+std::expected<void, DataflowError> validate_reborrow_lender_write(const std::string& lender, const DataflowState& state, bool report_errors) {
+    if (!report_errors) return {};
     if (local_is_suspended_for_reborrow(lender, state)) {
-        throw DataflowError("cannot write through '" + lender +
+        return std::unexpected(DataflowError("cannot write through '" + lender +
                                  "' while a nested reborrow derived from it is still live",
-            state.current_loc);
+            state.current_loc));
     }
+    return {};
 }
 
 // Releases the borrow (if any) that reference-typed local `name` holds
@@ -573,7 +575,7 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
     }
 }
 
-void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
+[[nodiscard]] std::expected<void, DataflowError> apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
                  const Signatures& signatures, bool report_errors);
 
 // Checks every argument of a Call expression against its callee's
@@ -582,7 +584,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
 // statement or value sub-expression) and resolve_borrow_source_root's
 // Call case below (a call to a reference-returning function used
 // itself as a further reference-binding source).
-void check_call_arguments(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
+[[nodiscard]] std::expected<void, DataflowError> check_call_arguments(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
                            bool report_errors);
 
 // Resolves the root place that `expr` would be borrowing from if used as
@@ -608,7 +610,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
 // own call -- see apply_reference_argument below -- so sequential calls
 // never overlap), or keep the two named reference locals' own live
 // ranges (shortened by the liveness analysis below) from overlapping.
-[[nodiscard]] RootSet resolve_borrow_source_root(const Expr& expr, DataflowState& state, const Body& body,
+[[nodiscard]] std::expected<RootSet, DataflowError> resolve_borrow_source_root(const Expr& expr, DataflowState& state, const Body& body,
                                                  const Signatures& signatures, bool report_errors) {
     auto literal_has_no_borrow_root = [&](const Expr& candidate) {
         return candidate.kind == ExprKind::IntegerLiteral || candidate.kind == ExprKind::FloatLiteral ||
@@ -616,7 +618,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                candidate.kind == ExprKind::StringLiteral;
     };
     if (literal_has_no_borrow_root(expr)) {
-        if (!report_errors) return {};
+        if (!report_errors) return RootSet{};
     }
     switch (expr.kind) {
         case ExprKind::Identifier: {
@@ -624,8 +626,8 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             if (report_errors) {
                 LocalState current = lookup(state.locals, bound_name);
                 if (current != LocalState::Initialized) {
-                    throw DataflowError(describe_bad_state(bound_name, current),
-                        state.current_loc);
+                    return std::unexpected(DataflowError(describe_bad_state(bound_name, current),
+                        state.current_loc));
                 }
             }
 
@@ -642,7 +644,9 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             // could itself read/move/call), so it's checked exactly like
             // any other read; the array base contributes the (whole-)
             // root, same as Member above.
-            apply_expr(*expr.rhs, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+            if (auto _r = apply_expr(*expr.rhs, /*is_move_target_context=*/false, state, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             if (expr.lhs->kind == ExprKind::Identifier) {
                 auto it = body.local_types.find(expr.lhs->name);
                 if (it != body.local_types.end()) {
@@ -674,16 +678,20 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             }
             if (expr.unary_op != UnaryOp::Deref) {
                 if (report_errors) {
-                    throw DataflowError("a reference can currently only borrow a plain local variable, a "
+                    return std::unexpected(DataflowError("a reference can currently only borrow a plain local variable, a "
                                          "field of one ('a.b'), an array element of one ('arr[i]'), a "
                                          "dereferenced raw-pointer local ('*p'/'p->x'), or "
                                          "the result of a call to a reference-returning function -- not an "
                                          "arbitrary expression",
-                        state.current_loc);
+                        state.current_loc));
                 }
-                return {};
+                return RootSet{};
             }
-            if (report_errors) validate_deref_expr(expr, state, body, signatures);
+            if (report_errors) {
+                if (auto _r = validate_deref_expr(expr, state, body, signatures); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
             if (expr.lhs->kind == ExprKind::Identifier) return resolve_root_place(expr.lhs->name, state);
             if (expr.lhs->kind == ExprKind::Member && expr.lhs->lhs) {
                 return resolve_borrow_source_root(*expr.lhs->lhs, state, body, signatures, report_errors);
@@ -706,57 +714,62 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                 sig != nullptr && !sig->returned_lifetime_param_indices.empty() && is_pointer_return_lifetime_source_type(sig->return_type);
             if (!returns_reference) {
                 if (report_errors) {
-                    throw DataflowError("cannot borrow the result of calling '" + expr.name +
+                    return std::unexpected(DataflowError("cannot borrow the result of calling '" + expr.name +
                                          "': it doesn't return a reference with an inferrable lifetime (spec "
                                          "ch05.3)",
-                        state.current_loc);
+                        state.current_loc));
                 }
                 // Still check the arguments themselves so a genuinely
                 // invalid call (wrong callee, bad arguments) is still
                 // reported through the ordinary path once report_errors
                 // is true; harmless to also run silently here.
-                check_call_arguments(expr, state, body, signatures, report_errors);
-                return {};
+                if (auto _r = check_call_arguments(expr, state, body, signatures, report_errors); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                return RootSet{};
             }
-            check_call_arguments(expr, state, body, signatures, report_errors);
+            if (auto _r = check_call_arguments(expr, state, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             RootSet roots;
             for (std::size_t source_index : sig->returned_lifetime_param_indices) {
                 if (expr.name == "operator_deref" && expr.lhs != nullptr && source_index < callee.param_offset) {
                     if (expr.lhs->kind == ExprKind::Identifier) {
                         roots = union_roots(std::move(roots), resolve_root_place(expr.lhs->name, state));
                     } else if (expr.lhs->kind == ExprKind::Member && expr.lhs->lhs) {
-                        roots = union_roots(std::move(roots),
-                                            resolve_borrow_source_root(*expr.lhs->lhs, state, body, signatures,
-                                                                       report_errors));
+                        auto _r = resolve_borrow_source_root(*expr.lhs->lhs, state, body, signatures, report_errors);
+                        if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+                        roots = union_roots(std::move(roots), std::move(_r).value());
                     } else {
-                        roots = union_roots(std::move(roots),
-                                            resolve_borrow_source_root(*expr.lhs, state, body, signatures,
-                                                                       report_errors));
+                        auto _r = resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
+                        if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+                        roots = union_roots(std::move(roots), std::move(_r).value());
                     }
                     continue;
                 }
                 if (source_index < callee.param_offset) {
-                    roots = union_roots(std::move(roots),
-                                        resolve_borrow_source_root(*expr.lhs, state, body, signatures,
-                                                                   report_errors));
+                    auto _r = resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
+                    if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+                    roots = union_roots(std::move(roots), std::move(_r).value());
                     continue;
                 }
-                roots = union_roots(std::move(roots),
-                                    resolve_borrow_source_root(*expr.args[source_index - callee.param_offset], state,
-                                                               body, signatures, report_errors));
+                auto _r = resolve_borrow_source_root(*expr.args[source_index - callee.param_offset], state,
+                                                      body, signatures, report_errors);
+                if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+                roots = union_roots(std::move(roots), std::move(_r).value());
             }
             return roots;
         }
 
         default:
             if (report_errors) {
-                throw DataflowError("a reference can currently only borrow a plain local variable, a field of "
+                return std::unexpected(DataflowError("a reference can currently only borrow a plain local variable, a field of "
                                      "one ('a.b'), an array element of one ('arr[i]'), a dereferenced "
                                      "raw-pointer local ('*p'/'p->x'), or the result of a call "
                                      "to a reference-returning function -- not an arbitrary expression",
-                    state.current_loc);
+                    state.current_loc));
             }
-            return {};
+            return RootSet{};
     }
 }
 
@@ -864,28 +877,28 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
     return false;
 }
 
-void reject_lifetime_group_state_embedding(const Expr& expr, DataflowState& state, const Body& body,
+std::expected<void, DataflowError> reject_lifetime_group_state_embedding(const Expr& expr, DataflowState& state, const Body& body,
                                            const Signatures& signatures, bool report_errors, std::string_view context,
                                            const Type* destination_type) {
-    if (!report_errors) return;
+    if (!report_errors) return {};
     std::optional<Type> expr_type = infer_expr_type(expr, body, signatures);
-    if (!expr_type.has_value() || !is_pointer_return_lifetime_source_type(*expr_type)) return;
+    if (!expr_type.has_value() || !is_pointer_return_lifetime_source_type(*expr_type)) return {};
     if (destination_type != nullptr &&
         (destination_type->is_reference_wrapper_lifetime_source ||
          (destination_type->kind == TypeKind::Reference && destination_type->pointee != nullptr &&
           destination_type->pointee->is_reference_wrapper_lifetime_source) ||
          expr_contains_wrapper_lifetime_source_form(expr, body, signatures))) {
-        return;
+        return {};
     }
     RootSet roots = resolve_lifetime_source_roots(expr, state, body, signatures, report_errors);
     if (expr_contains_wrapper_lifetime_source_form(expr, body, signatures) && roots_include_parameter_lifetime(roots, state)) {
-        return;
+        return {};
     }
-    if (!roots_include_parameter_lifetime(roots, state)) return;
-    throw DataflowError("cannot store a reference, pointer, or span derived from " + format_roots(roots) +
+    if (!roots_include_parameter_lifetime(roots, state)) return {};
+    return std::unexpected(DataflowError("cannot store a reference, pointer, or span derived from " + format_roots(roots) +
                             " into " + std::string(context) +
                             "; named and any lifetime groups propagate only through the direct bare return value",
-                        state.current_loc);
+                        state.current_loc));
 }
 
 // Determines whether `expr` (a borrow-source place -- the same shape
@@ -969,26 +982,29 @@ void reject_lifetime_group_state_embedding(const Expr& expr, DataflowState& stat
 // operand's static type is already `T&`/`const T&`, `&expr` merely
 // derives a raw pointer from that existing borrow rather than creating a
 // second borrow of the root, so no extra exclusivity check applies here.
-void apply_address_of(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
+std::expected<void, DataflowError> apply_address_of(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
                        bool report_errors) {
     if (expr.lhs->kind == ExprKind::Identifier && !body.local_types.contains(expr.lhs->name) &&
         signatures.contains(expr.lhs->name)) {
-        return;
+        return {};
     }
-    RootSet roots = resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
-    if (!report_errors || roots.empty()) return;
+    auto roots_result = resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
+    if (!roots_result.has_value()) return std::unexpected(std::move(roots_result).error());
+    RootSet roots = std::move(roots_result).value();
+    if (!report_errors || roots.empty()) return {};
     if (std::optional<Type> operand_type = infer_expr_type(*expr.lhs, body, signatures);
         operand_type.has_value() && operand_type->kind == TypeKind::Reference) {
-        return;
+        return {};
     }
     for (const std::string& root : roots) {
         auto borrow_it = state.borrows.find(root);
         if (borrow_it != state.borrows.end() &&
             (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-            throw DataflowError("cannot take the address of '" + root + "': it is already borrowed",
-                                state.current_loc);
+            return std::unexpected(DataflowError("cannot take the address of '" + root + "': it is already borrowed",
+                                state.current_loc));
         }
     }
+    return {};
 }
 
 } // namespace scpp
