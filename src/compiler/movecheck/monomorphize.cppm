@@ -6035,14 +6035,8 @@ private:
 
 
 void monomorphize_generics_impl(Program& program) {
-    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
-        std::cerr << "[SCPP_DEBUG_FN] entering monomorphize_generics_impl, functions.size()=" << program.functions.size() << std::endl;
-    }
     Monomorphizer monomorphizer(program);
     monomorphizer.run();
-    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
-        std::cerr << "[SCPP_DEBUG_FN] finished monomorphize_generics_impl" << std::endl;
-    }
 }
 
 } // namespace scpp

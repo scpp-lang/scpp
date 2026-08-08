@@ -2641,29 +2641,17 @@ llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
 // file it came from.
 void emit_object_file_for_program(Program& program, const std::string& object_path, bool emit_debug_info = false,
                                   int opt_level = 2) {
-    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
-        std::cerr << "[SCPP_DEBUG_FN] entering emit_object_file_for_program, functions.size()=" << program.functions.size() << std::endl;
-    }
     reject_not_yet_lowerable_constexpr_surface(program);
-    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
-        std::cerr << "[SCPP_DEBUG_FN] reject_not_yet_lowerable_constexpr_surface done" << std::endl;
-    }
     // ch05 §5.11: must run before check_moves -- see Monomorphizer's own
     // comment in movecheck.cppm for why call-site monomorphization has
     // to happen first (movecheck's ordinary exact-type-match call-
     // argument checking can only work once every call site targets an
     // already-concrete function).
     monomorphize_generics(program);
-    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
-        std::cerr << "[SCPP_DEBUG_FN] monomorphize_generics done" << std::endl;
-    }
     try {
         fold_immediate_calls(program);
     } catch (const ConstexprError& error) {
         throw DriverError(error.what());
-    }
-    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
-        std::cerr << "[SCPP_DEBUG_FN] fold_immediate_calls done" << std::endl;
     }
     try {
         check_moves(program);
@@ -2818,9 +2806,6 @@ void emit_module_artifacts(std::string_view source, const std::string& interface
     if (!program_result.has_value()) throw std::move(program_result).error();
     Program program = std::move(program_result.value());
     program.source_path = source_path.empty() ? std::string() : absolute_source_path(source_path);
-    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
-        std::cerr << "[SCPP_DEBUG_FN] emit_module_artifacts: parse() done, functions.size()=" << program.functions.size() << std::endl;
-    }
     reject_not_yet_lowerable_constexpr_surface(program);
     if (!program.is_module_interface) {
         throw DriverError("module artifacts can only be emitted from an interface unit, not '" +
@@ -2828,13 +2813,7 @@ void emit_module_artifacts(std::string_view source, const std::string& interface
     }
     std::string merged_interface_source =
         build_merged_interface_source(program, cache, absolute_source_path(source_path), /*keep_concrete_bodies=*/false);
-    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
-        std::cerr << "[SCPP_DEBUG_FN] emit_module_artifacts: build_merged_interface_source done" << std::endl;
-    }
     write_scppm_file(program, merged_interface_source, interface_path);
-    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
-        std::cerr << "[SCPP_DEBUG_FN] emit_module_artifacts: write_scppm_file done" << std::endl;
-    }
     emit_module_archive_for_program(program, archive_path, opt_level);
 }
 
