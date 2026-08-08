@@ -2649,10 +2649,8 @@ void emit_object_file_for_program(Program& program, const std::string& object_pa
     // already-concrete function).
     auto monomorphize_result = monomorphize_generics(program);
     if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-    try {
-        fold_immediate_calls(program);
-    } catch (const ConstexprError& error) {
-        throw DriverError(error.what());
+    if (auto fold_result = fold_immediate_calls(program); !fold_result.has_value()) {
+        throw DriverError(fold_result.error().what());
     }
     try {
         auto check_moves_result = check_moves(program);
