@@ -64,7 +64,7 @@ namespace scpp {
     }
 
 
-    llvm::LLVMModuleRef Codegen::generate(const Program& program)
+    [[nodiscard]] std::expected<llvm::LLVMModuleRef, CodegenError> Codegen::generate(const Program& program)
 {
         // Structs are declared first (validated + turned into named llvm::LLVM
         // struct types) since function signatures and locals may reference
@@ -131,7 +131,7 @@ namespace scpp {
                 generic_type_template_names.insert(def.name);
                 continue;
             }
-            declare_struct(def);
+            if (auto r = declare_struct(def); !r.has_value()) return std::unexpected(std::move(r).error());
         }
         for (const ClassDef& def : program.classes) {
             if (def.is_concept_witness) {
@@ -151,11 +151,13 @@ namespace scpp {
                 synthetic_check_only_class_names.insert(def.name);
                 continue;
             }
-            declare_class(def);
+            if (auto r = declare_class(def); !r.has_value()) return std::unexpected(std::move(r).error());
         }
         for (const GlobalVar& global : program.globals) {
             if (global.decl == nullptr) continue;
-            llvm::LLVMTypeRef llvm_type = to_llvm_type(global.decl->type);
+            auto llvm_type_result = to_llvm_type(global.decl->type);
+            if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
+            llvm::LLVMTypeRef llvm_type = std::move(llvm_type_result).value();
             llvm::LLVMValueRef init = llvm::LLVMConstNull(llvm_type);
             llvm::LLVMValueRef variable = llvm::LLVMAddGlobal(module_, llvm_type, mangle_global_symbol_name(global.decl->var_name).c_str());
             llvm::LLVMSetLinkage(variable, llvm::LLVMInternalLinkage);
@@ -165,7 +167,7 @@ namespace scpp {
             globals_.emplace(global.decl->var_name, GlobalSlot{variable, global.decl->type,
                                                                global.decl->is_const || global.decl->is_constexpr});
         }
-        build_overload_names();
+        if (auto r = build_overload_names(); !r.has_value()) return std::unexpected(std::move(r).error());
         auto is_never_compiled = [&](const Function& fn) {
             // consteval functions/constructors are compile-time-only by
             // definition; every surviving use site is lowered through the
@@ -207,13 +209,15 @@ namespace scpp {
         };
         for (const Function& fn : program.functions) {
             if (is_never_compiled(fn)) continue;
-            declare_function(fn);
+            if (auto r = declare_function(fn); !r.has_value()) return std::unexpected(std::move(r).error());
         }
-        if (!program.globals.empty()) define_global_initializers(program);
+        if (!program.globals.empty()) {
+            if (auto r = define_global_initializers(program); !r.has_value()) return std::unexpected(std::move(r).error());
+        }
         for (const Function& fn : program.functions) {
             if (is_never_compiled(fn)) continue;
             if (fn.body != nullptr) {
-                define_function(fn);
+                if (auto r = define_function(fn); !r.has_value()) return std::unexpected(std::move(r).error());
             } else if (!fn.owning_module.empty() && fn.is_exported) {
                 // A defaulted special member (e.g. `virtual ~X() = default;`)
                 // or an inherited-method forwarding stub recovered from an
@@ -246,13 +250,13 @@ namespace scpp {
                 // beyond the plain declaration declare_function already
                 // emitted above.
             } else if (fn.is_defaulted) {
-                define_defaulted_function(fn);
+                if (auto r = define_defaulted_function(fn); !r.has_value()) return std::unexpected(std::move(r).error());
             } else if (!fn.forwards_to.empty()) {
                 // ch05 §5.14: an inherited method's own forwarding stub
                 // (synthesize_inherited_method_forwards) -- has no
                 // scpp-level AST body at all, just a thin codegen-only
                 // wrapper.
-                define_forwarding_function(fn);
+                if (auto r = define_forwarding_function(fn); !r.has_value()) return std::unexpected(std::move(r).error());
             }
             // Otherwise: a bodyless `extern "C"` declaration (ch02
             // §2.1) already got its llvm::LLVM `declare` from declare_function
@@ -268,8 +272,8 @@ namespace scpp {
             std::ofstream dump_out("scratch_selfhost/broken_module_dump.ll");
             dump_out << ir_dump;
             llvm::LLVMDisposeMessage(ir_dump);
-            throw CodegenError("module verification failed: " + error,
-                current_loc_);
+            return std::unexpected(CodegenError("module verification failed: " + error,
+                current_loc_));
         }
         return module_;
     }
@@ -614,7 +618,7 @@ namespace scpp {
     }
 
 
-    void Codegen::build_overload_names()
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::build_overload_names()
 {
         std::unordered_map<std::string, std::vector<const Function*>> by_name;
         for (const Function& fn : program_->functions) {
@@ -623,11 +627,11 @@ namespace scpp {
         for (const auto& [name, fns] : by_name) {
             if (!fns.empty() && fns[0]->is_extern_c) {
                 if (fns.size() != 1) {
-                    throw CodegenError("'" + name +
+                    return std::unexpected(CodegenError("'" + name +
                                         "' cannot be overloaded: 'extern \"C\"' functions share real C's own "
                                         "lack of a function-overloading concept, so every 'extern \"C\"' "
                                         "declaration of the same name must have an identical signature",
-                        current_loc_);
+                        current_loc_));
                 }
                 overload_names_[fns[0]] = name;
                 continue;
@@ -653,11 +657,11 @@ namespace scpp {
             // available at all, so this must be a hard error instead.
             for (const Function* fn : fns) {
                 if (fn->is_extern_c) {
-                    throw CodegenError("'" + name +
+                    return std::unexpected(CodegenError("'" + name +
                                         "' cannot be overloaded: 'extern \"C\"' functions share real C's own "
                                         "lack of a function-overloading concept, so every 'extern \"C\"' "
                                         "declaration of the same name must have an identical signature",
-                        current_loc_);
+                        current_loc_));
                 }
             }
             for (const Function* fn : fns) {
@@ -670,10 +674,11 @@ namespace scpp {
                 overload_names_[fn] = mangled;
             }
         }
+        return {};
     }
 
 
-    void Codegen::define_global_initializers(const Program& program)
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::define_global_initializers(const Program& program)
 {
         bool needs_initializer = false;
         for (const GlobalVar& global : program.globals) {
@@ -682,7 +687,7 @@ namespace scpp {
                 break;
             }
         }
-        if (!needs_initializer) return;
+        if (!needs_initializer) return {};
 
         llvm::LLVMTypeRef fn_type = llvm::LLVMFunctionType(llvm::LLVMVoidTypeInContext(context_), nullptr, 0, /*IsVarArg=*/0);
         llvm::LLVMValueRef init_fn = llvm::LLVMAddFunction(module_, "__scpp_global_init", fn_type);
@@ -698,15 +703,19 @@ namespace scpp {
             if (it == globals_.end()) continue;
             current_global_namespace_path_ = global.namespace_path;
             if (global.decl->has_ctor_args) {
-                throw CodegenError("global constructor-call initialization is not supported in this version", global.decl->loc);
+                return std::unexpected(CodegenError("global constructor-call initialization is not supported in this version", global.decl->loc));
             }
             if (global.decl->init == nullptr) continue;
             if (global.decl->type.kind == TypeKind::Reference) {
-                llvm::LLVMValueRef referent = codegen_lvalue(*global.decl->init).ptr;
+                auto lvalue_result = codegen_lvalue(*global.decl->init);
+                if (!lvalue_result.has_value()) return std::unexpected(std::move(lvalue_result).error());
+                llvm::LLVMValueRef referent = std::move(lvalue_result).value().ptr;
                 create_store(referent, it->second.global, std::nullopt);
                 continue;
             }
-            create_store(codegen_value_for_target(*global.decl->init, global.decl->type), it->second.global,
+            auto init_value_result = codegen_value_for_target(*global.decl->init, global.decl->type);
+            if (!init_value_result.has_value()) return std::unexpected(std::move(init_value_result).error());
+            create_store(std::move(init_value_result).value(), it->second.global,
                          global.decl->resolved_alignment != 0 ? std::optional<unsigned>(global.decl->resolved_alignment)
                                                               : alignment_for_type(global.decl->type));
         }
@@ -729,6 +738,7 @@ namespace scpp {
         llvm::LLVMSetLinkage(ctors_global, llvm::LLVMAppendingLinkage);
         llvm::LLVMSetGlobalConstant(ctors_global, /*IsConstant=*/1);
         llvm::LLVMSetInitializer(ctors_global, ctors_initializer);
+        return {};
     }
 
 } // namespace scpp

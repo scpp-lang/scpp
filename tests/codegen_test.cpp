@@ -105,7 +105,8 @@ std::string generate_ir(std::string_view source) {
     // ... -> codegen).
     scpp::fold_immediate_calls(program);
     scpp::Codegen codegen("test_module");
-    codegen.generate(program);
+    auto generate_result = codegen.generate(program);
+    if (!generate_result.has_value()) throw std::move(generate_result).error();
     return codegen.module_ir();
 }
 
@@ -277,10 +278,57 @@ void run_test_case_files() {
     }
 }
 
+// The two tests below exercise scpp::Codegen::generate's
+// std::expected<llvm::LLVMModuleRef, CodegenError> API shape directly,
+// without going through generate_ir's try/catch convenience wrapper --
+// mirroring parser_test.cpp's test_parse_returns_engaged_expected_on_success/
+// test_parse_returns_disengaged_expected_on_failure_without_throwing and
+// movecheck_test.cpp's analogous pair, added when parser.cppm/DataflowError
+// made this same exceptions -> std::expected transition.
+void test_generate_returns_engaged_expected_on_success() {
+    cases_run++;
+    scpp::Program program = parse_with_std_imports(
+        "int main() {\n"
+        "    return 0;\n"
+        "}\n");
+    auto monomorphize_result = scpp::monomorphize_generics(program);
+    if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+    scpp::fold_immediate_calls(program);
+    scpp::Codegen codegen("test_module");
+    auto result = codegen.generate(program);
+    expect(result.has_value(), "generate_returns_engaged_expected_on_success: expected generate()'s has_value() "
+                                "to be true");
+}
+
+void test_generate_returns_disengaged_expected_on_failure_without_throwing() {
+    cases_run++;
+    // No try/catch here at all -- if scpp::Codegen::generate still threw
+    // instead of returning std::expected, this call itself would already
+    // have aborted the test binary before reaching any of the expect()
+    // calls below, since nothing in this function catches exceptions.
+    scpp::Program program = parse_with_std_imports("int main() { return unknown(); }\n");
+    auto monomorphize_result = scpp::monomorphize_generics(program);
+    if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+    scpp::fold_immediate_calls(program);
+    scpp::Codegen codegen("test_module");
+    auto result = codegen.generate(program);
+    expect(!result.has_value(),
+           "generate_returns_disengaged_expected_on_failure_without_throwing: expected has_value() to be false");
+    if (result.has_value()) return;
+    const scpp::CodegenError& error = result.error();
+    expect(error.loc.is_known(),
+           "generate_returns_disengaged_expected_on_failure_without_throwing: expected a known error location");
+    expect(std::string(error.what()).size() > 0,
+           "generate_returns_disengaged_expected_on_failure_without_throwing: expected a non-empty diagnostic "
+           "message");
+}
+
 } // namespace
 
 int main() {
     run_test_case_files();
+    test_generate_returns_engaged_expected_on_success();
+    test_generate_returns_disengaged_expected_on_failure_without_throwing();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
