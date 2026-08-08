@@ -1,0 +1,4 @@
+consteval int loops_forever() {
+    return loops_forever();
+}
+int main() { return loops_forever(); }

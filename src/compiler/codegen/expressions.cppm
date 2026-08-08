@@ -126,7 +126,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
     llvm::LLVMValueRef Codegen::codegen_consteval_class_value(const Expr& expr, const std::string& class_name)
 {
-        ConstexprValue value = evaluate_immediate_expr(*program_, expr);
+        auto value_result = evaluate_immediate_expr(*program_, expr);
+        if (!value_result.has_value()) throw value_result.error();
+        ConstexprValue value = std::move(value_result).value();
         llvm::LLVMTypeRef llvm_type = to_llvm_type(named_type(class_name));
         std::optional<unsigned> align = alignment_for_type(named_type(class_name));
         llvm::LLVMValueRef temp = create_entry_block_alloca(llvm_type, "constevalclasstmp", align);
@@ -160,7 +162,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     ctor_expr->has_paren_init = true;
                     for (const ExprPtr& arg : args) ctor_expr->args.push_back(clone_expr(*arg));
                 }
-                ConstexprValue value = evaluate_immediate_expr(*program_, *ctor_expr);
+                auto value_result = evaluate_immediate_expr(*program_, *ctor_expr);
+                if (!value_result.has_value()) throw value_result.error();
+                ConstexprValue value = std::move(value_result).value();
                 store_constexpr_value_into(target.ptr, target.type, value);
             } else {
                 llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(ctor_def).c_str());

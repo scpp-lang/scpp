@@ -103,7 +103,8 @@ std::string generate_ir(std::string_view source) {
     // already-resolved `Type::array_size`. Mirrors driver.cppm's own
     // pipeline ordering (monomorphize_generics -> fold_immediate_calls ->
     // ... -> codegen).
-    scpp::fold_immediate_calls(program);
+    auto fold_result = scpp::fold_immediate_calls(program);
+    if (!fold_result.has_value()) throw std::move(fold_result).error();
     scpp::Codegen codegen("test_module");
     codegen.generate(program);
     return codegen.module_ir();
@@ -211,7 +212,8 @@ void check_ir_assertion(const Assertion& assertion, const std::string& ir, const
 //                                          match ends).
 //   count_at_least: <n> | <substring>  -- substring occurs >= n times
 //                                          (non-overlapping count).
-//   throws: ParseError | CodegenError  -- parsing (or, if parsing
+//   throws: ParseError | DataflowError |
+//           CodegenError | ConstexprError -- parsing (or, if parsing
 //                                          succeeds, codegen) must throw
 //                                          exactly this error type; must
 //                                          be the only line in the file.
@@ -260,6 +262,8 @@ void run_test_case_files() {
                 actual = "DataflowError";
             } catch (const scpp::CodegenError&) {
                 actual = "CodegenError";
+            } catch (const scpp::ConstexprError&) {
+                actual = "ConstexprError";
             }
             expect(actual == expected_type,
                    case_name + ": expected " + expected_type + " to be thrown, got " + actual);
@@ -277,10 +281,40 @@ void run_test_case_files() {
     }
 }
 
+// Exercises scpp.constexpr_engine's public API directly against its new
+// std::expected<T, ConstexprError> return type (rather than only indirectly,
+// via the .scpp/.expected `throws: ConstexprError` case above), to confirm
+// callers can report both success and failure without relying on
+// exceptions -- the eventual self-hosting requirement for this engine.
+void run_constexpr_engine_direct_api_tests() {
+    {
+        std::string case_name = "fold_immediate_calls_succeeds_for_well_formed_consteval_call";
+        cases_run++;
+        scpp::Program program = parse_with_std_imports(
+            "consteval int answer() { return 42; }\n"
+            "int main() { return answer(); }\n");
+        auto result = scpp::fold_immediate_calls(program);
+        expect(result.has_value(),
+               case_name + ": expected fold_immediate_calls to return a value instead of an error");
+    }
+
+    {
+        std::string case_name = "fold_immediate_calls_reports_error_for_runaway_consteval_recursion";
+        cases_run++;
+        scpp::Program program = parse_with_std_imports(
+            "consteval int loops_forever() { return loops_forever(); }\n"
+            "int main() { return loops_forever(); }\n");
+        auto result = scpp::fold_immediate_calls(program);
+        expect(!result.has_value(), case_name + ": expected fold_immediate_calls to return std::unexpected "
+                                                  "instead of throwing for runaway consteval recursion");
+    }
+}
+
 } // namespace
 
 int main() {
     run_test_case_files();
+    run_constexpr_engine_direct_api_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
@@ -289,3 +323,4 @@ int main() {
     std::cout << "All codegen tests passed (" << cases_run << " case file(s)).\n";
     return 0;
 }
+
