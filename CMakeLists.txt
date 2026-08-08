@@ -84,7 +84,10 @@ add_library(scpp_parser)
 target_sources(scpp_parser
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/parser.cppm)
+            src/compiler/parser.cppm)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(scpp_parser PRIVATE -Wno-error=unknown-attributes)
+endif()
 target_link_libraries(scpp_parser PUBLIC scpp_lexer scpp_ast)
 
 add_library(scpp_mir)

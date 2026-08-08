@@ -422,6 +422,19 @@ enum class ExprKind {
                 // either a type operand (stored in `type`) or an unevaluated
                 // expression operand (stored in `lhs`), distinguished by
                 // `sizeof_operand_is_type` below.
+    ValueInit,  // A bare `{}` used as a complete expression (e.g.
+                // `return {};`) rather than as a postfix constructor
+                // applied to a named type (`TypeName{}`, which parses as
+                // an ordinary Call instead -- see parse_return's existing
+                // Identifier+LBrace special case). Only recognized where
+                // the target type is otherwise unambiguous from context
+                // (currently: a return statement, whose enclosing
+                // function's own declared return type is stamped onto
+                // `type` by the parser); value-initializes that type,
+                // identically to spelling it out explicitly as
+                // `ReturnType{}` would (zero for scalars, each member's
+                // own default per its in-class initializer/default
+                // constructor for a class/struct -- ch04/ch05 §5.1).
 };
 
 enum class BinaryOp {
@@ -576,6 +589,7 @@ class Expr {
     // Cast: the target type `T` in `static_cast<T>(expr)`/`(T)expr`
     // (operand stored in `lhs`, like Unary).
     // Sizeof(type): the queried type operand `T`.
+    // ValueInit: the type to value-initialize (see ExprKind::ValueInit).
     Type type;
     // Sizeof only: true when this node is the `sizeof(T)` form (queried type
     // stored in `type`), false for `sizeof(expr)` (unevaluated operand stored
@@ -1497,6 +1511,23 @@ class Function {
     // Member functions only: the owning class's own fully-qualified name.
     // Empty for a free function.
     std::string member_owner_class;
+    // Non-empty only for a lambda's synthesized closure-class `_call`
+    // method (see monomorphize.cppm's resolve_lambda): the *lexically*
+    // enclosing class whose private members this lambda's body may
+    // access, as if the lambda's body appeared directly at the point
+    // where the lambda-expression itself is written -- exactly how real
+    // C++ access control treats a closure type ([expr.prim.lambda]).
+    // This is deliberately kept separate from member_owner_class (which
+    // for a `_call` method names the closure's own, unrelated synthetic
+    // class, needed for `this`-typing/method registration) rather than
+    // overloading that field, so nothing else that inspects
+    // member_owner_class (overload resolution, declared_members_of,
+    // and so on) is affected; only movecheck's own private-access-
+    // checking perspective (DataflowState::current_class, set from this
+    // field in preference to member_owner_class when non-empty) reads
+    // it. Empty for every ordinary function/method, preserving today's
+    // behavior unchanged.
+    std::string access_context_class;
     // Constructors only: `Ctor(...) : Base{...}, field{...}, other{...}
     // { ... }` parsed exactly as written (still in source order). Entries
     // may name the direct base class itself or a direct field. Codegen
@@ -1584,6 +1615,20 @@ class Function {
     // of imported generics, which may need local symbol ownership while
     // still seeing the defining module's hidden helpers.
     std::string visibility_module;
+    // Locations of any standalone `Type f(...);` ordinary forward
+    // declaration(s) (ch05 §5.x) that reconcile_ordinary_forward_
+    // declarations (parser.cppm) matched to *this* definition and then
+    // discarded from Program::functions, keeping only this merged
+    // definition. The driver's own module-interface writer needs these
+    // back: once it strips this definition's body down to a bare
+    // declaration too (to build a private-body-free `.scppm`), the
+    // original standalone declaration's own source text becomes an
+    // exact, redundant second copy of the very same declaration -- which
+    // a later `import` of that interface would then reject outright
+    // (ch05 §5.10 forbids re-declaring an identical signature more than
+    // once). Empty for every function that was never split across a
+    // separate forward declaration to begin with.
+    std::vector<SourceLocation> superseded_forward_declaration_locs;
 };
 
 [[nodiscard]] inline bool is_special_member_this_param(const Type& type, std::string_view owner_name) {
@@ -2138,6 +2183,7 @@ inline Function::Function(const Function& other)
       template_params{other.template_params},
       generic_method_owner_id{other.generic_method_owner_id},
       member_owner_class{other.member_owner_class},
+      access_context_class{other.access_context_class},
       member_initializers{other.member_initializers},
       receiver_ref_qualifier{other.receiver_ref_qualifier},
       is_static{other.is_static},
@@ -2151,7 +2197,8 @@ inline Function::Function(const Function& other)
       namespace_path{other.namespace_path},
       is_exported{other.is_exported},
       owning_module{other.owning_module},
-      visibility_module{other.visibility_module} {
+      visibility_module{other.visibility_module},
+      superseded_forward_declaration_locs{other.superseded_forward_declaration_locs} {
     if (other.body != nullptr) this->body = deep_clone_stmt(*other.body);
 }
 

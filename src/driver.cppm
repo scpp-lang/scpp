@@ -1828,6 +1828,139 @@ void create_archive(const std::vector<std::string>& object_paths, const std::str
     throw DriverError("failed to locate end of function body while writing module interface");
 }
 
+// Scans forward from a bodyless declaration's own start (e.g. a
+// standalone `Type f(...);` ordinary forward declaration -- see
+// Function::superseded_forward_declaration_locs) for its terminating
+// top-level `;`, the same string/char/comment-aware way find_matching_
+// brace above locates a body's closing `}`. Tracks `()`/`{}` nesting
+// depth too (not just parens) since a parameter's default argument can
+// itself be a brace-init expression or a lambda with its own nested
+// `;`-containing body.
+[[nodiscard]] std::size_t find_declaration_semicolon(std::string_view source, std::size_t decl_begin) {
+    bool in_string = false;
+    bool in_char = false;
+    bool in_line_comment = false;
+    bool in_block_comment = false;
+    int depth = 0;
+    for (std::size_t i = decl_begin; i < source.size(); i++) {
+        char c = source[i];
+        char next = i + 1 < source.size() ? source[i + 1] : '\0';
+        if (in_line_comment) {
+            if (c == '\n') in_line_comment = false;
+            continue;
+        }
+        if (in_block_comment) {
+            if (c == '*' && next == '/') {
+                in_block_comment = false;
+                i++;
+            }
+            continue;
+        }
+        if (in_string) {
+            if (c == '\\' && next != '\0') {
+                i++;
+                continue;
+            }
+            if (c == '"') in_string = false;
+            continue;
+        }
+        if (in_char) {
+            if (c == '\\' && next != '\0') {
+                i++;
+                continue;
+            }
+            if (c == '\'') in_char = false;
+            continue;
+        }
+        if (c == '/' && next == '/') {
+            in_line_comment = true;
+            i++;
+            continue;
+        }
+        if (c == '/' && next == '*') {
+            in_block_comment = true;
+            i++;
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+            continue;
+        }
+        if (c == '\'') {
+            in_char = true;
+            continue;
+        }
+        if (c == '(' || c == '{') depth++;
+        else if (c == ')' || c == '}') {
+            if (depth > 0) depth--;
+        } else if (c == ';' && depth == 0) {
+            return i;
+        }
+    }
+    throw DriverError("failed to locate end of superseded forward declaration while writing module interface");
+}
+
+// A standalone forward declaration's own recorded Function::loc starts
+// right at its return type -- any leading `export` keyword (ch11 §11.3)
+// was already consumed by the caller (parse_top_level_function_or_
+// extern_group) before that location was captured, so it sits *before*
+// decl_begin and would otherwise survive as dangling, orphaned text once
+// the rest of the (now-redundant) declaration is stripped out below.
+// Widens decl_begin backward over exactly one such keyword, if present
+// immediately before it (skipping only whitespace in between, and
+// checking it is a standalone word rather than e.g. a longer identifier
+// ending in "export").
+[[nodiscard]] std::size_t widen_declaration_begin_over_leading_export(std::string_view source, std::size_t decl_begin) {
+    std::size_t i = decl_begin;
+    while (i > 0 && std::isspace(static_cast<unsigned char>(source[i - 1]))) i--;
+    static constexpr std::string_view kExportKeyword = "export";
+    if (i < kExportKeyword.size()) return decl_begin;
+    std::size_t candidate = i - kExportKeyword.size();
+    if (source.substr(candidate, kExportKeyword.size()) != kExportKeyword) return decl_begin;
+    bool boundary_before = candidate == 0 ||
+        !(std::isalnum(static_cast<unsigned char>(source[candidate - 1])) || source[candidate - 1] == '_');
+    if (!boundary_before) return decl_begin;
+    return candidate;
+}
+
+// A standalone forward declaration's own recorded Function::loc also
+// sits *after* any leading `[[...]]` attribute-specifier-seq (ch01
+// §1.2/§1.3's `[[nodiscard]]`, `[[nodiscard("reason")]]`,
+// `[[scpp::unsafe]]`, `[[packed]]`, ...) for the very same reason as
+// widen_declaration_begin_over_leading_export above -- parse_top_level_
+// item consumes it before dispatching into the function-parsing path
+// that captures loc. Scans backward for the attribute-seq's own opening
+// `[[`, bailing out (leaving decl_begin unwidened) if a statement/scope
+// boundary character is hit first instead -- a defensive fallback for
+// any attribute shape more exotic than this codebase's own current,
+// argument-free forms.
+[[nodiscard]] std::size_t widen_declaration_begin_over_leading_attribute(std::string_view source, std::size_t decl_begin) {
+    std::size_t i = decl_begin;
+    while (i > 0 && std::isspace(static_cast<unsigned char>(source[i - 1]))) i--;
+    if (i < 2 || source[i - 1] != ']' || source[i - 2] != ']') return decl_begin;
+    std::size_t j = i - 2;
+    while (j > 0) {
+        j--;
+        if (source[j] == ';' || source[j] == '{' || source[j] == '}') return decl_begin;
+        if (source[j] == '[' && j > 0 && source[j - 1] == '[') return j - 1;
+    }
+    return decl_begin;
+}
+
+// Applies both widen_declaration_begin_over_leading_{export,attribute}
+// repeatedly (in either order -- the grammar always writes `export`
+// before an attribute-seq, but looping until neither helper can widen
+// any further is simpler than hard-coding that assumption) until
+// decl_begin no longer moves.
+[[nodiscard]] std::size_t widen_declaration_begin_over_leading_modifiers(std::string_view source, std::size_t decl_begin) {
+    for (;;) {
+        std::size_t widened = widen_declaration_begin_over_leading_export(source, decl_begin);
+        widened = widen_declaration_begin_over_leading_attribute(source, widened);
+        if (widened == decl_begin) return decl_begin;
+        decl_begin = widened;
+    }
+}
+
 [[nodiscard]] std::optional<std::size_t> find_constructor_member_initializer_colon(std::string_view source,
                                                                                std::size_t signature_begin,
                                                                                std::size_t body_begin) {
@@ -1919,7 +2052,57 @@ std::string strip_concrete_function_bodies(const Program& program, const std::st
         }
         std::size_t end = find_matching_brace(source, begin);
         ranges.push_back(BodyRange{begin, end + 1, ";"});
+        // Once this definition's own body is stripped down to a bare
+        // `;` above, any standalone forward declaration(s) that were
+        // reconciled against it (see Function::superseded_forward_
+        // declaration_locs's own comment) become an exact, redundant
+        // second (or third, ...) copy of the very same now-bodyless
+        // declaration -- drop each one's own source text entirely
+        // rather than leave it for a later `import` to reject as a
+        // repeated identical declaration.
+        for (const SourceLocation& superseded_loc : fn.superseded_forward_declaration_locs) {
+            if (!superseded_loc.has_source_path() ||
+                absolute_source_path(superseded_loc.source_path_text()) != file_path) {
+                continue;
+            }
+            std::size_t decl_begin = offset_for_loc(source, superseded_loc);
+            if (decl_begin >= source.size()) continue;
+            decl_begin = widen_declaration_begin_over_leading_modifiers(source, decl_begin);
+            std::size_t decl_end = find_declaration_semicolon(source, decl_begin);
+            ranges.push_back(BodyRange{decl_begin, decl_end + 1, ""});
+        }
     }
+    // A local class/struct defined inside a function body (e.g.
+    // layout_of_type's own LayoutComputer) registers its member functions
+    // in program.functions exactly like any other function, each with its
+    // own fn.body pointing *inside* the enclosing function's body -- so
+    // the loop above pushes one range for the enclosing function's entire
+    // body and additional, strictly nested ranges for each of the local
+    // class's own members. Applying both independently corrupts the
+    // output: whichever nested range is replaced first shrinks `source`,
+    // which silently invalidates the enclosing range's own `end` offset
+    // (computed against the original, unshrunk text), so replacing it
+    // afterwards consumes extra, unrelated trailing source -- observed
+    // firsthand as a truncated interface missing everything after the
+    // outer function (up to and including the module's own closing
+    // namespace brace). Discard any range fully contained within another
+    // (keeping only maximal/outermost ranges) before sorting/applying --
+    // stripping the outer function's body already removes its nested
+    // classes' member bodies too, so the nested ranges are redundant, not
+    // merely undesirable.
+    std::vector<BodyRange> maximal_ranges;
+    for (const BodyRange& candidate : ranges) {
+        bool contained = false;
+        for (const BodyRange& other : ranges) {
+            if (other.begin <= candidate.begin && candidate.end <= other.end &&
+                (other.begin != candidate.begin || other.end != candidate.end)) {
+                contained = true;
+                break;
+            }
+        }
+        if (!contained) maximal_ranges.push_back(candidate);
+    }
+    ranges = std::move(maximal_ranges);
     std::sort(ranges.begin(), ranges.end(), [](const BodyRange& a, const BodyRange& b) {
         if (a.begin != b.begin) return a.begin > b.begin;
         if (a.end != b.end) return a.end > b.end;
@@ -1993,7 +2176,7 @@ public:
         // naming, archive lookup) where deduplicating equivalent paths
         // genuinely matters.
         auto imported_result = parse(
-            loaded.interface_source, [this](const std::string& name) -> const Program& { return resolve(name); },
+            loaded.interface_source, [this](const std::string& name) -> const Program* { return &resolve(name); },
             [this](const std::string& key) -> Program { return resolve_partition(key); }, path_it->second);
         if (!imported_result.has_value()) throw std::move(imported_result).error();
         Program imported = std::move(imported_result.value());
@@ -2062,7 +2245,7 @@ public:
         // absolute form internal bookkeeping (e.g. resolved_paths_) can
         // rely on.
         auto partition_result = parse(
-            loaded.interface_source, [this](const std::string& name) -> const Program& { return resolve(name); },
+            loaded.interface_source, [this](const std::string& name) -> const Program* { return &resolve(name); },
             [this](const std::string& nested_key) -> Program { return resolve_partition(nested_key); },
             path_it->second);
         if (!partition_result.has_value()) throw std::move(partition_result).error();
@@ -2382,6 +2565,16 @@ std::string hoist_non_partition_imports(std::string source) {
     std::vector<std::string> imports;
     std::unordered_set<std::string> seen_imports;
     std::vector<std::string> body_lines;
+    // ch11 §11.2: a global module fragment -- a leading bare `module;`
+    // line, plus anything between it and the module declaration itself
+    // (e.g. an ordinary comment, or, for a not-yet-self-hosted file, real
+    // preprocessor directives) -- must stay ahead of `export module
+    // name;`, never reordered alongside imports/body below it. Collected
+    // separately from body_lines (rather than relying on is_module_decl,
+    // which never matches a bare `module;`: it only recognizes
+    // "module "/"export module " with a trailing space before a real
+    // name) so it can be re-emitted first, before module_line itself.
+    std::vector<std::string> prologue_lines;
     std::string module_line;
     bool module_line_set = false;
 
@@ -2398,6 +2591,8 @@ std::string hoist_non_partition_imports(std::string source) {
         if (is_module_decl && !module_line_set) {
             module_line = line_text;
             module_line_set = true;
+        } else if (!module_line_set) {
+            prologue_lines.push_back(line_text);
         } else if (is_non_partition_import_line(trimmed)) {
             if (seen_imports.insert(trimmed).second) imports.push_back(line_text);
         } else {
@@ -2408,6 +2603,7 @@ std::string hoist_non_partition_imports(std::string source) {
     }
 
     std::ostringstream out;
+    for (const std::string& prologue_line : prologue_lines) out << prologue_line << '\n';
     if (module_line_set) out << module_line << '\n';
     if (!imports.empty()) {
         out << '\n';
@@ -2445,17 +2641,29 @@ llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
 // file it came from.
 void emit_object_file_for_program(Program& program, const std::string& object_path, bool emit_debug_info = false,
                                   int opt_level = 2) {
+    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
+        std::cerr << "[SCPP_DEBUG_FN] entering emit_object_file_for_program, functions.size()=" << program.functions.size() << std::endl;
+    }
     reject_not_yet_lowerable_constexpr_surface(program);
+    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
+        std::cerr << "[SCPP_DEBUG_FN] reject_not_yet_lowerable_constexpr_surface done" << std::endl;
+    }
     // ch05 §5.11: must run before check_moves -- see Monomorphizer's own
     // comment in movecheck.cppm for why call-site monomorphization has
     // to happen first (movecheck's ordinary exact-type-match call-
     // argument checking can only work once every call site targets an
     // already-concrete function).
     monomorphize_generics(program);
+    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
+        std::cerr << "[SCPP_DEBUG_FN] monomorphize_generics done" << std::endl;
+    }
     try {
         fold_immediate_calls(program);
     } catch (const ConstexprError& error) {
         throw DriverError(error.what());
+    }
+    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
+        std::cerr << "[SCPP_DEBUG_FN] fold_immediate_calls done" << std::endl;
     }
     try {
         check_moves(program);
@@ -2584,7 +2792,7 @@ void emit_object_file(std::string_view source, const std::string& object_path,
                        int opt_level = 2) {
     ModuleCache cache(import_paths, import_search_dirs);
     auto program_result = parse(
-        source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); },
+        source, [&cache](const std::string& name) -> const Program* { return &cache.resolve(name); },
         [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); }, source_path);
     if (!program_result.has_value()) throw std::move(program_result).error();
     Program program = std::move(program_result.value());
@@ -2605,11 +2813,14 @@ void emit_module_artifacts(std::string_view source, const std::string& interface
     }
     ModuleCache cache(std::move(effective_import_paths), import_search_dirs);
     auto program_result = parse(
-        source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); },
+        source, [&cache](const std::string& name) -> const Program* { return &cache.resolve(name); },
         [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); }, source_path);
     if (!program_result.has_value()) throw std::move(program_result).error();
     Program program = std::move(program_result.value());
     program.source_path = source_path.empty() ? std::string() : absolute_source_path(source_path);
+    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
+        std::cerr << "[SCPP_DEBUG_FN] emit_module_artifacts: parse() done, functions.size()=" << program.functions.size() << std::endl;
+    }
     reject_not_yet_lowerable_constexpr_surface(program);
     if (!program.is_module_interface) {
         throw DriverError("module artifacts can only be emitted from an interface unit, not '" +
@@ -2617,7 +2828,13 @@ void emit_module_artifacts(std::string_view source, const std::string& interface
     }
     std::string merged_interface_source =
         build_merged_interface_source(program, cache, absolute_source_path(source_path), /*keep_concrete_bodies=*/false);
+    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
+        std::cerr << "[SCPP_DEBUG_FN] emit_module_artifacts: build_merged_interface_source done" << std::endl;
+    }
     write_scppm_file(program, merged_interface_source, interface_path);
+    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
+        std::cerr << "[SCPP_DEBUG_FN] emit_module_artifacts: write_scppm_file done" << std::endl;
+    }
     emit_module_archive_for_program(program, archive_path, opt_level);
 }
 
@@ -2657,8 +2874,12 @@ void link_executable(const std::vector<std::string>& link_inputs, const std::str
     // needs libstdc++'s runtime linked in too; `cc` alone (plain C mode)
     // doesn't pull that in automatically the way `c++`/`clang++` would.
     // Only added when there's an actual C++ wrapper to support, so a plain
-    // scpp-only build's link command is unaffected.
-    if (!link_inputs.empty()) command += " -lstdc++";
+    // scpp-only build's link command is unaffected. libstdc++'s static
+    // floating-point <charconv> support (std::from_chars/to_chars for
+    // double/long double) calls fesetround/fegetround, which live in
+    // libm -- `c++`/`clang++` pull that in implicitly, but plain `cc`
+    // does not, so it must be requested explicitly for a static link.
+    if (!link_inputs.empty()) command += " -lstdc++ -lm";
     command += " -o \"" + executable_path + "\"";
     int result = std::system(command.c_str());
     if (result != 0) {
@@ -2684,7 +2905,7 @@ void compile_to_executable(std::string_view source, const std::string& executabl
                             int opt_level = 2) {
     ModuleCache cache(import_paths, import_search_dirs);
     auto program_result = parse(
-        source, [&cache](const std::string& name) -> const Program& { return cache.resolve(name); },
+        source, [&cache](const std::string& name) -> const Program* { return &cache.resolve(name); },
         [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); }, source_path);
     if (!program_result.has_value()) throw std::move(program_result).error();
     Program program = std::move(program_result.value());

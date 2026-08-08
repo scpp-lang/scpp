@@ -19,6 +19,7 @@ namespace scpp {
 [[nodiscard]] bool is_synthesized_for_range_storage(std::string_view name);
 [[nodiscard]] bool is_reborrowable_local_type(const Type& type);
 [[nodiscard]] bool local_is_suspended_for_reborrow(std::string_view name, const DataflowState& state);
+[[nodiscard]] bool local_has_mutable_reborrow_suspended(std::string_view name, const DataflowState& state);
 [[nodiscard]] bool is_explicit_star_this(const Expr& expr);
 [[nodiscard]] Type by_reference_capture_type(std::string_view local_name, const Type& local_type, const Body& body);
 
@@ -78,9 +79,27 @@ namespace {
 }
 [[nodiscard]] bool is_synthesized_for_range_storage(std::string_view name) { return name.rfind("$for_range_", 0) == 0; }
 [[nodiscard]] bool is_reborrowable_local_type(const Type& type) { return is_reference(type) || is_span(type); }
+// "Is *any* reborrow (shared or mutable) currently outstanding from
+// `name`?" -- used where *every* kind of outstanding reborrow must
+// block (writing directly through the lender while any reference
+// derived from it is still alive would be unsound, regardless of
+// whether that reference is shared or mutable). Forming a *new shared*
+// reborrow is less strict than this -- see local_has_mutable_reborrow_
+// suspended below, which only the mutable case actually needs.
 [[nodiscard]] bool local_is_suspended_for_reborrow(std::string_view name, const DataflowState& state) {
     auto it = state.suspended_reborrows.find(std::string(name));
-    return it != state.suspended_reborrows.end() && it->second > 0;
+    return it != state.suspended_reborrows.end() &&
+           (it->second.shared_count > 0 || it->second.mutable_suspended);
+}
+// "Is a *mutable* reborrow currently outstanding from `name`?" -- the
+// narrower check a *new shared* reborrow attempt needs: any number of
+// simultaneous shared reborrows of the same lender coexist safely (see
+// ReborrowSuspension's own comment), so only an existing *mutable* one
+// (which by construction excludes every other reborrow, shared or
+// mutable, while it's alive) can conflict with forming another.
+[[nodiscard]] bool local_has_mutable_reborrow_suspended(std::string_view name, const DataflowState& state) {
+    auto it = state.suspended_reborrows.find(std::string(name));
+    return it != state.suspended_reborrows.end() && it->second.mutable_suspended;
 }
 [[nodiscard]] bool is_explicit_star_this(const Expr& expr) {
     return expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Deref && expr.lhs != nullptr &&

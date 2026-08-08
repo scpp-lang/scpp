@@ -530,6 +530,9 @@ void print_expr(const scpp::Expr& expr, int depth) {
                 print_expr(*expr.lhs, depth + 1);
             }
             break;
+        case scpp::ExprKind::ValueInit:
+            std::cout << "ValueInit " << type_to_string(expr.type) << "\n";
+            break;
         case scpp::ExprKind::New:
             std::cout << "New " << type_to_string(expr.type) << "\n";
             if (expr.lhs) {

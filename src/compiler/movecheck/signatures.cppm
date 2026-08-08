@@ -316,6 +316,16 @@ void validate_constructor_member_initialization(const Function& ctor, const Clas
         is_defaulted_special_member_equivalent_to_implicit_omission(ctor)) {
         return;
     }
+    // A bodyless constructor is a stripped interface declaration (driver.cppm's
+    // strip_concrete_function_bodies deliberately erases a concrete constructor's
+    // member-initializer-list along with its body when reconstructing another
+    // module's re-importable interface text -- see its own comment), re-parsed
+    // here as a downstream dependency; its member coverage was already fully
+    // validated when its own defining module was compiled from the real,
+    // unstripped source, so there is nothing left here to (mis)diagnose as
+    // "uninitialized" from a declaration that never had an init-list to begin
+    // with.
+    if (!ctor.body) return;
     if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return;
     std::unordered_set<std::string> direct_field_names;
     for (const ClassField& field : def.fields) direct_field_names.insert(field.name);

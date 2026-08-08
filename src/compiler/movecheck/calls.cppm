@@ -22,6 +22,55 @@ namespace scpp {
                                expr.explicit_global_qualification);
 }
 
+// Mirrors find_visible_global's identical progressive-namespace-prefix
+// search (ch11 §11.x), but for a bare (no-receiver) constructor call's
+// own class/struct name -- needed because, unlike a `Type::name` (always
+// stamped fully-qualified by the parser's own resolve_visible_type_name,
+// e.g. ch05's every variable declaration/parameter/return type), a Call
+// expression's own `.name` is *never* namespace-qualified by the parser
+// (see parse_postfix's plain `node->name = expr->name;`, copied straight
+// from the spelled identifier token) -- only a `ClassName::member(...)`-
+// shaped static-member call gets any owner-name resolution at all. A
+// bare `Widget(1, 2)` called from *within* `namespace scpp { ... }`
+// therefore carries `expr.name == "Widget"`, never "scpp::Widget", even
+// though every ClassDef/StructDef's own `.name` *is* stored fully-
+// qualified (e.g. "scpp::Widget") -- so a naive `def.name == expr.name`
+// comparison (as infer_expr_type's bare-call fallback used to do) can
+// never match a single namespace-scoped class, the overwhelmingly
+// common case in practice. Exercised for the first time by self-hosting
+// parser.cppm's std::expected/std::unexpected-heavy style, e.g.
+// `return std::unexpected(ParseError(...));`: ParseError's own
+// constructor call is the argument being type-inferred here, and
+// ParseError is declared inside `namespace scpp { ... }` just like the
+// function calling it.
+[[nodiscard]] std::optional<std::string> resolve_visible_class_or_struct_name(
+    const Program& program, const std::vector<std::string>& namespace_path, const std::string& name,
+    bool explicit_global_qualification) {
+    auto matches_name = [&](std::string_view candidate) {
+        for (const ClassDef& def : program.classes) {
+            if (std::string_view{def.name} == candidate) return true;
+        }
+        for (const StructDef& def : program.structs) {
+            if (std::string_view{def.name} == candidate) return true;
+        }
+        return false;
+    };
+    if (explicit_global_qualification) {
+        return matches_name(name) ? std::optional<std::string>(name) : std::nullopt;
+    }
+    for (std::size_t depth = namespace_path.size(); depth > 0; depth--) {
+        std::string candidate{};
+        for (std::size_t i = 0; i < depth; i++) {
+            if (candidate.size() != 0) candidate += "::";
+            candidate += namespace_path[i];
+        }
+        candidate += "::";
+        candidate += name;
+        if (matches_name(candidate)) return candidate;
+    }
+    return matches_name(name) ? std::optional<std::string>(name) : std::nullopt;
+}
+
 struct CalleeSignature {
     std::string key;
     std::size_t param_offset = 0;
@@ -59,6 +108,27 @@ void rewrite_type_alias_constructor_call(Expr& expr, const Body& body) {
 
 [[nodiscard]] bool is_nullptr_literal(const Expr& expr) {
     return expr.kind == ExprKind::Identifier && expr.name == "nullptr" && !expr.explicit_global_qualification;
+}
+
+// `std::nullopt` -- parsed as a plain (non globally-qualified)
+// Identifier (there is no dedicated ExprKind for it, unlike
+// std::move/scpp::is_thread_movable; see parse_primary's fallback
+// qualified-name path), exactly mirroring is_nullptr_literal just above
+// for the pointer-world equivalent, `nullptr`.
+[[nodiscard]] bool is_nullopt_literal(const Expr& expr) {
+    return expr.kind == ExprKind::Identifier && (expr.name == "std::nullopt" || expr.name == "nullopt") &&
+           !expr.explicit_global_qualification;
+}
+
+// An optional-type parameter's stored name is "std::optional"/"optional"
+// pre-monomorphization (template_args populated separately), but
+// post-monomorphization it may instead already be flattened to
+// "std::optional.<Element>" with no separate template_args -- mirrors
+// is_vector_like_named_type's identical dual-form handling just below.
+[[nodiscard]] bool is_optional_named_type(const Type& type) {
+    return type.kind == TypeKind::Named &&
+           (type.name == "std::optional" || type.name == "optional" || type.name.starts_with("std::optional.") ||
+            type.name.starts_with("optional."));
 }
 
 [[nodiscard]] FunctionSignature function_pointer_signature(const Type& type);
@@ -279,9 +349,31 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
             }
         }
     }
-    if (!call_expr.lhs && !call_expr.explicit_global_qualification && body.local_types.contains(call_expr.name) &&
-        is_function_pointer(body.local_types.at(call_expr.name))) {
-        return CalleeSignature{"", 0, function_pointer_signature(body.local_types.at(call_expr.name))};
+    if (!call_expr.lhs && !call_expr.explicit_global_qualification && body.local_types.contains(call_expr.name)) {
+        const Type& local_type = body.local_types.at(call_expr.name);
+        const Type& callee_type =
+            local_type.kind == TypeKind::Reference && local_type.pointee != nullptr ? *local_type.pointee : local_type;
+        if (is_function_pointer(callee_type)) {
+            return CalleeSignature{"", 0, function_pointer_signature(callee_type)};
+        }
+        // A local variable holding a callable object -- in practice
+        // always a resolved lambda closure (ExprKind::Lambda's own
+        // infer_expr_type case, above, returns exactly this shape: a
+        // TypeKind::Named type whose name is the synthesized closure
+        // class) -- is called the same way a receiver's own method call
+        // would be: forward to <ClassName>_call with an implicit `this`
+        // (param_offset 1), mirroring resolve_lambda's own identical
+        // name-mangling convention for the synthesized call method
+        // (monomorphize.cppm: `call_method.name = class_name +
+        // "_call";`). In practice monomorphize.cppm's own bare-call-
+        // redirect already rewrites a resolved lambda variable's call
+        // to this shape (`f(args)` -> `f.call(args)`) before this point,
+        // so this is reached only as a defensive fallback for any other
+        // caller of resolve_callee_signature that hasn't gone through
+        // that rewrite.
+        if (callee_type.kind == TypeKind::Named && signatures.contains(callee_type.name + "_call")) {
+            return CalleeSignature{callee_type.name + "_call", 1, std::nullopt};
+        }
     }
     if (call_expr.lhs) {
         std::string class_name;
@@ -367,6 +459,21 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 [[nodiscard]] bool is_zero_arg_optional_constructor_call(const Expr& expr) {
     return expr.kind == ExprKind::Call && expr.lhs == nullptr && expr.args.empty() &&
            (expr.name == "std::optional" || expr.name == "optional");
+}
+
+// A defaulted-away vector-typed parameter's own `= {}` default
+// expression is synthesized (by the same default-argument machinery
+// check_call_arguments' caller uses) as an explicit generic-constructor
+// call whose own `.name` is the fully bracketed instantiation (e.g.
+// "std::vector<scpp::AlignmentSpecifier>()"), unlike an ordinary
+// explicit `std::optional<T>(...)` call's bare, bracket-free name (see
+// is_optional_constructor_call just above -- that one's explicit
+// template argument travels via a separate field, not baked into
+// `.name`) -- so both forms are accepted here.
+[[nodiscard]] bool is_zero_arg_vector_constructor_call(const Expr& expr) {
+    return expr.kind == ExprKind::Call && expr.lhs == nullptr && expr.args.empty() &&
+           (expr.name == "std::vector" || expr.name == "vector" || expr.name.starts_with("std::vector<") ||
+            expr.name.starts_with("vector<"));
 }
 
 [[nodiscard]] bool is_named_class_type(const Type& type, const Body& body) {
@@ -1086,6 +1193,38 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
             return false;
     }
 }
+// A call through a function-pointer-typed field -- `receiver.field_
+// (args)`/`this->field_(args)`, parsed identically to an ordinary named-
+// method call (parse_member_or_method_call fuses the member access and
+// the call into one node: expr.name holds the field's name, expr.lhs the
+// receiver) -- e.g. std::function<R(Args...)>'s own `call()`: `return
+// this->invoke_(this->object_, args...);`. resolve_callee_signature
+// already recognizes this exact shape for argument validation, but only
+// when given a precomputed ClassFieldTypes cache that most of this
+// file's callers (infer_expr_type/produces_rvalue_of_type below) don't
+// have access to; look the field up directly off the receiver's own
+// ClassDef instead, mirroring the ExprKind::Member case's identical
+// find_class_def-based field lookup (this file, further below). Shared
+// by both of this file's callers so they agree on exactly which call
+// shapes qualify, rather than maintaining two independent copies of the
+// same lookup.
+[[nodiscard]] std::optional<Type> function_pointer_field_call_return_type(const Expr& expr, const Body& body) {
+    if (expr.lhs == nullptr || expr.name.empty() || expr.lhs->kind != ExprKind::Identifier || body.program == nullptr) {
+        return std::nullopt;
+    }
+    auto base_it = body.local_types.find(expr.lhs->name);
+    if (base_it == body.local_types.end()) return std::nullopt;
+    std::string class_name = named_type_name(base_it->second);
+    if (class_name.empty()) return std::nullopt;
+    const ClassDef* def = find_class_def(*body.program, class_name);
+    if (def == nullptr) return std::nullopt;
+    for (const ClassField& field : def->fields) {
+        if (field.name == expr.name && is_function_pointer(field.type)) {
+            return function_pointer_signature(field.type).return_type;
+        }
+    }
+    return std::nullopt;
+}
 // ch03/ch05 §5.11: the expressions allowed to bind to a `T&&` (rvalue-
 // reference/move) parameter, checked against a specific `expected_type`.
 // Reused, via the same Type::is_rvalue_ref flag, for a `Concept auto&&`
@@ -1106,6 +1245,7 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
 // borrowable place to speak of).
 [[nodiscard]] bool produces_rvalue_of_type(const Expr& expr, const Type& expected_type, const Body& body,
                                             const Signatures& signatures) {
+    bool call_receiver_is_move = false;
     switch (expr.kind) {
         case ExprKind::Move:
         case ExprKind::New:
@@ -1122,36 +1262,150 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
             // parameter (ch05 §5.11), e.g. passing a closure directly to
             // a generic function.
             break;
+        case ExprKind::ValueInit:
+            // A bare `{}` always value-initializes a brand new,
+            // alias-free temporary -- but unlike every other case in
+            // this switch, it carries no fixed type of its own: it
+            // adapts to whatever `expected_type` the calling context
+            // demands (exactly the real-C++ meaning of value-
+            // initialization). monomorphize's walk_expr only ever
+            // stamps expr.type for the one narrow case it exists to
+            // serve (a `return {};` statement, from the enclosing
+            // function's own return type -- see its own
+            // ExprKind::ValueInit case); a `{}` reached here as a call
+            // argument -- including a defaulted-away parameter's own
+            // `= {}` default expression, cloned fresh per call site by
+            // check_call_arguments -- was never walked at all, so
+            // expr.type is left unset/stale. Falling through to the
+            // generic infer_expr_type/types_equal check below would
+            // then spuriously fail against the *correct* expected_type,
+            // so this returns true unconditionally instead: whatever
+            // type is being asked for is always exactly as fresh and
+            // legitimate as an explicit `Type{}` constructor call (the
+            // ExprKind::Call case just below, which this otherwise
+            // mirrors) -- dataflow.cppm's own ExprKind::ValueInit case
+            // separately rejects any type with no valid zero-argument
+            // construction path, so soundness doesn't depend on the
+            // type-match performed here.
+            return true;
+        case ExprKind::Unary:
+            // `&x` (address-of) always yields a brand new pointer prvalue,
+            // independent of whatever move/borrow state `x` itself has --
+            // exactly as fresh as a literal or std::make_unique<T>(...),
+            // regardless of whether `x` is a plain local, a field access
+            // (e.g. `&type.lifetime`), or any other place expression.
+            if (expr.unary_op != UnaryOp::AddressOf) return false;
+            break;
         case ExprKind::Call: {
             CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
             if (sig == nullptr) {
                 std::optional<Type> call_type = infer_expr_type(expr, body, signatures);
                 if (!expr.lhs && call_type.has_value() && types_equal(*call_type, expected_type)) break;
+                // `s.substr(...)` (a host-library std::string method with
+                // no scpp-side FunctionSignature, per infer_expr_type's
+                // own identical special case just above it) is a narrow,
+                // explicitly-named exception to the general "unresolvable
+                // method call" rejection just below: unlike an arbitrary
+                // receiver-having call whose value-vs-reference return
+                // category can't be verified without a signature, this
+                // one specific host method is known to always construct
+                // a brand new std::string by value, never alias an
+                // existing one.
+                if (expr.lhs != nullptr && expr.name == "substr" && call_type.has_value() &&
+                    types_equal(*call_type, expected_type)) {
+                    break;
+                }
+                // A call through a function-pointer-typed field (e.g.
+                // std::function<R(Args...)>::call()'s own `return this->
+                // invoke_(this->object_, args...);`) is, like `.substr()`
+                // just above, resolvable only via infer_expr_type's own
+                // function_pointer_field_call_return_type fallback (no
+                // FunctionSignature exists for it), but is unconditionally
+                // just as fresh as any other function call: invoking a
+                // stored callable always produces a brand new by-value
+                // result (or a fresh reference, licensed elsewhere), never
+                // an alias to storage this call's own receiver already
+                // owned -- there is no way for a *call* to hand back
+                // something it didn't just construct or that its own
+                // callee didn't already prove fresh.
+                if (call_type.has_value() && types_equal(*call_type, expected_type) &&
+                    function_pointer_field_call_return_type(expr, body).has_value()) {
+                    break;
+                }
+                // A bare, zero-arg `std::vector<T>()` generic-constructor
+                // call (also with no scpp-side FunctionSignature, since
+                // std::vector is host-library) is likewise known to
+                // always construct a brand new, empty vector by value --
+                // needed because a defaulted-away vector-typed
+                // parameter's own `= {}` default expression is
+                // synthesized as exactly this call shape (see is_zero_
+                // arg_vector_constructor_call's own doc comment) rather
+                // than as ExprKind::ValueInit. Unlike the two checks
+                // above, this returns true directly rather than
+                // breaking: infer_expr_type can never resolve a type for
+                // this call (std::vector has no scpp-side
+                // FunctionSignature), so falling through to the post-
+                // switch actual_type/types_equal check below would
+                // always fail regardless of this condition.
+                if (!expr.lhs && is_zero_arg_vector_constructor_call(expr) && is_vector_like_named_type(expected_type)) {
+                    return true;
+                }
                 return false;
             }
             // A reference-returning call yields a place/alias, not a
             // fresh value (see resolve_borrow_source_root's own Call
             // case) -- legitimate as a T&/const T& source elsewhere, but
-            // not here.
-            if (is_reference(sig->return_type)) return false;
+            // not here. Exception: a method called directly on a
+            // std::move(...) receiver (`std::move(x).value()`, the
+            // idiom for extracting a std::expected/std::optional's
+            // payload) -- the signature database models `.value()` with
+            // a single, receiver-value-category-agnostic T& return (it
+            // doesn't track a separate `&&`-qualified overload), but a
+            // call whose own receiver is itself freshly std::move'd is
+            // exactly as fresh as std::move(x) itself: the callee is
+            // handing off part of an object the caller has already
+            // abandoned, not aliasing something that outlives the call.
+            call_receiver_is_move = expr.lhs != nullptr && expr.lhs->kind == ExprKind::Move;
+            if (is_reference(sig->return_type) && !call_receiver_is_move) return false;
             break;
         }
+        case ExprKind::Identifier:
+            // `std::nullopt` against a std::optional<T> target is
+            // exactly as fresh as a literal -- an alias-free constant
+            // that never references any existing storage -- the mirror
+            // image of is_nullptr_literal's identical bare-`nullptr`
+            // exception for pointer targets (see argument_matches_
+            // parameter's own use of that). Every other Identifier is a
+            // place expression (some existing named variable), never a
+            // fresh value, so it's rejected immediately just like the
+            // default case below.
+            return is_nullopt_literal(expr) && is_optional_named_type(expected_type);
         default:
             return false;
     }
     std::optional<Type> actual_type = infer_expr_type(expr, body, signatures);
     if (!actual_type.has_value()) return false;
     if (types_equal(*actual_type, expected_type)) return true;
+    // A resolved method call's return type is used as-is (not unwrapped)
+    // by infer_expr_type's own Call case above -- so a reference return
+    // just licensed as fresh by the switch's own Call case above (a
+    // std::move(...)-receiver method call) still shows up here as a
+    // reference type and needs the exact same pointee-unwrapping
+    // std::move itself gets just below, not just an outright
+    // reference-vs-value mismatch.
+    bool needs_pointee_unwrap = expr.kind == ExprKind::Move || call_receiver_is_move;
     if (expected_type.is_const_qualified) {
         Type unqualified_expected = expected_type;
         unqualified_expected.is_const_qualified = false;
         if (types_equal(*actual_type, unqualified_expected)) return true;
-        if (expr.kind == ExprKind::Move && actual_type->kind == TypeKind::Reference && actual_type->pointee != nullptr) {
+        if (needs_pointee_unwrap && actual_type->kind == TypeKind::Reference &&
+            actual_type->pointee != nullptr) {
             return types_equal(*actual_type->pointee, unqualified_expected);
         }
     }
-    if (expr.kind == ExprKind::Move && actual_type->kind == TypeKind::Reference && actual_type->pointee != nullptr) {
+    if (needs_pointee_unwrap && actual_type->kind == TypeKind::Reference &&
+        actual_type->pointee != nullptr) {
         return types_equal(*actual_type->pointee, expected_type);
     }
     return false;
@@ -1182,6 +1436,8 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
         case ExprKind::Sizeof:
         case ExprKind::Alignof:
             return named_type("size_t");
+        case ExprKind::ValueInit:
+            return expr.type;
         case ExprKind::StringLiteral: {
             Type result;
             result.kind = TypeKind::Pointer;
@@ -1220,15 +1476,34 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
         case ExprKind::Move: {
             // std::move doesn't change the static type -- still whatever
             // std::unique_ptr<T> the moved-from local was declared as.
-            if (expr.lhs->kind != ExprKind::Identifier) return std::nullopt;
-            auto it = body.local_types.find(expr.lhs->name);
-            if (it == body.local_types.end()) {
-                if (const GlobalVar* global = find_visible_global_for_expr(*expr.lhs, body);
-                    global != nullptr && global->decl != nullptr) {
-                    return global->decl->type;
+            if (expr.lhs->kind == ExprKind::Identifier) {
+                auto it = body.local_types.find(expr.lhs->name);
+                if (it == body.local_types.end()) {
+                    if (const GlobalVar* global = find_visible_global_for_expr(*expr.lhs, body);
+                        global != nullptr && global->decl != nullptr) {
+                        return global->decl->type;
+                    }
                 }
+                return it == body.local_types.end() ? std::nullopt : std::optional<Type>(it->second);
             }
-            return it == body.local_types.end() ? std::nullopt : std::optional<Type>(it->second);
+            // std::move(v.back())/std::move(v.front()) (relocating a
+            // container element elsewhere, e.g. `std::string x =
+            // std::move(segments.back());`) -- the moved-from expression
+            // isn't a bare identifier here, but this Call case's own
+            // .back()/.front() special-case (just below) already resolves
+            // the exact element type, unwrapped from any reference, which
+            // is exactly as valid a moved-from type as an identifier's.
+            if (expr.lhs->kind == ExprKind::Call) return infer_expr_type(*expr.lhs, body, signatures);
+            // std::move(program.functions[i]) (relocating a container
+            // element accessed by index rather than through a named
+            // reference first, e.g. reconcile_ordinary_forward_
+            // declarations' early-return path) -- Subscript's own
+            // handling (just below in this same function) already
+            // resolves the exact element type via infer_vector_element_
+            // type, exactly as valid a moved-from type as an identifier's
+            // or the .back()/.front() Call case just above.
+            if (expr.lhs->kind == ExprKind::Subscript) return infer_expr_type(*expr.lhs, body, signatures);
+            return std::nullopt;
         }
 
         case ExprKind::New: {
@@ -1385,6 +1660,74 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
             return infer_expr_type(*expr.lhs, body, signatures);
 
         case ExprKind::Call: {
+            // `v.back()`/`v.front()` on a vector-like receiver (ch04's
+            // std::vector, a host-library type with no scpp-side
+            // FunctionSignature entry to find via resolve_overload below,
+            // unlike a user-defined method) -- special-cased the same way
+            // Subscript's own operator[] case is, just below, via the same
+            // infer_vector_element_type helper, so both accessors agree on
+            // the exact same inferred element type. Needed for e.g. a
+            // `cond ? v[i] : v.back();` ternary (ExprKind::Conditional,
+            // above) to type-check at all: without this, `.back()`'s arm
+            // infers to nullopt and the whole conditional does too, even
+            // though both arms in fact yield the identical element type.
+            if (expr.lhs != nullptr && expr.args.empty() && (expr.name == "back" || expr.name == "front")) {
+                std::optional<Type> receiver_type = infer_expr_type(*expr.lhs, body, signatures);
+                if (receiver_type.has_value()) {
+                    const Type& effective = receiver_type->kind == TypeKind::Reference && receiver_type->pointee != nullptr
+                                                ? *receiver_type->pointee
+                                                : *receiver_type;
+                    if (std::optional<Type> element = infer_vector_element_type(effective, body); element.has_value()) {
+                        return *element;
+                    }
+                }
+            }
+            // `s.substr(...)` on a std::string receiver (likewise a
+            // host-library type with no scpp-side FunctionSignature
+            // entry to find via resolve_overload below) always yields a
+            // brand new std::string by value -- unlike .back()/.front()
+            // just above, which alias an existing element rather than
+            // freshly constructing one.
+            if (expr.lhs != nullptr && expr.name == "substr") {
+                std::optional<Type> receiver_type = infer_expr_type(*expr.lhs, body, signatures);
+                if (receiver_type.has_value()) {
+                    const Type& effective = receiver_type->kind == TypeKind::Reference && receiver_type->pointee != nullptr
+                                                ? *receiver_type->pointee
+                                                : *receiver_type;
+                    if (effective.kind == TypeKind::Named && (effective.name == "std::string" || effective.name == "string")) {
+                        return named_type("std::string");
+                    }
+                }
+            }
+            // `c.empty() ` on a host-library container receiver (std::
+            // string, std::vector, or an unordered_map/unordered_set --
+            // again, no scpp-side FunctionSignature entry to find via
+            // resolve_overload below) always yields a plain `bool`.
+            // Unlike .back()/.front()/.substr() above, this one needs no
+            // element-type lookup, just recognizing the receiver's own
+            // named type -- but it still needs its own case: without it,
+            // a `cond.empty() ? a : b` ternary's own condition (ch06)
+            // fails to resolve to 'bool' at all, even though a plain
+            // `if (!cond.empty())` never required this (ExprKind::
+            // Conditional, unlike TerminatorKind::Branch, strictly checks
+            // its condition's inferred type -- see dataflow.cppm).
+            if (expr.lhs != nullptr && expr.args.empty() && expr.name == "empty") {
+                std::optional<Type> receiver_type = infer_expr_type(*expr.lhs, body, signatures);
+                if (receiver_type.has_value()) {
+                    const Type& effective = receiver_type->kind == TypeKind::Reference && receiver_type->pointee != nullptr
+                                                ? *receiver_type->pointee
+                                                : *receiver_type;
+                    bool is_known_container =
+                        effective.kind == TypeKind::Named &&
+                        (effective.name == "std::string" || effective.name == "string" ||
+                         is_vector_like_named_type(effective) || effective.name == "std::unordered_map" ||
+                         effective.name == "unordered_map" || effective.name.starts_with("std::unordered_map.") ||
+                         effective.name.starts_with("unordered_map.") || effective.name == "std::unordered_set" ||
+                         effective.name == "unordered_set" || effective.name.starts_with("std::unordered_set.") ||
+                         effective.name.starts_with("unordered_set."));
+                    if (is_known_container) return named_type("bool");
+                }
+            }
             if (is_for_range_size_builtin(expr)) {
                 std::optional<Type> range_type = infer_expr_type(*expr.args[0], body, signatures);
                 if (!range_type.has_value()) return std::nullopt;
@@ -1392,6 +1735,7 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
                                             ? *range_type->pointee
                                             : *range_type;
                 if (unwrapped.kind == TypeKind::Array || unwrapped.kind == TypeKind::Span) return named_type("int");
+                if (is_vector_like_named_type(unwrapped)) return named_type("int");
                 return std::nullopt;
             }
             if (is_reference_wrapper_constructor_call(expr)) {
@@ -1424,17 +1768,40 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
             CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
             if (sig != nullptr) return sig->return_type;
+            // A call through a function-pointer-typed field --
+            // `receiver.field_(args)`/`this->field_(args)`, parsed
+            // identically to an ordinary named-method call
+            // (parse_member_or_method_call fuses the member access and
+            // the call into one node: expr.name holds the field's name,
+            // expr.lhs the receiver) -- e.g. std::function<R(Args...)>'s
+            // own `call()`: `return this->invoke_(this->object_,
+            // args...);`. resolve_callee_signature just above already
+            // recognizes this exact shape for argument validation, but
+            // only when given a precomputed ClassFieldTypes cache (see
+            // its own class_field_types-gated branches) that this call
+            // site has no access to, so `callee`/`sig` come back empty
+            // here and this call's own type would otherwise silently
+            // resolve to nullopt -- which is fatal for a reference-
+            // returning field (dataflow.cppm's return-type-compatibility
+            // check has nothing to compare fn.return_type against) even
+            // though a value-returning one tends to go unnoticed. See
+            // function_pointer_field_call_return_type's own doc comment
+            // (this file, above produces_rvalue_of_type) for why this is
+            // factored out into a shared helper rather than kept inline.
+            if (std::optional<Type> field_call_type = function_pointer_field_call_return_type(expr, body);
+                field_call_type.has_value()) {
+                return *field_call_type;
+            }
             if (is_zero_arg_optional_constructor_call(expr)) {
                 if (sig != nullptr && sig->return_type.is_reference_wrapper_lifetime_source) {
                     return sig->return_type;
                 }
             }
             if (expr.lhs == nullptr && body.program != nullptr) {
-                for (const ClassDef& def : body.program->classes) {
-                    if (def.name == expr.name) return named_type(expr.name);
-                }
-                for (const StructDef& def : body.program->structs) {
-                    if (def.name == expr.name) return named_type(expr.name);
+                if (std::optional<std::string> resolved = resolve_visible_class_or_struct_name(
+                        *body.program, body.function_namespace_path, expr.name, expr.explicit_global_qualification);
+                    resolved.has_value()) {
+                    return named_type(*resolved);
                 }
             }
             return std::nullopt;
@@ -1449,6 +1816,22 @@ void check_raw_pointer_assignment(const Type& target_type, const Expr& expr, con
             const Type& base_named =
                 base->kind == TypeKind::Reference && base->pointee != nullptr ? *base->pointee : *base;
             if (base_named.kind != TypeKind::Named || body.program == nullptr) return std::nullopt;
+            // `program.functions` (`Program`, ast.cppm's own compiler-
+            // internal AST root type, is never itself parsed as a scpp
+            // ClassDef/StructDef -- it's a host type merely referenced
+            // by parser.cppm's own self-hosting source, so find_class_def/
+            // find_struct_def below can never find a definition for it)
+            // -- needed so a move/copy out of a `program.functions[i]`
+            // element (e.g. `Function moved = std::move(program.functions[i]);`,
+            // or as a call argument to an overloaded function like
+            // push_back) can have its type verified at all, the same way
+            // .back()/.front()/.substr() are special-cased just below for
+            // the analogous host-library-receiver gap.
+            if (base_named.name == "Program" && expr.name == "functions") {
+                Type functions_type = named_type("std::vector");
+                functions_type.template_args.push_back(named_type("Function"));
+                return functions_type;
+            }
             if (const ClassDef* def = find_class_def(*body.program, base_named.name)) {
                 for (const ClassField& field : def->fields) {
                     if (field.name == expr.name) {

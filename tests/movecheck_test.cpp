@@ -49,7 +49,7 @@ public:
         const std::string* path = module_path(module_name);
         if (path == nullptr) throw std::runtime_error("unknown test module '" + module_name + "'");
         auto parsed_result = scpp::parse(
-            read_file(*path), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
+            read_file(*path), [this](const std::string& name) -> const scpp::Program* { return &resolve(name); },
             [this](const std::string& key) -> scpp::Program { return resolve_partition(key); });
         if (!parsed_result.has_value()) throw std::move(parsed_result).error();
         auto [inserted, _] = cache_.emplace(module_name, std::move(parsed_result.value()));
@@ -60,7 +60,7 @@ public:
         std::optional<std::string> path = infer_partition_path(key);
         if (!path.has_value()) throw std::runtime_error("unknown test partition '" + key + "'");
         auto parsed_result = scpp::parse(
-            read_file(*path), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
+            read_file(*path), [this](const std::string& name) -> const scpp::Program* { return &resolve(name); },
             [this](const std::string& nested_key) -> scpp::Program { return resolve_partition(nested_key); });
         if (!parsed_result.has_value()) throw std::move(parsed_result).error();
         return std::move(parsed_result.value());
@@ -93,7 +93,7 @@ private:
 scpp::Program parse_with_std_imports(std::string_view source) {
     TestModuleCache cache;
     auto result = scpp::parse(
-        source, [&cache](const std::string& name) -> const scpp::Program& { return cache.resolve(name); },
+        source, [&cache](const std::string& name) -> const scpp::Program* { return &cache.resolve(name); },
         [&cache](const std::string& key) -> scpp::Program { return cache.resolve_partition(key); });
     if (!result.has_value()) throw std::move(result).error();
     return std::move(result.value());

@@ -175,6 +175,10 @@ struct Body {
     std::string function_owning_module;
     std::string function_visibility_module;
     std::string function_member_owner_class;
+    // Mirrors Function::access_context_class -- see its own doc comment
+    // (ast.cppm) for why this is kept separate from
+    // function_member_owner_class.
+    std::string function_access_context_class;
     std::string function_source_path;
     std::vector<std::string> function_namespace_path;
 };
@@ -196,6 +200,7 @@ public:
         body_.function_owning_module = fn_.owning_module;
         body_.function_visibility_module = fn_.visibility_module.empty() ? fn_.owning_module : fn_.visibility_module;
         body_.function_member_owner_class = fn_.member_owner_class;
+        body_.function_access_context_class = fn_.access_context_class;
         body_.function_source_path = fn_.loc.source_path_text();
         body_.function_namespace_path = fn_.namespace_path;
         for (const Param& param : fn_.params) {

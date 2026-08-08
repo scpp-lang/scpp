@@ -183,7 +183,16 @@ void validate_reborrow_lender(const std::string& lender, bool child_is_mutable, 
                             "reference/view",
             state.current_loc);
     }
-    if (local_is_suspended_for_reborrow(lender, state)) {
+    // A new *mutable* reborrow needs exclusivity against every other
+    // reborrow, shared or mutable alike -- but a new *shared* reborrow
+    // only conflicts with an already-outstanding *mutable* one (any
+    // number of simultaneous shared reborrows of the same lender, e.g.
+    // `const T& a = this->peek();` alongside `const U& b =
+    // this->other_const_accessor();`, coexist safely; see
+    // ReborrowSuspension's own comment).
+    bool conflicts = child_is_mutable ? local_is_suspended_for_reborrow(lender, state)
+                                       : local_has_mutable_reborrow_suspended(lender, state);
+    if (conflicts) {
         throw DataflowError("cannot form another reborrow from '" + lender +
                                  "' while a nested reborrow derived from it is still live",
             state.current_loc);
@@ -212,16 +221,19 @@ void validate_reborrow_lender_write(const std::string& lender, const DataflowSta
 // immediately after its BindReference, before ScopeExit is even
 // reached). Whichever fires first does the actual work; the other is
 // then a harmless no-op, since both leave the exact same state.
-void release_reference_borrow(const std::string& name, DataflowState& state, const Body& body) {
+void release_reference_borrow(const std::string& name, DataflowState& state, [[maybe_unused]] const Body& body) {
     auto ref_it = state.ref_targets.find(name);
     if (ref_it == state.ref_targets.end()) return;
     RefTarget target = ref_it->second;
     if (target.is_reborrow()) {
         auto suspension_it = state.suspended_reborrows.find(target.lender);
         if (suspension_it != state.suspended_reborrows.end()) {
-            if (suspension_it->second > 1) {
-                suspension_it->second--;
-            } else {
+            if (target.is_mutable) {
+                suspension_it->second.mutable_suspended = false;
+            } else if (suspension_it->second.shared_count > 0) {
+                suspension_it->second.shared_count--;
+            }
+            if (suspension_it->second.shared_count == 0 && !suspension_it->second.mutable_suspended) {
                 state.suspended_reborrows.erase(suspension_it);
             }
         }
@@ -229,7 +241,7 @@ void release_reference_borrow(const std::string& name, DataflowState& state, con
         for (const std::string& root : target.roots) {
             auto borrow_it = state.borrows.find(root);
             if (borrow_it != state.borrows.end()) {
-                if (body.local_types.at(name).is_mutable_ref) {
+                if (target.is_mutable) {
                     borrow_it->second.mutable_borrow = false;
                 } else if (borrow_it->second.shared_count > 0) {
                     borrow_it->second.shared_count--;
@@ -306,6 +318,7 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
         case ExprKind::TypeTrait:
         case ExprKind::Sizeof:
         case ExprKind::Alignof:
+        case ExprKind::ValueInit:
             return;
         case ExprKind::New:
             if (expr->lhs) collect_reference_uses(expr->lhs.get(), body, out);

@@ -198,6 +198,7 @@ public:
             bool allow_generic_monomorphization = !program_.functions[i].is_generic_template;
             std::optional<Type> enclosing_this_type = this_type_of(program_.functions[i]);
             StmtPtr walk_body = deep_clone_stmt(*program_.functions[i].body);
+            current_walk_return_type_ = program_.functions[i].return_type;
             walk_stmt(*walk_body, body, enclosing_this_type, allow_generic_monomorphization);
             program_.functions[i].body = std::move(walk_body);
         }
@@ -205,6 +206,21 @@ public:
 
 private:
     Program& program_;
+    // ch05 §5.x: the return type of whichever function/method/lambda
+    // body is *currently* being walked by walk_stmt/walk_expr below --
+    // refreshed at each of this class's 3 independent "start walking a
+    // fresh function-like body" call sites (the main loop just above,
+    // walk_new_concrete_function, and resolve_lambda's own synthesized
+    // "call" method), each of which has a concrete, already-resolved
+    // Function::return_type directly in scope. The sole reader is
+    // walk_expr's own ExprKind::ValueInit case: a bare `return {};` (see
+    // ast.cppm's ExprKind::ValueInit) carries no type of its own from
+    // parsing (parser.cppm has no per-function "current return type"
+    // state to stamp one with at parse time -- see parse_return), so
+    // this is where it is filled in instead, once, before any later
+    // pass (constexpr folding, movecheck, codegen) ever needs to know
+    // what `expr.type` is for such a node.
+    Type current_walk_return_type_;
     std::unordered_map<std::string, const ConceptDef*> concepts_by_name_;
     std::unordered_map<std::string, std::vector<std::size_t>> generic_template_indices_;
     std::unordered_map<std::string, std::size_t> class_template_indices_by_owner_id_;
@@ -440,6 +456,7 @@ private:
         signatures_ = build_signatures(program_);
         Body body = build_mir(fn);
         body.program = &program_;
+        current_walk_return_type_ = fn.return_type;
         walk_stmt(*fn.body, body, this_type_of(fn), /*allow_generic_monomorphization=*/!fn.is_generic_template);
     }
 
@@ -1025,6 +1042,7 @@ private:
             clone.template_params = method_tmpl.template_params;
             clone.method_requires_concept = method_tmpl.method_requires_concept;
             clone.member_owner_class = cache_key;
+            clone.receiver_ref_qualifier = method_tmpl.receiver_ref_qualifier;
             clone.is_static = method_tmpl.is_static;
             clone.is_virtual = method_tmpl.is_virtual;
             clone.is_override = method_tmpl.is_override;
@@ -1104,10 +1122,7 @@ private:
                     substitute_non_type_param_in_stmt(*clone.body, template_params_copy[i].name, non_type_args[i]);
                 }
                 for (const auto& [class_pack_name, concrete_pack_types] : pack_replacements) {
-                    std::vector<std::string> concrete_names;
-                    concrete_names.reserve(concrete_pack_types.size());
-                    for (const Type& concrete_type : concrete_pack_types) concrete_names.push_back(concrete_type.name);
-                    expand_explicit_template_arg_packs_in_stmt(*clone.body, class_pack_name, concrete_names);
+                    expand_explicit_template_arg_packs_in_stmt(*clone.body, class_pack_name, concrete_pack_types);
                 }
                 for (const auto& [pack_param_name, concrete_names] : pack_param_names) {
                     expand_pack_expansions_in_stmt(*clone.body, pack_param_name, concrete_names);
@@ -1482,6 +1497,75 @@ private:
     // re-verified at every concrete instantiation by the ordinary
     // declare_struct check codegen already performs -- nothing here
     // would add anything, so structs are skipped entirely.
+    // check_generic_type_methods_once's own field/param/return/body type
+    // resolution needs to eagerly instantiate a nested generic-type
+    // reference (e.g. `OtherGeneric<T>`, T = this class's own witness-
+    // substituted parameter) exactly like an ordinary *concrete*
+    // instantiation does (get_or_create_clone/instantiate_generic_type's
+    // own struct/class field loops) -- otherwise a call through such a
+    // field/param would wrongly resolve against OtherGeneric's own
+    // literal, un-substituted template parameter name instead of the
+    // witness type actually bound here (the bug this helper was added
+    // for: a stored `std::unique_ptr<T>&&`-accepting shared_ptr
+    // constructor calling `.release()` on it). But unlike an ordinary
+    // concrete instantiation, the *witness* type stands in for "some
+    // arbitrary, not-yet-known T" -- so a nested reference to another
+    // template that only has specific specializations and no general
+    // primary form (e.g. `std::hash<T>`, forward-declared-only by
+    // design, mirroring real C++'s own std::hash: intentionally
+    // uninstantiable for an arbitrary T with no user-provided
+    // specialization) can *never* resolve for ANY witness type, even
+    // though a real, concrete instantiation with an actually-hashable
+    // key type resolves it just fine. The bare witness struct's own
+    // zero size can likewise turn an otherwise-innocuous `char
+    // storage_[sizeof(T)]` field (std::optional/std::expected's own
+    // in-place storage) into a rejected zero-length array once T is
+    // substituted with it, throwing a ConstexprError (constexpr.cppm)
+    // rather than a DataflowError -- a different exception type, but
+    // the exact same "this witness doesn't work for this particular
+    // nested shape" situation, so both (and, defensively, any other
+    // compiler-diagnostic exception -- every one of ParseError/
+    // DataflowError/CodegenError/ConstexprError/ManifestError/
+    // BuildError/DriverError derives from std::runtime_error, per a
+    // repo-wide grep) are caught here via that common base rather than
+    // naming each concrete type. Silently falling back to the pre-
+    // resolution (substituted-but-uninstantiated) type here --
+    // mirroring maybe_instantiate_generic_constructor_overloads' own
+    // identical "speculative, tolerate a thrown compiler error" idiom
+    // just below in this same file -- keeps this whole check
+    // optimistic, exactly like the bare-witness-struct's own "checked
+    // optimistically, as if freely copyable" design (bare_witness_struct_name's
+    // own comment): a witness-check failure here must never block a
+    // generic class from being *defined* just because one of its
+    // methods happens to reference another forward-declared-only
+    // template (or size an array off the witness' own, atypically
+    // zero, size), since the real, concrete instantiation path (which
+    // surfaces a genuine error for an actually-unhashable key type, or
+    // never hits a zero-sized concrete T to begin with) already covers
+    // those cases correctly on its own.
+    [[nodiscard]] Type resolve_generic_type_optimistic(Type type, SourceLocation loc) {
+        try {
+            // Deliberately NOT std::move(type) -- `type` must stay
+            // valid/unmodified for the catch-fallback below.
+            return resolve_generic_type(type, loc);
+        } catch (const std::runtime_error&) {
+            return type;
+        }
+    }
+
+    void resolve_generic_types_in_stmt_optimistic(Stmt& stmt) {
+        try {
+            resolve_generic_types_in_stmt(stmt);
+        } catch (const std::runtime_error&) {
+            // See resolve_generic_type_optimistic's own comment: leaves
+            // whatever prefix of `stmt` was already resolved before the
+            // failing reference in place (harmless -- is_synthetic_check_only,
+            // never reaches codegen) and simply stops short of resolving
+            // the rest, exactly as if this whole call had never been
+            // added.
+        }
+    }
+
     void check_generic_type_methods_once() {
         // Index-based, snapshotting the original class count up front --
         // same reasoning as resolve_generic_types: this loop's own body
@@ -1516,6 +1600,32 @@ private:
             std::vector<Function> methods = method_templates_of_owner(owner_id_copy);
             for (const Function& method_tmpl : methods) {
                 if (!method_tmpl.template_params.empty()) continue;
+                // ch05 §5.14: snapshotted *before* any of this method's own
+                // resolve_generic_type_optimistic/
+                // resolve_generic_types_in_stmt_optimistic calls below (the
+                // very next statement inside this loop that can push a new
+                // ClassDef is the field-type one a few lines down) so every
+                // class instantiated as a side effect of witness-checking
+                // this one method -- e.g. `instantiate_generic_type`
+                // creating a genuine `OtherGeneric<witness>` ClassDef the
+                // first time a field/param/return type referencing
+                // `OtherGeneric<T>` gets eagerly resolved here -- is
+                // captured, however many of the several call sites below
+                // end up triggering it. Such a class is never a real,
+                // caller-facing instantiation (no real caller ever asks
+                // for `OtherGeneric<__generic_bare_witness>` or
+                // `OtherGeneric<SomeConcept>`): it exists solely so this
+                // abstract witness-check can resolve a call through it, so
+                // it must be marked is_synthetic_check_only right below,
+                // exactly like check_class itself just past this point --
+                // otherwise resolve_class_array_bounds (constexpr.cppm)
+                // legitimately validates its fields as if it were real
+                // storage, and a `sizeof`-based field (e.g.
+                // std::optional/std::expected's own in-place storage
+                // array) spuriously rejects the witness type's atypical
+                // zero size, when a real, concrete instantiation would
+                // never see that failure to begin with.
+                std::size_t classes_before_method = program_.classes.size();
                 std::vector<std::pair<std::string, Type>> type_replacements;
                 type_replacements.reserve(template_params.size());
                 for (std::size_t param_index = 0; param_index < template_params.size(); ++param_index) {
@@ -1553,7 +1663,24 @@ private:
                     ClassField nf;
                     nf.name = f.name;
                     nf.access = f.access;
+                    // Witness substitution alone leaves a field type like
+                    // `OtherGeneric<T>` (T = this class's own template
+                    // parameter, now replaced by the witness) as a
+                    // still-unresolved generic-type reference: nothing
+                    // above ever runs the ordinary monomorphization
+                    // pipeline (instantiate_generic_type) against it, so
+                    // e.g. a later `field.someMethod()` call would
+                    // resolve `someMethod`'s return type against
+                    // OtherGeneric's own literal, un-substituted template
+                    // parameter name instead of the witness type actually
+                    // bound here -- resolve_generic_type (the same call
+                    // instantiate_generic_type's own struct/class field
+                    // loops make just below, and get_or_create_clone's
+                    // does for method params/return types) closes that
+                    // gap by eagerly instantiating it now, exactly like
+                    // any other concrete field type.
                     nf.type = substitute_type_params(f.type, type_replacements);
+                    nf.type = resolve_generic_type_optimistic(nf.type, method_tmpl.loc);
                     if (f.default_initializer) {
                         nf.default_initializer = f.default_initializer;
                         if (nf.default_initializer->expr) {
@@ -1578,11 +1705,32 @@ private:
                 check_fn.name = check_class_name + method_suffix_after_owner_prefix(method_tmpl, class_name_copy, owner_id_copy);
                 check_fn.loc = method_tmpl.loc;
                 check_fn.is_generic_template = true;
+                // is_operator_arrow_function/resolve_returned_lifetime_param_indices
+                // (signatures.cppm) key their "this"-derived-return
+                // special cases off `member_owner_class` being non-empty
+                // -- without it, a witness-checked operator-> (or any
+                // other method a caller ties to "this" via lifetime
+                // group name matching) spuriously reports "no parameter
+                // belongs to that group" even though the real,
+                // untransformed method is perfectly valid.
+                check_fn.member_owner_class = check_class_name;
                 check_fn.return_type = substitute_type_params(method_tmpl.return_type, type_replacements);
+                check_fn.return_type = resolve_generic_type_optimistic(check_fn.return_type, method_tmpl.loc);
+                // Preserves the original method template's own
+                // `[[scpp::lifetime(...)]]` group linkage (spec ch05
+                // §5.13) -- these are plain name tags relating a
+                // parameter's position to the return value, entirely
+                // orthogonal to whatever concrete/witness type K/V get
+                // substituted to, so they must carry over verbatim or
+                // this synthesized check copy spuriously looks like it
+                // returns an untracked raw pointer/reference with no
+                // eligible source parameter at all.
+                check_fn.return_lifetime = method_tmpl.return_lifetime;
                 check_fn.params.reserve(method_tmpl.params.size());
                 for (const Param& p : method_tmpl.params) {
                     Param np;
                     np.name = p.name;
+                    np.lifetime = p.lifetime;
                     if (p.name == "this") {
                         Type this_type;
                         this_type.kind = TypeKind::Reference;
@@ -1591,11 +1739,40 @@ private:
                         np.type = std::move(this_type);
                     } else {
                         np.type = substitute_type_params(p.type, type_replacements);
+                        np.type = resolve_generic_type_optimistic(np.type, method_tmpl.loc);
                     }
                     check_fn.params.push_back(std::move(np));
                 }
+                // Mirrors the identical member_initializers copy +
+                // witness-substitution done for every other synthesized
+                // method clone (get_or_create_clone,
+                // clone_variadic_class_methods, and the ordinary
+                // concrete-instantiation path just below in this same
+                // class) -- without it, a constructor's own
+                // member-initializer-list (e.g. `: value{v}`) is silently
+                // dropped from this synthetic check-only copy, so
+                // validate_constructor_member_initialization
+                // (signatures.cppm), which now also runs against
+                // check_fn (member_owner_class is set above), sees zero
+                // initializers for every field and spuriously reports
+                // *every* generic class constructor as leaving all of
+                // its members uninitialized.
+                check_fn.member_initializers = method_tmpl.member_initializers;
+                for (MemberInitializer& init : check_fn.member_initializers) {
+                    if (init.initializer.expr) {
+                        substitute_type_params_in_expr(*init.initializer.expr, type_replacements);
+                        resolve_generic_types_in_expr(*init.initializer.expr);
+                    }
+                    for (ExprPtr& arg : init.initializer.brace_args) {
+                        substitute_type_params_in_expr(*arg, type_replacements);
+                        resolve_generic_types_in_expr(*arg);
+                    }
+                }
                 check_fn.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
-                if (check_fn.body) substitute_type_params_in_stmt(*check_fn.body, type_replacements);
+                if (check_fn.body) {
+                    substitute_type_params_in_stmt(*check_fn.body, type_replacements);
+                    resolve_generic_types_in_stmt_optimistic(*check_fn.body);
+                }
                 // ch05 §5.11/§5.14: "calling any method on it or applying
                 // any operator to it is a compile error" -- for the
                 // *bare* (unconstrained) case specifically (never the
@@ -1626,6 +1803,15 @@ private:
                     generic_template_indices_[program_.functions.back().name].push_back(program_.functions.size() - 1);
                 }
                 walk_new_concrete_function(program_.functions.size() - 1);
+                // See classes_before_method's own comment above: every
+                // ClassDef pushed while witness-checking this one method
+                // (check_class itself, already marked above, plus any
+                // further instantiation resolve_generic_type_optimistic/
+                // resolve_generic_types_in_stmt_optimistic triggered as a
+                // side effect) is check-only, never real storage.
+                for (std::size_t k = classes_before_method; k < program_.classes.size(); ++k) {
+                    program_.classes[k].is_synthetic_check_only = true;
+                }
             }
         }
     }
@@ -1787,28 +1973,78 @@ private:
             if (belongs_to_unresolved_generic_type_template(program_.functions[i])) continue;
             // ch05 §5.11/§5.14: a full-header-form generic *function*'s
             // own template (e.g. `get`/`make`, Function::template_params
-            // non-empty) is never resolved here at all -- its own
-            // signature may contain a base-class-deduction pattern
-            // (`TupleImpl<I, Head, Tail...>& t`) whose "arguments" are
-            // only meaningful *symbolically*, referencing this
-            // function's own not-yet-bound template parameters, not
-            // real concrete types/values resolve_generic_type could
-            // make sense of at all. Each concrete call site is instead
-            // resolved directly by monomorphize_generic_function_call
-            // (mirroring exactly how an abbreviated-Concept-auto-form
-            // generic function's own body is similarly left untouched
-            // here and only monomorphized per call site).
-            if (!program_.functions[i].template_params.empty()) continue;
+            // non-empty) may have a signature containing a base-class-
+            // deduction pattern (`TupleImpl<I, Head, Tail...>& t`) whose
+            // "arguments" are only meaningful *symbolically*,
+            // referencing this function's own not-yet-bound template
+            // parameters, not real concrete types/values
+            // resolve_generic_type could make sense of at all -- such a
+            // pattern is instead resolved per concrete call site by
+            // monomorphize_generic_function_call. But *most* of a
+            // generic function's own parameters are ordinary, fully
+            // concrete types with no relation to its own template
+            // parameters at all (e.g. parse_record_body_into's own
+            // `const std::vector<GenericTypeParam>& template_params`,
+            // entirely independent of its `HandleUsingFn`/`AddFieldFn`
+            // template parameters) -- skipping *those* here too would
+            // leave them permanently unresolved/unmangled, silently
+            // mismatching against an otherwise-identical, already-
+            // resolved type elsewhere (e.g. a same-type copy-source
+            // check comparing this parameter's own declared type against
+            // a call's target type). So the skip below is applied
+            // per-parameter/per-return-type via
+            // type_depends_on_template_params, not to the whole function
+            // at once.
             SourceLocation loc = program_.functions[i].loc;
             std::size_t param_count = program_.functions[i].params.size();
             for (std::size_t j = 0; j < param_count; j++) {
                 Type old_type = program_.functions[i].params[j].type;
+                if (!program_.functions[i].template_params.empty() &&
+                    type_depends_on_template_params(old_type, program_.functions[i].template_params)) {
+                    continue;
+                }
                 Type new_type = resolve_generic_type(old_type, loc);
                 program_.functions[i].params[j].type = new_type;
+                // ch05 §5.14: a class-typed default argument value (e.g.
+                // `std::shared_ptr<const std::string> source_path = {}`,
+                // parsed as an ExprKind::ValueInit whose own `.type` is
+                // stamped in directly at parse time -- see
+                // make_value_initialized_expr, parser.cppm) is only ever
+                // materialized into a real call's `args` list *later*,
+                // on demand, at codegen time (codegen_call_args) for an
+                // ordinary (non-generic) function -- unlike a generic
+                // function template's own default args, which get
+                // expanded into a call's `args` right here during
+                // monomorphization (append_default_arguments_to_call)
+                // and so already flow through the ordinary per-arg
+                // resolve_generic_types_in_expr walk below. Codegen has
+                // no generic-type-instantiation machinery of its own, so
+                // this is the only chance such a default expression's
+                // own (possibly still-generic) `.type` ever gets
+                // resolved into the concrete, registered form
+                // to_llvm_type/find_class_def expect.
+                if (program_.functions[i].params[j].default_expr) {
+                    resolve_generic_types_in_expr(*program_.functions[i].params[j].default_expr);
+                }
             }
-            Type old_return = program_.functions[i].return_type;
-            Type new_return = resolve_generic_type(old_return, loc);
-            program_.functions[i].return_type = new_return;
+            if (program_.functions[i].template_params.empty() ||
+                !type_depends_on_template_params(program_.functions[i].return_type,
+                                                 program_.functions[i].template_params)) {
+                Type old_return = program_.functions[i].return_type;
+                Type new_return = resolve_generic_type(old_return, loc);
+                program_.functions[i].return_type = new_return;
+            }
+            // A full-header-form generic function's own *body* is left
+            // untouched here regardless (mirroring exactly how an
+            // abbreviated-Concept-auto-form generic function's own body
+            // is similarly left untouched here and only monomorphized
+            // per call site) -- unlike its parameter/return types just
+            // above, a symbolic type deep inside its body (e.g. a nested
+            // local variable's own declared type mentioning `Head`/
+            // `Tail...`) is far more likely, and walking it here isn't
+            // needed for the (only ever parameter/return-type-shaped)
+            // case this function was extended to handle.
+            if (!program_.functions[i].template_params.empty()) continue;
             // A function's own body is a stable, independently heap-
             // allocated tree (via StmtPtr) -- never relocated by
             // program_.functions/classes/structs reallocating elsewhere
@@ -2002,6 +2238,37 @@ private:
         if (cached != generic_type_instance_cache_.end()) return cached->second;
         generic_type_instance_cache_[cache_key] = cache_key;
 
+        // ch05 §5.14 (witness-driven instantiation failure gap): the
+        // self-reference cache entry just inserted above (a recursion
+        // guard for a self-referential generic type, e.g. a linked-list
+        // node instantiating itself) must not survive if anything below
+        // throws -- e.g. resolve_generic_type failing on one of this
+        // template's own fields/methods for a *witness* type (unlike any
+        // real, concrete argument, a witness can legitimately fail to
+        // satisfy a nested constraint -- see resolve_generic_type_
+        // optimistic's own comment). Left in place, a *later* attempt to
+        // instantiate this exact cache_key (from a different field/
+        // param/return type elsewhere, or resolve_generic_type_
+        // optimistic's own retry after catching this exact exception)
+        // would find that stale cache_key -> cache_key sentinel and
+        // silently "succeed" with that name, even though no real
+        // ClassDef/StructDef/Function of that name was ever actually
+        // finished and pushed -- surfacing far downstream (inside
+        // layout_of_type, e.g.) as a confusing "unsupported type" error
+        // instead of cleanly re-attempting (and re-throwing the
+        // *original*, meaningful diagnostic) as if this failed attempt
+        // had never happened. Everything this failed attempt already
+        // pushed to program_.classes/structs/functions before the throw
+        // (including via a nested nested instantiate_generic_type call,
+        // which rolls back identically on its own failure before
+        // re-throwing here) is likewise truncated away, to avoid leaving
+        // an orphaned, half-built duplicate of `cache_key` behind for a
+        // retry to collide with.
+        std::size_t classes_before_instantiation = program_.classes.size();
+        std::size_t structs_before_instantiation = program_.structs.size();
+        std::size_t functions_before_instantiation = program_.functions.size();
+        try {
+
         std::vector<Type> named_concretes;
         named_concretes.reserve(concrete_args.size());
         for (const Type& concrete_arg : concrete_args) {
@@ -2171,6 +2438,7 @@ private:
                 clone.template_params = method_tmpl.template_params;
                 clone.method_requires_concept = method_tmpl.method_requires_concept;
                 clone.member_owner_class = cache_key;
+                clone.receiver_ref_qualifier = method_tmpl.receiver_ref_qualifier;
                 clone.is_static = method_tmpl.is_static;
                 clone.is_virtual = method_tmpl.is_virtual;
                 clone.is_override = method_tmpl.is_override;
@@ -2242,10 +2510,7 @@ private:
                 if (clone.body) {
                     substitute_type_params_in_stmt(*clone.body, class_selection.bindings.type_replacements);
                     for (const auto& [class_pack_name, concrete_pack_types] : class_selection.bindings.type_pack_replacements) {
-                        std::vector<std::string> concrete_names;
-                        concrete_names.reserve(concrete_pack_types.size());
-                        for (const Type& concrete_type : concrete_pack_types) concrete_names.push_back(concrete_type.name);
-                        expand_explicit_template_arg_packs_in_stmt(*clone.body, class_pack_name, concrete_names);
+                        expand_explicit_template_arg_packs_in_stmt(*clone.body, class_pack_name, concrete_pack_types);
                     }
                     for (const auto& [pack_param_name, concrete_names] : pack_param_names) {
                         expand_pack_expansions_in_stmt(*clone.body, pack_param_name, concrete_names);
@@ -2264,6 +2529,25 @@ private:
         }
 
         throw DataflowError("'" + template_name + "' is not a declared generic type (ch05 §5.14)", loc);
+
+        } catch (...) {
+            for (std::size_t k = functions_before_instantiation; k < program_.functions.size(); ++k) {
+                known_function_names_.erase(program_.functions[k].name);
+                generic_template_indices_.erase(program_.functions[k].name);
+            }
+            if (program_.functions.size() > functions_before_instantiation) {
+                program_.functions.resize(functions_before_instantiation);
+            }
+            if (program_.classes.size() > classes_before_instantiation) {
+                program_.classes.resize(classes_before_instantiation);
+            }
+            if (program_.structs.size() > structs_before_instantiation) {
+                program_.structs.resize(structs_before_instantiation);
+            }
+            ordinary_generic_instance_info_.erase(cache_key);
+            generic_type_instance_cache_.erase(cache_key);
+            throw;
+        }
     }
 
     [[nodiscard]] std::string instantiate_non_type_generic_type(const std::string& template_name,
@@ -2274,6 +2558,16 @@ private:
         auto cached = generic_type_instance_cache_.find(cache_key);
         if (cached != generic_type_instance_cache_.end()) return cached->second;
         generic_type_instance_cache_[cache_key] = cache_key;
+
+        // ch05 §5.14: same cache-poisoning hazard as
+        // instantiate_generic_type's own identical guard above -- see
+        // its comment for the full rationale. Rolled back on any throw
+        // below (e.g. a witness type failing one of this non-type
+        // generic's own field/method type resolutions).
+        std::size_t classes_before_instantiation = program_.classes.size();
+        std::size_t structs_before_instantiation = program_.structs.size();
+        std::size_t functions_before_instantiation = program_.functions.size();
+        try {
 
         for (const StructDef& tmpl : program_.structs) {
             if (tmpl.name != template_name || tmpl.template_params.size() != non_type_args.size() ||
@@ -2334,6 +2628,7 @@ private:
                 clone.template_params = method_tmpl.template_params;
                 clone.method_requires_concept = method_tmpl.method_requires_concept;
                 clone.member_owner_class = cache_key;
+                clone.receiver_ref_qualifier = method_tmpl.receiver_ref_qualifier;
                 clone.is_static = method_tmpl.is_static;
                 clone.is_virtual = method_tmpl.is_virtual;
                 clone.is_override = method_tmpl.is_override;
@@ -2387,6 +2682,24 @@ private:
         }
 
         throw DataflowError("'" + template_name + "' is not a declared generic type (ch05 §5.14)", loc);
+
+        } catch (...) {
+            for (std::size_t k = functions_before_instantiation; k < program_.functions.size(); ++k) {
+                known_function_names_.erase(program_.functions[k].name);
+                generic_template_indices_.erase(program_.functions[k].name);
+            }
+            if (program_.functions.size() > functions_before_instantiation) {
+                program_.functions.resize(functions_before_instantiation);
+            }
+            if (program_.classes.size() > classes_before_instantiation) {
+                program_.classes.resize(classes_before_instantiation);
+            }
+            if (program_.structs.size() > structs_before_instantiation) {
+                program_.structs.resize(structs_before_instantiation);
+            }
+            generic_type_instance_cache_.erase(cache_key);
+            throw;
+        }
     }
 
     // ch05 §5.14: synthesizes (or reuses an already-cached) concrete
@@ -2421,6 +2734,18 @@ private:
         auto cached = generic_type_instance_cache_.find(cache_key);
         if (cached != generic_type_instance_cache_.end()) return cached->second;
         generic_type_instance_cache_[cache_key] = cache_key;
+
+        // ch05 §5.14: same cache-poisoning hazard as
+        // instantiate_generic_type's own identical guard above -- see
+        // its comment for the full rationale. Rolled back on any throw
+        // below, including one propagating up from a nested recursive
+        // instantiate_variadic_generic_type call (which rolls back
+        // identically on its own failure before re-throwing here, so
+        // only this level's own additional pushes need undoing).
+        std::size_t classes_before_instantiation = program_.classes.size();
+        std::size_t structs_before_instantiation = program_.structs.size();
+        std::size_t functions_before_instantiation = program_.functions.size();
+        try {
 
         if (type_args.empty()) {
             // The empty-pack base case: `template<> class Tuple<>
@@ -2603,6 +2928,25 @@ private:
                                      type_replacements, pack_replacements, non_type_args);
         variadic_instance_info_[cache_key] = VariadicInstanceInfo{template_name, non_type_args, type_args};
         return cache_key;
+
+        } catch (...) {
+            for (std::size_t k = functions_before_instantiation; k < program_.functions.size(); ++k) {
+                known_function_names_.erase(program_.functions[k].name);
+                generic_template_indices_.erase(program_.functions[k].name);
+            }
+            if (program_.functions.size() > functions_before_instantiation) {
+                program_.functions.resize(functions_before_instantiation);
+            }
+            if (program_.classes.size() > classes_before_instantiation) {
+                program_.classes.resize(classes_before_instantiation);
+            }
+            if (program_.structs.size() > structs_before_instantiation) {
+                program_.structs.resize(structs_before_instantiation);
+            }
+            variadic_instance_info_.erase(cache_key);
+            generic_type_instance_cache_.erase(cache_key);
+            throw;
+        }
     }
 
     // ch05 §5.14: evaluates a variadic generic type's own non-type
@@ -3277,13 +3621,7 @@ private:
         }
         auto cached = generic_function_clone_cache_.find(cache_key);
         if (cached != generic_function_clone_cache_.end()) {
-            if (tmpl.name == "std::thread_new") {
-                std::cerr << "[ctor-cache-hit] " << cache_key << " -> " << cached->second << "\n";
-            }
             return cached->second;
-        }
-        if (tmpl.name == "std::thread_new") {
-            std::cerr << "[ctor-cache-new] " << cache_key << "\n";
         }
         generic_function_clone_cache_[cache_key] = cache_key;
 
@@ -4143,9 +4481,29 @@ private:
                 } else {
                     if (!deduce_template_bindings_from_type_pattern(underlying, concrete, stable_tmpl.template_params,
                                                                     type_bindings, value_bindings, pack_bindings)) {
-                        throw DataflowError("no overload of generic function '" + stable_tmpl.name +
-                                                "' matches this argument list",
-                                            expr.loc);
+                        // ch05 §5.11: deduce_template_bindings_from_type_pattern
+                        // only ever *binds* a template parameter or requires an
+                        // exact structural Type match -- it has no notion of an
+                        // implicit converting-constructor conversion (e.g. a
+                        // string-literal argument, inferred as `char*`, against
+                        // a plain (non-template-dependent) `std::string_view`
+                        // parameter, via string_view's own single-argument
+                        // converting constructor). An *ordinary* (non-generic)
+                        // call already accepts exactly this via
+                        // argument_matches_parameter (see resolve_overload) --
+                        // so, for a parameter whose declared type doesn't even
+                        // mention any of this template's own parameters (i.e.
+                        // there is nothing to deduce here in the first place,
+                        // only to match), fall back to that same richer check
+                        // before giving up on the whole call.
+                        bool matches_via_conversion =
+                            !type_depends_on_template_params(param_type, stable_tmpl.template_params) &&
+                            argument_matches_parameter(*expr.args[arg_cursor], param_type, body, signatures_);
+                        if (!matches_via_conversion) {
+                            throw DataflowError("no overload of generic function '" + stable_tmpl.name +
+                                                    "' matches this argument list",
+                                                expr.loc);
+                        }
                     }
                 }
                 if (is_forwarding_reference_parameter(stable_tmpl.params[param_cursor], stable_tmpl.template_params)) {
@@ -4290,12 +4648,41 @@ private:
                             "cannot infer 'auto' variable '" + stmt.var_name + "'s type from its initializer",
                             stmt.loc);
                     }
-                    if (is_synthesized_for_range_storage(stmt.var_name) &&
-                        (inferred->kind == TypeKind::Array || inferred->kind == TypeKind::Span)) {
+                    // Mirrors real C++'s own `auto&& __range = range_expr;`
+                    // range-for desugaring: a synthesized `$for_range_N`
+                    // storage variable must never *copy* the range, both to
+                    // avoid needless copies and because a range like
+                    // `std::vector<std::unique_ptr<T>>` isn't copy-
+                    // constructible at all (parser.cppm's clone_expr_tree,
+                    // e.g., range-for's over `expr.args`) -- so bind by
+                    // reference whenever the range is Array/Span (already
+                    // handled below) or a Named class type that isn't
+                    // copy-constructible, and otherwise keep the existing
+                    // by-value behavior unchanged for freely-copyable Named
+                    // ranges (ordinary `std::vector<int>`-shaped loops).
+                    bool range_needs_reference =
+                        inferred->kind == TypeKind::Array || inferred->kind == TypeKind::Span ||
+                        (inferred->kind == TypeKind::Named && body.program != nullptr &&
+                         !is_copy_constructible(inferred->name, *body.program));
+                    if (is_synthesized_for_range_storage(stmt.var_name) && range_needs_reference) {
                         Type inferred_ref;
                         inferred_ref.kind = TypeKind::Reference;
                         inferred_ref.pointee = std::make_shared<Type>(*inferred);
-                        inferred_ref.is_mutable_ref = inferred->kind == TypeKind::Span ? inferred->is_mutable_ref : true;
+                        // The Array case keeps its pre-existing unconditional
+                        // `true` (untouched, already validated by ast.cppm/
+                        // lexer.cppm self-hosting); the new Named-not-copy-
+                        // constructible case must instead respect the
+                        // range_expr's own const-reachability (e.g.
+                        // `expr.args` through a `const Expr&` parameter) --
+                        // same idiom as apply_call's own by-reference
+                        // argument passing just below in this file.
+                        if (inferred->kind == TypeKind::Span) {
+                            inferred_ref.is_mutable_ref = inferred->is_mutable_ref;
+                        } else if (inferred->kind == TypeKind::Named) {
+                            inferred_ref.is_mutable_ref = !is_read_only_reachable(*stmt.init, body, signatures_);
+                        } else {
+                            inferred_ref.is_mutable_ref = true;
+                        }
                         stmt.type = inferred_ref;
                         body.local_types[stmt.var_name] = inferred_ref;
                     } else {
@@ -4416,6 +4803,19 @@ private:
         // not lhs/rhs/args -- see ast.cppm's Expr).
         if (expr.kind == ExprKind::Lambda) {
             resolve_lambda(expr, body, enclosing_this_type);
+            return;
+        }
+
+        // A bare `return {};` (ast.cppm's ExprKind::ValueInit) has no
+        // type of its own from parsing -- stamped here, once, from
+        // whichever function/method/lambda body is currently being
+        // walked (current_walk_return_type_, refreshed at each of this
+        // class's 3 independent "start walking a fresh body" call
+        // sites), since that is the only place this is unambiguous.
+        // Leaf node (no lhs/rhs/third/args), so nothing else to recurse
+        // into.
+        if (expr.kind == ExprKind::ValueInit) {
+            expr.type = current_walk_return_type_;
             return;
         }
 
@@ -4752,6 +5152,13 @@ private:
         lambda_ctor.name = class_name + "_new";
         lambda_ctor.loc = expr.loc;
         lambda_ctor.member_owner_class = class_name;
+        // See call_method.namespace_path's own comment below: same
+        // reasoning applies here for consistency, even though this
+        // constructor's own synthesized body (a bare `return;` plus
+        // member-initializer identifier references, never a class-name
+        // constructor call) doesn't currently exercise the gap in
+        // practice.
+        lambda_ctor.namespace_path = enclosing_body.function_namespace_path;
         Param ctor_this;
         ctor_this.name = "this";
         Type ctor_this_type;
@@ -4791,6 +5198,38 @@ private:
         Function call_method;
         call_method.name = class_name + "_call";
         call_method.loc = expr.loc;
+        // A lambda's synthesized closure-call method is lexically
+        // nested inside its enclosing function, so it must inherit that
+        // function's own namespace context -- otherwise
+        // resolve_visible_class_or_struct_name's own qualified-name
+        // lookup (calls.cppm) silently never tries the enclosing
+        // namespace's qualified spelling (e.g. "scpp::ParseError") for
+        // any bare class-name constructor call inside this lambda's
+        // body, even though the class is genuinely visible and
+        // resolvable from this scope -- surfacing later, confusingly,
+        // as a generic-type CTAD failure for whichever outer call
+        // (e.g. std::unexpected(...)) wraps it.
+        call_method.namespace_path = enclosing_body.function_namespace_path;
+        // ch04 §4.2/[expr.prim.lambda]: a lambda's closure type has the
+        // same access rights as if its body appeared directly at the
+        // lambda-expression's own lexical position -- so this
+        // synthesized method's *access* perspective must be its
+        // enclosing function's own (propagating through
+        // function_access_context_class first, for a lambda nested
+        // inside another lambda), never this closure's own unrelated
+        // synthetic class (which member_owner_class, set on this
+        // Function further below, correctly still names for `this`-
+        // typing/method-registration purposes). Without this, a private
+        // member/method access lexically written inside a lambda body
+        // -- e.g. Parser::type_to_string's own recursive `this->
+        // type_to_string(...)` call from within an IIFE -- would be
+        // misjudged as happening "from outside its own methods", since
+        // DataflowState::current_class would otherwise fall back to
+        // this closure's own synthetic class name (see check_function's
+        // entry-state setup, dataflow.cppm).
+        call_method.access_context_class = !enclosing_body.function_access_context_class.empty()
+                                                ? enclosing_body.function_access_context_class
+                                                : enclosing_body.function_member_owner_class;
         Param this_param;
         this_param.name = "this";
         Type this_type;
@@ -4881,6 +5320,20 @@ private:
         if (synthesized.is_generic_template) {
             generic_template_indices_[synthesized.name].push_back(program_.functions.size() - 1);
         }
+        // ch05 §5.9/§5.12: unlike lambda_ctor just above (whose own
+        // resolution goes through walk_new_concrete_function, which
+        // already rebuilds signatures_ unconditionally), this "call"
+        // method's own body is walked directly, below, with no such
+        // rebuild -- so without this, signatures_ still would not carry
+        // this closure's own "<ClassName>_call" signature by the time
+        // resolve_callee_signature's bare-call-redirect (`f(args)` ->
+        // `f.call(args)`, just above) needs it for *any* call site whose
+        // callee is this same lambda-typed local variable, including
+        // ones textually later in the very same enclosing function body
+        // (e.g. `auto p = [...](...) {...}; ... auto r = p(x);`) --
+        // surfacing, confusingly, as an unrelated "cannot infer 'auto'
+        // variable's type" error at that later call site instead.
+        signatures_ = build_signatures(program_);
 
         expr.name = class_name;
 
@@ -4896,6 +5349,7 @@ private:
         if (synthesized.body) {
             Body synthesized_body = build_mir(synthesized);
             synthesized_body.program = &program_;
+            current_walk_return_type_ = synthesized.return_type;
             walk_stmt(*synthesized.body, synthesized_body, this_type_of(synthesized),
                       /*allow_generic_monomorphization=*/!synthesized.is_generic_template);
         }
@@ -5213,19 +5667,37 @@ private:
     }
 
     void expand_explicit_template_arg_packs_in_expr(Expr& expr, const std::string& pack_name,
-                                                   const std::vector<std::string>& concrete_names) {
-        if (expr.lhs) expand_explicit_template_arg_packs_in_expr(*expr.lhs, pack_name, concrete_names);
-        if (expr.rhs) expand_explicit_template_arg_packs_in_expr(*expr.rhs, pack_name, concrete_names);
-        for (ExprPtr& arg : expr.args) expand_explicit_template_arg_packs_in_expr(*arg, pack_name, concrete_names);
+                                                   const std::vector<Type>& concrete_types) {
+        if (expr.lhs) expand_explicit_template_arg_packs_in_expr(*expr.lhs, pack_name, concrete_types);
+        if (expr.rhs) expand_explicit_template_arg_packs_in_expr(*expr.rhs, pack_name, concrete_types);
+        for (ExprPtr& arg : expr.args) expand_explicit_template_arg_packs_in_expr(*arg, pack_name, concrete_types);
         if (!expr.explicit_template_args.empty()) {
             std::vector<ExplicitTemplateArg> expanded_template_args;
             for (ExplicitTemplateArg& arg : expr.explicit_template_args) {
                 if (arg.is_type && arg.type.is_pack_expansion && arg.type.kind == TypeKind::Named && arg.type.name == pack_name) {
-                    for (const std::string& concrete_name : concrete_names) {
+                    // Copy each concrete pack element's *full* Type (kind,
+                    // pointee, etc.) rather than re-deriving a fresh
+                    // Named-kind Type from just its `.name` string -- a
+                    // Reference/Pointer-kind element's `.name` is
+                    // conventionally blank (its identity lives in `.kind`
+                    // + `.pointee`, not `.name`; see to_llvm_type/
+                    // mangle_type_for_clone_name's own treatment of such
+                    // types), so reconstructing via name alone silently
+                    // downgraded e.g. a `const Foo&` pack element into a
+                    // corrupt `Type{kind=Named, name=""}` -- fine by
+                    // coincidence for plain by-value Named types (whose
+                    // `.name` *is* their whole identity) but a genuine
+                    // type-loss bug for every reference/pointer element,
+                    // surfacing later as "unsupported type ''" wherever
+                    // that expanded template argument's type got used
+                    // (e.g. a nested `std::__move_only_function_invoke<F,
+                    // R, Args...>` designator inside `std::function`'s
+                    // own templated constructor, forwarding its
+                    // enclosing class's already-concrete `Args...`).
+                    for (const Type& concrete_type : concrete_types) {
                         ExplicitTemplateArg expanded_arg;
                         expanded_arg.is_type = true;
-                        expanded_arg.type.kind = TypeKind::Named;
-                        expanded_arg.type.name = concrete_name;
+                        expanded_arg.type = concrete_type;
                         expanded_template_args.push_back(std::move(expanded_arg));
                     }
                     continue;
@@ -5235,28 +5707,28 @@ private:
             expr.explicit_template_args = std::move(expanded_template_args);
         }
         for (LambdaCapture& capture : expr.lambda_captures) {
-            if (capture.init) expand_explicit_template_arg_packs_in_expr(*capture.init, pack_name, concrete_names);
+            if (capture.init) expand_explicit_template_arg_packs_in_expr(*capture.init, pack_name, concrete_types);
         }
         if (expr.lambda_body) {
             for (StmtPtr& s : expr.lambda_body->statements) {
                 switch (s->kind) {
                     case StmtKind::VarDecl:
-                        if (s->init) expand_explicit_template_arg_packs_in_expr(*s->init, pack_name, concrete_names);
-                        for (ExprPtr& a : s->ctor_args) expand_explicit_template_arg_packs_in_expr(*a, pack_name, concrete_names);
+                        if (s->init) expand_explicit_template_arg_packs_in_expr(*s->init, pack_name, concrete_types);
+                        for (ExprPtr& a : s->ctor_args) expand_explicit_template_arg_packs_in_expr(*a, pack_name, concrete_types);
                         break;
                     case StmtKind::Return:
                     case StmtKind::ExprStmt:
-                        if (s->expr) expand_explicit_template_arg_packs_in_expr(*s->expr, pack_name, concrete_names);
+                        if (s->expr) expand_explicit_template_arg_packs_in_expr(*s->expr, pack_name, concrete_types);
                         break;
                     case StmtKind::If:
                     case StmtKind::While:
-                        expand_explicit_template_arg_packs_in_expr(*s->condition, pack_name, concrete_names);
+                        expand_explicit_template_arg_packs_in_expr(*s->condition, pack_name, concrete_types);
                         break;
                     case StmtKind::Switch:
-                        expand_explicit_template_arg_packs_in_expr(*s->condition, pack_name, concrete_names);
+                        expand_explicit_template_arg_packs_in_expr(*s->condition, pack_name, concrete_types);
                         for (SwitchCase& switch_case : s->switch_cases) {
                             if (switch_case.value) {
-                                expand_explicit_template_arg_packs_in_expr(*switch_case.value, pack_name, concrete_names);
+                                expand_explicit_template_arg_packs_in_expr(*switch_case.value, pack_name, concrete_types);
                             }
                         }
                         break;
@@ -5308,33 +5780,33 @@ private:
     }
 
     void expand_explicit_template_arg_packs_in_stmt(Stmt& stmt, const std::string& pack_name,
-                                                   const std::vector<std::string>& concrete_names) {
+                                                   const std::vector<Type>& concrete_types) {
         switch (stmt.kind) {
             case StmtKind::VarDecl:
-                if (stmt.init) expand_explicit_template_arg_packs_in_expr(*stmt.init, pack_name, concrete_names);
-                for (ExprPtr& arg : stmt.ctor_args) expand_explicit_template_arg_packs_in_expr(*arg, pack_name, concrete_names);
+                if (stmt.init) expand_explicit_template_arg_packs_in_expr(*stmt.init, pack_name, concrete_types);
+                for (ExprPtr& arg : stmt.ctor_args) expand_explicit_template_arg_packs_in_expr(*arg, pack_name, concrete_types);
                 return;
             case StmtKind::Return:
             case StmtKind::ExprStmt:
-                if (stmt.expr) expand_explicit_template_arg_packs_in_expr(*stmt.expr, pack_name, concrete_names);
+                if (stmt.expr) expand_explicit_template_arg_packs_in_expr(*stmt.expr, pack_name, concrete_types);
                 return;
             case StmtKind::If:
-                expand_explicit_template_arg_packs_in_expr(*stmt.condition, pack_name, concrete_names);
-                expand_explicit_template_arg_packs_in_stmt(*stmt.then_branch, pack_name, concrete_names);
-                if (stmt.else_branch) expand_explicit_template_arg_packs_in_stmt(*stmt.else_branch, pack_name, concrete_names);
+                expand_explicit_template_arg_packs_in_expr(*stmt.condition, pack_name, concrete_types);
+                expand_explicit_template_arg_packs_in_stmt(*stmt.then_branch, pack_name, concrete_types);
+                if (stmt.else_branch) expand_explicit_template_arg_packs_in_stmt(*stmt.else_branch, pack_name, concrete_types);
                 return;
             case StmtKind::While:
-                expand_explicit_template_arg_packs_in_expr(*stmt.condition, pack_name, concrete_names);
-                expand_explicit_template_arg_packs_in_stmt(*stmt.then_branch, pack_name, concrete_names);
+                expand_explicit_template_arg_packs_in_expr(*stmt.condition, pack_name, concrete_types);
+                expand_explicit_template_arg_packs_in_stmt(*stmt.then_branch, pack_name, concrete_types);
                 return;
             case StmtKind::Switch:
-                expand_explicit_template_arg_packs_in_expr(*stmt.condition, pack_name, concrete_names);
+                expand_explicit_template_arg_packs_in_expr(*stmt.condition, pack_name, concrete_types);
                 for (SwitchCase& switch_case : stmt.switch_cases) {
                     if (switch_case.value) {
-                        expand_explicit_template_arg_packs_in_expr(*switch_case.value, pack_name, concrete_names);
+                        expand_explicit_template_arg_packs_in_expr(*switch_case.value, pack_name, concrete_types);
                     }
                     for (StmtPtr& s : switch_case.statements) {
-                        expand_explicit_template_arg_packs_in_stmt(*s, pack_name, concrete_names);
+                        expand_explicit_template_arg_packs_in_stmt(*s, pack_name, concrete_types);
                     }
                 }
                 return;
@@ -5343,7 +5815,7 @@ private:
             case StmtKind::Fallthrough:
                 return;
             case StmtKind::Block:
-                for (StmtPtr& s : stmt.statements) expand_explicit_template_arg_packs_in_stmt(*s, pack_name, concrete_names);
+                for (StmtPtr& s : stmt.statements) expand_explicit_template_arg_packs_in_stmt(*s, pack_name, concrete_types);
                 return;
         }
     }
@@ -5485,6 +5957,7 @@ private:
         clone.visibility_module = tmpl.visibility_module.empty() ? tmpl.owning_module : tmpl.visibility_module;
         clone.eval_mode = tmpl.eval_mode;
         clone.member_owner_class = tmpl.member_owner_class;
+        clone.receiver_ref_qualifier = tmpl.receiver_ref_qualifier;
         clone.is_static = tmpl.is_static;
         clone.access = tmpl.access;
         std::unordered_map<std::string, Type> witness_replacements;
@@ -5562,8 +6035,14 @@ private:
 
 
 void monomorphize_generics_impl(Program& program) {
+    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
+        std::cerr << "[SCPP_DEBUG_FN] entering monomorphize_generics_impl, functions.size()=" << program.functions.size() << std::endl;
+    }
     Monomorphizer monomorphizer(program);
     monomorphizer.run();
+    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
+        std::cerr << "[SCPP_DEBUG_FN] finished monomorphize_generics_impl" << std::endl;
+    }
 }
 
 } // namespace scpp
