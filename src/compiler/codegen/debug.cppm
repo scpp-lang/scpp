@@ -116,7 +116,7 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
     }
 
 
-    [[nodiscard]] llvm::LLVMMetadataRef Codegen::debug_type_for(const Type& type)
+    [[nodiscard]] std::expected<llvm::LLVMMetadataRef, CodegenError> Codegen::debug_type_for(const Type& type)
 {
         if (!emit_debug_info_) return nullptr;
         std::string key = mangle_type(type);
@@ -125,20 +125,35 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
         llvm::LLVMMetadataRef result = nullptr;
         switch (type.kind) {
             case TypeKind::Named: {
-                auto basic = [&](llvm::LLVMDWARFTypeEncoding encoding) -> llvm::LLVMMetadataRef {
+                auto basic = [&](llvm::LLVMDWARFTypeEncoding encoding) -> std::expected<llvm::LLVMMetadataRef, CodegenError> {
+                    auto llvm_type_result = to_llvm_type(type);
+                    if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
                     return llvm::LLVMDIBuilderCreateBasicType(dibuilder_, type.name.c_str(), type.name.size(),
-                        llvm::LLVMSizeOfTypeInBits(data_layout_ref(module_), to_llvm_type(type)), encoding, llvm::LLVMDIFlagZero);
+                        llvm::LLVMSizeOfTypeInBits(data_layout_ref(module_), std::move(llvm_type_result).value()), encoding, llvm::LLVMDIFlagZero);
                 };
-                if (type.name == "bool") result = basic(kDwAteBoolean);
-                else if (type.name == "char") result = basic(kDwAteSignedChar);
-                else if (is_float_scalar_type_name(type.name)) result = basic(kDwAteFloat);
-                else if (is_scalar_type_name(type.name)) {
-                    result = basic(is_unsigned_scalar_type_name(type.name) ? kDwAteUnsigned : kDwAteSigned);
+                if (type.name == "bool") {
+                    auto basic_result = basic(kDwAteBoolean);
+                    if (!basic_result.has_value()) return std::unexpected(std::move(basic_result).error());
+                    result = std::move(basic_result).value();
+                } else if (type.name == "char") {
+                    auto basic_result = basic(kDwAteSignedChar);
+                    if (!basic_result.has_value()) return std::unexpected(std::move(basic_result).error());
+                    result = std::move(basic_result).value();
+                } else if (is_float_scalar_type_name(type.name)) {
+                    auto basic_result = basic(kDwAteFloat);
+                    if (!basic_result.has_value()) return std::unexpected(std::move(basic_result).error());
+                    result = std::move(basic_result).value();
+                } else if (is_scalar_type_name(type.name)) {
+                    auto basic_result = basic(is_unsigned_scalar_type_name(type.name) ? kDwAteUnsigned : kDwAteSigned);
+                    if (!basic_result.has_value()) return std::unexpected(std::move(basic_result).error());
+                    result = std::move(basic_result).value();
                 } else if (const EnumDef* enum_def = find_enum_def(program_, type.name)) {
                     const std::string& underlying = enum_def->underlying_type.name;
-                    result = basic(underlying == "char"                ? kDwAteSignedChar
+                    auto basic_result = basic(underlying == "char"                ? kDwAteSignedChar
                                    : is_unsigned_scalar_type_name(underlying) ? kDwAteUnsigned
                                                                                 : kDwAteSigned);
+                    if (!basic_result.has_value()) return std::unexpected(std::move(basic_result).error());
+                    result = std::move(basic_result).value();
                 } else {
                     result = llvm::LLVMDIBuilderCreateUnspecifiedType(dibuilder_, type.name.c_str(), type.name.size());
                 }
@@ -151,7 +166,12 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
                     result = llvm::LLVMDIBuilderCreateUnspecifiedType(dibuilder_, name.c_str(), name.size());
                     break;
                 }
-                llvm::LLVMMetadataRef pointee = type.pointee ? debug_type_for(*type.pointee) : nullptr;
+                llvm::LLVMMetadataRef pointee = nullptr;
+                if (type.pointee) {
+                    auto pointee_result = debug_type_for(*type.pointee);
+                    if (!pointee_result.has_value()) return std::unexpected(std::move(pointee_result).error());
+                    pointee = std::move(pointee_result).value();
+                }
                 result = llvm::LLVMDIBuilderCreatePointerType(
                     dibuilder_, pointee, 8ULL * llvm::LLVMPointerSizeForAS(data_layout_ref(module_), 0),
                     static_cast<std::uint32_t>(pointer_abi_alignment_for_as(module_, 0) * 8), /*AddressSpace=*/0, "",
@@ -159,11 +179,15 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
                 break;
             }
             case TypeKind::Array: {
-                llvm::LLVMMetadataRef element = debug_type_for(*type.element);
+                auto element_result = debug_type_for(*type.element);
+                if (!element_result.has_value()) return std::unexpected(std::move(element_result).error());
+                llvm::LLVMMetadataRef element = std::move(element_result).value();
                 llvm::LLVMMetadataRef subrange =
                     llvm::LLVMDIBuilderGetOrCreateSubrange(dibuilder_, 0, static_cast<std::int64_t>(type.array_size));
                 llvm::LLVMMetadataRef subscripts = llvm::LLVMDIBuilderGetOrCreateArray(dibuilder_, &subrange, 1);
-                llvm::LLVMTypeRef llvm_type = to_llvm_type(type);
+                auto llvm_type_result = to_llvm_type(type);
+                if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
+                llvm::LLVMTypeRef llvm_type = std::move(llvm_type_result).value();
                 result = llvm::LLVMDIBuilderCreateArrayType(
                     dibuilder_, llvm::LLVMSizeOfTypeInBits(data_layout_ref(module_), llvm_type),
                     static_cast<std::uint32_t>(llvm::LLVMABIAlignmentOfType(data_layout_ref(module_), llvm_type) * 8),
@@ -178,8 +202,18 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
             case TypeKind::Function:
             case TypeKind::FunctionPointer: {
                 std::vector<llvm::LLVMMetadataRef> elems;
-                elems.push_back(type.function_return ? debug_type_for(*type.function_return) : nullptr);
-                for (const Type& param : type.function_params) elems.push_back(debug_type_for(param));
+                if (type.function_return) {
+                    auto function_return_result = debug_type_for(*type.function_return);
+                    if (!function_return_result.has_value()) return std::unexpected(std::move(function_return_result).error());
+                    elems.push_back(std::move(function_return_result).value());
+                } else {
+                    elems.push_back(nullptr);
+                }
+                for (const Type& param : type.function_params) {
+                    auto param_result = debug_type_for(param);
+                    if (!param_result.has_value()) return std::unexpected(std::move(param_result).error());
+                    elems.push_back(std::move(param_result).value());
+                }
                 llvm::LLVMMetadataRef subroutine = llvm::LLVMDIBuilderCreateSubroutineType(
                     dibuilder_, nullptr, elems.data(), static_cast<unsigned>(elems.size()), llvm::LLVMDIFlagZero);
                 result = type.kind == TypeKind::FunctionPointer
@@ -208,11 +242,13 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
     }
 
 
-    void Codegen::maybe_emit_parameter_debug_decl(const Param& param, llvm::LLVMValueRef slot, unsigned index)
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::maybe_emit_parameter_debug_decl(const Param& param, llvm::LLVMValueRef slot, unsigned index)
 {
-        if (!emit_debug_info_ || current_subprogram_ == nullptr) return;
-        llvm::LLVMMetadataRef type = debug_type_for(param.type);
-        if (type == nullptr) return;
+        if (!emit_debug_info_ || current_subprogram_ == nullptr) return {};
+        auto type_result = debug_type_for(param.type);
+        if (!type_result.has_value()) return std::unexpected(std::move(type_result).error());
+        llvm::LLVMMetadataRef type = std::move(type_result).value();
+        if (type == nullptr) return {};
         llvm::LLVMMetadataRef var = llvm::LLVMDIBuilderCreateParameterVariable(
             dibuilder_, current_subprogram_, param.name.c_str(), param.name.size(), index,
             debug_file_for_loc(current_function_def_->loc), std::max(current_function_def_->loc.line, 1), type,
@@ -221,14 +257,17 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
         llvm::LLVMMetadataRef loc = llvm::LLVMDIBuilderCreateDebugLocation(context_, std::max(current_function_def_->loc.line, 1), 1,
                                                                current_subprogram_, nullptr);
         llvm::LLVMDIBuilderInsertDeclareRecordAtEnd(dibuilder_, slot, var, expr, loc, llvm::LLVMGetInsertBlock(builder_));
+        return {};
     }
 
 
-    void Codegen::maybe_emit_local_debug_decl(const std::string& name, const Type& type, llvm::LLVMValueRef slot, SourceLocation loc)
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::maybe_emit_local_debug_decl(const std::string& name, const Type& type, llvm::LLVMValueRef slot, SourceLocation loc)
 {
-        if (!emit_debug_info_ || current_debug_scope_ == nullptr) return;
-        llvm::LLVMMetadataRef debug_type = debug_type_for(type);
-        if (debug_type == nullptr) return;
+        if (!emit_debug_info_ || current_debug_scope_ == nullptr) return {};
+        auto debug_type_result = debug_type_for(type);
+        if (!debug_type_result.has_value()) return std::unexpected(std::move(debug_type_result).error());
+        llvm::LLVMMetadataRef debug_type = std::move(debug_type_result).value();
+        if (debug_type == nullptr) return {};
         llvm::LLVMMetadataRef var = llvm::LLVMDIBuilderCreateAutoVariable(dibuilder_, current_debug_scope_, name.c_str(), name.size(),
                                                               debug_file_for_loc(loc), std::max(loc.line, 1), debug_type,
                                                               /*AlwaysPreserve=*/1, llvm::LLVMDIFlagZero, /*AlignInBits=*/0);
@@ -236,6 +275,7 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
         llvm::LLVMMetadataRef debug_loc = llvm::LLVMDIBuilderCreateDebugLocation(context_, std::max(loc.line, 1), std::max(loc.column, 1),
                                                                      current_debug_scope_, nullptr);
         llvm::LLVMDIBuilderInsertDeclareRecordAtEnd(dibuilder_, slot, var, expr, debug_loc, llvm::LLVMGetInsertBlock(builder_));
+        return {};
     }
 
 
@@ -282,12 +322,18 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
     }
 
 
-    void Codegen::attach_debug_subprogram(llvm::LLVMValueRef llvm_fn, const Function& fn)
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::attach_debug_subprogram(llvm::LLVMValueRef llvm_fn, const Function& fn)
 {
-        if (!emit_debug_info_) return;
+        if (!emit_debug_info_) return {};
         std::vector<llvm::LLVMMetadataRef> type_elems;
-        type_elems.push_back(debug_type_for(fn.return_type));
-        for (const Param& param : fn.params) type_elems.push_back(debug_type_for(param.type));
+        auto return_type_result = debug_type_for(fn.return_type);
+        if (!return_type_result.has_value()) return std::unexpected(std::move(return_type_result).error());
+        type_elems.push_back(std::move(return_type_result).value());
+        for (const Param& param : fn.params) {
+            auto param_type_result = debug_type_for(param.type);
+            if (!param_type_result.has_value()) return std::unexpected(std::move(param_type_result).error());
+            type_elems.push_back(std::move(param_type_result).value());
+        }
         llvm::LLVMMetadataRef fn_type = llvm::LLVMDIBuilderCreateSubroutineType(
             dibuilder_, nullptr, type_elems.data(), static_cast<unsigned>(type_elems.size()), llvm::LLVMDIFlagZero);
         llvm::LLVMMetadataRef file = debug_file_for_loc(fn.loc);
@@ -300,6 +346,7 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
         llvm::LLVMSetSubprogram(llvm_fn, subprogram);
         current_subprogram_ = subprogram;
         current_debug_scope_ = subprogram;
+        return {};
     }
 
 } // namespace scpp
