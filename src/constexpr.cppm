@@ -9,7 +9,18 @@ export namespace scpp {
 
 struct ConstexprLimits {
     int max_steps = 1000000;
-    int max_recursion_depth = 512;
+    // Lowered from 512: propagating std::expected<T, ConstexprError>
+    // through this engine's mutually-recursive evaluation walk (call_function
+    // -> execute_stmt -> evaluate_expr -> evaluate_call_expr -> ...) costs
+    // more C++ stack per level than the exceptions this engine used to
+    // throw, since every frame now materializes its own expected<T, E>
+    // return value instead of unwinding past it. 512 levels of recursion
+    // reliably overflowed an 8 MiB stack (a Debug build's default) before
+    // this engine's own budget check could ever fire; 256 leaves a wide,
+    // empirically-verified safety margin (the crash threshold measured
+    // well above 300) and is still far deeper than any real constexpr/
+    // consteval recursion is likely to need.
+    int max_recursion_depth = 256;
     int max_loop_iterations = 262144;
 };
 
@@ -42,8 +53,8 @@ struct ConstexprValue {
     std::vector<ConstexprValue> elements;
 };
 
-void fold_immediate_calls(Program& program, ConstexprLimits limits = {});
-[[nodiscard]] ConstexprValue evaluate_immediate_expr(const Program& program, const Expr& expr,
+[[nodiscard]] std::expected<void, ConstexprError> fold_immediate_calls(Program& program, ConstexprLimits limits = {});
+[[nodiscard]] std::expected<ConstexprValue, ConstexprError> evaluate_immediate_expr(const Program& program, const Expr& expr,
                                                      ConstexprLimits limits = {});
 
 } // namespace scpp
@@ -53,8 +64,8 @@ namespace {
 
 struct Cell;
 
-void rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value);
-[[nodiscard]] ConstexprValue snapshot_constexpr_value(const std::shared_ptr<Cell>& value, const SourceLocation& loc);
+[[nodiscard]] std::expected<void, ConstexprError> rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value);
+[[nodiscard]] std::expected<ConstexprValue, ConstexprError> snapshot_constexpr_value(const std::shared_ptr<Cell>& value, const SourceLocation& loc);
 
 struct PointerValue {
     std::shared_ptr<Cell> storage;
@@ -99,12 +110,24 @@ struct ExprRewrite {
     std::shared_ptr<Cell> value;
 };
 
-struct ReturnSignal {
-    std::shared_ptr<Cell> value;
-};
+// scpp (the language) has no exceptions, so `execute_stmt`'s own
+// `return`/`break`/`continue` control flow -- previously modeled by
+// throwing/catching ReturnSignal/BreakSignal/ContinueSignal -- is instead
+// folded into the success channel of `execute_stmt`'s own
+// std::expected<ExecOutcome, ConstexprError> return type: `flow` says
+// which (if any) of the three unwound out of the executed statement, and
+// `return_value` carries a Return's own value (null for a `return;` with
+// no operand, or for any other flow). Every caller that recurses into a
+// nested statement must check `flow` itself and decide whether to consume
+// it (a loop consuming its own Break/Continue) or propagate it unchanged
+// to its own caller (exactly mirroring which exception types the old
+// per-construct `catch` clauses used to leave uncaught).
+enum class ExecFlow { Normal, Return, Break, Continue };
 
-struct BreakSignal {};
-struct ContinueSignal {};
+struct ExecOutcome {
+    ExecFlow flow = ExecFlow::Normal;
+    std::shared_ptr<Cell> return_value;
+};
 
 [[nodiscard]] bool types_equal(const Type& a, const Type& b) {
     if (a.kind != b.kind) return false;
@@ -182,25 +205,25 @@ struct ContinueSignal {};
     return type;
 }
 
-[[nodiscard]] std::shared_ptr<Cell> dereference_pointer(const PointerValue& pointer, const Type& pointer_type,
+[[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> dereference_pointer(const PointerValue& pointer, const Type& pointer_type,
                                                         const SourceLocation& loc) {
-    if (!pointer.storage) throw ConstexprError(loc, "constexpr dereference requires a non-null pointer");
+    if (!pointer.storage) return std::unexpected(ConstexprError(loc, "constexpr dereference requires a non-null pointer"));
     if (pointer_type.kind != TypeKind::Pointer || !pointer_type.pointee) {
-        throw ConstexprError(loc, "malformed constexpr pointer type");
+        return std::unexpected(ConstexprError(loc, "malformed constexpr pointer type"));
     }
     if (types_equal(*pointer_type.pointee, pointer.storage->type)) {
         if (pointer.index != 0) {
-            throw ConstexprError(loc, "constexpr pointer arithmetic escaped the pointed-to object");
+            return std::unexpected(ConstexprError(loc, "constexpr pointer arithmetic escaped the pointed-to object"));
         }
         return pointer.storage;
     }
     auto* array = std::get_if<ArrayValue>(&pointer.storage->data);
-    if (!array) throw ConstexprError(loc, "constexpr pointer does not point to supported storage");
+    if (!array) return std::unexpected(ConstexprError(loc, "constexpr pointer does not point to supported storage"));
     if (!types_equal(*pointer_type.pointee, array->element_type)) {
-        throw ConstexprError(loc, "constexpr pointer element type does not match the pointed-to storage");
+        return std::unexpected(ConstexprError(loc, "constexpr pointer element type does not match the pointed-to storage"));
     }
     if (pointer.index < 0 || static_cast<std::size_t>(pointer.index) >= array->elements.size()) {
-        throw ConstexprError(loc, "constexpr dereference out of bounds");
+        return std::unexpected(ConstexprError(loc, "constexpr dereference out of bounds"));
     }
     return array->elements[static_cast<std::size_t>(pointer.index)];
 }
@@ -217,7 +240,7 @@ public:
         }
     }
 
-    std::shared_ptr<Cell> evaluate_root_expr(const Expr& expr) {
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_root_expr(const Expr& expr) {
         frames_.clear();
         steps_ = 0;
         call_depth_ = 0;
@@ -225,18 +248,19 @@ public:
         return evaluate_expr(expr);
     }
 
-    void validate_constexpr_locals(Function& fn) {
-        if (!fn.body) return;
+    [[nodiscard]] std::expected<void, ConstexprError> validate_constexpr_locals(Function& fn) {
+        if (!fn.body) return {};
         frames_.clear();
         steps_ = 0;
         call_depth_ = 0;
         string_storage_counter_ = 0;
         frames_.push_back({});
-        validate_constexpr_stmt_tree(*fn.body);
+        auto result = validate_constexpr_stmt_tree(*fn.body);
         frames_.pop_back();
+        return result;
     }
 
-    std::uint64_t resolve_root_alignment_specs(const std::vector<AlignmentSpecifier>& specs, std::uint64_t natural_alignment,
+    [[nodiscard]] std::expected<std::uint64_t, ConstexprError> resolve_root_alignment_specs(const std::vector<AlignmentSpecifier>& specs, std::uint64_t natural_alignment,
                                                const SourceLocation& loc, std::string_view what) {
         frames_.clear();
         steps_ = 0;
@@ -255,15 +279,19 @@ public:
     // (e.g. from `validate_constexpr_stmt_tree`, which runs inside a
     // `frames_` scope pushed by `validate_constexpr_locals`). Use
     // `resolve_root_array_bound` instead at a true top-level call site.
-    [[nodiscard]] long long evaluate_and_validate_array_bound(const Expr& expr) {
-        std::shared_ptr<Cell> value = evaluate_expr(expr);
+    [[nodiscard]] std::expected<long long, ConstexprError> evaluate_and_validate_array_bound(const Expr& expr) {
+        auto value_result = evaluate_expr(expr);
+        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+        std::shared_ptr<Cell> value = std::move(value_result).value();
         if (!is_integer_like(value->type)) {
-            throw ConstexprError(expr.loc,
-                                 "array bound must be a converted constant expression of type 'std::size_t'");
+            return std::unexpected(ConstexprError(expr.loc,
+                                 "array bound must be a converted constant expression of type 'std::size_t'"));
         }
-        long long raw = as_integer(value, expr.loc);
+        auto raw_result = as_integer(value, expr.loc);
+        if (!raw_result.has_value()) return std::unexpected(std::move(raw_result).error());
+        long long raw = raw_result.value();
         if (raw <= 0) {
-            throw ConstexprError(expr.loc, "array bound must be greater than zero (got " + std::to_string(raw) + ")");
+            return std::unexpected(ConstexprError(expr.loc, "array bound must be greater than zero (got " + std::to_string(raw) + ")"));
         }
         return raw;
     }
@@ -271,7 +299,7 @@ public:
     // Top-level entry point: resets evaluation state (mirroring
     // `resolve_root_alignment_specs`) before evaluating. Only safe to call
     // when no other evaluation is already in progress on this engine.
-    [[nodiscard]] long long resolve_root_array_bound(const Expr& expr) {
+    [[nodiscard]] std::expected<long long, ConstexprError> resolve_root_array_bound(const Expr& expr) {
         frames_.clear();
         steps_ = 0;
         call_depth_ = 0;
@@ -291,29 +319,37 @@ public:
     // this is called from `validate_constexpr_stmt_tree` while a `frames_`
     // scope is already active, so it must not reset the frame stack out
     // from under its caller.
-    void resolve_array_bounds_in_type(Type& type) {
+    [[nodiscard]] std::expected<void, ConstexprError> resolve_array_bounds_in_type(Type& type) {
         switch (type.kind) {
             case TypeKind::Array:
-                if (type.element) resolve_array_bounds_in_type(*type.element);
+                if (type.element) {
+                    if (auto result = resolve_array_bounds_in_type(*type.element); !result.has_value()) return result;
+                }
                 if (type.array_size_expr) {
-                    long long resolved = evaluate_and_validate_array_bound(*type.array_size_expr);
-                    type.array_size = resolved;
+                    auto resolved_result = evaluate_and_validate_array_bound(*type.array_size_expr);
+                    if (!resolved_result.has_value()) return std::unexpected(std::move(resolved_result).error());
+                    type.array_size = std::move(resolved_result).value();
                     type.array_size_expr.reset();
                 }
-                return;
+                return {};
             case TypeKind::Pointer:
             case TypeKind::Reference:
             case TypeKind::Span:
-                if (type.pointee) resolve_array_bounds_in_type(*type.pointee);
-                return;
+                if (type.pointee) return resolve_array_bounds_in_type(*type.pointee);
+                return {};
             case TypeKind::Function:
             case TypeKind::FunctionPointer:
-                if (type.function_return) resolve_array_bounds_in_type(*type.function_return);
-                for (Type& param : type.function_params) resolve_array_bounds_in_type(param);
-                return;
+                if (type.function_return) {
+                    if (auto result = resolve_array_bounds_in_type(*type.function_return); !result.has_value()) return result;
+                }
+                for (Type& param : type.function_params) {
+                    if (auto result = resolve_array_bounds_in_type(param); !result.has_value()) return result;
+                }
+                return {};
             case TypeKind::Named:
-                return;
+                return {};
         }
+        return {};
     }
 
     // ch05 §9.4 (local-constexpr-as-array-bound gap fix): the four methods
@@ -359,15 +395,17 @@ public:
     // `frames_.back()[var_name] = ...` binding) so a later sibling/nested
     // array-bound expression in the same function can look it up, exactly
     // like it already could as an `alignas` operand.
-    void bind_local_constant_for_array_bounds(const Stmt& stmt) {
+    [[nodiscard]] std::expected<void, ConstexprError> bind_local_constant_for_array_bounds(const Stmt& stmt) {
         if (stmt.is_constexpr) {
-            execute_stmt(stmt, named_type("void"));
+            auto result = execute_stmt(stmt, named_type("void"));
+            if (!result.has_value()) return std::unexpected(std::move(result).error());
         } else if (stmt.is_const && (stmt.init || stmt.has_ctor_args)) {
-            try {
-                execute_stmt(stmt, named_type("void"));
-            } catch (const ConstexprError&) {
-            }
+            // Best-effort: a failing local `const` initializer is not (yet)
+            // usable as an array bound, but that's fine here -- silently
+            // tolerated exactly like the original catch(const ConstexprError&) {}.
+            (void)execute_stmt(stmt, named_type("void"));
         }
+        return {};
     }
 
     // ch05 §9.4(6): while a struct/class's own fields are being resolved
@@ -411,61 +449,69 @@ private:
     // incomplete at this point, so evaluating its size/alignment must be
     // rejected rather than silently computed from a partially-resolved
     // definition (see mark_type_incomplete/mark_type_complete above).
-    void reject_if_incomplete(const Type& queried_type, const SourceLocation& loc, std::string_view op) const {
+    [[nodiscard]] std::expected<void, ConstexprError> reject_if_incomplete(const Type& queried_type, const SourceLocation& loc, std::string_view op) const {
         if (queried_type.kind == TypeKind::Named && incomplete_type_names_.contains(queried_type.name)) {
-            throw ConstexprError(loc, "cannot apply '" + std::string(op) + "' to '" + queried_type.name +
-                                          "': it is still an incomplete type at this point");
+            return std::unexpected(ConstexprError(loc, "cannot apply '" + std::string(op) + "' to '" + queried_type.name +
+                                          "': it is still an incomplete type at this point"));
         }
+        return {};
     }
 
-    void tick(const SourceLocation& loc, std::string_view what) {
+    [[nodiscard]] std::expected<void, ConstexprError> tick(const SourceLocation& loc, std::string_view what) {
         ++steps_;
         if (steps_ > limits_.max_steps) {
-            throw ConstexprError(loc, "constexpr evaluation exceeded step budget while " + std::string(what));
+            return std::unexpected(ConstexprError(loc, "constexpr evaluation exceeded step budget while " + std::string(what)));
         }
+        return {};
     }
 
     [[nodiscard]] static bool is_power_of_two(std::uint64_t value) {
         return value != 0 && (value & (value - 1)) == 0;
     }
 
-    [[nodiscard]] std::uint64_t evaluate_alignment_operand(const AlignmentSpecifier& spec) {
+    [[nodiscard]] std::expected<std::uint64_t, ConstexprError> evaluate_alignment_operand(const AlignmentSpecifier& spec) {
         if (spec.operand_is_type) {
             std::optional<TypeLayoutInfo> layout = layout_of_type(program_, spec.type);
             if (!layout.has_value()) {
-                throw ConstexprError(spec.loc, "cannot apply 'alignas' to this type in this version");
+                return std::unexpected(ConstexprError(spec.loc, "cannot apply 'alignas' to this type in this version"));
             }
             return layout->abi_align_bytes;
         }
         if (!spec.expr) {
-            throw ConstexprError(spec.loc, "internal error: malformed alignas operand");
+            return std::unexpected(ConstexprError(spec.loc, "internal error: malformed alignas operand"));
         }
-        std::shared_ptr<Cell> value = evaluate_expr(*spec.expr);
+        auto value_result = evaluate_expr(*spec.expr);
+        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+        std::shared_ptr<Cell> value = std::move(value_result).value();
         if (!is_integer_like(value->type)) {
-            throw ConstexprError(spec.loc, "'alignas' requires an integral constant expression");
+            return std::unexpected(ConstexprError(spec.loc, "'alignas' requires an integral constant expression"));
         }
-        long long raw = as_integer(value, spec.loc);
+        auto raw_result = as_integer(value, spec.loc);
+        if (!raw_result.has_value()) return std::unexpected(std::move(raw_result).error());
+        long long raw = raw_result.value();
         if (raw < 0) {
-            throw ConstexprError(spec.loc, "'alignas' requires a non-negative alignment value");
+            return std::unexpected(ConstexprError(spec.loc, "'alignas' requires a non-negative alignment value"));
         }
         return static_cast<std::uint64_t>(raw);
     }
 
-    [[nodiscard]] std::uint64_t resolve_alignment_specs(const std::vector<AlignmentSpecifier>& specs,
+    [[nodiscard]] std::expected<std::uint64_t, ConstexprError> resolve_alignment_specs(const std::vector<AlignmentSpecifier>& specs,
                                                         std::uint64_t natural_alignment, const SourceLocation& loc,
                                                         std::string_view what) {
         std::uint64_t strictest = 0;
         for (const AlignmentSpecifier& spec : specs) {
-            std::uint64_t requested = evaluate_alignment_operand(spec);
+            auto requested_result = evaluate_alignment_operand(spec);
+            if (!requested_result.has_value()) return std::unexpected(std::move(requested_result).error());
+            std::uint64_t requested = requested_result.value();
             if (requested == 0) continue;
             if (!is_power_of_two(requested)) {
-                throw ConstexprError(spec.loc, "'alignas' requires a positive power-of-two alignment");
+                return std::unexpected(ConstexprError(spec.loc, "'alignas' requires a positive power-of-two alignment"));
             }
             if (requested < natural_alignment) {
-                throw ConstexprError(spec.loc,
+                return std::unexpected(ConstexprError(spec.loc,
                                      "'alignas' requests alignment " + std::to_string(requested) +
                                          ", which is less strict than the natural alignment " +
-                                         std::to_string(natural_alignment) + " of " + std::string(what));
+                                         std::to_string(natural_alignment) + " of " + std::string(what)));
             }
             strictest = std::max(strictest, requested);
         }
@@ -473,109 +519,101 @@ private:
         return strictest > natural_alignment ? strictest : 0;
     }
 
-    void validate_constexpr_stmt_tree(Stmt& stmt) {
-        tick(stmt.loc, "checking a constexpr local declaration");
+    [[nodiscard]] std::expected<void, ConstexprError> validate_constexpr_stmt_tree(Stmt& stmt) {
+        if (auto result = tick(stmt.loc, "checking a constexpr local declaration"); !result.has_value()) return result;
         switch (stmt.kind) {
-            case StmtKind::VarDecl:
+            case StmtKind::VarDecl: {
                 // ch05 §9.4: a local variable's own array bound (e.g.
                 // `char buf[sizeof(int)];`) must be resolved before
                 // anything below reads `stmt.type`'s layout (its
                 // `alignas`, if any) or codegen ever sees this
                 // declaration.
-                resolve_array_bounds_in_type(stmt.type);
+                if (auto result = resolve_array_bounds_in_type(stmt.type); !result.has_value()) return result;
                 if (!stmt.alignment_specs.empty()) {
                     std::optional<TypeLayoutInfo> layout = layout_of_type(program_, stmt.type);
                     if (!layout.has_value()) {
-                        throw ConstexprError(stmt.loc, "cannot apply 'alignas' to this variable type in this version");
+                        return std::unexpected(ConstexprError(stmt.loc, "cannot apply 'alignas' to this variable type in this version"));
                     }
-                    stmt.resolved_alignment =
+                    auto alignment_result =
                         resolve_alignment_specs(stmt.alignment_specs, layout->abi_align_bytes, stmt.loc,
                                                 "variable '" + stmt.var_name + "'");
+                    if (!alignment_result.has_value()) return std::unexpected(std::move(alignment_result).error());
+                    stmt.resolved_alignment = alignment_result.value();
                 }
                 if (stmt.is_constexpr) {
-                    execute_stmt(stmt, named_type("void"));
+                    if (auto result = execute_stmt(stmt, named_type("void")); !result.has_value()) {
+                        return std::unexpected(std::move(result).error());
+                    }
                     if (stmt.init) {
-                        const auto& binding = lookup_binding(stmt.var_name, stmt.loc);
-                        try {
-                            rewrite_expr_as_constant(*stmt.init, binding.cell);
-                        } catch (const ConstexprError&) {
-                            // Some valid constant-expression results (notably
-                            // richer object values) still cannot be lowered
-                            // back into source-form AST here. Validation has
-                            // already succeeded, so keep the original
-                            // initializer in those cases.
-                        }
+                        auto binding_result = lookup_binding(stmt.var_name, stmt.loc);
+                        if (!binding_result.has_value()) return std::unexpected(std::move(binding_result).error());
+                        // Some valid constant-expression results (notably
+                        // richer object values) still cannot be lowered
+                        // back into source-form AST here. Validation has
+                        // already succeeded, so keep the original
+                        // initializer in those cases.
+                        (void)rewrite_expr_as_constant(*stmt.init, binding_result.value().cell);
                     }
                 } else if (stmt.is_const && (stmt.init || stmt.has_ctor_args)) {
-                    try {
-                        execute_stmt(stmt, named_type("void"));
-                    } catch (const ConstexprError&) {
-                    }
+                    (void)execute_stmt(stmt, named_type("void"));
                 }
-                return;
-            case StmtKind::Block:
+                return {};
+            }
+            case StmtKind::Block: {
                 frames_.push_back({});
-                try {
-                    for (StmtPtr& nested : stmt.statements) validate_constexpr_stmt_tree(*nested);
-                } catch (...) {
-                    frames_.pop_back();
-                    throw;
+                std::expected<void, ConstexprError> result;
+                for (StmtPtr& nested : stmt.statements) {
+                    result = validate_constexpr_stmt_tree(*nested);
+                    if (!result.has_value()) break;
                 }
                 frames_.pop_back();
-                return;
-            case StmtKind::If:
+                return result;
+            }
+            case StmtKind::If: {
                 if (stmt.then_branch) {
                     frames_.push_back({});
-                    try {
-                        validate_constexpr_stmt_tree(*stmt.then_branch);
-                    } catch (...) {
-                        frames_.pop_back();
-                        throw;
-                    }
+                    auto result = validate_constexpr_stmt_tree(*stmt.then_branch);
                     frames_.pop_back();
+                    if (!result.has_value()) return result;
                 }
                 if (stmt.else_branch) {
                     frames_.push_back({});
-                    try {
-                        validate_constexpr_stmt_tree(*stmt.else_branch);
-                    } catch (...) {
-                        frames_.pop_back();
-                        throw;
-                    }
+                    auto result = validate_constexpr_stmt_tree(*stmt.else_branch);
                     frames_.pop_back();
+                    if (!result.has_value()) return result;
                 }
-                return;
-            case StmtKind::While:
+                return {};
+            }
+            case StmtKind::While: {
                 if (stmt.then_branch) {
                     frames_.push_back({});
-                    try {
-                        validate_constexpr_stmt_tree(*stmt.then_branch);
-                    } catch (...) {
-                        frames_.pop_back();
-                        throw;
-                    }
+                    auto result = validate_constexpr_stmt_tree(*stmt.then_branch);
                     frames_.pop_back();
+                    if (!result.has_value()) return result;
                 }
-                return;
-            case StmtKind::Switch:
+                return {};
+            }
+            case StmtKind::Switch: {
                 for (SwitchCase& switch_case : stmt.switch_cases) {
                     frames_.push_back({});
-                    try {
-                        for (StmtPtr& nested : switch_case.statements) validate_constexpr_stmt_tree(*nested);
-                    } catch (...) {
-                        frames_.pop_back();
-                        throw;
+                    std::expected<void, ConstexprError> result;
+                    for (StmtPtr& nested : switch_case.statements) {
+                        result = validate_constexpr_stmt_tree(*nested);
+                        if (!result.has_value()) break;
                     }
                     frames_.pop_back();
+                    if (!result.has_value()) return result;
                 }
-                return;
+                return {};
+            }
             case StmtKind::Return:
             case StmtKind::Break:
             case StmtKind::Continue:
             case StmtKind::Fallthrough:
             case StmtKind::ExprStmt:
-                return;
+                return {};
         }
+        return {};
     }
 
     [[nodiscard]] std::shared_ptr<Cell> clone_cell(const std::shared_ptr<Cell>& cell) {
@@ -625,21 +663,23 @@ private:
         return cell;
     }
 
-    [[nodiscard]] std::vector<ClassField> collect_class_fields(const ClassDef& def) {
+    [[nodiscard]] std::expected<std::vector<ClassField>, ConstexprError> collect_class_fields(const ClassDef& def) {
         std::vector<ClassField> fields;
         if (auto base = def.direct_ordinary_base()) {
             auto base_it = classes_by_name_.find(base->get().base_type.name);
             if (base_it == classes_by_name_.end()) {
-                throw ConstexprError({}, "missing constexpr class definition for base class '" + base->get().base_type.name + "'");
+                return std::unexpected(ConstexprError({}, "missing constexpr class definition for base class '" + base->get().base_type.name + "'"));
             }
-            std::vector<ClassField> base_fields = collect_class_fields(*base_it->second);
+            auto base_fields_result = collect_class_fields(*base_it->second);
+            if (!base_fields_result.has_value()) return std::unexpected(std::move(base_fields_result).error());
+            std::vector<ClassField> base_fields = std::move(base_fields_result).value();
             fields.insert(fields.end(), base_fields.begin(), base_fields.end());
         }
         fields.insert(fields.end(), def.fields.begin(), def.fields.end());
         return fields;
     }
 
-    [[nodiscard]] std::shared_ptr<Cell> make_default_cell(const Type& type, const SourceLocation& loc) {
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> make_default_cell(const Type& type, const SourceLocation& loc) {
         auto cell = std::make_shared<Cell>();
         cell->type = type;
         switch (type.kind) {
@@ -664,7 +704,9 @@ private:
                     ObjectValue object;
                     object.type_name = type.name;
                     for (const StructField& field : struct_it->second->fields) {
-                        object.fields.emplace(field.name, make_default_cell(field.type, loc));
+                        auto field_result = make_default_cell(field.type, loc);
+                        if (!field_result.has_value()) return std::unexpected(std::move(field_result).error());
+                        object.fields.emplace(field.name, std::move(field_result).value());
                     }
                     cell->data = std::move(object);
                     return cell;
@@ -672,51 +714,63 @@ private:
                 if (auto class_it = classes_by_name_.find(type.name); class_it != classes_by_name_.end()) {
                     ObjectValue object;
                     object.type_name = type.name;
-                    for (const ClassField& field : collect_class_fields(*class_it->second)) {
+                    auto fields_result = collect_class_fields(*class_it->second);
+                    if (!fields_result.has_value()) return std::unexpected(std::move(fields_result).error());
+                    for (const ClassField& field : fields_result.value()) {
                         if (field.type.kind == TypeKind::Reference && field.type.pointee) {
-                            object.fields.emplace(field.name, make_default_cell(*field.type.pointee, loc));
+                            auto field_result = make_default_cell(*field.type.pointee, loc);
+                            if (!field_result.has_value()) return std::unexpected(std::move(field_result).error());
+                            object.fields.emplace(field.name, std::move(field_result).value());
                         } else {
-                            object.fields.emplace(field.name, make_default_cell(field.type, loc));
+                            auto field_result = make_default_cell(field.type, loc);
+                            if (!field_result.has_value()) return std::unexpected(std::move(field_result).error());
+                            object.fields.emplace(field.name, std::move(field_result).value());
                         }
                     }
                     cell->data = std::move(object);
                     return cell;
                 }
-                throw ConstexprError(loc, "type '" + type.name + "' is not constexpr-compatible in Phase D1");
+                return std::unexpected(ConstexprError(loc, "type '" + type.name + "' is not constexpr-compatible in Phase D1"));
             case TypeKind::Pointer:
                 cell->data = PointerValue{};
                 return cell;
             case TypeKind::Array: {
-                if (!type.element) throw ConstexprError(loc, "malformed array type in constexpr evaluator");
+                if (!type.element) return std::unexpected(ConstexprError(loc, "malformed array type in constexpr evaluator"));
                 ArrayValue array;
                 array.element_type = *type.element;
-                for (long long i = 0; i < type.array_size; ++i) array.elements.push_back(make_default_cell(*type.element, loc));
+                for (long long i = 0; i < type.array_size; ++i) {
+                    auto element_result = make_default_cell(*type.element, loc);
+                    if (!element_result.has_value()) return std::unexpected(std::move(element_result).error());
+                    array.elements.push_back(std::move(element_result).value());
+                }
                 cell->data = std::move(array);
                 return cell;
             }
             case TypeKind::Reference:
             case TypeKind::Function:
             case TypeKind::FunctionPointer:
-                throw ConstexprError(loc, "type is not yet supported by the constexpr evaluator in Phase D1");
+                return std::unexpected(ConstexprError(loc, "type is not yet supported by the constexpr evaluator in Phase D1"));
             case TypeKind::Span:
                 if (type.is_mutable_ref) {
-                    throw ConstexprError(loc, "mutable std::span<T> is not supported during constant evaluation");
+                    return std::unexpected(ConstexprError(loc, "mutable std::span<T> is not supported during constant evaluation"));
                 }
                 cell->data = SpanValue{};
                 return cell;
         }
-        throw ConstexprError(loc, "unsupported constexpr type");
+        return std::unexpected(ConstexprError(loc, "unsupported constexpr type"));
     }
 
-    [[nodiscard]] Binding lookup_binding(const std::string& name, const SourceLocation& loc) {
+    [[nodiscard]] std::expected<Binding, ConstexprError> lookup_binding(const std::string& name, const SourceLocation& loc) {
         for (auto it = frames_.rbegin(); it != frames_.rend(); ++it) {
             auto binding_it = it->find(name);
             if (binding_it != it->end()) return binding_it->second;
         }
-        if (std::shared_ptr<Cell> global_value = resolve_global_constant(name, loc)) {
+        auto global_result = resolve_global_constant(name, loc);
+        if (!global_result.has_value()) return std::unexpected(std::move(global_result).error());
+        if (std::shared_ptr<Cell> global_value = std::move(global_result).value()) {
             return Binding{global_value, /*read_only=*/true};
         }
-        throw ConstexprError(loc, "expression is not a constant expression: identifier '" + name + "' is not available");
+        return std::unexpected(ConstexprError(loc, "expression is not a constant expression: identifier '" + name + "' is not available"));
     }
 
     // ch05 §9.4(8): a required constant expression may name a global
@@ -730,7 +784,7 @@ private:
     // frame stack: a global initializer must only ever see other
     // globals/functions, never whatever local variables happen to be
     // live in the caller that triggered this lookup.
-    [[nodiscard]] std::shared_ptr<Cell> resolve_global_constant(const std::string& name, const SourceLocation& loc) {
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> resolve_global_constant(const std::string& name, const SourceLocation& loc) {
         if (auto cached = resolved_global_constants_.find(name); cached != resolved_global_constants_.end()) {
             return cached->second;
         }
@@ -739,43 +793,46 @@ private:
         const GlobalVar& global = *global_it->second;
         if (global.decl == nullptr || !global.decl->is_constexpr || !global.decl->init) return nullptr;
         if (globals_resolving_.contains(name)) {
-            throw ConstexprError(loc, "constant expression circularly depends on global constexpr variable '" + name + "'");
+            return std::unexpected(ConstexprError(loc, "constant expression circularly depends on global constexpr variable '" + name + "'"));
         }
         globals_resolving_.insert(name);
         std::vector<std::unordered_map<std::string, Binding>> saved_frames = std::move(frames_);
         frames_.clear();
-        std::shared_ptr<Cell> value;
-        try {
-            value = evaluate_expr(*global.decl->init);
-        } catch (...) {
-            frames_ = std::move(saved_frames);
-            globals_resolving_.erase(name);
-            throw;
-        }
+        auto value_result = evaluate_expr(*global.decl->init);
         frames_ = std::move(saved_frames);
         globals_resolving_.erase(name);
+        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+        std::shared_ptr<Cell> value = std::move(value_result).value();
         resolved_global_constants_.emplace(name, value);
         return value;
     }
 
-    [[nodiscard]] long long as_integer(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
+    [[nodiscard]] std::expected<long long, ConstexprError> as_integer(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
         if (!is_integer_like(cell->type)) {
-            throw ConstexprError(loc, "expected an integer-like constexpr value");
+            return std::unexpected(ConstexprError(loc, "expected an integer-like constexpr value"));
         }
         if (is_named_type(cell->type, "bool")) return std::get<bool>(cell->data) ? 1LL : 0LL;
         return std::get<long long>(cell->data);
     }
 
-    [[nodiscard]] double as_double(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
+    [[nodiscard]] std::expected<double, ConstexprError> as_double(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
         if (is_floating_like(cell->type)) return std::get<double>(cell->data);
-        if (is_integer_like(cell->type)) return static_cast<double>(as_integer(cell, loc));
-        throw ConstexprError(loc, "expected a numeric constexpr value");
+        if (is_integer_like(cell->type)) {
+            auto result = as_integer(cell, loc);
+            if (!result.has_value()) return std::unexpected(std::move(result).error());
+            return static_cast<double>(result.value());
+        }
+        return std::unexpected(ConstexprError(loc, "expected a numeric constexpr value"));
     }
 
-    [[nodiscard]] bool as_bool(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
+    [[nodiscard]] std::expected<bool, ConstexprError> as_bool(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
         if (is_named_type(cell->type, "bool")) return std::get<bool>(cell->data);
-        if (is_integer_like(cell->type)) return as_integer(cell, loc) != 0;
-        throw ConstexprError(loc, "expected a boolean constexpr value");
+        if (is_integer_like(cell->type)) {
+            auto result = as_integer(cell, loc);
+            if (!result.has_value()) return std::unexpected(std::move(result).error());
+            return result.value() != 0;
+        }
+        return std::unexpected(ConstexprError(loc, "expected a boolean constexpr value"));
     }
 
     [[nodiscard]] bool is_enum_like(const Type& type) {
@@ -786,10 +843,10 @@ private:
         return false;
     }
 
-    [[nodiscard]] long long switch_match_key(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
+    [[nodiscard]] std::expected<long long, ConstexprError> switch_match_key(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
         if (is_integer_like(cell->type)) return as_integer(cell, loc);
         if (is_enum_like(cell->type)) return std::get<long long>(cell->data);
-        throw ConstexprError(loc, "switch requires an integral or enum constexpr value");
+        return std::unexpected(ConstexprError(loc, "switch requires an integral or enum constexpr value"));
     }
 
     [[nodiscard]] std::pair<long long, long long> integer_bounds_for_type(const Type& type) const {
@@ -815,44 +872,47 @@ private:
         return {std::numeric_limits<long long>::min(), std::numeric_limits<long long>::max()};
     }
 
-    void checked_assign_integer(const std::shared_ptr<Cell>& target, long long value, const SourceLocation& loc) {
+    [[nodiscard]] std::expected<void, ConstexprError> checked_assign_integer(const std::shared_ptr<Cell>& target, long long value, const SourceLocation& loc) {
         if (is_named_type(target->type, "bool")) {
             target->data = (value != 0);
-            return;
+            return {};
         }
         auto [min_value, max_value] = integer_bounds_for_type(target->type);
         if (value < min_value || value > max_value) {
-            throw ConstexprError(loc, "constexpr integer overflow");
+            return std::unexpected(ConstexprError(loc, "constexpr integer overflow"));
         }
         target->data = value;
+        return {};
     }
 
-    [[nodiscard]] std::shared_ptr<Cell> make_checked_int_cell(long long value, const SourceLocation& loc) {
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> make_checked_int_cell(long long value, const SourceLocation& loc) {
         return make_checked_int_cell_as(named_type("int"), value, loc);
     }
 
-    [[nodiscard]] std::shared_ptr<Cell> make_checked_int_cell_as(const Type& type, long long value, const SourceLocation& loc) {
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> make_checked_int_cell_as(const Type& type, long long value, const SourceLocation& loc) {
         auto cell = std::make_shared<Cell>();
         cell->type = type;
-        checked_assign_integer(cell, value, loc);
+        auto result = checked_assign_integer(cell, value, loc);
+        if (!result.has_value()) return std::unexpected(std::move(result).error());
         return cell;
     }
 
-    void copy_into(const std::shared_ptr<Cell>& target, const std::shared_ptr<Cell>& source, const SourceLocation& loc) {
+    [[nodiscard]] std::expected<void, ConstexprError> copy_into(const std::shared_ptr<Cell>& target, const std::shared_ptr<Cell>& source, const SourceLocation& loc) {
         if (!types_equal(target->type, source->type)) {
-            throw ConstexprError(loc, "constexpr assignment requires exactly matching types");
+            return std::unexpected(ConstexprError(loc, "constexpr assignment requires exactly matching types"));
         }
         std::shared_ptr<Cell> cloned = clone_cell(source);
         target->data = std::move(cloned->data);
+        return {};
     }
 
-    [[nodiscard]] std::shared_ptr<Cell> bind_read_only_span(const Type& span_type, const Expr& init_expr,
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> bind_read_only_span(const Type& span_type, const Expr& init_expr,
                                                             const SourceLocation& loc) {
         if (span_type.kind != TypeKind::Span || !span_type.pointee) {
-            throw ConstexprError(loc, "malformed constexpr span type");
+            return std::unexpected(ConstexprError(loc, "malformed constexpr span type"));
         }
         if (span_type.is_mutable_ref) {
-            throw ConstexprError(loc, "mutable std::span<T> is not supported during constant evaluation");
+            return std::unexpected(ConstexprError(loc, "mutable std::span<T> is not supported during constant evaluation"));
         }
 
         auto result = std::make_shared<Cell>();
@@ -860,14 +920,16 @@ private:
         SpanValue span;
 
         if (init_expr.kind == ExprKind::StringLiteral) {
-            std::shared_ptr<Cell> pointer_cell = evaluate_expr(init_expr);
+            auto pointer_cell_result = evaluate_expr(init_expr);
+            if (!pointer_cell_result.has_value()) return std::unexpected(std::move(pointer_cell_result).error());
+            std::shared_ptr<Cell> pointer_cell = std::move(pointer_cell_result).value();
             auto* pointer = std::get_if<PointerValue>(&pointer_cell->data);
             auto* array = pointer && pointer->storage ? std::get_if<ArrayValue>(&pointer->storage->data) : nullptr;
             if (!pointer || !array) {
-                throw ConstexprError(loc, "string-literal span binding lost its backing storage");
+                return std::unexpected(ConstexprError(loc, "string-literal span binding lost its backing storage"));
             }
             if (!types_equal(*span_type.pointee, array->element_type)) {
-                throw ConstexprError(loc, "string-literal element type does not match std::span element type");
+                return std::unexpected(ConstexprError(loc, "string-literal element type does not match std::span element type"));
             }
             span.pointer = *pointer;
             span.size = static_cast<long long>(array->elements.size()) - 1;
@@ -875,13 +937,15 @@ private:
             return result;
         }
 
-        LValue source = resolve_lvalue(init_expr);
+        auto source_result = resolve_lvalue(init_expr);
+        if (!source_result.has_value()) return std::unexpected(std::move(source_result).error());
+        LValue source = std::move(source_result).value();
         auto* array = std::get_if<ArrayValue>(&source.cell->data);
         if (!array) {
-            throw ConstexprError(loc, "std::span<const T> can only be constructed from an array or string literal");
+            return std::unexpected(ConstexprError(loc, "std::span<const T> can only be constructed from an array or string literal"));
         }
         if (!types_equal(*span_type.pointee, array->element_type)) {
-            throw ConstexprError(loc, "array element type does not match std::span element type");
+            return std::unexpected(ConstexprError(loc, "array element type does not match std::span element type"));
         }
         span.pointer.storage = source.cell;
         span.pointer.index = 0;
@@ -891,74 +955,97 @@ private:
         return result;
     }
 
-    [[nodiscard]] LValue resolve_lvalue(const Expr& expr) {
-        tick(expr.loc, "resolving an lvalue");
+    [[nodiscard]] std::expected<LValue, ConstexprError> resolve_lvalue(const Expr& expr) {
+        if (auto result = tick(expr.loc, "resolving an lvalue"); !result.has_value()) return std::unexpected(std::move(result).error());
         switch (expr.kind) {
             case ExprKind::Identifier: {
-                Binding binding = lookup_binding(expr.name, expr.loc);
+                auto binding_result = lookup_binding(expr.name, expr.loc);
+                if (!binding_result.has_value()) return std::unexpected(std::move(binding_result).error());
+                Binding binding = std::move(binding_result).value();
                 return LValue{binding.cell, binding.read_only};
             }
             case ExprKind::Member: {
-                LValue base = resolve_lvalue(*expr.lhs);
+                auto base_result = resolve_lvalue(*expr.lhs);
+                if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
+                LValue base = std::move(base_result).value();
                 auto* object = std::get_if<ObjectValue>(&base.cell->data);
-                if (!object) throw ConstexprError(expr.loc, "member access requires a constexpr object value");
+                if (!object) return std::unexpected(ConstexprError(expr.loc, "member access requires a constexpr object value"));
                 auto it = object->fields.find(expr.name);
                 if (it == object->fields.end()) {
-                    throw ConstexprError(expr.loc, "unknown constexpr field '" + expr.name + "'");
+                    return std::unexpected(ConstexprError(expr.loc, "unknown constexpr field '" + expr.name + "'"));
                 }
                 return LValue{it->second, base.read_only};
             }
             case ExprKind::Subscript: {
                 std::shared_ptr<Cell> base;
                 bool base_read_only = false;
-                try {
-                    LValue base_lvalue = resolve_lvalue(*expr.lhs);
-                    base = base_lvalue.cell;
-                    base_read_only = base_lvalue.read_only;
-                } catch (const ConstexprError&) {
-                    base = evaluate_expr(*expr.lhs);
+                // Speculatively try lvalue resolution first (needed so
+                // that e.g. `arr[i] = 1` assigns through the real
+                // storage); an expression that isn't itself an lvalue
+                // (e.g. a function call returning an array by value)
+                // falls back to plain evaluation, matching the original
+                // try/catch(const ConstexprError&) fallback exactly.
+                auto base_lvalue_result = resolve_lvalue(*expr.lhs);
+                if (base_lvalue_result.has_value()) {
+                    base = base_lvalue_result.value().cell;
+                    base_read_only = base_lvalue_result.value().read_only;
+                } else {
+                    auto base_value_result = evaluate_expr(*expr.lhs);
+                    if (!base_value_result.has_value()) return std::unexpected(std::move(base_value_result).error());
+                    base = std::move(base_value_result).value();
                 }
-                long long index = as_integer(evaluate_expr(*expr.rhs), expr.loc);
+                auto index_value_result = evaluate_expr(*expr.rhs);
+                if (!index_value_result.has_value()) return std::unexpected(std::move(index_value_result).error());
+                auto index_result = as_integer(index_value_result.value(), expr.loc);
+                if (!index_result.has_value()) return std::unexpected(std::move(index_result).error());
+                long long index = index_result.value();
                 if (auto* array = std::get_if<ArrayValue>(&base->data)) {
                     if (index < 0 || static_cast<std::size_t>(index) >= array->elements.size()) {
-                        throw ConstexprError(expr.loc, "constexpr subscript out of bounds");
+                        return std::unexpected(ConstexprError(expr.loc, "constexpr subscript out of bounds"));
                     }
                     return LValue{array->elements[static_cast<std::size_t>(index)], base_read_only};
                 }
                 if (auto* span = std::get_if<SpanValue>(&base->data)) {
                     if (index < 0 || index >= span->size) {
-                        throw ConstexprError(expr.loc, "constexpr span subscript out of bounds");
+                        return std::unexpected(ConstexprError(expr.loc, "constexpr span subscript out of bounds"));
                     }
                     PointerValue element_ptr = span->pointer;
                     element_ptr.index += index;
-                    return LValue{dereference_pointer(element_ptr, make_pointer_type_to(*base->type.pointee, false), expr.loc),
-                                  true};
+                    auto dereferenced = dereference_pointer(element_ptr, make_pointer_type_to(*base->type.pointee, false), expr.loc);
+                    if (!dereferenced.has_value()) return std::unexpected(std::move(dereferenced).error());
+                    return LValue{std::move(dereferenced).value(), true};
                 }
                 if (auto* pointer = std::get_if<PointerValue>(&base->data)) {
-                    if (!base->type.pointee) throw ConstexprError(expr.loc, "malformed constexpr pointer type");
+                    if (!base->type.pointee) return std::unexpected(ConstexprError(expr.loc, "malformed constexpr pointer type"));
                     PointerValue shifted = *pointer;
                     shifted.index += index;
                     auto* array = shifted.storage ? std::get_if<ArrayValue>(&shifted.storage->data) : nullptr;
-                    if (!array) throw ConstexprError(expr.loc, "constexpr pointer does not point to indexable storage");
+                    if (!array) return std::unexpected(ConstexprError(expr.loc, "constexpr pointer does not point to indexable storage"));
                     if (shifted.index < 0 || static_cast<std::size_t>(shifted.index) >= array->elements.size()) {
-                        throw ConstexprError(expr.loc, "constexpr subscript out of bounds");
+                        return std::unexpected(ConstexprError(expr.loc, "constexpr subscript out of bounds"));
                     }
-                    return LValue{dereference_pointer(shifted, base->type, expr.loc), true};
+                    auto dereferenced = dereference_pointer(shifted, base->type, expr.loc);
+                    if (!dereferenced.has_value()) return std::unexpected(std::move(dereferenced).error());
+                    return LValue{std::move(dereferenced).value(), true};
                 }
-                throw ConstexprError(expr.loc, "constexpr subscript requires an array, pointer, or std::span");
+                return std::unexpected(ConstexprError(expr.loc, "constexpr subscript requires an array, pointer, or std::span"));
             }
             case ExprKind::Unary:
                 if (expr.unary_op == UnaryOp::Deref) {
-                    std::shared_ptr<Cell> pointer_cell = evaluate_expr(*expr.lhs);
+                    auto pointer_cell_result = evaluate_expr(*expr.lhs);
+                    if (!pointer_cell_result.has_value()) return std::unexpected(std::move(pointer_cell_result).error());
+                    std::shared_ptr<Cell> pointer_cell = std::move(pointer_cell_result).value();
                     auto* pointer = std::get_if<PointerValue>(&pointer_cell->data);
-                    if (!pointer) throw ConstexprError(expr.loc, "constexpr dereference requires a pointer");
-                    return LValue{dereference_pointer(*pointer, pointer_cell->type, expr.loc), true};
+                    if (!pointer) return std::unexpected(ConstexprError(expr.loc, "constexpr dereference requires a pointer"));
+                    auto dereferenced = dereference_pointer(*pointer, pointer_cell->type, expr.loc);
+                    if (!dereferenced.has_value()) return std::unexpected(std::move(dereferenced).error());
+                    return LValue{std::move(dereferenced).value(), true};
                 }
                 break;
             default:
                 break;
         }
-        throw ConstexprError(expr.loc, "expression is not an assignable constexpr lvalue");
+        return std::unexpected(ConstexprError(expr.loc, "expression is not an assignable constexpr lvalue"));
     }
 
     [[nodiscard]] std::shared_ptr<Cell> make_string_literal_pointer(const Expr& expr) {
@@ -1040,24 +1127,24 @@ private:
         }
     }
 
-    [[nodiscard]] std::shared_ptr<Cell> clone_cell_as_type(const std::shared_ptr<Cell>& cell, const Type& target_type,
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> clone_cell_as_type(const std::shared_ptr<Cell>& cell, const Type& target_type,
                                                            const SourceLocation& loc) {
         auto clone = clone_cell(cell);
         if (!is_same_or_base_class_type(target_type, clone->type)) {
-            throw ConstexprError(loc, "constexpr value is not compatible with requested parameter type");
+            return std::unexpected(ConstexprError(loc, "constexpr value is not compatible with requested parameter type"));
         }
         clone->type = target_type;
         if (auto* object = std::get_if<ObjectValue>(&clone->data)) object->type_name = target_type.name;
         return clone;
     }
 
-    [[nodiscard]] std::shared_ptr<Cell> alias_cell_as_type(const std::shared_ptr<Cell>& cell, const Type& target_type,
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> alias_cell_as_type(const std::shared_ptr<Cell>& cell, const Type& target_type,
                                                            const SourceLocation& loc) {
         if (!is_same_or_base_class_type(target_type, cell->type)) {
-            throw ConstexprError(loc, "constexpr object is not compatible with requested reference type");
+            return std::unexpected(ConstexprError(loc, "constexpr object is not compatible with requested reference type"));
         }
         auto* object = std::get_if<ObjectValue>(&cell->data);
-        if (!object) throw ConstexprError(loc, "constexpr base-class binding requires an object value");
+        if (!object) return std::unexpected(ConstexprError(loc, "constexpr base-class binding requires an object value"));
         auto alias = std::make_shared<Cell>();
         alias->type = target_type;
         ObjectValue alias_object;
@@ -1153,69 +1240,93 @@ private:
                this_param.pointee->kind == TypeKind::Named && this_param.pointee->name == fn.member_owner_class;
     }
 
-    void apply_default_initializers_to_named_object(const std::shared_ptr<Cell>& object_cell, const Type& object_type,
+    [[nodiscard]] std::expected<void, ConstexprError> apply_default_initializers_to_named_object(const std::shared_ptr<Cell>& object_cell, const Type& object_type,
                                                     const SourceLocation& loc) {
-        if (object_type.kind != TypeKind::Named) return;
+        if (object_type.kind != TypeKind::Named) return {};
         auto* object = std::get_if<ObjectValue>(&object_cell->data);
-        if (!object) return;
+        if (!object) return {};
         if (auto struct_it = structs_by_name_.find(object_type.name); struct_it != structs_by_name_.end()) {
             for (const StructField& field : struct_it->second->fields) {
                 if (!field.default_initializer) continue;
                 auto field_it = object->fields.find(field.name);
                 if (field_it == object->fields.end()) continue;
-                apply_initializer_to_field(field_it->second, field.type, *field.default_initializer, loc);
+                if (auto result = apply_initializer_to_field(field_it->second, field.type, *field.default_initializer, loc);
+                    !result.has_value()) {
+                    return result;
+                }
             }
-            return;
+            return {};
         }
         if (auto class_it = classes_by_name_.find(object_type.name); class_it != classes_by_name_.end()) {
-            for (const ClassField& field : collect_class_fields(*class_it->second)) {
+            auto fields_result = collect_class_fields(*class_it->second);
+            if (!fields_result.has_value()) return std::unexpected(std::move(fields_result).error());
+            for (const ClassField& field : fields_result.value()) {
                 if (!field.default_initializer) continue;
                 auto field_it = object->fields.find(field.name);
                 if (field_it == object->fields.end()) continue;
-                apply_initializer_to_field(field_it->second, field.type, *field.default_initializer, loc);
+                if (auto result = apply_initializer_to_field(field_it->second, field.type, *field.default_initializer, loc);
+                    !result.has_value()) {
+                    return result;
+                }
             }
         }
+        return {};
     }
 
-    void apply_initializer_to_field(std::shared_ptr<Cell>& field_cell, const Type& field_type, const Initializer& init,
+    [[nodiscard]] std::expected<void, ConstexprError> apply_initializer_to_field(std::shared_ptr<Cell>& field_cell, const Type& field_type, const Initializer& init,
                                     const SourceLocation& loc) {
         if (field_type.kind == TypeKind::Reference) {
             const Expr* ref_expr = init.expr.get();
             if (init.has_brace_args) {
                 if (init.brace_args.size() != 1) {
-                    throw ConstexprError(loc, "a reference member must be initialized with exactly one expression");
+                    return std::unexpected(ConstexprError(loc, "a reference member must be initialized with exactly one expression"));
                 }
                 ref_expr = init.brace_args[0].get();
             }
-            if (ref_expr == nullptr) throw ConstexprError(loc, "a reference member must be initialized");
+            if (ref_expr == nullptr) return std::unexpected(ConstexprError(loc, "a reference member must be initialized"));
             if (field_type.is_mutable_ref) {
-                field_cell = resolve_lvalue(*ref_expr).cell;
+                auto lvalue_result = resolve_lvalue(*ref_expr);
+                if (!lvalue_result.has_value()) return std::unexpected(std::move(lvalue_result).error());
+                field_cell = lvalue_result.value().cell;
             } else {
-                try {
-                    field_cell = resolve_lvalue(*ref_expr).cell;
-                } catch (const ConstexprError&) {
-                    field_cell = evaluate_expr(*ref_expr);
+                // Speculative: prefer binding through the referenced
+                // lvalue's real storage; a non-lvalue initializer (e.g. a
+                // temporary) falls back to plain evaluation, exactly like
+                // the original try/catch(const ConstexprError&) fallback.
+                auto lvalue_result = resolve_lvalue(*ref_expr);
+                if (lvalue_result.has_value()) {
+                    field_cell = lvalue_result.value().cell;
+                } else {
+                    auto value_result = evaluate_expr(*ref_expr);
+                    if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                    field_cell = std::move(value_result).value();
                 }
             }
-            return;
+            return {};
         }
         if (field_type.kind == TypeKind::Span) {
             const Expr* span_expr = init.expr.get();
             if (init.has_brace_args) {
                 if (init.brace_args.size() != 1) {
-                    throw ConstexprError(loc, "a span member must be initialized with exactly one array expression");
+                    return std::unexpected(ConstexprError(loc, "a span member must be initialized with exactly one array expression"));
                 }
                 span_expr = init.brace_args[0].get();
             }
-            if (span_expr == nullptr) throw ConstexprError(loc, "a span member must be initialized");
-            field_cell = bind_read_only_span(field_type, *span_expr, loc);
-            return;
+            if (span_expr == nullptr) return std::unexpected(ConstexprError(loc, "a span member must be initialized"));
+            auto span_result = bind_read_only_span(field_type, *span_expr, loc);
+            if (!span_result.has_value()) return std::unexpected(std::move(span_result).error());
+            field_cell = std::move(span_result).value();
+            return {};
         }
         if (field_type.kind == TypeKind::Named &&
             (is_class_name(field_type.name) || structs_by_name_.contains(field_type.name)) && init.has_brace_args) {
             std::vector<std::shared_ptr<Cell>> arg_values;
             arg_values.reserve(init.brace_args.size());
-            for (const ExprPtr& arg : init.brace_args) arg_values.push_back(evaluate_expr(*arg));
+            for (const ExprPtr& arg : init.brace_args) {
+                auto arg_result = evaluate_expr(*arg);
+                if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
+                arg_values.push_back(std::move(arg_result).value());
+            }
             if (const Function* ctor = find_constructor(field_type.name, arg_values, /*require_constexpr=*/true)) {
                 std::vector<Binding> bindings;
                 bindings.reserve(ctor->params.size());
@@ -1225,44 +1336,61 @@ private:
                     const Expr& arg_expr = *init.brace_args[i - 1];
                     if (param.type.kind == TypeKind::Reference) {
                         if (param.type.is_rvalue_ref) {
-                            bindings.push_back(Binding{evaluate_expr(arg_expr), false});
+                            auto value_result = evaluate_expr(arg_expr);
+                            if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                            bindings.push_back(Binding{std::move(value_result).value(), false});
                         } else if (param.type.is_mutable_ref) {
-                            bindings.push_back(Binding{resolve_lvalue(arg_expr).cell, false});
+                            auto lvalue_result = resolve_lvalue(arg_expr);
+                            if (!lvalue_result.has_value()) return std::unexpected(std::move(lvalue_result).error());
+                            bindings.push_back(Binding{lvalue_result.value().cell, false});
                         } else {
-                            try {
-                                bindings.push_back(Binding{resolve_lvalue(arg_expr).cell, true});
-                            } catch (const ConstexprError&) {
-                                bindings.push_back(Binding{evaluate_expr(arg_expr), true});
+                            auto lvalue_result = resolve_lvalue(arg_expr);
+                            if (lvalue_result.has_value()) {
+                                bindings.push_back(Binding{lvalue_result.value().cell, true});
+                            } else {
+                                auto value_result = evaluate_expr(arg_expr);
+                                if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                                bindings.push_back(Binding{std::move(value_result).value(), true});
                             }
                         }
                     } else {
-                        bindings.push_back(Binding{evaluate_expr(arg_expr), false});
+                        auto value_result = evaluate_expr(arg_expr);
+                        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                        bindings.push_back(Binding{std::move(value_result).value(), false});
                     }
                 }
-                static_cast<void>(call_function(*ctor, std::move(bindings), loc));
-                return;
+                auto call_result = call_function(*ctor, std::move(bindings), loc);
+                if (!call_result.has_value()) return std::unexpected(std::move(call_result).error());
+                return {};
             }
             if (init.brace_args.empty()) {
-                apply_default_initializers_to_named_object(field_cell, field_type, loc);
-                return;
+                return apply_default_initializers_to_named_object(field_cell, field_type, loc);
             }
         }
         if (init.has_brace_args) {
-            if (init.brace_args.empty()) return;
+            if (init.brace_args.empty()) return {};
             if (init.brace_args.size() != 1) {
-                throw ConstexprError(loc, "brace-initialization of this member requires exactly one expression");
+                return std::unexpected(ConstexprError(loc, "brace-initialization of this member requires exactly one expression"));
             }
-            copy_into(field_cell, evaluate_expr(*init.brace_args[0]), loc);
-            return;
+            auto value_result = evaluate_expr(*init.brace_args[0]);
+            if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+            return copy_into(field_cell, std::move(value_result).value(), loc);
         }
-        if (init.expr) copy_into(field_cell, evaluate_expr(*init.expr), loc);
+        if (init.expr) {
+            auto value_result = evaluate_expr(*init.expr);
+            if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+            return copy_into(field_cell, std::move(value_result).value(), loc);
+        }
+        return {};
     }
 
-    void execute_constructor_member_initializers(const Function& fn) {
-        if (!is_constructor_function(fn)) return;
-        Binding this_binding = lookup_binding("this", fn.loc);
+    [[nodiscard]] std::expected<void, ConstexprError> execute_constructor_member_initializers(const Function& fn) {
+        if (!is_constructor_function(fn)) return {};
+        auto this_binding_result = lookup_binding("this", fn.loc);
+        if (!this_binding_result.has_value()) return std::unexpected(std::move(this_binding_result).error());
+        Binding this_binding = std::move(this_binding_result).value();
         auto* object = std::get_if<ObjectValue>(&this_binding.cell->data);
-        if (!object) throw ConstexprError(fn.loc, "constructor receiver is not an object during constant evaluation");
+        if (!object) return std::unexpected(ConstexprError(fn.loc, "constructor receiver is not an object during constant evaluation"));
         if (auto struct_it = structs_by_name_.find(fn.member_owner_class); struct_it != structs_by_name_.end()) {
             for (const StructField& field : struct_it->second->fields) {
                 const Initializer* selected = nullptr;
@@ -1276,15 +1404,17 @@ private:
                 if (selected == nullptr) continue;
                 auto field_it = object->fields.find(field.name);
                 if (field_it == object->fields.end()) {
-                    throw ConstexprError(fn.loc, "missing constexpr storage for field '" + field.name + "'");
+                    return std::unexpected(ConstexprError(fn.loc, "missing constexpr storage for field '" + field.name + "'"));
                 }
-                apply_initializer_to_field(field_it->second, field.type, *selected, fn.loc);
+                if (auto result = apply_initializer_to_field(field_it->second, field.type, *selected, fn.loc); !result.has_value()) {
+                    return result;
+                }
             }
-            return;
+            return {};
         }
         auto class_it = classes_by_name_.find(fn.member_owner_class);
         if (class_it == classes_by_name_.end()) {
-            throw ConstexprError(fn.loc, "missing constexpr class definition for '" + fn.member_owner_class + "'");
+            return std::unexpected(ConstexprError(fn.loc, "missing constexpr class definition for '" + fn.member_owner_class + "'"));
         }
         for (const ClassField& field : class_it->second->fields) {
             const Initializer* selected = nullptr;
@@ -1298,10 +1428,13 @@ private:
             if (selected == nullptr) continue;
             auto field_it = object->fields.find(field.name);
             if (field_it == object->fields.end()) {
-                throw ConstexprError(fn.loc, "missing constexpr storage for field '" + field.name + "'");
+                return std::unexpected(ConstexprError(fn.loc, "missing constexpr storage for field '" + field.name + "'"));
             }
-            apply_initializer_to_field(field_it->second, field.type, *selected, fn.loc);
+            if (auto result = apply_initializer_to_field(field_it->second, field.type, *selected, fn.loc); !result.has_value()) {
+                return result;
+            }
         }
+        return {};
     }
 
     [[nodiscard]] bool is_class_name(std::string_view name) const {
@@ -1317,30 +1450,45 @@ private:
         return false;
     }
 
-    void reject_user_defined_destructor_execution(const Type& type, const SourceLocation& loc) const {
-        if (type.kind != TypeKind::Named || !is_class_name(type.name) || !has_user_defined_destructor(type.name)) return;
-        throw ConstexprError(loc, "required constant evaluation cannot execute user-defined destructor of '" + type.name +
-                                      "'");
+    [[nodiscard]] std::expected<void, ConstexprError> reject_user_defined_destructor_execution(const Type& type, const SourceLocation& loc) const {
+        if (type.kind != TypeKind::Named || !is_class_name(type.name) || !has_user_defined_destructor(type.name)) return {};
+        return std::unexpected(ConstexprError(loc, "required constant evaluation cannot execute user-defined destructor of '" + type.name +
+                                      "'"));
     }
 
-    [[nodiscard]] std::shared_ptr<Cell> cast_value(const Type& target_type, const std::shared_ptr<Cell>& operand,
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> cast_value(const Type& target_type, const std::shared_ptr<Cell>& operand,
                                                    const SourceLocation& loc) {
-        if (is_named_type(target_type, "double")) return make_double_cell(as_double(operand, loc));
-        if (is_named_type(target_type, "bool")) return make_bool_cell(as_bool(operand, loc));
+        if (is_named_type(target_type, "double")) {
+            auto result = as_double(operand, loc);
+            if (!result.has_value()) return std::unexpected(std::move(result).error());
+            return make_double_cell(result.value());
+        }
+        if (is_named_type(target_type, "bool")) {
+            auto result = as_bool(operand, loc);
+            if (!result.has_value()) return std::unexpected(std::move(result).error());
+            return make_bool_cell(result.value());
+        }
         if (is_named_type(target_type, "int") || is_named_type(target_type, "char")) {
+            auto double_result = as_double(operand, loc);
+            if (!double_result.has_value()) return std::unexpected(std::move(double_result).error());
             auto result = std::make_shared<Cell>();
             result->type = target_type;
-            checked_assign_integer(result, static_cast<long long>(as_double(operand, loc)), loc);
+            auto assign_result = checked_assign_integer(result, static_cast<long long>(double_result.value()), loc);
+            if (!assign_result.has_value()) return std::unexpected(std::move(assign_result).error());
             return result;
         }
-        throw ConstexprError(loc, "constexpr cast only supports builtin scalar targets in Phase D1");
+        return std::unexpected(ConstexprError(loc, "constexpr cast only supports builtin scalar targets in Phase D1"));
     }
 
-    [[nodiscard]] std::shared_ptr<Cell> evaluate_binary_numeric(const Expr& expr, const std::shared_ptr<Cell>& lhs,
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_binary_numeric(const Expr& expr, const std::shared_ptr<Cell>& lhs,
                                                                 const std::shared_ptr<Cell>& rhs) {
         if (is_floating_like(lhs->type) || is_floating_like(rhs->type)) {
-            double left = as_double(lhs, expr.loc);
-            double right = as_double(rhs, expr.loc);
+            auto left_result = as_double(lhs, expr.loc);
+            if (!left_result.has_value()) return std::unexpected(std::move(left_result).error());
+            auto right_result = as_double(rhs, expr.loc);
+            if (!right_result.has_value()) return std::unexpected(std::move(right_result).error());
+            double left = left_result.value();
+            double right = right_result.value();
             switch (expr.binary_op) {
                 case BinaryOp::Add: return make_double_cell(left + right);
                 case BinaryOp::Sub: return make_double_cell(left - right);
@@ -1355,27 +1503,31 @@ private:
                 default: break;
             }
         } else {
-            long long left = as_integer(lhs, expr.loc);
-            long long right = as_integer(rhs, expr.loc);
+            auto left_result = as_integer(lhs, expr.loc);
+            if (!left_result.has_value()) return std::unexpected(std::move(left_result).error());
+            auto right_result = as_integer(rhs, expr.loc);
+            if (!right_result.has_value()) return std::unexpected(std::move(right_result).error());
+            long long left = left_result.value();
+            long long right = right_result.value();
             Type result_type = types_equal(lhs->type, rhs->type) ? lhs->type : named_type("int");
             switch (expr.binary_op) {
                 case BinaryOp::Add: {
                     long long result;
-                    if (__builtin_add_overflow(left, right, &result)) throw ConstexprError(expr.loc, "constexpr integer overflow");
+                    if (__builtin_add_overflow(left, right, &result)) return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
                     return make_checked_int_cell_as(result_type, result, expr.loc);
                 }
                 case BinaryOp::Sub: {
                     long long result;
-                    if (__builtin_sub_overflow(left, right, &result)) throw ConstexprError(expr.loc, "constexpr integer overflow");
+                    if (__builtin_sub_overflow(left, right, &result)) return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
                     return make_checked_int_cell_as(result_type, result, expr.loc);
                 }
                 case BinaryOp::Mul: {
                     long long result;
-                    if (__builtin_mul_overflow(left, right, &result)) throw ConstexprError(expr.loc, "constexpr integer overflow");
+                    if (__builtin_mul_overflow(left, right, &result)) return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
                     return make_checked_int_cell_as(result_type, result, expr.loc);
                 }
                 case BinaryOp::Div:
-                    if (right == 0) throw ConstexprError(expr.loc, "constexpr division by zero");
+                    if (right == 0) return std::unexpected(ConstexprError(expr.loc, "constexpr division by zero"));
                     return make_checked_int_cell_as(result_type, left / right, expr.loc);
                 case BinaryOp::Eq: return make_bool_cell(left == right);
                 case BinaryOp::Ne: return make_bool_cell(left != right);
@@ -1386,38 +1538,44 @@ private:
                 default: break;
             }
         }
-        throw ConstexprError(expr.loc, "unsupported constexpr binary operator");
+        return std::unexpected(ConstexprError(expr.loc, "unsupported constexpr binary operator"));
     }
 
-    [[nodiscard]] std::shared_ptr<Cell> call_function(const Function& fn, std::vector<Binding> bindings,
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> call_function(const Function& fn, std::vector<Binding> bindings,
                                                       const SourceLocation& loc) {
-        tick(loc, "calling an immediate function");
+        if (auto result = tick(loc, "calling an immediate function"); !result.has_value()) return std::unexpected(std::move(result).error());
         if (fn.eval_mode == FunctionEvalMode::RuntimeOnly) {
-            throw ConstexprError(loc, "immediate evaluation may only call constexpr/consteval functions");
+            return std::unexpected(ConstexprError(loc, "immediate evaluation may only call constexpr/consteval functions"));
         }
-        if (!fn.body) throw ConstexprError(loc, "cannot evaluate a declaration-only function at compile time");
+        if (!fn.body) return std::unexpected(ConstexprError(loc, "cannot evaluate a declaration-only function at compile time"));
         ++call_depth_;
         if (call_depth_ > limits_.max_recursion_depth) {
             --call_depth_;
-            throw ConstexprError(loc, "constexpr evaluation exceeded recursion budget");
+            return std::unexpected(ConstexprError(loc, "constexpr evaluation exceeded recursion budget"));
         }
         for (std::size_t i = 0; i < fn.params.size(); ++i) {
             if (fn.params[i].type.kind == TypeKind::Reference) continue;
-            reject_user_defined_destructor_execution(fn.params[i].type, loc);
+            if (auto result = reject_user_defined_destructor_execution(fn.params[i].type, loc); !result.has_value()) {
+                --call_depth_;
+                return std::unexpected(std::move(result).error());
+            }
         }
         frames_.push_back({});
         auto& frame = frames_.back();
         for (std::size_t i = 0; i < fn.params.size(); ++i) frame.emplace(fn.params[i].name, std::move(bindings[i]));
-        try {
-            execute_constructor_member_initializers(fn);
-            execute_stmt(*fn.body, fn.return_type);
-        } catch (const ReturnSignal& signal) {
-            frames_.pop_back();
-            --call_depth_;
-            return signal.value ? clone_cell(signal.value) : make_default_cell(fn.return_type, loc);
+        auto init_result = execute_constructor_member_initializers(fn);
+        std::expected<ExecOutcome, ConstexprError> body_result;
+        if (init_result.has_value()) {
+            body_result = execute_stmt(*fn.body, fn.return_type);
         }
         frames_.pop_back();
         --call_depth_;
+        if (!init_result.has_value()) return std::unexpected(std::move(init_result).error());
+        if (!body_result.has_value()) return std::unexpected(std::move(body_result).error());
+        if (body_result.value().flow == ExecFlow::Return) {
+            if (body_result.value().return_value) return clone_cell(body_result.value().return_value);
+            return make_default_cell(fn.return_type, loc);
+        }
         if (is_named_type(fn.return_type, "void")) {
             auto result = std::make_shared<Cell>();
             result->type = named_type("void");
@@ -1426,7 +1584,7 @@ private:
         return make_default_cell(fn.return_type, loc);
     }
 
-    [[nodiscard]] std::shared_ptr<Cell> call_with_expr_arg_views(const Function& fn, const std::vector<const Expr*>& args,
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> call_with_expr_arg_views(const Function& fn, const std::vector<const Expr*>& args,
                                                                  const SourceLocation& loc) {
         std::vector<Binding> bindings;
         bindings.reserve(fn.params.size());
@@ -1435,65 +1593,97 @@ private:
             const Expr& arg_expr = *args[i];
             if (param.type.kind == TypeKind::Reference) {
                 if (param.type.is_rvalue_ref) {
-                    std::shared_ptr<Cell> value = evaluate_expr(arg_expr);
+                    auto value_result = evaluate_expr(arg_expr);
+                    if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                    std::shared_ptr<Cell> value = std::move(value_result).value();
                     if (param.type.pointee && is_same_or_base_class_type(*param.type.pointee, value->type) &&
                         !types_equal(*param.type.pointee, value->type)) {
-                        value = clone_cell_as_type(value, *param.type.pointee, loc);
+                        auto cloned = clone_cell_as_type(value, *param.type.pointee, loc);
+                        if (!cloned.has_value()) return std::unexpected(std::move(cloned).error());
+                        value = std::move(cloned).value();
                     }
                     bindings.push_back(Binding{value, false});
                     continue;
                 }
                 if (param.type.is_mutable_ref) {
-                    LValue arg = resolve_lvalue(arg_expr);
+                    auto arg_result = resolve_lvalue(arg_expr);
+                    if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
+                    LValue arg = std::move(arg_result).value();
                     if (arg.read_only) {
-                        throw ConstexprError(loc, "cannot bind a const/constexpr value to mutable reference parameter '" +
-                                                      param.name + "'");
+                        return std::unexpected(ConstexprError(loc, "cannot bind a const/constexpr value to mutable reference parameter '" +
+                                                      param.name + "'"));
                     }
                     if (param.type.pointee && is_same_or_base_class_type(*param.type.pointee, arg.cell->type) &&
                         !types_equal(*param.type.pointee, arg.cell->type)) {
-                        bindings.push_back(Binding{alias_cell_as_type(arg.cell, *param.type.pointee, loc), false});
+                        auto aliased = alias_cell_as_type(arg.cell, *param.type.pointee, loc);
+                        if (!aliased.has_value()) return std::unexpected(std::move(aliased).error());
+                        bindings.push_back(Binding{std::move(aliased).value(), false});
                     } else {
                         bindings.push_back(Binding{arg.cell, false});
                     }
                 } else {
+                    // Speculative: prefer binding through the argument's
+                    // real lvalue storage (possibly aliased to a base-class
+                    // reference type); if either resolving the lvalue or
+                    // that aliasing fails, fall back to plain evaluation,
+                    // exactly like the original try/catch(const
+                    // ConstexprError&) fallback (which covered both steps).
+                    std::shared_ptr<Cell> bound_value;
                     bool can_bind_lvalue = false;
-                    try {
-                        LValue arg = resolve_lvalue(arg_expr);
+                    auto arg_lvalue_result = resolve_lvalue(arg_expr);
+                    if (arg_lvalue_result.has_value()) {
+                        LValue arg = std::move(arg_lvalue_result).value();
                         if (param.type.pointee && is_same_or_base_class_type(*param.type.pointee, arg.cell->type) &&
                             !types_equal(*param.type.pointee, arg.cell->type)) {
-                            bindings.push_back(Binding{alias_cell_as_type(arg.cell, *param.type.pointee, loc), true});
+                            auto aliased = alias_cell_as_type(arg.cell, *param.type.pointee, loc);
+                            if (aliased.has_value()) {
+                                bound_value = std::move(aliased).value();
+                                can_bind_lvalue = true;
+                            }
                         } else {
-                            bindings.push_back(Binding{arg.cell, true});
+                            bound_value = arg.cell;
+                            can_bind_lvalue = true;
                         }
-                        can_bind_lvalue = true;
-                    } catch (const ConstexprError&) {
                     }
-                    if (!can_bind_lvalue) {
-                        std::shared_ptr<Cell> value = evaluate_expr(arg_expr);
+                    if (can_bind_lvalue) {
+                        bindings.push_back(Binding{std::move(bound_value), true});
+                    } else {
+                        auto value_result = evaluate_expr(arg_expr);
+                        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                        std::shared_ptr<Cell> value = std::move(value_result).value();
                         if (param.type.pointee && is_same_or_base_class_type(*param.type.pointee, value->type) &&
                             !types_equal(*param.type.pointee, value->type)) {
-                            value = clone_cell_as_type(value, *param.type.pointee, loc);
+                            auto cloned = clone_cell_as_type(value, *param.type.pointee, loc);
+                            if (!cloned.has_value()) return std::unexpected(std::move(cloned).error());
+                            value = std::move(cloned).value();
                         }
                         bindings.push_back(Binding{value, true});
                     }
                 }
             } else {
-                std::shared_ptr<Cell> value = evaluate_expr(arg_expr);
+                auto value_result = evaluate_expr(arg_expr);
+                if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                std::shared_ptr<Cell> value = std::move(value_result).value();
                 if (is_same_or_base_class_type(param.type, value->type) && !types_equal(param.type, value->type)) {
-                    bindings.push_back(Binding{clone_cell_as_type(value, param.type, loc), false});
+                    auto cloned = clone_cell_as_type(value, param.type, loc);
+                    if (!cloned.has_value()) return std::unexpected(std::move(cloned).error());
+                    bindings.push_back(Binding{std::move(cloned).value(), false});
                 } else if (!types_equal(param.type, value->type) &&
                            param.type.kind == TypeKind::Named && is_class_name(param.type.name)) {
                     const Function* ctor =
                         find_single_argument_converting_constructor(param.type.name, value, /*require_constexpr=*/true);
                     if (ctor == nullptr) {
-                        throw ConstexprError(loc, "constexpr call has no viable converting constructor for parameter '" +
-                                                      param.name + "'");
+                        return std::unexpected(ConstexprError(loc, "constexpr call has no viable converting constructor for parameter '" +
+                                                      param.name + "'"));
                     }
-                    auto object = make_default_cell(param.type, loc);
+                    auto object_result = make_default_cell(param.type, loc);
+                    if (!object_result.has_value()) return std::unexpected(std::move(object_result).error());
+                    auto object = std::move(object_result).value();
                     std::vector<Binding> ctor_bindings;
                     ctor_bindings.push_back(Binding{object, false});
                     ctor_bindings.push_back(Binding{value, false});
-                    (void)call_function(*ctor, std::move(ctor_bindings), loc);
+                    auto ctor_call_result = call_function(*ctor, std::move(ctor_bindings), loc);
+                    if (!ctor_call_result.has_value()) return std::unexpected(std::move(ctor_call_result).error());
                     bindings.push_back(Binding{object, false});
                 } else {
                     bindings.push_back(Binding{value, false});
@@ -1503,7 +1693,7 @@ private:
         return call_function(fn, std::move(bindings), loc);
     }
 
-    [[nodiscard]] std::shared_ptr<Cell> call_with_expr_args(const Function& fn, const std::vector<ExprPtr>& args,
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> call_with_expr_args(const Function& fn, const std::vector<ExprPtr>& args,
                                                             const SourceLocation& loc) {
         std::vector<const Expr*> arg_views;
         arg_views.reserve(args.size());
@@ -1511,19 +1701,28 @@ private:
         return call_with_expr_arg_views(fn, arg_views, loc);
     }
 
-    [[nodiscard]] const Function* find_method_callable(const Expr& receiver_expr, std::string_view method_name,
+    [[nodiscard]] std::expected<const Function*, ConstexprError> find_method_callable(const Expr& receiver_expr, std::string_view method_name,
                                                        const std::vector<std::shared_ptr<Cell>>& arg_values,
                                                        bool require_constexpr) {
         std::shared_ptr<Cell> receiver_value;
         bool receiver_is_lvalue = false;
         bool receiver_read_only = false;
-        try {
-            LValue receiver = resolve_lvalue(receiver_expr);
+        // Speculative: prefer resolving the receiver as a real lvalue (so
+        // a mutable-this method can be found); a receiver that isn't
+        // itself an lvalue (e.g. a temporary) falls back to plain
+        // evaluation, exactly like the original try/catch(const
+        // ConstexprError&) fallback. A genuine failure from that fallback
+        // evaluation is a real error and must now propagate explicitly.
+        auto receiver_lvalue_result = resolve_lvalue(receiver_expr);
+        if (receiver_lvalue_result.has_value()) {
+            LValue receiver = std::move(receiver_lvalue_result).value();
             receiver_value = receiver.cell;
             receiver_is_lvalue = true;
             receiver_read_only = receiver.read_only;
-        } catch (const ConstexprError&) {
-            receiver_value = evaluate_expr(receiver_expr);
+        } else {
+            auto receiver_value_result = evaluate_expr(receiver_expr);
+            if (!receiver_value_result.has_value()) return std::unexpected(std::move(receiver_value_result).error());
+            receiver_value = std::move(receiver_value_result).value();
         }
         if (receiver_value->type.kind != TypeKind::Named || !is_class_name(receiver_value->type.name)) return nullptr;
 
@@ -1559,23 +1758,31 @@ private:
         return nullptr;
     }
 
-    [[nodiscard]] std::shared_ptr<Cell> evaluate_constructor_expr(const Expr& expr) {
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_constructor_expr(const Expr& expr) {
         Type object_type = named_type(expr.name);
-        auto object = make_default_cell(object_type, expr.loc);
+        auto object_result = make_default_cell(object_type, expr.loc);
+        if (!object_result.has_value()) return std::unexpected(std::move(object_result).error());
+        auto object = std::move(object_result).value();
         std::vector<std::shared_ptr<Cell>> arg_values;
         arg_values.reserve(expr.args.size());
-        for (const ExprPtr& arg : expr.args) arg_values.push_back(evaluate_expr(*arg));
+        for (const ExprPtr& arg : expr.args) {
+            auto arg_result = evaluate_expr(*arg);
+            if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
+            arg_values.push_back(std::move(arg_result).value());
+        }
         const Function* ctor = find_constructor(expr.name, arg_values, /*require_constexpr=*/true);
         if (!ctor) {
             if (expr.args.empty() &&
                 (classes_by_name_.contains(expr.name) || structs_by_name_.contains(expr.name))) {
-                apply_default_initializers_to_named_object(object, object_type, expr.loc);
+                if (auto result = apply_default_initializers_to_named_object(object, object_type, expr.loc); !result.has_value()) {
+                    return std::unexpected(std::move(result).error());
+                }
                 return object;
             }
             if (has_runtime_only_match(expr.name + "_new", arg_values)) {
-                throw ConstexprError(expr.loc, "immediate evaluation may only call constexpr/consteval constructors");
+                return std::unexpected(ConstexprError(expr.loc, "immediate evaluation may only call constexpr/consteval constructors"));
             }
-            throw ConstexprError(expr.loc, "no constexpr/consteval constructor matches for type '" + expr.name + "'");
+            return std::unexpected(ConstexprError(expr.loc, "no constexpr/consteval constructor matches for type '" + expr.name + "'"));
         }
         std::vector<Binding> bindings;
         bindings.reserve(ctor->params.size());
@@ -1585,39 +1792,55 @@ private:
             const Expr& arg_expr = *expr.args[i - 1];
             if (param.type.kind == TypeKind::Reference) {
                 if (param.type.is_rvalue_ref) {
-                    bindings.push_back(Binding{evaluate_expr(arg_expr), false});
+                    auto value_result = evaluate_expr(arg_expr);
+                    if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                    bindings.push_back(Binding{std::move(value_result).value(), false});
                     continue;
                 }
                 if (param.type.is_mutable_ref) {
-                    LValue arg = resolve_lvalue(arg_expr);
-                    bindings.push_back(Binding{arg.cell, false});
+                    auto arg_result = resolve_lvalue(arg_expr);
+                    if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
+                    bindings.push_back(Binding{arg_result.value().cell, false});
                 } else {
-                    bool can_bind_lvalue = false;
-                    try {
-                        LValue arg = resolve_lvalue(arg_expr);
-                        bindings.push_back(Binding{arg.cell, true});
-                        can_bind_lvalue = true;
-                    } catch (const ConstexprError&) {
+                    // Speculative: prefer binding through the argument's
+                    // real lvalue storage; a non-lvalue expression falls
+                    // back to plain evaluation, exactly like the original
+                    // try/catch(const ConstexprError&) fallback.
+                    auto arg_lvalue_result = resolve_lvalue(arg_expr);
+                    if (arg_lvalue_result.has_value()) {
+                        bindings.push_back(Binding{arg_lvalue_result.value().cell, true});
+                    } else {
+                        auto value_result = evaluate_expr(arg_expr);
+                        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                        bindings.push_back(Binding{std::move(value_result).value(), true});
                     }
-                    if (!can_bind_lvalue) bindings.push_back(Binding{evaluate_expr(arg_expr), true});
                 }
             } else {
-                bindings.push_back(Binding{evaluate_expr(arg_expr), false});
+                auto value_result = evaluate_expr(arg_expr);
+                if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                bindings.push_back(Binding{std::move(value_result).value(), false});
             }
         }
-        static_cast<void>(call_function(*ctor, std::move(bindings), expr.loc));
+        auto call_result = call_function(*ctor, std::move(bindings), expr.loc);
+        if (!call_result.has_value()) return std::unexpected(std::move(call_result).error());
         return object;
     }
 
-    [[nodiscard]] std::shared_ptr<Cell> evaluate_call_expr(const Expr& expr) {
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_call_expr(const Expr& expr) {
         if (expr.lhs) {
             std::vector<std::shared_ptr<Cell>> arg_values;
             arg_values.reserve(expr.args.size());
-            for (const ExprPtr& arg : expr.args) arg_values.push_back(evaluate_expr(*arg));
-            const Function* fn = find_method_callable(*expr.lhs, expr.name, arg_values, /*require_constexpr=*/true);
+            for (const ExprPtr& arg : expr.args) {
+                auto arg_result = evaluate_expr(*arg);
+                if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
+                arg_values.push_back(std::move(arg_result).value());
+            }
+            auto fn_result = find_method_callable(*expr.lhs, expr.name, arg_values, /*require_constexpr=*/true);
+            if (!fn_result.has_value()) return std::unexpected(std::move(fn_result).error());
+            const Function* fn = fn_result.value();
             if (!fn) {
-                throw ConstexprError(expr.loc,
-                                     "no constexpr/consteval overload of method '" + expr.name + "' matches this immediate call");
+                return std::unexpected(ConstexprError(expr.loc,
+                                     "no constexpr/consteval overload of method '" + expr.name + "' matches this immediate call"));
             }
             std::vector<const Expr*> all_args;
             all_args.reserve(expr.args.size() + 1);
@@ -1628,13 +1851,17 @@ private:
         if (is_class_name(expr.name)) return evaluate_constructor_expr(expr);
         std::vector<std::shared_ptr<Cell>> arg_values;
         arg_values.reserve(expr.args.size());
-        for (const ExprPtr& arg : expr.args) arg_values.push_back(evaluate_expr(*arg));
+        for (const ExprPtr& arg : expr.args) {
+            auto arg_result = evaluate_expr(*arg);
+            if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
+            arg_values.push_back(std::move(arg_result).value());
+        }
         const Function* fn = find_callable(expr.name, arg_values, /*require_constexpr=*/true);
         if (!fn) {
             if (has_runtime_only_match(expr.name, arg_values)) {
-                throw ConstexprError(expr.loc, "immediate evaluation may only call constexpr/consteval functions");
+                return std::unexpected(ConstexprError(expr.loc, "immediate evaluation may only call constexpr/consteval functions"));
             }
-            throw ConstexprError(expr.loc, "no constexpr/consteval overload of '" + expr.name + "' matches this immediate call");
+            return std::unexpected(ConstexprError(expr.loc, "no constexpr/consteval overload of '" + expr.name + "' matches this immediate call"));
         }
         return call_with_expr_args(*fn, expr.args, expr.loc);
     }
@@ -1662,13 +1889,17 @@ private:
                 return expr.type;
             case ExprKind::Destroy: return named_type("void");
             case ExprKind::StringLiteral: return make_const_char_pointer_type();
-            case ExprKind::Identifier:
-                try {
-                    return lookup_binding(expr.name, expr.loc).cell->type;
-                } catch (const ConstexprError&) {
-                    if (const EnumDef* def = find_enum_for_variant(expr.name)) return named_type(def->name);
-                    return std::nullopt;
-                }
+            case ExprKind::Identifier: {
+                // Speculative: prefer a real binding; an identifier that
+                // isn't currently bound (e.g. an enum variant name used
+                // as a value) falls back to enum-variant lookup, else
+                // nullopt -- exactly like the original try/catch(const
+                // ConstexprError&) fallback.
+                auto binding_result = lookup_binding(expr.name, expr.loc);
+                if (binding_result.has_value()) return binding_result.value().cell->type;
+                if (const EnumDef* def = find_enum_for_variant(expr.name)) return named_type(def->name);
+                return std::nullopt;
+            }
             case ExprKind::Move:
                 return expr.lhs ? infer_unevaluated_expr_type(*expr.lhs) : std::nullopt;
             case ExprKind::New: {
@@ -1705,8 +1936,14 @@ private:
                     }
                 }
                 if (auto class_it = classes_by_name_.find(base_named.name); class_it != classes_by_name_.end()) {
-                    for (const ClassField& field : collect_class_fields(*class_it->second)) {
-                        if (field.name == expr.name) return field.type.kind == TypeKind::Reference ? *field.type.pointee : field.type;
+                    // Best-effort: a missing base-class definition is a
+                    // real diagnostic elsewhere (e.g. make_default_cell);
+                    // here it just means this type can't be inferred.
+                    auto fields_result = collect_class_fields(*class_it->second);
+                    if (fields_result.has_value()) {
+                        for (const ClassField& field : fields_result.value()) {
+                            if (field.name == expr.name) return field.type.kind == TypeKind::Reference ? *field.type.pointee : field.type;
+                        }
                     }
                 }
                 return std::nullopt;
@@ -1798,8 +2035,8 @@ private:
         return std::nullopt;
     }
 
-    [[nodiscard]] std::shared_ptr<Cell> evaluate_expr(const Expr& expr) {
-        tick(expr.loc, "evaluating an expression");
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_expr(const Expr& expr) {
+        if (auto result = tick(expr.loc, "evaluating an expression"); !result.has_value()) return std::unexpected(std::move(result).error());
         switch (expr.kind) {
             case ExprKind::IntegerLiteral: return make_scalar_cell(named_type("int"), expr.int_value);
             case ExprKind::FloatLiteral: return make_double_cell(expr.float_value);
@@ -1807,13 +2044,15 @@ private:
             case ExprKind::CharLiteral: return make_scalar_cell(named_type("char"), expr.int_value);
             case ExprKind::StringLiteral: return make_string_literal_pointer(expr);
             case ExprKind::Destroy:
-                throw ConstexprError(expr.loc, "explicit destructor calls are not supported during constant evaluation");
+                return std::unexpected(ConstexprError(expr.loc, "explicit destructor calls are not supported during constant evaluation"));
             case ExprKind::ValueInit:
                 return make_default_cell(expr.type, expr.loc);
             case ExprKind::Alignof: {
-                reject_if_incomplete(expr.type, expr.loc, "alignof");
+                if (auto result = reject_if_incomplete(expr.type, expr.loc, "alignof"); !result.has_value()) {
+                    return std::unexpected(std::move(result).error());
+                }
                 std::optional<TypeLayoutInfo> layout = layout_of_type(program_, expr.type);
-                if (!layout.has_value()) throw ConstexprError(expr.loc, "cannot apply 'alignof' to this type in this version");
+                if (!layout.has_value()) return std::unexpected(ConstexprError(expr.loc, "cannot apply 'alignof' to this type in this version"));
                 return make_scalar_cell(named_type("size_t"), static_cast<long long>(layout->abi_align_bytes));
             }
             case ExprKind::Sizeof: {
@@ -1823,53 +2062,82 @@ private:
                 } else {
                     std::optional<Type> inferred = infer_unevaluated_expr_type(*expr.lhs);
                     if (!inferred.has_value()) {
-                        throw ConstexprError(expr.loc, "cannot apply 'sizeof' to this expression: its type could not be inferred");
+                        return std::unexpected(ConstexprError(expr.loc, "cannot apply 'sizeof' to this expression: its type could not be inferred"));
                     }
                     queried_type = *inferred;
                 }
-                reject_if_incomplete(queried_type, expr.loc, "sizeof");
+                if (auto result = reject_if_incomplete(queried_type, expr.loc, "sizeof"); !result.has_value()) {
+                    return std::unexpected(std::move(result).error());
+                }
                 std::optional<TypeLayoutInfo> layout = layout_of_type(program_, queried_type);
                 if (!layout.has_value()) {
-                    throw ConstexprError(expr.loc, "cannot apply 'sizeof' to this type in this version");
+                    return std::unexpected(ConstexprError(expr.loc, "cannot apply 'sizeof' to this type in this version"));
                 }
                 return make_scalar_cell(named_type("size_t"), static_cast<long long>(layout->size_bytes));
             }
-            case ExprKind::Identifier: return clone_cell(lookup_binding(expr.name, expr.loc).cell);
-            case ExprKind::Conditional:
-                return as_bool(evaluate_expr(*expr.lhs), expr.loc) ? evaluate_expr(*expr.rhs) : evaluate_expr(*expr.third);
+            case ExprKind::Identifier: {
+                auto binding_result = lookup_binding(expr.name, expr.loc);
+                if (!binding_result.has_value()) return std::unexpected(std::move(binding_result).error());
+                return clone_cell(binding_result.value().cell);
+            }
+            case ExprKind::Conditional: {
+                auto cond_result = evaluate_expr(*expr.lhs);
+                if (!cond_result.has_value()) return std::unexpected(std::move(cond_result).error());
+                auto cond_bool = as_bool(cond_result.value(), expr.loc);
+                if (!cond_bool.has_value()) return std::unexpected(std::move(cond_bool).error());
+                return cond_bool.value() ? evaluate_expr(*expr.rhs) : evaluate_expr(*expr.third);
+            }
             case ExprKind::Member: {
-                std::shared_ptr<Cell> base = evaluate_expr(*expr.lhs);
+                auto base_result = evaluate_expr(*expr.lhs);
+                if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
+                std::shared_ptr<Cell> base = std::move(base_result).value();
                 if (auto* span = std::get_if<SpanValue>(&base->data); span && expr.name == "size") {
                     return make_checked_int_cell(span->size, expr.loc);
                 }
-                return clone_cell(resolve_lvalue(expr).cell);
+                auto lvalue_result = resolve_lvalue(expr);
+                if (!lvalue_result.has_value()) return std::unexpected(std::move(lvalue_result).error());
+                return clone_cell(lvalue_result.value().cell);
             }
-            case ExprKind::Subscript: return clone_cell(resolve_lvalue(expr).cell);
+            case ExprKind::Subscript: {
+                auto lvalue_result = resolve_lvalue(expr);
+                if (!lvalue_result.has_value()) return std::unexpected(std::move(lvalue_result).error());
+                return clone_cell(lvalue_result.value().cell);
+            }
             case ExprKind::Call:
                 if (expr.lhs == nullptr && expr.name == "$for_range_size" && expr.args.size() == 1) {
                     std::optional<Type> range_type = infer_unevaluated_expr_type(*expr.args[0]);
-                    if (!range_type.has_value()) throw ConstexprError(expr.loc, "cannot determine range-for operand type");
+                    if (!range_type.has_value()) return std::unexpected(ConstexprError(expr.loc, "cannot determine range-for operand type"));
                     const Type& unwrapped = range_type->kind == TypeKind::Reference && range_type->pointee != nullptr
                                                 ? *range_type->pointee
                                                 : *range_type;
                     if (unwrapped.kind == TypeKind::Array) return make_checked_int_cell(unwrapped.array_size, expr.loc);
                     if (unwrapped.kind == TypeKind::Span) {
-                        std::shared_ptr<Cell> value = evaluate_expr(*expr.args[0]);
+                        auto value_result = evaluate_expr(*expr.args[0]);
+                        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                        std::shared_ptr<Cell> value = std::move(value_result).value();
                         if (auto* span = std::get_if<SpanValue>(&value->data)) {
                             return make_checked_int_cell(span->size, expr.loc);
                         }
                     }
-                    throw ConstexprError(expr.loc, "range-for requires a fixed-size array or std::span operand");
+                    return std::unexpected(ConstexprError(expr.loc, "range-for requires a fixed-size array or std::span operand"));
                 }
                 return evaluate_call_expr(expr);
-            case ExprKind::Cast: return cast_value(expr.type, evaluate_expr(*expr.lhs), expr.loc);
+            case ExprKind::Cast: {
+                auto operand_result = evaluate_expr(*expr.lhs);
+                if (!operand_result.has_value()) return std::unexpected(std::move(operand_result).error());
+                return cast_value(expr.type, operand_result.value(), expr.loc);
+            }
             case ExprKind::Binary:
                 if (expr.binary_op == BinaryOp::Assign || expr.binary_op == BinaryOp::AddAssign ||
                     expr.binary_op == BinaryOp::SubAssign || expr.binary_op == BinaryOp::MulAssign ||
                     expr.binary_op == BinaryOp::DivAssign) {
-                    LValue target = resolve_lvalue(*expr.lhs);
-                    if (target.read_only) throw ConstexprError(expr.loc, "cannot assign through a const/constexpr binding");
-                    std::shared_ptr<Cell> value = evaluate_expr(*expr.rhs);
+                    auto target_result = resolve_lvalue(*expr.lhs);
+                    if (!target_result.has_value()) return std::unexpected(std::move(target_result).error());
+                    LValue target = std::move(target_result).value();
+                    if (target.read_only) return std::unexpected(ConstexprError(expr.loc, "cannot assign through a const/constexpr binding"));
+                    auto value_result = evaluate_expr(*expr.rhs);
+                    if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                    std::shared_ptr<Cell> value = std::move(value_result).value();
                     if (expr.binary_op != BinaryOp::Assign) {
                         std::shared_ptr<Cell> lhs_value = clone_cell(target.cell);
                         BinaryOp arithmetic_op = expr.binary_op == BinaryOp::AddAssign   ? BinaryOp::Add
@@ -1879,47 +2147,104 @@ private:
                         Expr arithmetic_expr{};
                         arithmetic_expr.binary_op = arithmetic_op;
                         arithmetic_expr.loc = expr.loc;
-                        value = evaluate_binary_numeric(arithmetic_expr, lhs_value, value);
+                        auto arithmetic_result = evaluate_binary_numeric(arithmetic_expr, lhs_value, value);
+                        if (!arithmetic_result.has_value()) return std::unexpected(std::move(arithmetic_result).error());
+                        value = std::move(arithmetic_result).value();
                     }
-                    copy_into(target.cell, value, expr.loc);
+                    if (auto result = copy_into(target.cell, value, expr.loc); !result.has_value()) {
+                        return std::unexpected(std::move(result).error());
+                    }
                     return clone_cell(target.cell);
                 }
                 if (expr.binary_op == BinaryOp::And) {
-                    if (!as_bool(evaluate_expr(*expr.lhs), expr.loc)) return make_bool_cell(false);
-                    return make_bool_cell(as_bool(evaluate_expr(*expr.rhs), expr.loc));
+                    auto lhs_result = evaluate_expr(*expr.lhs);
+                    if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+                    auto lhs_bool = as_bool(lhs_result.value(), expr.loc);
+                    if (!lhs_bool.has_value()) return std::unexpected(std::move(lhs_bool).error());
+                    if (!lhs_bool.value()) return make_bool_cell(false);
+                    auto rhs_result = evaluate_expr(*expr.rhs);
+                    if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+                    auto rhs_bool = as_bool(rhs_result.value(), expr.loc);
+                    if (!rhs_bool.has_value()) return std::unexpected(std::move(rhs_bool).error());
+                    return make_bool_cell(rhs_bool.value());
                 }
                 if (expr.binary_op == BinaryOp::Or) {
-                    if (as_bool(evaluate_expr(*expr.lhs), expr.loc)) return make_bool_cell(true);
-                    return make_bool_cell(as_bool(evaluate_expr(*expr.rhs), expr.loc));
+                    auto lhs_result = evaluate_expr(*expr.lhs);
+                    if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+                    auto lhs_bool = as_bool(lhs_result.value(), expr.loc);
+                    if (!lhs_bool.has_value()) return std::unexpected(std::move(lhs_bool).error());
+                    if (lhs_bool.value()) return make_bool_cell(true);
+                    auto rhs_result = evaluate_expr(*expr.rhs);
+                    if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+                    auto rhs_bool = as_bool(rhs_result.value(), expr.loc);
+                    if (!rhs_bool.has_value()) return std::unexpected(std::move(rhs_bool).error());
+                    return make_bool_cell(rhs_bool.value());
                 }
-                return evaluate_binary_numeric(expr, evaluate_expr(*expr.lhs), evaluate_expr(*expr.rhs));
+                {
+                    auto lhs_result = evaluate_expr(*expr.lhs);
+                    if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+                    auto rhs_result = evaluate_expr(*expr.rhs);
+                    if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+                    return evaluate_binary_numeric(expr, lhs_result.value(), rhs_result.value());
+                }
             case ExprKind::Unary:
                 switch (expr.unary_op) {
                     case UnaryOp::Neg: {
-                        std::shared_ptr<Cell> operand = evaluate_expr(*expr.lhs);
-                        if (is_floating_like(operand->type)) return make_double_cell(-as_double(operand, expr.loc));
-                        long long value = as_integer(operand, expr.loc);
+                        auto operand_result = evaluate_expr(*expr.lhs);
+                        if (!operand_result.has_value()) return std::unexpected(std::move(operand_result).error());
+                        std::shared_ptr<Cell> operand = std::move(operand_result).value();
+                        if (is_floating_like(operand->type)) {
+                            auto double_result = as_double(operand, expr.loc);
+                            if (!double_result.has_value()) return std::unexpected(std::move(double_result).error());
+                            return make_double_cell(-double_result.value());
+                        }
+                        auto integer_result = as_integer(operand, expr.loc);
+                        if (!integer_result.has_value()) return std::unexpected(std::move(integer_result).error());
+                        long long value = integer_result.value();
                         if (value == std::numeric_limits<long long>::min()) {
-                            throw ConstexprError(expr.loc, "constexpr integer overflow");
+                            return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
                         }
                         return make_checked_int_cell(-value, expr.loc);
                     }
-                    case UnaryOp::Not: return make_bool_cell(!as_bool(evaluate_expr(*expr.lhs), expr.loc));
+                    case UnaryOp::Not: {
+                        auto operand_result = evaluate_expr(*expr.lhs);
+                        if (!operand_result.has_value()) return std::unexpected(std::move(operand_result).error());
+                        auto bool_result = as_bool(operand_result.value(), expr.loc);
+                        if (!bool_result.has_value()) return std::unexpected(std::move(bool_result).error());
+                        return make_bool_cell(!bool_result.value());
+                    }
                     case UnaryOp::PreInc:
                     case UnaryOp::PreDec:
                     case UnaryOp::PostInc:
                     case UnaryOp::PostDec:
                         break;
-                    case UnaryOp::Deref: return clone_cell(resolve_lvalue(expr).cell);
+                    case UnaryOp::Deref: {
+                        auto lvalue_result = resolve_lvalue(expr);
+                        if (!lvalue_result.has_value()) return std::unexpected(std::move(lvalue_result).error());
+                        return clone_cell(lvalue_result.value().cell);
+                    }
                     case UnaryOp::AddressOf: {
-                        LValue target = resolve_lvalue(*expr.lhs);
+                        auto target_result = resolve_lvalue(*expr.lhs);
+                        if (!target_result.has_value()) return std::unexpected(std::move(target_result).error());
+                        LValue target = std::move(target_result).value();
                         auto result = std::make_shared<Cell>();
                         result->type = make_pointer_type_to(target.cell->type, !target.read_only);
                         PointerValue pointer;
                         if (expr.lhs->kind == ExprKind::Subscript && expr.lhs->lhs && expr.lhs->rhs) {
-                            long long offset = as_integer(evaluate_expr(*expr.lhs->rhs), expr.loc);
-                            try {
-                                LValue base_lvalue = resolve_lvalue(*expr.lhs->lhs);
+                            auto offset_value_result = evaluate_expr(*expr.lhs->rhs);
+                            if (!offset_value_result.has_value()) return std::unexpected(std::move(offset_value_result).error());
+                            auto offset_result = as_integer(offset_value_result.value(), expr.loc);
+                            if (!offset_result.has_value()) return std::unexpected(std::move(offset_result).error());
+                            long long offset = offset_result.value();
+                            // Speculative: prefer resolving the subscript's
+                            // base as a real lvalue array; a non-lvalue
+                            // base (e.g. a function call returning a
+                            // pointer/span) falls back to plain evaluation,
+                            // exactly like the original try/catch(const
+                            // ConstexprError&) fallback.
+                            auto base_lvalue_result = resolve_lvalue(*expr.lhs->lhs);
+                            if (base_lvalue_result.has_value()) {
+                                LValue base_lvalue = std::move(base_lvalue_result).value();
                                 if (std::holds_alternative<ArrayValue>(base_lvalue.cell->data)) {
                                     pointer.storage = base_lvalue.cell;
                                     pointer.index = offset;
@@ -1927,8 +2252,10 @@ private:
                                     pointer.storage = target.cell;
                                     pointer.index = 0;
                                 }
-                            } catch (const ConstexprError&) {
-                                std::shared_ptr<Cell> base_value = evaluate_expr(*expr.lhs->lhs);
+                            } else {
+                                auto base_value_result = evaluate_expr(*expr.lhs->lhs);
+                                if (!base_value_result.has_value()) return std::unexpected(std::move(base_value_result).error());
+                                std::shared_ptr<Cell> base_value = std::move(base_value_result).value();
                                 if (auto* span = std::get_if<SpanValue>(&base_value->data)) {
                                     pointer = span->pointer;
                                     pointer.index += offset;
@@ -1950,7 +2277,7 @@ private:
                 }
                 break;
             case ExprKind::TypeTrait:
-                throw ConstexprError(expr.loc, "constexpr type traits are deferred to a later phase");
+                return std::unexpected(ConstexprError(expr.loc, "constexpr type traits are deferred to a later phase"));
             case ExprKind::New:
             case ExprKind::Delete:
             case ExprKind::Move:
@@ -1959,23 +2286,29 @@ private:
             case ExprKind::Fold:
                 break;
         }
-        throw ConstexprError(expr.loc, "expression kind is not yet supported by the constexpr evaluator in Phase D1");
+        return std::unexpected(ConstexprError(expr.loc, "expression kind is not yet supported by the constexpr evaluator in Phase D1"));
     }
 
-    void execute_stmt(const Stmt& stmt, const Type& return_type) {
-        tick(stmt.loc, "executing a statement");
+    [[nodiscard]] std::expected<ExecOutcome, ConstexprError> execute_stmt(const Stmt& stmt, const Type& return_type) {
+        if (auto result = tick(stmt.loc, "executing a statement"); !result.has_value()) return std::unexpected(std::move(result).error());
         switch (stmt.kind) {
             case StmtKind::VarDecl: {
                 if (stmt.type.kind == TypeKind::Span) {
                     if (!stmt.init) {
-                        throw ConstexprError(stmt.loc, "std::span<const T> must be initialized during constant evaluation");
+                        return std::unexpected(ConstexprError(stmt.loc, "std::span<const T> must be initialized during constant evaluation"));
                     }
-                    frames_.back()[stmt.var_name] = Binding{bind_read_only_span(stmt.type, *stmt.init, stmt.loc),
+                    auto span_result = bind_read_only_span(stmt.type, *stmt.init, stmt.loc);
+                    if (!span_result.has_value()) return std::unexpected(std::move(span_result).error());
+                    frames_.back()[stmt.var_name] = Binding{std::move(span_result).value(),
                                                             stmt.is_const || stmt.is_constexpr};
-                    return;
+                    return ExecOutcome{};
                 }
-                reject_user_defined_destructor_execution(stmt.type, stmt.loc);
-                auto cell = make_default_cell(stmt.type, stmt.loc);
+                if (auto result = reject_user_defined_destructor_execution(stmt.type, stmt.loc); !result.has_value()) {
+                    return std::unexpected(std::move(result).error());
+                }
+                auto cell_result = make_default_cell(stmt.type, stmt.loc);
+                if (!cell_result.has_value()) return std::unexpected(std::move(cell_result).error());
+                auto cell = std::move(cell_result).value();
                 if (stmt.has_ctor_args) {
                     std::vector<Binding> ctor_bindings;
                     ctor_bindings.reserve(stmt.ctor_args.size() + 1);
@@ -1983,120 +2316,199 @@ private:
                     std::vector<std::shared_ptr<Cell>> arg_values;
                     arg_values.reserve(stmt.ctor_args.size() + 1);
                     arg_values.push_back(cell);
-                    for (const ExprPtr& arg : stmt.ctor_args) arg_values.push_back(evaluate_expr(*arg));
+                    for (const ExprPtr& arg : stmt.ctor_args) {
+                        auto arg_result = evaluate_expr(*arg);
+                        if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
+                        arg_values.push_back(std::move(arg_result).value());
+                    }
                     const Function* ctor = find_callable(stmt.type.name + "_new", arg_values, /*require_constexpr=*/true);
                     if (!ctor) {
                         if (stmt.ctor_args.empty() &&
                             (classes_by_name_.contains(stmt.type.name) || structs_by_name_.contains(stmt.type.name))) {
-                            apply_default_initializers_to_named_object(cell, stmt.type, stmt.loc);
+                            if (auto result = apply_default_initializers_to_named_object(cell, stmt.type, stmt.loc);
+                                !result.has_value()) {
+                                return std::unexpected(std::move(result).error());
+                            }
                             frames_.back()[stmt.var_name] = Binding{cell, stmt.is_const || stmt.is_constexpr};
-                            return;
+                            return ExecOutcome{};
                         }
-                        throw ConstexprError(stmt.loc, "no constexpr/consteval constructor matches for type '" + stmt.type.name + "'");
+                        return std::unexpected(ConstexprError(stmt.loc, "no constexpr/consteval constructor matches for type '" + stmt.type.name + "'"));
                     }
                     for (std::size_t i = 1; i < ctor->params.size(); ++i) {
                         const Param& param = ctor->params[i];
                         const Expr& arg_expr = *stmt.ctor_args[i - 1];
                         if (param.type.kind == TypeKind::Reference && !param.type.is_rvalue_ref && param.type.is_mutable_ref) {
-                            LValue arg = resolve_lvalue(arg_expr);
-                            ctor_bindings.push_back(Binding{arg.cell, false});
+                            auto arg_result = resolve_lvalue(arg_expr);
+                            if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
+                            ctor_bindings.push_back(Binding{arg_result.value().cell, false});
                         } else {
-                            ctor_bindings.push_back(Binding{evaluate_expr(arg_expr), param.type.kind == TypeKind::Reference && !param.type.is_mutable_ref});
+                            auto value_result = evaluate_expr(arg_expr);
+                            if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                            ctor_bindings.push_back(
+                                Binding{std::move(value_result).value(),
+                                        param.type.kind == TypeKind::Reference && !param.type.is_mutable_ref});
                         }
                     }
-                    static_cast<void>(call_function(*ctor, std::move(ctor_bindings), stmt.loc));
+                    auto call_result = call_function(*ctor, std::move(ctor_bindings), stmt.loc);
+                    if (!call_result.has_value()) return std::unexpected(std::move(call_result).error());
                 } else if (stmt.init) {
-                    copy_into(cell, evaluate_expr(*stmt.init), stmt.loc);
+                    auto value_result = evaluate_expr(*stmt.init);
+                    if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                    if (auto result = copy_into(cell, std::move(value_result).value(), stmt.loc); !result.has_value()) {
+                        return std::unexpected(std::move(result).error());
+                    }
                 }
                 frames_.back()[stmt.var_name] = Binding{cell, stmt.is_const || stmt.is_constexpr};
-                return;
+                return ExecOutcome{};
             }
-            case StmtKind::Return:
-                if (stmt.expr) throw ReturnSignal{evaluate_expr(*stmt.expr)};
-                throw ReturnSignal{is_named_type(return_type, "void") ? std::shared_ptr<Cell>() : make_default_cell(return_type, stmt.loc)};
+            case StmtKind::Return: {
+                if (stmt.expr) {
+                    auto value_result = evaluate_expr(*stmt.expr);
+                    if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                    return ExecOutcome{ExecFlow::Return, std::move(value_result).value()};
+                }
+                if (is_named_type(return_type, "void")) {
+                    return ExecOutcome{ExecFlow::Return, nullptr};
+                }
+                auto default_result = make_default_cell(return_type, stmt.loc);
+                if (!default_result.has_value()) return std::unexpected(std::move(default_result).error());
+                return ExecOutcome{ExecFlow::Return, std::move(default_result).value()};
+            }
             case StmtKind::ExprStmt:
-                if (stmt.expr) static_cast<void>(evaluate_expr(*stmt.expr));
-                return;
+                if (stmt.expr) {
+                    auto result = evaluate_expr(*stmt.expr);
+                    if (!result.has_value()) return std::unexpected(std::move(result).error());
+                }
+                return ExecOutcome{};
             case StmtKind::If:
                 if (stmt.if_mode == IfMode::ConstevalTrue) {
-                    execute_stmt(*stmt.then_branch, return_type);
-                    return;
+                    return execute_stmt(*stmt.then_branch, return_type);
                 }
                 if (stmt.if_mode == IfMode::ConstevalFalse) {
-                    if (stmt.else_branch) execute_stmt(*stmt.else_branch, return_type);
-                    return;
+                    if (stmt.else_branch) return execute_stmt(*stmt.else_branch, return_type);
+                    return ExecOutcome{};
                 }
-                if (as_bool(evaluate_expr(*stmt.condition), stmt.loc)) {
-                    execute_stmt(*stmt.then_branch, return_type);
-                } else if (stmt.else_branch) {
-                    execute_stmt(*stmt.else_branch, return_type);
+                {
+                    auto condition_result = evaluate_expr(*stmt.condition);
+                    if (!condition_result.has_value()) return std::unexpected(std::move(condition_result).error());
+                    auto condition_bool = as_bool(condition_result.value(), stmt.loc);
+                    if (!condition_bool.has_value()) return std::unexpected(std::move(condition_bool).error());
+                    if (condition_bool.value()) {
+                        return execute_stmt(*stmt.then_branch, return_type);
+                    }
+                    if (stmt.else_branch) {
+                        return execute_stmt(*stmt.else_branch, return_type);
+                    }
                 }
-                return;
+                return ExecOutcome{};
             case StmtKind::While: {
                 int iterations = 0;
-                while (as_bool(evaluate_expr(*stmt.condition), stmt.loc)) {
+                while (true) {
+                    auto condition_result = evaluate_expr(*stmt.condition);
+                    if (!condition_result.has_value()) return std::unexpected(std::move(condition_result).error());
+                    auto condition_bool = as_bool(condition_result.value(), stmt.loc);
+                    if (!condition_bool.has_value()) return std::unexpected(std::move(condition_bool).error());
+                    if (!condition_bool.value()) break;
                     ++iterations;
                     if (iterations > limits_.max_loop_iterations) {
-                        throw ConstexprError(stmt.loc, "constexpr evaluation exceeded loop-iteration budget");
+                        return std::unexpected(ConstexprError(stmt.loc, "constexpr evaluation exceeded loop-iteration budget"));
                     }
-                    try {
-                        execute_stmt(*stmt.then_branch, return_type);
-                    } catch (const ContinueSignal&) {
-                        continue;
-                    } catch (const BreakSignal&) {
-                        break;
-                    }
+                    auto body_result = execute_stmt(*stmt.then_branch, return_type);
+                    if (!body_result.has_value()) return std::unexpected(std::move(body_result).error());
+                    if (body_result.value().flow == ExecFlow::Break) break;
+                    if (body_result.value().flow == ExecFlow::Return) return body_result;
+                    // ExecFlow::Continue and ExecFlow::Normal both simply
+                    // loop again (matching the original try/catch, where
+                    // a caught ContinueSignal and normal completion both
+                    // fell through to the while condition re-check).
                 }
-                return;
+                return ExecOutcome{};
             }
             case StmtKind::Switch: {
-                std::shared_ptr<Cell> condition_value = evaluate_expr(*stmt.condition);
-                long long condition_key = switch_match_key(condition_value, stmt.loc);
+                auto condition_value_result = evaluate_expr(*stmt.condition);
+                if (!condition_value_result.has_value()) return std::unexpected(std::move(condition_value_result).error());
+                std::shared_ptr<Cell> condition_value = std::move(condition_value_result).value();
+                auto condition_key_result = switch_match_key(condition_value, stmt.loc);
+                if (!condition_key_result.has_value()) return std::unexpected(std::move(condition_key_result).error());
+                long long condition_key = condition_key_result.value();
                 frames_.push_back({});
-                try {
-                    bool matched = false;
-                    for (const SwitchCase& switch_case : stmt.switch_cases) {
-                        bool case_matches = false;
-                        if (matched) {
-                            case_matches = true;
-                        } else if (!switch_case.value) {
-                            case_matches = true;
-                        } else {
-                            case_matches = switch_match_key(evaluate_expr(*switch_case.value), switch_case.loc) == condition_key;
-                        }
-                        if (!case_matches) continue;
-                        matched = true;
-                        try {
-                            for (const StmtPtr& nested : switch_case.statements) execute_stmt(*nested, return_type);
-                        } catch (const BreakSignal&) {
+                std::expected<ExecOutcome, ConstexprError> result = ExecOutcome{};
+                bool matched = false;
+                for (const SwitchCase& switch_case : stmt.switch_cases) {
+                    bool case_matches = false;
+                    if (matched) {
+                        case_matches = true;
+                    } else if (!switch_case.value) {
+                        case_matches = true;
+                    } else {
+                        auto case_value_result = evaluate_expr(*switch_case.value);
+                        if (!case_value_result.has_value()) {
+                            result = std::unexpected(std::move(case_value_result).error());
                             break;
                         }
-                        bool ends_with_fallthrough =
-                            !switch_case.statements.empty() && switch_case.statements.back()->kind == StmtKind::Fallthrough;
-                        if (!ends_with_fallthrough) break;
+                        auto case_key_result = switch_match_key(case_value_result.value(), switch_case.loc);
+                        if (!case_key_result.has_value()) {
+                            result = std::unexpected(std::move(case_key_result).error());
+                            break;
+                        }
+                        case_matches = case_key_result.value() == condition_key;
                     }
-                } catch (...) {
-                    frames_.pop_back();
-                    throw;
+                    if (!case_matches) continue;
+                    matched = true;
+                    ExecOutcome case_outcome;
+                    bool case_broke = false;
+                    for (const StmtPtr& nested : switch_case.statements) {
+                        auto nested_result = execute_stmt(*nested, return_type);
+                        if (!nested_result.has_value()) {
+                            result = std::unexpected(std::move(nested_result).error());
+                            break;
+                        }
+                        case_outcome = nested_result.value();
+                        if (case_outcome.flow == ExecFlow::Break) {
+                            case_broke = true;
+                            break;
+                        }
+                        if (case_outcome.flow != ExecFlow::Normal) break;
+                    }
+                    if (!result.has_value()) break;
+                    if (case_broke) {
+                        // A `break;` inside a switch case is consumed here
+                        // (matching the original catch(const
+                        // BreakSignal&)): it stops case scanning and the
+                        // switch itself completes normally.
+                        break;
+                    }
+                    if (case_outcome.flow == ExecFlow::Return || case_outcome.flow == ExecFlow::Continue) {
+                        // Unlike Break, Return/Continue were never caught
+                        // by the original Switch's exception handling, so
+                        // they must keep propagating to this statement's
+                        // own caller unchanged.
+                        result = case_outcome;
+                        break;
+                    }
+                    bool ends_with_fallthrough =
+                        !switch_case.statements.empty() && switch_case.statements.back()->kind == StmtKind::Fallthrough;
+                    if (!ends_with_fallthrough) break;
                 }
                 frames_.pop_back();
-                return;
+                return result;
             }
-            case StmtKind::Break: throw BreakSignal{};
-            case StmtKind::Continue: throw ContinueSignal{};
-            case StmtKind::Fallthrough: return;
-            case StmtKind::Block:
-                if (stmt.is_unsafe) throw ConstexprError(stmt.loc, "unsafe blocks are not allowed in constant evaluation");
+            case StmtKind::Break: return ExecOutcome{ExecFlow::Break, nullptr};
+            case StmtKind::Continue: return ExecOutcome{ExecFlow::Continue, nullptr};
+            case StmtKind::Fallthrough: return ExecOutcome{};
+            case StmtKind::Block: {
+                if (stmt.is_unsafe) return std::unexpected(ConstexprError(stmt.loc, "unsafe blocks are not allowed in constant evaluation"));
                 frames_.push_back({});
-                try {
-                    for (const StmtPtr& nested : stmt.statements) execute_stmt(*nested, return_type);
-                } catch (...) {
-                    frames_.pop_back();
-                    throw;
+                std::expected<ExecOutcome, ConstexprError> result = ExecOutcome{};
+                for (const StmtPtr& nested : stmt.statements) {
+                    result = execute_stmt(*nested, return_type);
+                    if (!result.has_value() || result.value().flow != ExecFlow::Normal) break;
                 }
                 frames_.pop_back();
-                return;
+                return result;
+            }
         }
+        return ExecOutcome{};
     }
 };
 
@@ -2141,7 +2553,7 @@ private:
     return false;
 }
 
-void rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value) {
+[[nodiscard]] std::expected<void, ConstexprError> rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value) {
     if (is_named_type(value->type, "int")) {
         expr.kind = ExprKind::IntegerLiteral;
         expr.int_value = std::get<long long>(value->data);
@@ -2170,7 +2582,7 @@ void rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value) {
         auto* pointer = std::get_if<PointerValue>(&value->data);
         auto* array = pointer ? std::get_if<ArrayValue>(&pointer->storage->data) : nullptr;
         if (!pointer || !array || pointer->index != 0) {
-            throw ConstexprError(expr.loc, "Phase D1 cannot yet lower this constexpr pointer result back into source form");
+            return std::unexpected(ConstexprError(expr.loc, "Phase D1 cannot yet lower this constexpr pointer result back into source form"));
         }
         expr.kind = ExprKind::StringLiteral;
         expr.name.clear();
@@ -2183,7 +2595,7 @@ void rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value) {
         expr.float_value = 0.0;
         expr.bool_value = false;
     } else {
-        throw ConstexprError(expr.loc, "Phase D1 can only lower scalar and string-literal immediate results");
+        return std::unexpected(ConstexprError(expr.loc, "Phase D1 can only lower scalar and string-literal immediate results"));
     }
     expr.lhs.reset();
     expr.rhs.reset();
@@ -2191,9 +2603,10 @@ void rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value) {
     expr.args.clear();
     expr.explicit_template_args.clear();
     expr.type = value->type;
+    return {};
 }
 
-[[nodiscard]] ConstexprValue snapshot_constexpr_value(const std::shared_ptr<Cell>& value, const SourceLocation& loc) {
+[[nodiscard]] std::expected<ConstexprValue, ConstexprError> snapshot_constexpr_value(const std::shared_ptr<Cell>& value, const SourceLocation& loc) {
     ConstexprValue snapshot;
     snapshot.type = value->type;
     if (is_named_type(value->type, "void")) {
@@ -2219,7 +2632,7 @@ void rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value) {
         auto* pointer = std::get_if<PointerValue>(&value->data);
         auto* array = pointer ? std::get_if<ArrayValue>(&pointer->storage->data) : nullptr;
         if (!pointer || !array) {
-            throw ConstexprError(loc, "unsupported constexpr pointer result");
+            return std::unexpected(ConstexprError(loc, "unsupported constexpr pointer result"));
         }
         snapshot.kind = ConstexprValueKind::StringLiteralPointer;
         for (std::size_t i = static_cast<std::size_t>(std::max(pointer->index, 0LL)); i < array->elements.size(); ++i) {
@@ -2232,28 +2645,32 @@ void rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value) {
     if (auto* object = std::get_if<ObjectValue>(&value->data)) {
         snapshot.kind = ConstexprValueKind::Object;
         for (const auto& [name, field] : object->fields) {
-            snapshot.object_fields.push_back({name, std::make_shared<ConstexprValue>(snapshot_constexpr_value(field, loc))});
+            auto field_result = snapshot_constexpr_value(field, loc);
+            if (!field_result.has_value()) return std::unexpected(std::move(field_result).error());
+            snapshot.object_fields.push_back({name, std::make_shared<ConstexprValue>(std::move(field_result).value())});
         }
         return snapshot;
     }
     if (auto* array = std::get_if<ArrayValue>(&value->data)) {
         snapshot.kind = ConstexprValueKind::Array;
         for (const auto& element : array->elements) {
-            snapshot.elements.push_back(snapshot_constexpr_value(element, loc));
+            auto element_result = snapshot_constexpr_value(element, loc);
+            if (!element_result.has_value()) return std::unexpected(std::move(element_result).error());
+            snapshot.elements.push_back(std::move(element_result).value());
         }
         return snapshot;
     }
-    throw ConstexprError(loc, "unsupported constexpr value kind");
+    return std::unexpected(ConstexprError(loc, "unsupported constexpr value kind"));
 }
 
-void collect_runtime_expr_rewrites(const Program& program, Expr& expr, ConstexprEngine& engine,
+[[nodiscard]] std::expected<void, ConstexprError> collect_runtime_expr_rewrites(const Program& program, Expr& expr, ConstexprEngine& engine,
                                    std::vector<ExprRewrite>& expr_rewrites,
                                    std::vector<Stmt*>& consteval_if_rewrites);
-void collect_runtime_stmt_rewrites(const Program& program, Stmt& stmt, ConstexprEngine& engine,
+[[nodiscard]] std::expected<void, ConstexprError> collect_runtime_stmt_rewrites(const Program& program, Stmt& stmt, ConstexprEngine& engine,
                                    std::vector<ExprRewrite>& expr_rewrites,
                                    std::vector<Stmt*>& consteval_if_rewrites);
 
-void collect_runtime_stmt_rewrites(const Program& program, Stmt& stmt, ConstexprEngine& engine,
+[[nodiscard]] std::expected<void, ConstexprError> collect_runtime_stmt_rewrites(const Program& program, Stmt& stmt, ConstexprEngine& engine,
                                    std::vector<ExprRewrite>& expr_rewrites,
                                    std::vector<Stmt*>& consteval_if_rewrites) {
     if (stmt.kind == StmtKind::If && stmt.if_mode != IfMode::Runtime) {
@@ -2263,44 +2680,101 @@ void collect_runtime_stmt_rewrites(const Program& program, Stmt& stmt, Constexpr
         } else if (stmt.else_branch) {
             runtime_branch = stmt.else_branch.get();
         }
-        if (runtime_branch) collect_runtime_stmt_rewrites(program, *runtime_branch, engine, expr_rewrites, consteval_if_rewrites);
+        if (runtime_branch) {
+            if (auto result = collect_runtime_stmt_rewrites(program, *runtime_branch, engine, expr_rewrites, consteval_if_rewrites);
+                !result.has_value()) {
+                return result;
+            }
+        }
         consteval_if_rewrites.push_back(&stmt);
-        return;
+        return {};
     }
 
-    if (stmt.init) collect_runtime_expr_rewrites(program, *stmt.init, engine, expr_rewrites, consteval_if_rewrites);
+    if (stmt.init) {
+        if (auto result = collect_runtime_expr_rewrites(program, *stmt.init, engine, expr_rewrites, consteval_if_rewrites);
+            !result.has_value()) {
+            return result;
+        }
+    }
     for (ExprPtr& arg : stmt.ctor_args) {
-        collect_runtime_expr_rewrites(program, *arg, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_expr_rewrites(program, *arg, engine, expr_rewrites, consteval_if_rewrites);
+            !result.has_value()) {
+            return result;
+        }
     }
-    if (stmt.expr) collect_runtime_expr_rewrites(program, *stmt.expr, engine, expr_rewrites, consteval_if_rewrites);
+    if (stmt.expr) {
+        if (auto result = collect_runtime_expr_rewrites(program, *stmt.expr, engine, expr_rewrites, consteval_if_rewrites);
+            !result.has_value()) {
+            return result;
+        }
+    }
     if (stmt.condition) {
-        collect_runtime_expr_rewrites(program, *stmt.condition, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_expr_rewrites(program, *stmt.condition, engine, expr_rewrites, consteval_if_rewrites);
+            !result.has_value()) {
+            return result;
+        }
     }
-    if (stmt.then_branch) collect_runtime_stmt_rewrites(program, *stmt.then_branch, engine, expr_rewrites, consteval_if_rewrites);
-    if (stmt.else_branch) collect_runtime_stmt_rewrites(program, *stmt.else_branch, engine, expr_rewrites, consteval_if_rewrites);
+    if (stmt.then_branch) {
+        if (auto result = collect_runtime_stmt_rewrites(program, *stmt.then_branch, engine, expr_rewrites, consteval_if_rewrites);
+            !result.has_value()) {
+            return result;
+        }
+    }
+    if (stmt.else_branch) {
+        if (auto result = collect_runtime_stmt_rewrites(program, *stmt.else_branch, engine, expr_rewrites, consteval_if_rewrites);
+            !result.has_value()) {
+            return result;
+        }
+    }
     for (StmtPtr& nested : stmt.statements) {
-        collect_runtime_stmt_rewrites(program, *nested, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_stmt_rewrites(program, *nested, engine, expr_rewrites, consteval_if_rewrites);
+            !result.has_value()) {
+            return result;
+        }
     }
+    return {};
 }
 
-void collect_runtime_expr_rewrites(const Program& program, Expr& expr, ConstexprEngine& engine,
+[[nodiscard]] std::expected<void, ConstexprError> collect_runtime_expr_rewrites(const Program& program, Expr& expr, ConstexprEngine& engine,
                                    std::vector<ExprRewrite>& expr_rewrites,
                                    std::vector<Stmt*>& consteval_if_rewrites) {
     if (find_consteval_function(program, expr) != nullptr && !expr_depends_on_runtime_bindings(expr)) {
-        expr_rewrites.push_back(ExprRewrite{&expr, engine.evaluate_root_expr(expr)});
-        return;
+        auto value_result = engine.evaluate_root_expr(expr);
+        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+        expr_rewrites.push_back(ExprRewrite{&expr, std::move(value_result).value()});
+        return {};
     }
-    if (expr.lhs) collect_runtime_expr_rewrites(program, *expr.lhs, engine, expr_rewrites, consteval_if_rewrites);
-    if (expr.rhs) collect_runtime_expr_rewrites(program, *expr.rhs, engine, expr_rewrites, consteval_if_rewrites);
+    if (expr.lhs) {
+        if (auto result = collect_runtime_expr_rewrites(program, *expr.lhs, engine, expr_rewrites, consteval_if_rewrites);
+            !result.has_value()) {
+            return result;
+        }
+    }
+    if (expr.rhs) {
+        if (auto result = collect_runtime_expr_rewrites(program, *expr.rhs, engine, expr_rewrites, consteval_if_rewrites);
+            !result.has_value()) {
+            return result;
+        }
+    }
     if (expr.third) {
-        collect_runtime_expr_rewrites(program, *expr.third, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_expr_rewrites(program, *expr.third, engine, expr_rewrites, consteval_if_rewrites);
+            !result.has_value()) {
+            return result;
+        }
     }
     for (ExprPtr& arg : expr.args) {
-        collect_runtime_expr_rewrites(program, *arg, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_expr_rewrites(program, *arg, engine, expr_rewrites, consteval_if_rewrites);
+            !result.has_value()) {
+            return result;
+        }
     }
     if (expr.lambda_body) {
-        collect_runtime_stmt_rewrites(program, *expr.lambda_body, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_stmt_rewrites(program, *expr.lambda_body, engine, expr_rewrites, consteval_if_rewrites);
+            !result.has_value()) {
+            return result;
+        }
     }
+    return {};
 }
 
 void rewrite_consteval_if_for_runtime(Stmt& stmt) {
@@ -2362,20 +2836,26 @@ public:
     // the time it runs every `array_size_expr` here has already been
     // cleared, so that part of `run()` becomes a harmless no-op safety
     // net for whichever call site is reached first.
-    void resolve_array_bounds() {
-        for (StructDef& def : program_.structs) resolve_struct_array_bounds(def.name);
-        for (ClassDef& def : program_.classes) resolve_class_array_bounds(def.name);
+    [[nodiscard]] std::expected<void, ConstexprError> resolve_array_bounds() {
+        for (StructDef& def : program_.structs) {
+            if (auto result = resolve_struct_array_bounds(def.name); !result.has_value()) return result;
+        }
+        for (ClassDef& def : program_.classes) {
+            if (auto result = resolve_class_array_bounds(def.name); !result.has_value()) return result;
+        }
         for (GlobalVar& global : program_.globals) {
             if (global.decl == nullptr) continue;
-            resolve_array_bounds_type_dependencies(global.decl->type);
+            if (auto result = resolve_array_bounds_type_dependencies(global.decl->type); !result.has_value()) return result;
         }
         for (Function& fn : program_.functions) {
             if (fn.is_generic_template) continue;
             if (!fn.member_owner_class.empty() && generic_template_owner_names_.contains(fn.member_owner_class)) {
                 continue;
             }
-            for (Param& param : fn.params) resolve_array_bounds_type_dependencies(param.type);
-            resolve_array_bounds_type_dependencies(fn.return_type);
+            for (Param& param : fn.params) {
+                if (auto result = resolve_array_bounds_type_dependencies(param.type); !result.has_value()) return result;
+            }
+            if (auto result = resolve_array_bounds_type_dependencies(fn.return_type); !result.has_value()) return result;
             if (fn.body) {
                 // ch05 §9.4 (local-constexpr-as-array-bound gap fix):
                 // opens this function's own local constant-evaluation
@@ -2386,31 +2866,34 @@ public:
                 // already is for `alignas` via validate_constexpr_locals.
                 // Reset fresh per function -- never leaks across functions.
                 engine_.begin_local_array_bound_scope();
-                try {
-                    resolve_array_bounds_in_stmt(*fn.body);
-                } catch (...) {
-                    engine_.end_local_array_bound_scope();
-                    throw;
-                }
+                auto result = resolve_array_bounds_in_stmt(*fn.body);
                 engine_.end_local_array_bound_scope();
+                if (!result.has_value()) return result;
             }
         }
+        return {};
     }
 
-    void run() {
-        for (StructDef& def : program_.structs) resolve_struct(def.name);
-        for (ClassDef& def : program_.classes) resolve_class(def.name);
+    [[nodiscard]] std::expected<void, ConstexprError> run() {
+        for (StructDef& def : program_.structs) {
+            if (auto result = resolve_struct(def.name); !result.has_value()) return result;
+        }
+        for (ClassDef& def : program_.classes) {
+            if (auto result = resolve_class(def.name); !result.has_value()) return result;
+        }
         for (GlobalVar& global : program_.globals) {
             if (global.decl == nullptr) continue;
-            resolve_type_dependencies(global.decl->type);
+            if (auto result = resolve_type_dependencies(global.decl->type); !result.has_value()) return result;
             std::optional<TypeLayoutInfo> layout = layout_of_type(program_, global.decl->type);
             if (!layout.has_value()) {
                 global.decl->resolved_alignment = 0;
                 continue;
             }
-            global.decl->resolved_alignment =
+            auto alignment_result =
                 engine_.resolve_root_alignment_specs(global.decl->alignment_specs, layout->abi_align_bytes, global.decl->loc,
                                                      "variable '" + global.decl->var_name + "'");
+            if (!alignment_result.has_value()) return std::unexpected(std::move(alignment_result).error());
+            global.decl->resolved_alignment = alignment_result.value();
         }
         for (Function& fn : program_.functions) {
             if (!fn.body) continue;
@@ -2418,8 +2901,9 @@ public:
             if (!fn.member_owner_class.empty() && generic_template_owner_names_.contains(fn.member_owner_class)) {
                 continue;
             }
-            engine_.validate_constexpr_locals(fn);
+            if (auto result = engine_.validate_constexpr_locals(fn); !result.has_value()) return result;
         }
+        return {};
     }
 
 private:
@@ -2447,33 +2931,44 @@ private:
     // additionally recurses into a Named struct/class reference so a
     // `sizeof(Other)` inside an array-bound expression sees Other's own
     // array-sized fields correctly, regardless of declaration order.
-    void resolve_array_bounds_type_dependencies(Type& type) {
+    [[nodiscard]] std::expected<void, ConstexprError> resolve_array_bounds_type_dependencies(Type& type) {
         switch (type.kind) {
             case TypeKind::Named:
                 if (StructDef* def = find_struct_mut(type.name)) {
-                    resolve_struct_array_bounds(def->name);
+                    return resolve_struct_array_bounds(def->name);
                 } else if (ClassDef* def = find_class_mut(type.name)) {
-                    resolve_class_array_bounds(def->name);
+                    return resolve_class_array_bounds(def->name);
                 }
-                return;
+                return {};
             case TypeKind::Pointer:
             case TypeKind::Reference:
             case TypeKind::Span:
-                if (type.pointee) resolve_array_bounds_type_dependencies(*type.pointee);
-                return;
+                if (type.pointee) return resolve_array_bounds_type_dependencies(*type.pointee);
+                return {};
             case TypeKind::Array:
-                if (type.element) resolve_array_bounds_type_dependencies(*type.element);
+                if (type.element) {
+                    if (auto result = resolve_array_bounds_type_dependencies(*type.element); !result.has_value()) return result;
+                }
                 if (type.array_size_expr) {
-                    type.array_size = engine_.resolve_root_array_bound(*type.array_size_expr);
+                    auto bound_result = engine_.resolve_root_array_bound(*type.array_size_expr);
+                    if (!bound_result.has_value()) return std::unexpected(std::move(bound_result).error());
+                    type.array_size = bound_result.value();
                     type.array_size_expr.reset();
                 }
-                return;
+                return {};
             case TypeKind::Function:
             case TypeKind::FunctionPointer:
-                if (type.function_return) resolve_array_bounds_type_dependencies(*type.function_return);
-                for (Type& param : type.function_params) resolve_array_bounds_type_dependencies(param);
-                return;
+                if (type.function_return) {
+                    if (auto result = resolve_array_bounds_type_dependencies(*type.function_return); !result.has_value()) {
+                        return result;
+                    }
+                }
+                for (Type& param : type.function_params) {
+                    if (auto result = resolve_array_bounds_type_dependencies(param); !result.has_value()) return result;
+                }
+                return {};
         }
+        return {};
     }
 
     // Full statement-tree walk covering every StmtKind that can carry a
@@ -2484,7 +2979,7 @@ private:
     // ConstexprEngine::push_local_array_bound_scope's comment): a nested
     // frame per Block/If-branch/While-body keeps a local constexpr's
     // visibility scoped exactly like ordinary C++ block scoping.
-    void resolve_array_bounds_in_stmt(Stmt& stmt) {
+    [[nodiscard]] std::expected<void, ConstexprError> resolve_array_bounds_in_stmt(Stmt& stmt) {
         switch (stmt.kind) {
             case StmtKind::VarDecl:
                 // ch05 §9.4 (local-constexpr-as-array-bound gap fix): uses
@@ -2501,123 +2996,136 @@ private:
                 // is unnecessary here: every struct/class is already fully
                 // array-bounds-resolved (see resolve_array_bounds()'s own
                 // struct/class loops, which always run first).
-                engine_.resolve_array_bounds_in_type(stmt.type);
-                if (stmt.init) resolve_array_bounds_in_expr(*stmt.init);
-                for (ExprPtr& arg : stmt.ctor_args) resolve_array_bounds_in_expr(*arg);
+                if (auto result = engine_.resolve_array_bounds_in_type(stmt.type); !result.has_value()) return result;
+                if (stmt.init) {
+                    if (auto result = resolve_array_bounds_in_expr(*stmt.init); !result.has_value()) return result;
+                }
+                for (ExprPtr& arg : stmt.ctor_args) {
+                    if (auto result = resolve_array_bounds_in_expr(*arg); !result.has_value()) return result;
+                }
                 // Makes this local's own value visible to a later
                 // sibling/nested array-bound expression in this same
                 // function, exactly like it's already visible as an
                 // `alignas` operand.
-                engine_.bind_local_constant_for_array_bounds(stmt);
-                return;
+                return engine_.bind_local_constant_for_array_bounds(stmt);
             case StmtKind::Return:
             case StmtKind::ExprStmt:
-                if (stmt.expr) resolve_array_bounds_in_expr(*stmt.expr);
-                return;
+                if (stmt.expr) return resolve_array_bounds_in_expr(*stmt.expr);
+                return {};
             case StmtKind::If:
-                if (stmt.condition) resolve_array_bounds_in_expr(*stmt.condition);
+                if (stmt.condition) {
+                    if (auto result = resolve_array_bounds_in_expr(*stmt.condition); !result.has_value()) return result;
+                }
                 if (stmt.then_branch) {
                     engine_.push_local_array_bound_scope();
-                    try {
-                        resolve_array_bounds_in_stmt(*stmt.then_branch);
-                    } catch (...) {
-                        engine_.pop_local_array_bound_scope();
-                        throw;
-                    }
+                    auto result = resolve_array_bounds_in_stmt(*stmt.then_branch);
                     engine_.pop_local_array_bound_scope();
+                    if (!result.has_value()) return result;
                 }
                 if (stmt.else_branch) {
                     engine_.push_local_array_bound_scope();
-                    try {
-                        resolve_array_bounds_in_stmt(*stmt.else_branch);
-                    } catch (...) {
-                        engine_.pop_local_array_bound_scope();
-                        throw;
-                    }
+                    auto result = resolve_array_bounds_in_stmt(*stmt.else_branch);
                     engine_.pop_local_array_bound_scope();
+                    if (!result.has_value()) return result;
                 }
-                return;
+                return {};
             case StmtKind::While:
-                if (stmt.condition) resolve_array_bounds_in_expr(*stmt.condition);
+                if (stmt.condition) {
+                    if (auto result = resolve_array_bounds_in_expr(*stmt.condition); !result.has_value()) return result;
+                }
                 if (stmt.then_branch) {
                     engine_.push_local_array_bound_scope();
-                    try {
-                        resolve_array_bounds_in_stmt(*stmt.then_branch);
-                    } catch (...) {
-                        engine_.pop_local_array_bound_scope();
-                        throw;
-                    }
+                    auto result = resolve_array_bounds_in_stmt(*stmt.then_branch);
                     engine_.pop_local_array_bound_scope();
+                    if (!result.has_value()) return result;
                 }
-                return;
-            case StmtKind::Switch:
-                if (stmt.condition) resolve_array_bounds_in_expr(*stmt.condition);
+                return {};
+            case StmtKind::Switch: {
+                if (stmt.condition) {
+                    if (auto result = resolve_array_bounds_in_expr(*stmt.condition); !result.has_value()) return result;
+                }
                 for (SwitchCase& switch_case : stmt.switch_cases) {
-                    if (switch_case.value) resolve_array_bounds_in_expr(*switch_case.value);
+                    if (switch_case.value) {
+                        if (auto result = resolve_array_bounds_in_expr(*switch_case.value); !result.has_value()) return result;
+                    }
                     engine_.push_local_array_bound_scope();
-                    try {
-                        for (StmtPtr& nested : switch_case.statements) resolve_array_bounds_in_stmt(*nested);
-                    } catch (...) {
-                        engine_.pop_local_array_bound_scope();
-                        throw;
+                    std::expected<void, ConstexprError> result;
+                    for (StmtPtr& nested : switch_case.statements) {
+                        result = resolve_array_bounds_in_stmt(*nested);
+                        if (!result.has_value()) break;
                     }
                     engine_.pop_local_array_bound_scope();
+                    if (!result.has_value()) return result;
                 }
-                return;
-            case StmtKind::Block:
+                return {};
+            }
+            case StmtKind::Block: {
                 engine_.push_local_array_bound_scope();
-                try {
-                    for (StmtPtr& nested : stmt.statements) resolve_array_bounds_in_stmt(*nested);
-                } catch (...) {
-                    engine_.pop_local_array_bound_scope();
-                    throw;
+                std::expected<void, ConstexprError> result;
+                for (StmtPtr& nested : stmt.statements) {
+                    result = resolve_array_bounds_in_stmt(*nested);
+                    if (!result.has_value()) break;
                 }
                 engine_.pop_local_array_bound_scope();
-                return;
+                return result;
+            }
             case StmtKind::Break:
             case StmtKind::Continue:
             case StmtKind::Fallthrough:
-                return;
+                return {};
         }
+        return {};
     }
 
-    void resolve_array_bounds_in_expr(Expr& expr) {
-        if (expr.lhs) resolve_array_bounds_in_expr(*expr.lhs);
-        if (expr.rhs) resolve_array_bounds_in_expr(*expr.rhs);
-        if (expr.third) resolve_array_bounds_in_expr(*expr.third);
-        for (ExprPtr& arg : expr.args) resolve_array_bounds_in_expr(*arg);
-        if (expr.lambda_body) resolve_array_bounds_in_stmt(*expr.lambda_body);
+    [[nodiscard]] std::expected<void, ConstexprError> resolve_array_bounds_in_expr(Expr& expr) {
+        if (expr.lhs) {
+            if (auto result = resolve_array_bounds_in_expr(*expr.lhs); !result.has_value()) return result;
+        }
+        if (expr.rhs) {
+            if (auto result = resolve_array_bounds_in_expr(*expr.rhs); !result.has_value()) return result;
+        }
+        if (expr.third) {
+            if (auto result = resolve_array_bounds_in_expr(*expr.third); !result.has_value()) return result;
+        }
+        for (ExprPtr& arg : expr.args) {
+            if (auto result = resolve_array_bounds_in_expr(*arg); !result.has_value()) return result;
+        }
+        if (expr.lambda_body) return resolve_array_bounds_in_stmt(*expr.lambda_body);
+        return {};
     }
 
     // Array-bounds-only counterpart of resolve_struct/resolve_class below
     // (no alignas work, and using this class's own separate
     // array_bounds_resolving_*/array_bounds_resolved_* sets).
-    void resolve_struct_array_bounds(const std::string& name) {
-        if (array_bounds_resolved_structs_.contains(name)) return;
-        if (!array_bounds_resolving_structs_.insert(name).second) return;
+    [[nodiscard]] std::expected<void, ConstexprError> resolve_struct_array_bounds(const std::string& name) {
+        if (array_bounds_resolved_structs_.contains(name)) return {};
+        if (!array_bounds_resolving_structs_.insert(name).second) return {};
         StructDef* def = find_struct_mut(name);
-        if (!def) return;
+        if (!def) return {};
         if (!def->template_params.empty()) {
             array_bounds_resolving_structs_.erase(name);
             array_bounds_resolved_structs_.insert(name);
-            return;
+            return {};
         }
         engine_.mark_type_incomplete(name);
-        for (StructField& field : def->fields) resolve_array_bounds_type_dependencies(field.type);
+        for (StructField& field : def->fields) {
+            if (auto result = resolve_array_bounds_type_dependencies(field.type); !result.has_value()) return result;
+        }
         engine_.mark_type_complete(name);
         array_bounds_resolving_structs_.erase(name);
         array_bounds_resolved_structs_.insert(name);
+        return {};
     }
 
-    void resolve_class_array_bounds(const std::string& name) {
-        if (array_bounds_resolved_classes_.contains(name)) return;
-        if (!array_bounds_resolving_classes_.insert(name).second) return;
+    [[nodiscard]] std::expected<void, ConstexprError> resolve_class_array_bounds(const std::string& name) {
+        if (array_bounds_resolved_classes_.contains(name)) return {};
+        if (!array_bounds_resolving_classes_.insert(name).second) return {};
         ClassDef* def = find_class_mut(name);
-        if (!def) return;
+        if (!def) return {};
         if (!def->template_params.empty()) {
             array_bounds_resolving_classes_.erase(name);
             array_bounds_resolved_classes_.insert(name);
-            return;
+            return {};
         }
         // ch05 §5.14: a "checking class" (ClassDef::is_synthetic_check_only,
         // see check_generic_type_methods_once) is a purely internal,
@@ -2636,17 +3144,20 @@ private:
         if (def->is_synthetic_check_only) {
             array_bounds_resolving_classes_.erase(name);
             array_bounds_resolved_classes_.insert(name);
-            return;
+            return {};
         }
         engine_.mark_type_incomplete(name);
         if (auto base = def->direct_ordinary_base()) {
             Type base_type = base->get().base_type;
-            resolve_array_bounds_type_dependencies(base_type);
+            if (auto result = resolve_array_bounds_type_dependencies(base_type); !result.has_value()) return result;
         }
-        for (ClassField& field : def->fields) resolve_array_bounds_type_dependencies(field.type);
+        for (ClassField& field : def->fields) {
+            if (auto result = resolve_array_bounds_type_dependencies(field.type); !result.has_value()) return result;
+        }
         engine_.mark_type_complete(name);
         array_bounds_resolving_classes_.erase(name);
         array_bounds_resolved_classes_.insert(name);
+        return {};
     }
 
     [[nodiscard]] StructDef* find_struct_mut(std::string_view name) {
@@ -2663,22 +3174,24 @@ private:
         return nullptr;
     }
 
-    void resolve_type_dependencies(Type& type) {
+    [[nodiscard]] std::expected<void, ConstexprError> resolve_type_dependencies(Type& type) {
         switch (type.kind) {
             case TypeKind::Named:
                 if (StructDef* def = find_struct_mut(type.name)) {
-                    resolve_struct(def->name);
+                    return resolve_struct(def->name);
                 } else if (ClassDef* def = find_class_mut(type.name)) {
-                    resolve_class(def->name);
+                    return resolve_class(def->name);
                 }
-                return;
+                return {};
             case TypeKind::Pointer:
             case TypeKind::Reference:
             case TypeKind::Span:
-                if (type.pointee) resolve_type_dependencies(*type.pointee);
-                return;
+                if (type.pointee) return resolve_type_dependencies(*type.pointee);
+                return {};
             case TypeKind::Array:
-                if (type.element) resolve_type_dependencies(*type.element);
+                if (type.element) {
+                    if (auto result = resolve_type_dependencies(*type.element); !result.has_value()) return result;
+                }
                 // ch05 §9.4: this array's own bound (not its element's --
                 // that was just handled by the recursive call above)
                 // must be resolved before any layout_of_type call below
@@ -2686,16 +3199,23 @@ private:
                 // natural_class_alignment, and this same function's own
                 // callers) ever reads `array_size`.
                 if (type.array_size_expr) {
-                    type.array_size = engine_.resolve_root_array_bound(*type.array_size_expr);
+                    auto bound_result = engine_.resolve_root_array_bound(*type.array_size_expr);
+                    if (!bound_result.has_value()) return std::unexpected(std::move(bound_result).error());
+                    type.array_size = bound_result.value();
                     type.array_size_expr.reset();
                 }
-                return;
+                return {};
             case TypeKind::Function:
             case TypeKind::FunctionPointer:
-                if (type.function_return) resolve_type_dependencies(*type.function_return);
-                for (Type& param : type.function_params) resolve_type_dependencies(param);
-                return;
+                if (type.function_return) {
+                    if (auto result = resolve_type_dependencies(*type.function_return); !result.has_value()) return result;
+                }
+                for (Type& param : type.function_params) {
+                    if (auto result = resolve_type_dependencies(param); !result.has_value()) return result;
+                }
+                return {};
         }
+        return {};
     }
 
     [[nodiscard]] bool type_has_strengthened_record_alignment(const Type& type) {
@@ -2743,11 +3263,11 @@ private:
         return overall;
     }
 
-    void resolve_struct(const std::string& name) {
-        if (resolved_structs_.contains(name)) return;
-        if (!resolving_structs_.insert(name).second) return;
+    [[nodiscard]] std::expected<void, ConstexprError> resolve_struct(const std::string& name) {
+        if (resolved_structs_.contains(name)) return {};
+        if (!resolving_structs_.insert(name).second) return {};
         StructDef* def = find_struct_mut(name);
-        if (!def) return;
+        if (!def) return {};
         if (!def->template_params.empty()) {
             // ch05 §9.4(7)/§9.3: this is the primary template
             // definition itself, not a concrete instantiation -- its
@@ -2762,55 +3282,60 @@ private:
             // where resolution proceeds normally.
             resolving_structs_.erase(name);
             resolved_structs_.insert(name);
-            return;
+            return {};
         }
         engine_.mark_type_incomplete(name);
         for (StructField& field : def->fields) {
-            resolve_type_dependencies(field.type);
+            if (auto result = resolve_type_dependencies(field.type); !result.has_value()) return result;
         }
         if (def->is_packed && !def->alignment_specs.empty()) {
-            throw ConstexprError(def->alignment_specs.front().loc,
-                                 "'[[scpp::packed]]' cannot be combined with 'alignas' on '" + def->name + "'");
+            return std::unexpected(ConstexprError(def->alignment_specs.front().loc,
+                                 "'[[scpp::packed]]' cannot be combined with 'alignas' on '" + def->name + "'"));
         }
         for (StructField& field : def->fields) {
             if (def->is_packed && !field.alignment_specs.empty()) {
-                throw ConstexprError(field.alignment_specs.front().loc,
-                                     "'[[scpp::packed]]' cannot be combined with 'alignas' on member '" + field.name + "'");
+                return std::unexpected(ConstexprError(field.alignment_specs.front().loc,
+                                     "'[[scpp::packed]]' cannot be combined with 'alignas' on member '" + field.name + "'"));
             }
             std::optional<TypeLayoutInfo> layout = layout_of_type(program_, field.type);
             if (!layout.has_value()) {
                 field.resolved_alignment = 0;
                 continue;
             }
-            field.resolved_alignment =
+            auto alignment_result =
                 engine_.resolve_root_alignment_specs(field.alignment_specs, layout->abi_align_bytes, field.loc,
                                                      "member '" + field.name + "'");
+            if (!alignment_result.has_value()) return std::unexpected(std::move(alignment_result).error());
+            field.resolved_alignment = alignment_result.value();
             if (def->is_packed && type_has_strengthened_record_alignment(field.type)) {
-                throw ConstexprError(field.loc,
+                return std::unexpected(ConstexprError(field.loc,
                                      "'[[scpp::packed]]' member '" + field.name +
                                          "' cannot have a class/struct/union type whose alignment was strengthened by "
-                                         "'alignas'");
+                                         "'alignas'"));
             }
         }
         std::uint64_t natural_align = natural_struct_alignment(*def);
-        def->resolved_alignment =
+        auto def_alignment_result =
             engine_.resolve_root_alignment_specs(def->alignment_specs, natural_align, def->loc,
                                                  std::string(def->is_union ? "union '" : "struct '") + def->name + "'");
+        if (!def_alignment_result.has_value()) return std::unexpected(std::move(def_alignment_result).error());
+        def->resolved_alignment = def_alignment_result.value();
         engine_.mark_type_complete(name);
         resolving_structs_.erase(name);
         resolved_structs_.insert(name);
+        return {};
     }
 
-    void resolve_class(const std::string& name) {
-        if (resolved_classes_.contains(name)) return;
-        if (!resolving_classes_.insert(name).second) return;
+    [[nodiscard]] std::expected<void, ConstexprError> resolve_class(const std::string& name) {
+        if (resolved_classes_.contains(name)) return {};
+        if (!resolving_classes_.insert(name).second) return {};
         ClassDef* def = find_class_mut(name);
-        if (!def) return;
+        if (!def) return {};
         if (!def->template_params.empty()) {
             // See the identical comment in resolve_struct above.
             resolving_classes_.erase(name);
             resolved_classes_.insert(name);
-            return;
+            return {};
         }
         // ch05 §9.4/§5.14: skip a synthetic "checking class"
         // (ClassDef::is_synthetic_check_only) here too, for the same
@@ -2825,36 +3350,43 @@ private:
         if (def->is_synthetic_check_only) {
             resolving_classes_.erase(name);
             resolved_classes_.insert(name);
-            return;
+            return {};
         }
         engine_.mark_type_incomplete(name);
         if (auto base = def->direct_ordinary_base()) {
             Type base_type = base->get().base_type;
-            resolve_type_dependencies(base_type);
+            if (auto result = resolve_type_dependencies(base_type); !result.has_value()) return result;
         }
-        for (ClassField& field : def->fields) resolve_type_dependencies(field.type);
+        for (ClassField& field : def->fields) {
+            if (auto result = resolve_type_dependencies(field.type); !result.has_value()) return result;
+        }
         for (ClassField& field : def->fields) {
             std::optional<TypeLayoutInfo> layout = layout_of_type(program_, field.type);
             if (!layout.has_value()) {
                 field.resolved_alignment = 0;
                 continue;
             }
-            field.resolved_alignment =
+            auto alignment_result =
                 engine_.resolve_root_alignment_specs(field.alignment_specs, layout->abi_align_bytes, field.loc,
                                                      "member '" + field.name + "'");
+            if (!alignment_result.has_value()) return std::unexpected(std::move(alignment_result).error());
+            field.resolved_alignment = alignment_result.value();
         }
         std::uint64_t natural_align = natural_class_alignment(*def);
-        def->resolved_alignment =
+        auto def_alignment_result =
             engine_.resolve_root_alignment_specs(def->alignment_specs, natural_align, def->loc, "class '" + def->name + "'");
+        if (!def_alignment_result.has_value()) return std::unexpected(std::move(def_alignment_result).error());
+        def->resolved_alignment = def_alignment_result.value();
         engine_.mark_type_complete(name);
         resolving_classes_.erase(name);
         resolved_classes_.insert(name);
+        return {};
     }
 };
 
 } // namespace
 
-void fold_immediate_calls(Program& program, ConstexprLimits limits) {
+[[nodiscard]] std::expected<void, ConstexprError> fold_immediate_calls(Program& program, ConstexprLimits limits) {
     ConstexprEngine engine(program, limits);
     AlignmentResolver aligner(program, engine);
     // ch05 §9.4: array bounds must be resolved before *any* immediate-call
@@ -2863,30 +3395,38 @@ void fold_immediate_calls(Program& program, ConstexprLimits limits) {
     // any local array declaration inside it -- long before `aligner.run()`
     // would otherwise get around to validating that same function. See
     // resolve_array_bounds()'s own comment for the full rationale.
-    aligner.resolve_array_bounds();
+    if (auto result = aligner.resolve_array_bounds(); !result.has_value()) return result;
     std::vector<ExprRewrite> expr_rewrites;
     std::vector<Stmt*> consteval_if_rewrites;
     for (Function& fn : program.functions) {
         if (!fn.body) continue;
-        collect_runtime_stmt_rewrites(program, *fn.body, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_stmt_rewrites(program, *fn.body, engine, expr_rewrites, consteval_if_rewrites);
+            !result.has_value()) {
+            return result;
+        }
     }
-    for (ExprRewrite& rewrite : expr_rewrites) rewrite_expr_as_constant(*rewrite.target, rewrite.value);
+    for (ExprRewrite& rewrite : expr_rewrites) {
+        if (auto result = rewrite_expr_as_constant(*rewrite.target, rewrite.value); !result.has_value()) return result;
+    }
     // Validate required-constant-expression contexts *before* stripping
     // `if consteval` / `if !consteval` down to their runtime-selected
     // branches. Otherwise a `constexpr` local initializer that calls a
     // constexpr function containing `if consteval` would incorrectly see
     // only the runtime branch, because the callee's AST has already been
     // destructively rewritten for the later runtime pipeline.
-    aligner.run();
+    if (auto result = aligner.run(); !result.has_value()) return result;
     for (Stmt* stmt : consteval_if_rewrites) rewrite_consteval_if_for_runtime(*stmt);
     for (Function& fn : program.functions) {
         if (fn.eval_mode == FunctionEvalMode::Consteval && !fn.name.ends_with("_new")) fn.body.reset();
     }
+    return {};
 }
 
-ConstexprValue evaluate_immediate_expr(const Program& program, const Expr& expr, ConstexprLimits limits) {
+[[nodiscard]] std::expected<ConstexprValue, ConstexprError> evaluate_immediate_expr(const Program& program, const Expr& expr, ConstexprLimits limits) {
     ConstexprEngine engine(program, limits);
-    return snapshot_constexpr_value(engine.evaluate_root_expr(expr), expr.loc);
+    auto value_result = engine.evaluate_root_expr(expr);
+    if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+    return snapshot_constexpr_value(value_result.value(), expr.loc);
 }
 
 } // namespace scpp
