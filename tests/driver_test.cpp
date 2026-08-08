@@ -252,7 +252,8 @@ std::string shell_quote(const std::string& text) {
 // its stdout and exit code (0-255, matching POSIX wait status semantics).
 RunResult compile_and_run(std::string_view source, const std::string& case_name) {
     std::filesystem::path exe_path = std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name);
-    scpp::compile_to_executable(source, exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+    auto compile_result_1 = scpp::compile_to_executable(source, exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+    if (!compile_result_1.has_value()) throw std::move(compile_result_1).error();
 
     FILE* pipe = popen(exe_path.string().c_str(), "r");
     std::string output;
@@ -271,7 +272,8 @@ RunResult compile_and_run(std::string_view source, const std::string& case_name)
 
 RunResult compile_and_run_with_input(std::string_view source, const std::string& case_name, std::string_view input) {
     std::filesystem::path exe_path = std::filesystem::current_path() / ("scpp_driver_test_" + case_name);
-    scpp::compile_to_executable(source, exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+    auto compile_result_2 = scpp::compile_to_executable(source, exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+    if (!compile_result_2.has_value()) throw std::move(compile_result_2).error();
     RunResult result = run_command_capture("printf %s " + shell_quote(std::string(input)) + " | " +
                                            shell_quote(exe_path.string()) + " 2>&1");
     std::filesystem::remove(exe_path);
@@ -459,8 +461,9 @@ void run_module_system_tests() {
         try {
             std::filesystem::path exe_path =
                 std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+            auto compile_result_3 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
                                          {{"mathlib", lib_path.string()}});
+            if (!compile_result_3.has_value()) throw std::move(compile_result_3).error();
             FILE* pipe = popen(exe_path.string().c_str(), "r");
             std::string output;
             if (pipe != nullptr) {
@@ -553,8 +556,9 @@ void run_module_system_tests() {
         try {
             std::filesystem::path exe_path =
                 std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+            auto compile_result_4 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
                                          {{"mathlib", lib_path.string()}});
+            if (!compile_result_4.has_value()) throw std::move(compile_result_4).error();
             RunResult run = run_command_capture(exe_path.string() + " 2>&1");
             std::filesystem::remove(exe_path);
             expect(run.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(run.exit_code));
@@ -587,8 +591,9 @@ void run_module_system_tests() {
         try {
             std::filesystem::path exe_path =
                 std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+            auto compile_result_5 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
                                          {{"records", lib_path.string()}});
+            if (!compile_result_5.has_value()) throw std::move(compile_result_5).error();
             RunResult run = run_command_capture(exe_path.string() + " 2>&1");
             std::filesystem::remove(exe_path);
             expect(run.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(run.exit_code));
@@ -608,8 +613,9 @@ void run_module_system_tests() {
         try {
             std::filesystem::path exe_path =
                 std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            scpp::compile_to_executable("import mathlib;\nint main() { return 0; }\n", exe_path.string(), {},
+            auto compile_result_6 = scpp::compile_to_executable("import mathlib;\nint main() { return 0; }\n", exe_path.string(), {},
                                          {{"mathlib", lib_path.string()}});
+            if (!compile_result_6.has_value()) throw std::move(compile_result_6).error();
             std::filesystem::remove(exe_path);
         } catch (const scpp::DriverError&) {
             threw = true;
@@ -627,7 +633,8 @@ void run_module_system_tests() {
         try {
             std::filesystem::path exe_path =
                 std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            scpp::compile_to_executable("import nonexistent;\nint main() { return 0; }\n", exe_path.string());
+            auto compile_result_7 = scpp::compile_to_executable("import nonexistent;\nint main() { return 0; }\n", exe_path.string());
+            if (!compile_result_7.has_value()) throw std::move(compile_result_7).error();
             std::filesystem::remove(exe_path);
         } catch (const scpp::DriverError&) {
             threw = true;
@@ -646,8 +653,9 @@ void run_module_system_tests() {
                         "export module mathlib;\n"
                         "namespace mathlib { export int value() { return 17; } }\n");
         try {
-            scpp::compile_to_executable("import mathlib;\nint main() { return mathlib::value(); }\n", exe_path.string(), {},
+            auto compile_result_8 = scpp::compile_to_executable("import mathlib;\nint main() { return mathlib::value(); }\n", exe_path.string(), {},
                                         {}, /*static_link=*/false, {module_dir.string()});
+            if (!compile_result_8.has_value()) throw std::move(compile_result_8).error();
             RunResult run = run_command_capture(exe_path.string() + " 2>&1");
             expect(run.exit_code == 17,
                    case_name + ": expected exit code 17, got " + std::to_string(run.exit_code));
@@ -674,8 +682,9 @@ void run_module_system_tests() {
                         "namespace mathlib { export int value() { return 22; } }\n");
         std::filesystem::path exe_path = std::filesystem::current_path() / "driver_import_search_dir_first_match_exe";
         try {
-            scpp::compile_to_executable("import mathlib;\nint main() { return mathlib::value(); }\n", exe_path.string(), {},
+            auto compile_result_9 = scpp::compile_to_executable("import mathlib;\nint main() { return mathlib::value(); }\n", exe_path.string(), {},
                                         {}, /*static_link=*/false, {first_dir.string(), second_dir.string()});
+            if (!compile_result_9.has_value()) throw std::move(compile_result_9).error();
             RunResult run = run_command_capture(exe_path.string() + " 2>&1");
             expect(run.exit_code == 11,
                    case_name + ": expected first -I directory to win, got exit code " +
@@ -701,8 +710,9 @@ void run_module_system_tests() {
         try {
             std::filesystem::path exe_path =
                 std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            scpp::compile_to_executable("import a;\nint main() { return 0; }\n", exe_path.string(), {},
+            auto compile_result_10 = scpp::compile_to_executable("import a;\nint main() { return 0; }\n", exe_path.string(), {},
                                          {{"a", a_path.string()}, {"b", b_path.string()}});
+            if (!compile_result_10.has_value()) throw std::move(compile_result_10).error();
             std::filesystem::remove(exe_path);
         } catch (const scpp::DriverError&) {
             threw = true;
@@ -741,8 +751,9 @@ void run_module_system_tests() {
         try {
             std::filesystem::path exe_path =
                 std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+            auto compile_result_11 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
                                          {{"mathlib", lib_path.string()}, {"mathlib:trig", trig_path.string()}});
+            if (!compile_result_11.has_value()) throw std::move(compile_result_11).error();
             FILE* pipe = popen(exe_path.string().c_str(), "r");
             std::string output;
             if (pipe != nullptr) {
@@ -782,8 +793,9 @@ void run_module_system_tests() {
         try {
             std::filesystem::path exe_path =
                 std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+            auto compile_result_12 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
                                          {{"mathlib", lib_path.string()}, {"mathlib:trig", trig_path.string()}});
+            if (!compile_result_12.has_value()) throw std::move(compile_result_12).error();
             std::filesystem::remove(exe_path);
         } catch (const scpp::CodegenError&) {
             threw = true;
@@ -815,8 +827,9 @@ void run_module_system_tests() {
         try {
             std::filesystem::path exe_path =
                 std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+            auto compile_result_13 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
                                          {{"mathlib", lib_path.string()}, {"mathlib:trig", trig_path.string()}});
+            if (!compile_result_13.has_value()) throw std::move(compile_result_13).error();
             std::filesystem::remove(exe_path);
         } catch (const scpp::CodegenError&) {
             threw = true;
@@ -851,10 +864,11 @@ void run_module_system_tests() {
         try {
             std::filesystem::path exe_path =
                 std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+            auto compile_result_14 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
                                          {{"mathlib", lib_path.string()},
                                           {"mathlib:api", api_path.string()},
                                           {"mathlib:helper", helper_path.string()}});
+            if (!compile_result_14.has_value()) throw std::move(compile_result_14).error();
             RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
             std::filesystem::remove(exe_path);
             expect(run_result.exit_code == 0,
@@ -899,8 +913,9 @@ void run_module_system_tests() {
         try {
             std::filesystem::path exe_path =
                 std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+            auto compile_result_15 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
                                          {{"a", a_path.string()}, {"b", b_path.string()}});
+            if (!compile_result_15.has_value()) throw std::move(compile_result_15).error();
             FILE* pipe = popen(exe_path.string().c_str(), "r");
             std::string output;
             if (pipe != nullptr) {
@@ -936,8 +951,9 @@ void run_module_system_tests() {
         try {
             std::filesystem::path exe_path =
                 std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+            auto compile_result_16 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
                                          {{"exportnsblock", lib_path.string()}});
+            if (!compile_result_16.has_value()) throw std::move(compile_result_16).error();
             RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
             std::filesystem::remove(exe_path);
             expect(run_result.exit_code == 0,
@@ -973,10 +989,11 @@ void run_module_system_tests() {
         try {
             std::filesystem::path exe_path =
                 std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+            auto compile_result_17 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
                                          {{"mathlib", mathlib_path.string()},
                                           {"mathlib:base", base_path.string()},
                                           {"mathlib:random", random_path.string()}});
+            if (!compile_result_17.has_value()) throw std::move(compile_result_17).error();
             FILE* pipe = popen(exe_path.string().c_str(), "r");
             std::string output;
             if (pipe != nullptr) {
@@ -1016,8 +1033,9 @@ void run_module_system_tests() {
             try {
                 std::filesystem::path exe_path = std::filesystem::temp_directory_path() /
                                                   ("scpp_driver_test_" + case_name + "_indirect_exe");
-                scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                auto compile_result_18 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
                                              {{"a", a_path.string()}, {"b", b_path.string()}});
+                if (!compile_result_18.has_value()) throw std::move(compile_result_18).error();
                 FILE* pipe = popen(exe_path.string().c_str(), "r");
                 std::string output;
                 if (pipe != nullptr) {
@@ -1043,8 +1061,9 @@ void run_module_system_tests() {
             try {
                 std::filesystem::path exe_path = std::filesystem::temp_directory_path() /
                                                   ("scpp_driver_test_" + case_name + "_direct_exe");
-                scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                auto compile_result_19 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
                                              {{"a", a_path.string()}, {"b", b_path.string()}});
+                if (!compile_result_19.has_value()) throw std::move(compile_result_19).error();
                 std::filesystem::remove(exe_path);
             } catch (const scpp::CodegenError&) {
                 threw = true;
@@ -1095,8 +1114,9 @@ void run_module_system_tests() {
         try {
             std::filesystem::path exe_path =
                 std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+            auto compile_result_20 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
                                          {{"dm_holder", lib_path.string()}});
+            if (!compile_result_20.has_value()) throw std::move(compile_result_20).error();
             RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
             std::filesystem::remove(exe_path);
             expect(run_result.exit_code == 0,
@@ -1155,8 +1175,9 @@ void run_module_system_tests() {
         try {
             std::filesystem::path exe_path =
                 std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+            auto compile_result_21 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
                                          {{"dm_a", a_path.string()}, {"dm_b", b_path.string()}});
+            if (!compile_result_21.has_value()) throw std::move(compile_result_21).error();
             RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
             std::filesystem::remove(exe_path);
             expect(run_result.exit_code == 0,
@@ -2090,7 +2111,7 @@ void run_sizeof_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "sizeof_runtime_layout_matches_current_abi_rules_exe";
-        scpp::compile_to_executable(
+        auto compile_result_22 = scpp::compile_to_executable(
             "struct Pair {\n"
             "    char a;\n"
             "    int b;\n"
@@ -2113,6 +2134,7 @@ void run_sizeof_tests() {
             "    return 0;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_22.has_value()) throw std::move(compile_result_22).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected sizeof runtime checks to exit 0, got " + std::to_string(run_result.exit_code));
@@ -2123,7 +2145,7 @@ void run_sizeof_tests() {
         std::string case_name = "sizeof_is_unevaluated_for_movecheck";
         cases_run++;
         std::filesystem::path exe_path = std::filesystem::current_path() / "sizeof_is_unevaluated_for_movecheck_exe";
-        scpp::compile_to_executable(
+        auto compile_result_23 = scpp::compile_to_executable(
             "import std;\n"
             "int consume(std::unique_ptr<int> p) {\n"
             "    return 0;\n"
@@ -2134,6 +2156,7 @@ void run_sizeof_tests() {
             "    return consume(std::move(p)) + n - n;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_23.has_value()) throw std::move(compile_result_23).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected sizeof operand to be unevaluated, got " + std::to_string(run_result.exit_code));
@@ -2145,7 +2168,7 @@ void run_sizeof_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "consteval_can_fold_sizeof_type_and_expr_exe";
-        scpp::compile_to_executable(
+        auto compile_result_24 = scpp::compile_to_executable(
             "struct Tiny {\n"
             "    char x;\n"
             "};\n"
@@ -2157,6 +2180,7 @@ void run_sizeof_tests() {
             "    return answer() - 2;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_24.has_value()) throw std::move(compile_result_24).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected consteval sizeof folding to exit 0, got " +
@@ -2171,7 +2195,7 @@ void run_storage_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "alignas_array_storage_uses_max_size_and_alignment_exe";
-        scpp::compile_to_executable(
+        auto compile_result_25 = scpp::compile_to_executable(
             "class Box {\n"
             "public:\n"
             "    virtual ~Box() = default;\n"
@@ -2192,6 +2216,7 @@ void run_storage_tests() {
             "    return 0;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_25.has_value()) throw std::move(compile_result_25).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected aligned storage layout checks to exit 0, got " +
@@ -2204,7 +2229,7 @@ void run_storage_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "alignas_array_storage_accepts_user_defined_candidate_types_exe";
-        scpp::compile_to_executable(
+        auto compile_result_26 = scpp::compile_to_executable(
             "class Widget {\n"
             "public:\n"
             "    virtual ~Widget() = default;\n"
@@ -2222,6 +2247,7 @@ void run_storage_tests() {
             "    return 0;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_26.has_value()) throw std::move(compile_result_26).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected user-defined-type storage checks to exit 0, got " +
@@ -2366,7 +2392,7 @@ void run_placement_new_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "placement_new_constructs_scalar_in_storage_exe";
-        scpp::compile_to_executable(
+        auto compile_result_27 = scpp::compile_to_executable(
             "int main() {\n"
             "    alignas(int) char slot[sizeof(int)]{};\n"
             "    [[scpp::unsafe]] {\n"
@@ -2375,6 +2401,7 @@ void run_placement_new_tests() {
             "    }\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_27.has_value()) throw std::move(compile_result_27).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected scalar placement-new path to exit 0, got " +
@@ -2387,7 +2414,7 @@ void run_placement_new_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "placement_new_constructs_class_in_storage_exe";
-        scpp::compile_to_executable(
+        auto compile_result_28 = scpp::compile_to_executable(
             "class Box {\n"
             "public:\n"
             "    virtual ~Box() = default;\n"
@@ -2403,6 +2430,7 @@ void run_placement_new_tests() {
             "    }\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_28.has_value()) throw std::move(compile_result_28).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected class placement-new path to exit 0, got " +
@@ -2417,7 +2445,7 @@ void run_explicit_destructor_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "explicit_destructor_runs_user_declared_destructor_exe";
-        scpp::compile_to_executable(
+        auto compile_result_29 = scpp::compile_to_executable(
             "class Box {\n"
             "public:\n"
             "    int* out{};\n"
@@ -2434,6 +2462,7 @@ void run_explicit_destructor_tests() {
             "    return result - 9;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_29.has_value()) throw std::move(compile_result_29).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected explicit destructor call to exit 0, got " +
@@ -2474,7 +2503,7 @@ void run_consteval_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "consteval_folds_recursive_constexpr_helper_exe";
-        scpp::compile_to_executable(
+        auto compile_result_30 = scpp::compile_to_executable(
             "constexpr int sum_to(int n) {\n"
             "    if (n == 0) {\n"
             "        return 0;\n"
@@ -2488,6 +2517,7 @@ void run_consteval_tests() {
             "    return answer() - 21;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_30.has_value()) throw std::move(compile_result_30).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected folded immediate call to exit 0, got " + std::to_string(run_result.exit_code));
@@ -2499,7 +2529,7 @@ void run_consteval_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "consteval_constructor_builds_class_object_exe";
-        scpp::compile_to_executable(
+        auto compile_result_31 = scpp::compile_to_executable(
             "class Box {\n"
             "public:\n"
             "    virtual ~Box() = default;\n"
@@ -2514,6 +2544,7 @@ void run_consteval_tests() {
             "    return answer() - 42;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_31.has_value()) throw std::move(compile_result_31).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected consteval constructor path to exit 0, got " +
@@ -2526,7 +2557,7 @@ void run_consteval_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "consteval_constructor_implicitly_converts_string_literal_argument_exe";
-        scpp::compile_to_executable(
+        auto compile_result_32 = scpp::compile_to_executable(
             "class Box {\n"
             "public:\n"
             "    virtual ~Box() = default;\n"
@@ -2540,6 +2571,7 @@ void run_consteval_tests() {
             "    return take(\"hi\") - 17;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_32.has_value()) throw std::move(compile_result_32).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected implicit consteval conversion path to exit 0, got " +
@@ -2552,7 +2584,7 @@ void run_consteval_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "consteval_constructor_expression_flows_through_consteval_call_exe";
-        scpp::compile_to_executable(
+        auto compile_result_33 = scpp::compile_to_executable(
             "class Box {\n"
             "public:\n"
             "    virtual ~Box() = default;\n"
@@ -2569,6 +2601,7 @@ void run_consteval_tests() {
             "    return answer() - 23;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_33.has_value()) throw std::move(compile_result_33).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected consteval constructor expression path to exit 0, got " +
@@ -2581,7 +2614,7 @@ void run_consteval_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "consteval_helper_call_uses_outer_call_bindings_exe";
-        scpp::compile_to_executable(
+        auto compile_result_34 = scpp::compile_to_executable(
             "consteval int add_40(int x) {\n"
             "    return x + 40;\n"
             "}\n"
@@ -2592,6 +2625,7 @@ void run_consteval_tests() {
             "    return route(2) - 42;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_34.has_value()) throw std::move(compile_result_34).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected nested consteval helper call to exit 0, got " +
@@ -2604,7 +2638,7 @@ void run_consteval_tests() {
         cases_run++;
         std::filesystem::path exe_path = std::filesystem::current_path() /
                                          "consteval_constructor_helper_call_accepts_const_char_pointer_parameter_exe";
-        scpp::compile_to_executable(
+        auto compile_result_35 = scpp::compile_to_executable(
             "constexpr int size1(const char* s) {\n"
             "    return 7;\n"
             "}\n"
@@ -2622,6 +2656,7 @@ void run_consteval_tests() {
             "    return answer() - 7;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_35.has_value()) throw std::move(compile_result_35).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected consteval constructor helper call to exit 0, got " +
@@ -2634,7 +2669,7 @@ void run_consteval_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "consteval_method_calls_support_mutating_and_const_receivers_exe";
-        scpp::compile_to_executable(
+        auto compile_result_36 = scpp::compile_to_executable(
             "class Counter {\n"
             "public:\n"
             "    virtual ~Counter() = default;\n"
@@ -2657,6 +2692,7 @@ void run_consteval_tests() {
             "    return answer() - 7;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_36.has_value()) throw std::move(compile_result_36).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected consteval/constexpr method calls to exit 0, got " +
@@ -2669,7 +2705,7 @@ void run_consteval_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "consteval_constructor_local_ctor_call_uses_outer_parameter_bindings_exe";
-        scpp::compile_to_executable(
+        auto compile_result_37 = scpp::compile_to_executable(
             "class Helper {\n"
             "public:\n"
             "    virtual ~Helper() = default;\n"
@@ -2688,6 +2724,7 @@ void run_consteval_tests() {
             "    return 0;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_37.has_value()) throw std::move(compile_result_37).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected local consteval constructor call to use outer ctor bindings, got " +
@@ -2700,7 +2737,7 @@ void run_consteval_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "consteval_helper_call_accepts_derived_object_for_base_parameter_exe";
-        scpp::compile_to_executable(
+        auto compile_result_38 = scpp::compile_to_executable(
             "template<typename... Ts> class TagList;\n"
             "template<>\n"
             "class TagList<> {\n"
@@ -2725,6 +2762,7 @@ void run_consteval_tests() {
             "    return answer() - 41;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_38.has_value()) throw std::move(compile_result_38).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected derived-to-base consteval helper call to exit 0, got " +
@@ -2737,7 +2775,7 @@ void run_consteval_tests() {
         cases_run++;
         std::filesystem::path exe_path = std::filesystem::current_path() /
                                          "consteval_helper_call_accepts_derived_object_for_base_reference_parameter_exe";
-        scpp::compile_to_executable(
+        auto compile_result_39 = scpp::compile_to_executable(
             "template<typename... Ts> class TagList;\n"
             "template<>\n"
             "class TagList<> {\n"
@@ -2762,6 +2800,7 @@ void run_consteval_tests() {
             "    return answer() - 41;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_39.has_value()) throw std::move(compile_result_39).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected derived-to-base consteval ref call to exit 0, got " +
@@ -2774,7 +2813,7 @@ void run_consteval_tests() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::compile_to_executable(
+            auto compile_result_40 = scpp::compile_to_executable(
                 "int runtime_only(int x) {\n"
                 "    return x + 1;\n"
                 "}\n"
@@ -2786,6 +2825,7 @@ void run_consteval_tests() {
                 "}\n",
                 (std::filesystem::current_path() / "consteval_rejects_runtime_only_call_exe").string(),
                 std_link_inputs(), prebuilt_module_import_paths());
+            if (!compile_result_40.has_value()) throw std::move(compile_result_40).error();
         } catch (const scpp::DriverError& error) {
             threw = std::string(error.what()).find("immediate evaluation may only call constexpr/consteval functions") !=
                     std::string::npos;
@@ -2798,7 +2838,7 @@ void run_consteval_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "if_consteval_selects_compile_time_and_runtime_branches_exe";
-        scpp::compile_to_executable(
+        auto compile_result_41 = scpp::compile_to_executable(
             "constexpr int choose_positive() {\n"
             "    if consteval {\n"
             "        return 1;\n"
@@ -2823,6 +2863,7 @@ void run_consteval_tests() {
             "    return runtime_total() + immediate_total();\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_41.has_value()) throw std::move(compile_result_41).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 37,
                case_name + ": expected runtime/immediate branch total 37, got " +
@@ -2835,7 +2876,7 @@ void run_consteval_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "consteval_supports_pointer_reads_and_const_spans_exe";
-        scpp::compile_to_executable(
+        auto compile_result_42 = scpp::compile_to_executable(
             "import std;\n"
             "consteval int inspect_views() {\n"
             "    int arr[3];\n"
@@ -2850,6 +2891,7 @@ void run_consteval_tests() {
             "    return inspect_views();\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_42.has_value()) throw std::move(compile_result_42).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 12,
                case_name + ": expected pointer/span total 12, got " + std::to_string(run_result.exit_code));
@@ -2861,7 +2903,7 @@ void run_consteval_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "constexpr_local_initializer_is_checked_as_constant_expression_exe";
-        scpp::compile_to_executable(
+        auto compile_result_43 = scpp::compile_to_executable(
             "constexpr int plus_one(int x) {\n"
             "    return x + 1;\n"
             "}\n"
@@ -2871,6 +2913,7 @@ void run_consteval_tests() {
             "    return total;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_43.has_value()) throw std::move(compile_result_43).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 5,
                case_name + ": expected constexpr local result 5, got " + std::to_string(run_result.exit_code));
@@ -2882,7 +2925,7 @@ void run_consteval_tests() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::compile_to_executable(
+            auto compile_result_44 = scpp::compile_to_executable(
                 "int main() {\n"
                 "    int runtime = 4;\n"
                 "    constexpr int total = runtime + 1;\n"
@@ -2890,6 +2933,7 @@ void run_consteval_tests() {
                 "}\n",
                 (std::filesystem::current_path() / "constexpr_local_rejects_runtime_initializer_exe").string(),
                 std_link_inputs(), prebuilt_module_import_paths());
+            if (!compile_result_44.has_value()) throw std::move(compile_result_44).error();
         } catch (const scpp::DriverError& error) {
             threw = std::string(error.what()).find("identifier 'runtime' is not available") != std::string::npos;
         }
@@ -2901,7 +2945,7 @@ void run_consteval_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "if_consteval_propagates_required_constant_evaluation_into_callees_exe";
-        scpp::compile_to_executable(
+        auto compile_result_45 = scpp::compile_to_executable(
             "consteval int ct_leaf(int x) {\n"
             "    return x + 40;\n"
             "}\n"
@@ -2925,6 +2969,7 @@ void run_consteval_tests() {
             "    return compile_time + runtime;\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_45.has_value()) throw std::move(compile_result_45).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 91,
                case_name + ": expected required-constant-evaluation total 91, got " +
@@ -2937,7 +2982,7 @@ void run_consteval_tests() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "if_consteval_skips_non_selected_runtime_only_branch_exe";
-        scpp::compile_to_executable(
+        auto compile_result_46 = scpp::compile_to_executable(
             "int runtime_only(int x) {\n"
             "    return x + 1;\n"
             "}\n"
@@ -2956,6 +3001,7 @@ void run_consteval_tests() {
             "    return compile_time + choose(2);\n"
             "}\n",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_46.has_value()) throw std::move(compile_result_46).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 45,
                case_name + ": expected non-selected runtime-only branch to be ignored, got " +
@@ -2968,7 +3014,7 @@ void run_consteval_tests() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::compile_to_executable(
+            auto compile_result_47 = scpp::compile_to_executable(
                 "class NeedsDrop {\n"
                 "public:\n"
                 "    int value{};\n"
@@ -2989,6 +3035,7 @@ void run_consteval_tests() {
                  "required_constant_evaluation_rejects_user_defined_destructor_execution_exe")
                     .string(),
                 std_link_inputs(), prebuilt_module_import_paths());
+            if (!compile_result_47.has_value()) throw std::move(compile_result_47).error();
         } catch (const scpp::DriverError& error) {
             threw = std::string(error.what()).find("cannot execute user-defined destructor of 'NeedsDrop'") !=
                     std::string::npos;
@@ -5711,7 +5758,7 @@ void run_enum_tests() {
                         "    export enum class Color : uint8_t { red = 1, green = 2 };\n"
                         "    export Color favorite() { return colors::Color::green; }\n"
                         "}\n");
-        scpp::compile_to_executable(
+        auto compile_result_48 = scpp::compile_to_executable(
             "import colors;\n"
             "int main() {\n"
             "    uint8_t lhs = static_cast<uint8_t>(colors::favorite());\n"
@@ -5719,6 +5766,7 @@ void run_enum_tests() {
             "    return (int)lhs - (int)rhs;\n"
             "}\n",
             exe_path.string(), {}, {{"colors", module_path.string()}});
+        if (!compile_result_48.has_value()) throw std::move(compile_result_48).error();
         RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected imported enum module executable to succeed, got " +
@@ -5735,7 +5783,7 @@ void run_switch_tests() {
         std::filesystem::remove(exe_path);
         bool threw = false;
         try {
-            scpp::compile_to_executable(
+            auto compile_result_49 = scpp::compile_to_executable(
                 "int main() {\n"
                 "    int value = 0;\n"
                 "    switch (1) {\n"
@@ -5749,7 +5797,8 @@ void run_switch_tests() {
                 "}\n",
                 exe_path.string(), std_link_inputs(),
                 prebuilt_module_import_paths());
-        } catch (const scpp::ParseError& e) {
+            if (!compile_result_49.has_value()) throw std::move(compile_result_49).error();
+        } catch (const scpp::DriverError& e) {
             threw = true;
             expect(std::string(e.what()).find("must end with 'break;'") != std::string::npos,
                    case_name + ": expected explicit-terminator diagnostic");
@@ -5883,7 +5932,7 @@ void run_global_scope_resolution_tests() {
         std::string case_name = "global_scope_resolution_bypasses_namespace_shadowing";
         cases_run++;
         std::filesystem::path exe_path = std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name);
-        scpp::compile_to_executable(
+        auto compile_result_50 = scpp::compile_to_executable(
             "int ping() { return 41; }\n"
             "namespace inner {\n"
             "int ping() {\n"
@@ -5894,6 +5943,7 @@ void run_global_scope_resolution_tests() {
             "    return inner::ping() - 42;\n"
             "}\n",
             exe_path.string());
+        if (!compile_result_50.has_value()) throw std::move(compile_result_50).error();
         RunResult result = run_command_capture(exe_path.string() + " 2>&1");
         expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
         std::filesystem::remove(exe_path);
@@ -5903,7 +5953,7 @@ void run_global_scope_resolution_tests() {
         std::string case_name = "global_scope_resolution_bypasses_std_namespace_shadowing";
         cases_run++;
         std::filesystem::path exe_path = std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name);
-        scpp::compile_to_executable(
+        auto compile_result_51 = scpp::compile_to_executable(
             "int raw_ping() { return 41; }\n"
             "namespace std {\n"
             "int raw_ping() {\n"
@@ -5914,6 +5964,7 @@ void run_global_scope_resolution_tests() {
             "    return std::raw_ping() - 42;\n"
             "}\n",
             exe_path.string());
+        if (!compile_result_51.has_value()) throw std::move(compile_result_51).error();
         RunResult result = run_command_capture(exe_path.string() + " 2>&1");
         expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
         std::filesystem::remove(exe_path);
@@ -5926,13 +5977,14 @@ void run_nodiscard_tests() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::compile_to_executable(
+            auto compile_result_52 = scpp::compile_to_executable(
                 "[[nodiscard]] int answer() { return 7; }\n"
                 "int main() {\n"
                 "    answer();\n"
                 "    return 0;\n"
                 "}\n",
                 (std::filesystem::current_path() / case_name).string());
+            if (!compile_result_52.has_value()) throw std::move(compile_result_52).error();
         } catch (const scpp::DataflowError& e) {
             threw = std::string(e.what()).find("nodiscard function 'answer'") != std::string::npos;
         }
@@ -5944,13 +5996,14 @@ void run_nodiscard_tests() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::compile_to_executable(
+            auto compile_result_53 = scpp::compile_to_executable(
                 "[[nodiscard(\"check the status\")]] int answer() { return 7; }\n"
                 "int main() {\n"
                 "    answer();\n"
                 "    return 0;\n"
                 "}\n",
                 (std::filesystem::current_path() / case_name).string());
+            if (!compile_result_53.has_value()) throw std::move(compile_result_53).error();
         } catch (const scpp::DataflowError& e) {
             std::string message = e.what();
             threw = message.find("check the status") != std::string::npos;
@@ -5963,7 +6016,7 @@ void run_nodiscard_tests() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::compile_to_executable(
+            auto compile_result_54 = scpp::compile_to_executable(
                 "struct [[nodiscard(\"keep the status\")]] status {\n"
                 "    int code;\n"
                 "};\n"
@@ -5977,6 +6030,7 @@ void run_nodiscard_tests() {
                 "    return 0;\n"
                 "}\n",
                 (std::filesystem::current_path() / case_name).string());
+            if (!compile_result_54.has_value()) throw std::move(compile_result_54).error();
         } catch (const scpp::DataflowError& e) {
             std::string message = e.what();
             threw = message.find("nodiscard type 'status'") != std::string::npos &&
@@ -6094,7 +6148,7 @@ int main() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::compile_to_executable(
+            auto compile_result_55 = scpp::compile_to_executable(
                 R"SCPP(class Box {
 public:
     virtual ~Box() = default;
@@ -6112,6 +6166,7 @@ int main() {
 }
 )SCPP",
                 (std::filesystem::current_path() / case_name).string());
+            if (!compile_result_55.has_value()) throw std::move(compile_result_55).error();
         } catch (const scpp::DataflowError& e) {
             threw = std::string(e.what()).find("private constructor") != std::string::npos;
         }
@@ -6123,7 +6178,7 @@ int main() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::compile_to_executable(
+            auto compile_result_56 = scpp::compile_to_executable(
                 R"SCPP(class Box {
 public:
     virtual ~Box() = default;
@@ -6135,6 +6190,7 @@ public:
 int main() { return 0; }
 )SCPP",
                 (std::filesystem::current_path() / case_name).string());
+            if (!compile_result_56.has_value()) throw std::move(compile_result_56).error();
         } catch (const scpp::CodegenError& e) {
             threw = std::string(e.what()).find("undeclared variable 'this'") != std::string::npos;
         }
@@ -6222,11 +6278,12 @@ void run_default_argument_tests() {
         std::string case_name = "default_argument_trailing_rule_is_rejected";
         bool threw = false;
         try {
-            scpp::compile_to_executable(
+            auto compile_result_57 = scpp::compile_to_executable(
                 "int bad(int x = 1, int y) { return x + y; }\n"
                 "int main() { return bad(1, 2); }\n",
                 (std::filesystem::current_path() / case_name).string());
-        } catch (const scpp::ParseError& e) {
+            if (!compile_result_57.has_value()) throw std::move(compile_result_57).error();
+        } catch (const scpp::DriverError& e) {
             threw = std::string(e.what()).find("every later parameter must also have one") != std::string::npos;
         }
         expect(threw, case_name + ": expected trailing-only default-argument diagnostic");
@@ -6258,7 +6315,7 @@ void run_static_local_lifetime_tests() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::compile_to_executable(
+            auto compile_result_58 = scpp::compile_to_executable(
                 R"SCPP(class Holder {
 public:
     const int& dangling_value() const {
@@ -6273,6 +6330,7 @@ int main() {
 }
 )SCPP",
                 (std::filesystem::current_path() / case_name).string());
+            if (!compile_result_58.has_value()) throw std::move(compile_result_58).error();
         } catch (const scpp::DataflowError& e) {
             threw = std::string(e.what()).find("returns a reference derived from 'value'") != std::string::npos;
         }
@@ -6341,7 +6399,7 @@ void run_implicit_member_field_access_tests() {
         std::filesystem::path exe_path = std::filesystem::current_path() / case_name;
         bool threw = false;
         try {
-            scpp::compile_to_executable(
+            auto compile_result_59 = scpp::compile_to_executable(
                 R"SCPP(import std;
 class Holder {
 public:
@@ -6356,6 +6414,7 @@ int main() {
 }
 )SCPP",
                 exe_path.string());
+            if (!compile_result_59.has_value()) throw std::move(compile_result_59).error();
         } catch (const scpp::DataflowError&) {
             threw = true;
         }
@@ -6368,7 +6427,7 @@ int main() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::compile_to_executable(
+            auto compile_result_60 = scpp::compile_to_executable(
                 R"SCPP(import std;
 class Holder {
 public:
@@ -6383,6 +6442,7 @@ int main() {
 }
 )SCPP",
                 (std::filesystem::current_path() / case_name).string());
+            if (!compile_result_60.has_value()) throw std::move(compile_result_60).error();
         } catch (const scpp::DataflowError& e) {
             threw = std::string(e.what()).find("returns a reference derived from 'text'") != std::string::npos;
         }
@@ -7298,7 +7358,7 @@ int main() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::compile_to_executable(
+            auto compile_result_61 = scpp::compile_to_executable(
                 R"SCPP(import std;
 enum class calc_error { invalid };
 std::expected<int, calc_error> fail() {
@@ -7312,6 +7372,7 @@ int main() {
 }
 )SCPP",
                 (std::filesystem::current_path() / case_name).string());
+            if (!compile_result_61.has_value()) throw std::move(compile_result_61).error();
         } catch (const scpp::DataflowError& e) {
             std::string message = e.what();
             threw = message.find("nodiscard type") != std::string::npos &&
@@ -7596,7 +7657,7 @@ void run_subscripted_deref_tests() {
         bool threw = false;
         std::string unexpected;
         try {
-            scpp::compile_to_executable(
+            auto compile_result_62 = scpp::compile_to_executable(
                 R"SCPP(import std;
 class Box;
 class Box {
@@ -7610,6 +7671,7 @@ const int& first(const Box& box) {
 int main() { return 0; }
 )SCPP",
                 (std::filesystem::current_path() / case_name).string());
+            if (!compile_result_62.has_value()) throw std::move(compile_result_62).error();
         } catch (const std::exception& e) {
             threw = true;
             unexpected = e.what();
@@ -7623,7 +7685,7 @@ int main() { return 0; }
         bool threw = false;
         std::string unexpected;
         try {
-            scpp::compile_to_executable(
+            auto compile_result_63 = scpp::compile_to_executable(
                 R"SCPP(import std;
 class Box;
 class Box {
@@ -7645,6 +7707,7 @@ int main() {
 }
 )SCPP",
                 (std::filesystem::current_path() / case_name).string());
+            if (!compile_result_63.has_value()) throw std::move(compile_result_63).error();
         } catch (const scpp::DataflowError& e) {
             threw = std::string(e.what()).find("returns a reference derived from 'box'") != std::string::npos;
         } catch (const std::exception& e) {
@@ -7659,7 +7722,7 @@ int main() {
         bool threw = false;
         std::string unexpected;
         try {
-            scpp::compile_to_executable(
+            auto compile_result_64 = scpp::compile_to_executable(
                 R"SCPP(import std;
 class Box;
 class Box {
@@ -7680,6 +7743,7 @@ int main() {
 }
 )SCPP",
                 (std::filesystem::current_path() / case_name).string());
+            if (!compile_result_64.has_value()) throw std::move(compile_result_64).error();
         } catch (const scpp::DataflowError& e) {
             threw = std::string(e.what()).find("cannot assign to this place: 'box' is currently borrowed") !=
                     std::string::npos;
@@ -8156,7 +8220,7 @@ void run_default_constructor_selection_tests() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::compile_to_executable(
+            auto compile_result_65 = scpp::compile_to_executable(
                 R"SCPP(struct User {
     int id{};
     User(int initial_id) : id{initial_id} { return; }
@@ -8168,6 +8232,7 @@ int main() {
 }
 )SCPP",
                 (std::filesystem::current_path() / case_name).string());
+            if (!compile_result_65.has_value()) throw std::move(compile_result_65).error();
         } catch (const scpp::DataflowError& e) {
             threw = std::string(e.what()).find("no default constructor") != std::string::npos;
         }
@@ -8179,7 +8244,7 @@ int main() {
         cases_run++;
         bool threw = false;
         try {
-            scpp::compile_to_executable(
+            auto compile_result_66 = scpp::compile_to_executable(
                 R"SCPP(class User {
 public:
     int id{};
@@ -8193,6 +8258,7 @@ int main() {
 }
 )SCPP",
                 (std::filesystem::current_path() / case_name).string());
+            if (!compile_result_66.has_value()) throw std::move(compile_result_66).error();
         } catch (const scpp::DataflowError& e) {
             threw = std::string(e.what()).find("no default constructor") != std::string::npos;
         }
@@ -8203,7 +8269,7 @@ int main() {
         std::string case_name = "struct_default_brace_init_prefers_zero_arg_ctor_when_overloads_exist";
         cases_run++;
         std::filesystem::path exe_path = std::filesystem::current_path() / (case_name + "_exe");
-        scpp::compile_to_executable(
+        auto compile_result_67 = scpp::compile_to_executable(
             R"SCPP(struct User {
     int id{};
     User() : id{7} { return; }
@@ -8219,6 +8285,7 @@ int main() {
 }
 )SCPP",
             exe_path.string());
+        if (!compile_result_67.has_value()) throw std::move(compile_result_67).error();
         RunResult result = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
         std::filesystem::remove(exe_path);
         expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
@@ -8230,7 +8297,7 @@ int main() {
         std::string case_name = "class_default_brace_init_prefers_zero_arg_ctor_when_overloads_exist";
         cases_run++;
         std::filesystem::path exe_path = std::filesystem::current_path() / (case_name + "_exe");
-        scpp::compile_to_executable(
+        auto compile_result_68 = scpp::compile_to_executable(
             R"SCPP(class User {
 public:
     int id{};
@@ -8248,6 +8315,7 @@ int main() {
 }
 )SCPP",
             exe_path.string());
+        if (!compile_result_68.has_value()) throw std::move(compile_result_68).error();
         RunResult result = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
         std::filesystem::remove(exe_path);
         expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
@@ -8433,7 +8501,7 @@ int main() {
         cases_run++;
         std::filesystem::path exe_path =
             std::filesystem::current_path() / "reference_wrapper_optional_lifetime_annotation_supports_pointer_return_exe";
-        scpp::compile_to_executable(
+        auto compile_result_69 = scpp::compile_to_executable(
             R"SCPP(import std;
 const int* find_visible(std::optional<std::reference_wrapper<const int [[scpp::lifetime(source)]]>> source)
     [[scpp::lifetime(source)]] {
@@ -8451,6 +8519,7 @@ int main() {
 }
 )SCPP",
             exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_69.has_value()) throw std::move(compile_result_69).error();
         std::filesystem::remove(exe_path);
     }
 
@@ -8650,6 +8719,44 @@ void run_equality_operator_tests() {
     }
 }
 
+// The next two tests exercise scpp::compile_to_executable's std::expected<void, DriverError>
+// API shape directly (mirroring parser.cppm's test_parse_returns_engaged_expected_on_success /
+// test_parse_returns_disengaged_expected_on_failure_without_throwing), rather than going
+// through the check-and-throw idiom used everywhere else in this file.
+void test_compile_to_executable_returns_engaged_expected_on_success() {
+    std::string case_name = "compile_to_executable_returns_engaged_expected_on_success";
+    cases_run++;
+    std::filesystem::path exe_path = std::filesystem::current_path() / case_name;
+    std::filesystem::remove(exe_path);
+    auto result = scpp::compile_to_executable("int main() { return 0; }\n", exe_path.string());
+    expect(result.has_value(),
+           case_name + ": expected compile_to_executable to return an engaged std::expected on success");
+    std::filesystem::remove(exe_path);
+}
+
+void test_compile_to_executable_returns_disengaged_expected_on_failure_without_throwing() {
+    std::string case_name = "compile_to_executable_returns_disengaged_expected_on_failure_without_throwing";
+    cases_run++;
+    std::filesystem::path exe_path = std::filesystem::current_path() / case_name;
+    std::filesystem::remove(exe_path);
+    // Same trailing-only-default-argument rule as
+    // default_argument_trailing_rule_is_rejected above; the point here is the
+    // std::expected shape itself, so this function contains zero try/catch.
+    auto result = scpp::compile_to_executable(
+        "int bad(int x = 1, int y) { return x + y; }\n"
+        "int main() { return bad(1, 2); }\n",
+        exe_path.string());
+    expect(!result.has_value(),
+           case_name + ": expected compile_to_executable to return a disengaged std::expected on failure");
+    if (!result.has_value()) {
+        expect(std::string(result.error().what()).find("every later parameter must also have one") !=
+                   std::string::npos,
+               case_name + ": expected trailing-only default-argument diagnostic");
+        expect(result.error().loc.is_known(), case_name + ": expected DriverError to carry a known source location");
+    }
+    std::filesystem::remove(exe_path);
+}
+
 } // namespace
 
 int main() {
@@ -8704,6 +8811,8 @@ int main() {
     run_default_constructor_selection_tests();
     run_defaulted_special_member_tests();
     run_equality_operator_tests();
+    test_compile_to_executable_returns_engaged_expected_on_success();
+    test_compile_to_executable_returns_disengaged_expected_on_failure_without_throwing();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
