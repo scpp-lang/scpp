@@ -131,7 +131,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::codegen_consteval_class_value(const Expr& expr, const std::string& class_name)
 {
-        ConstexprValue value = evaluate_immediate_expr(*program_, expr);
+        auto value_result = evaluate_immediate_expr(*program_, expr);
+        if (!value_result.has_value()) throw value_result.error();
+        ConstexprValue value = std::move(value_result).value();
         auto llvm_type_result = to_llvm_type(named_type(class_name));
         if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
         llvm::LLVMTypeRef llvm_type = std::move(llvm_type_result).value();
@@ -171,7 +173,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     ctor_expr->has_paren_init = true;
                     for (const ExprPtr& arg : args) ctor_expr->args.push_back(clone_expr(*arg));
                 }
-                ConstexprValue value = evaluate_immediate_expr(*program_, *ctor_expr);
+                auto value_result = evaluate_immediate_expr(*program_, *ctor_expr);
+                if (!value_result.has_value()) throw value_result.error();
+                ConstexprValue value = std::move(value_result).value();
                 if (auto r = store_constexpr_value_into(target.ptr, target.type, value); !r.has_value())
                     return std::unexpected(std::move(r).error());
             } else {
