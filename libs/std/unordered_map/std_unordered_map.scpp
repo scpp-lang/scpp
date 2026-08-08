@@ -1,0 +1,578 @@
+export module std:unordered_map;
+
+import :cstdlib;
+import :memory;
+import :functional;
+
+extern "C" {
+    void* scpp_vector_allocate(uint64_t bytes, uint64_t align);
+    void scpp_vector_deallocate(void* ptr, uint64_t align);
+}
+
+namespace std {
+
+void* unordered_map_allocate_bytes(uint64_t bytes, uint64_t align) {
+    [[scpp::unsafe]] {
+        return scpp_vector_allocate(bytes, align);
+    }
+}
+
+void unordered_map_deallocate_bytes(void* ptr, uint64_t align) {
+    [[scpp::unsafe]] {
+        scpp_vector_deallocate(ptr, align);
+    }
+    return;
+}
+
+// A single key/value entry, individually heap-allocated (see
+// unordered_map::__insert_new_entry/__delete_entry below) rather than stored
+// inline in the probe-sequence array -- unlike this file's sibling
+// std::unordered_set (whose slots store T directly), a map's entries must
+// stay at a stable address across a rehash: callers may keep a pointer/
+// reference into a found entry's `second` alive across further work that
+// inserts into the very same map (e.g. `&it->second` held while parsing
+// continues), so unordered_map's own __rehash only ever reshuffles
+// *pointers* into a fresh index, never the entries themselves -- matching
+// real std::unordered_map's own reference-stability-across-insertion
+// guarantee.
+export template<typename K, typename V>
+class unordered_map_entry {
+  public:
+    K first{};
+    V second{};
+
+    unordered_map_entry(const K& k, const V& v) {
+        this->first = k;
+        this->second = v;
+        return;
+    }
+
+    unordered_map_entry(const K& k, V&& v) {
+        this->first = k;
+        this->second = std::move(v);
+        return;
+    }
+
+    virtual ~unordered_map_entry() { return; }
+};
+
+// Returned by unordered_map::emplace: `first` points at the existing-or-
+// newly-inserted entry, `second` is true iff a new entry was actually
+// inserted -- mirrors real std::unordered_map::emplace's own
+// `pair<iterator, bool>`. This project's self-hosting compiler doesn't
+// support structured bindings (`auto [it, inserted] = ...`) yet, so callers
+// access `.first`/`.second` directly instead.
+export template<typename K, typename V>
+class unordered_map_emplace_result {
+  public:
+    unordered_map_entry<K, V>* first{};
+    bool second{};
+
+    virtual ~unordered_map_emplace_result() { return; }
+};
+
+export template<typename K, typename V>
+class [[scpp::thread_movable_if(scpp::is_thread_movable(K) && scpp::is_thread_movable(V),
+                                scpp::is_thread_shareable(K) && scpp::is_thread_shareable(V))]] unordered_map {
+private:
+    unordered_map_entry<K, V>** slots_{};
+    int* states_{};
+    size_t slot_count_{8};
+    size_t size_{};
+    size_t tombstones_{};
+    uint64_t slot_size_{sizeof(unordered_map_entry<K, V>*)};
+    uint64_t slot_align_{alignof(unordered_map_entry<K, V>*)};
+    uint64_t state_size_{sizeof(int)};
+    uint64_t state_align_{alignof(int)};
+
+    uint64_t __hash(const K& key) const {
+        std::hash<K> hasher{};
+        return hasher(key);
+    }
+
+    bool __equals(const K& lhs, const K& rhs) const {
+        std::equal_to<K> equals{};
+        return equals(lhs, rhs);
+    }
+
+    size_t __bucket_index_for_hash(uint64_t hash, size_t slot_count) const {
+        if (slot_count <= 0) return 0;
+        uint64_t count = static_cast<uint64_t>(slot_count);
+        uint64_t quotient = hash / count;
+        uint64_t remainder = hash - quotient * count;
+        return static_cast<size_t>(remainder);
+    }
+
+    size_t __probe_next(size_t index) const {
+        return index + 1 == this->slot_count_ ? static_cast<size_t>(0) : index + 1;
+    }
+
+    unordered_map_entry<K, V>** __allocate_slots(size_t count) {
+        unordered_map_entry<K, V>** empty{};
+        if (count <= 0) return empty;
+        [[scpp::unsafe]] {
+            return static_cast<unordered_map_entry<K, V>**>(
+                std::unordered_map_allocate_bytes(static_cast<uint64_t>(count) * this->slot_size_, this->slot_align_));
+        }
+    }
+
+    int* __allocate_states(size_t count) {
+        int* empty{};
+        if (count <= 0) return empty;
+        [[scpp::unsafe]] {
+            return static_cast<int*>(std::unordered_map_allocate_bytes(static_cast<uint64_t>(count) * this->state_size_,
+                                                                       this->state_align_));
+        }
+    }
+
+    void __zero_slots(unordered_map_entry<K, V>** slots, size_t count) {
+        unordered_map_entry<K, V>* empty{};
+        size_t index = 0;
+        while (index < count) {
+            [[scpp::unsafe]] {
+                slots[index] = empty;
+            }
+            index = index + 1;
+        }
+        return;
+    }
+
+    void __zero_states(int* states, size_t count) {
+        size_t index = 0;
+        while (index < count) {
+            [[scpp::unsafe]] {
+                states[index] = 0;
+            }
+            index = index + 1;
+        }
+        return;
+    }
+
+    void __delete_entry(unordered_map_entry<K, V>* entry) {
+        [[scpp::unsafe]] {
+            delete entry;
+        }
+        return;
+    }
+
+    void __destroy_live_entries() {
+        int* empty_states{};
+        if (this->states_ == empty_states) return;
+        size_t index = 0;
+        while (index < this->slot_count_) {
+            int state = 0;
+            [[scpp::unsafe]] {
+                state = this->states_[index];
+            }
+            if (state == 1) {
+                unordered_map_entry<K, V>* entry{};
+                [[scpp::unsafe]] {
+                    entry = this->slots_[index];
+                }
+                this->__delete_entry(entry);
+            }
+            index = index + 1;
+        }
+        return;
+    }
+
+    void __destroy_storage() {
+        this->__destroy_live_entries();
+        unordered_map_entry<K, V>** empty_slots{};
+        int* empty_states{};
+        if (this->slots_ != empty_slots) {
+            [[scpp::unsafe]] {
+                void* erased = static_cast<void*>(this->slots_);
+                std::unordered_map_deallocate_bytes(erased, this->slot_align_);
+            }
+        }
+        if (this->states_ != empty_states) {
+            [[scpp::unsafe]] {
+                void* erased = static_cast<void*>(this->states_);
+                std::unordered_map_deallocate_bytes(erased, this->state_align_);
+            }
+        }
+        this->slots_ = empty_slots;
+        this->states_ = empty_states;
+        this->size_ = 0;
+        this->tombstones_ = 0;
+        return;
+    }
+
+    void __initialize_storage(size_t count) {
+        if (count < 8) count = 8;
+        this->__destroy_storage();
+        [[scpp::unsafe]] {
+            this->slots_ = this->__allocate_slots(count);
+            this->states_ = this->__allocate_states(count);
+        }
+        this->__zero_slots(this->slots_, count);
+        this->__zero_states(this->states_, count);
+        this->slot_count_ = count;
+        this->size_ = 0;
+        this->tombstones_ = 0;
+        return;
+    }
+
+    unordered_map_entry<K, V>* __find_entry(const K& key) const {
+        unordered_map_entry<K, V>* empty{};
+        size_t index = this->__bucket_index_for_hash(this->__hash(key), this->slot_count_);
+        size_t probes = 0;
+        while (probes < this->slot_count_) {
+            int state = 0;
+            [[scpp::unsafe]] {
+                state = this->states_[index];
+            }
+            if (state == 0) return empty;
+            if (state == 1) {
+                unordered_map_entry<K, V>* candidate{};
+                [[scpp::unsafe]] {
+                    candidate = this->slots_[index];
+                }
+                bool matches = false;
+                [[scpp::unsafe]] {
+                    matches = this->__equals(candidate->first, key);
+                }
+                if (matches) return candidate;
+            }
+            index = this->__probe_next(index);
+            probes = probes + 1;
+        }
+        return empty;
+    }
+
+    void __ensure_capacity_for_one_more() {
+        if ((this->size_ + this->tombstones_ + 1) * 4 <= this->slot_count_ * 3) return;
+        this->__rehash(this->slot_count_ * 2);
+        return;
+    }
+
+    void __place_entry(size_t index, unordered_map_entry<K, V>* entry) {
+        [[scpp::unsafe]] {
+            this->slots_[index] = entry;
+            this->states_[index] = 1;
+        }
+        this->size_ = this->size_ + 1;
+        return;
+    }
+
+    // Rehashing only ever reshuffles the *pointer* index -- individual
+    // entries are never reallocated/copied, so any existing pointer or
+    // reference into a live entry's `second` remains valid across a rehash.
+    void __rehash(size_t new_slot_count) {
+        if (new_slot_count < 8) new_slot_count = 8;
+        unordered_map_entry<K, V>** old_slots = this->slots_;
+        int* old_states = this->states_;
+        size_t old_slot_count = this->slot_count_;
+
+        [[scpp::unsafe]] {
+            this->slots_ = this->__allocate_slots(new_slot_count);
+            this->states_ = this->__allocate_states(new_slot_count);
+        }
+        this->__zero_slots(this->slots_, new_slot_count);
+        this->__zero_states(this->states_, new_slot_count);
+        this->slot_count_ = new_slot_count;
+        this->size_ = 0;
+        this->tombstones_ = 0;
+
+        size_t index = 0;
+        while (index < old_slot_count) {
+            int state = 0;
+            [[scpp::unsafe]] {
+                state = old_states[index];
+            }
+            if (state == 1) {
+                unordered_map_entry<K, V>* entry{};
+                [[scpp::unsafe]] {
+                    entry = old_slots[index];
+                }
+                this->__insert_new_entry(entry);
+            }
+            index = index + 1;
+        }
+
+        unordered_map_entry<K, V>** empty_slots{};
+        int* empty_states{};
+        if (old_slots != empty_slots) {
+            [[scpp::unsafe]] {
+                void* erased = static_cast<void*>(old_slots);
+                std::unordered_map_deallocate_bytes(erased, this->slot_align_);
+            }
+        }
+        if (old_states != empty_states) {
+            [[scpp::unsafe]] {
+                void* erased = static_cast<void*>(old_states);
+                std::unordered_map_deallocate_bytes(erased, this->state_align_);
+            }
+        }
+        return;
+    }
+
+public:
+    // Inserts an already-allocated entry (caller must already know
+    // entry->first isn't present -- e.g. right after __find_entry returned
+    // empty), growing/rehashing first if the table is too full. Returns
+    // the same `entry` pointer back to the caller (a convenience so
+    // insert_or_assign/emplace don't need to keep their own copy); tied
+    // to `entry`'s own lifetime via a named group (ch05 §5.13, same
+    // mechanism as std::max/min in algorithm.scpp) since the returned
+    // pointer is derived from that parameter, not from `this`. Public
+    // (despite the double-underscore, "internal" naming) for the same
+    // reason as unordered_set's own __insert_copy: private members here
+    // are only reachable through `this->`, not through an arbitrary
+    // other same-class-typed parameter -- and __append_all_to (the
+    // copy-constructor/assignment-operator helper below) needs to call
+    // this on `target`, a distinct instance of this same generic class.
+    unordered_map_entry<K, V>* __insert_new_entry(unordered_map_entry<K, V>* entry [[scpp::lifetime(entry_group)]])
+        [[scpp::lifetime(entry_group)]] {
+        this->__ensure_capacity_for_one_more();
+        K entry_key{};
+        [[scpp::unsafe]] {
+            entry_key = entry->first;
+        }
+        size_t index = this->__bucket_index_for_hash(this->__hash(entry_key), this->slot_count_);
+        size_t first_tombstone = 0;
+        bool has_first_tombstone = false;
+        size_t probes = 0;
+        while (probes < this->slot_count_) {
+            int state = 0;
+            [[scpp::unsafe]] {
+                state = this->states_[index];
+            }
+            if (state == 0) {
+                size_t target = has_first_tombstone ? first_tombstone : index;
+                this->__place_entry(target, entry);
+                if (has_first_tombstone) this->tombstones_ = this->tombstones_ - 1;
+                return entry;
+            }
+            if (state == 2) {
+                if (!has_first_tombstone) {
+                    has_first_tombstone = true;
+                    first_tombstone = index;
+                }
+            }
+            index = this->__probe_next(index);
+            probes = probes + 1;
+        }
+        this->__rehash(this->slot_count_ * 2);
+        return this->__insert_new_entry(entry);
+    }
+
+    // Copy-constructor/assignment-operator helper (see both below): appends
+    // a fresh copy of every live entry in `*this` onto `target`, a distinct
+    // instance of this same generic class. Public (despite the double-
+    // underscore, "internal" naming) for the same reason as
+    // __insert_new_entry just above (and unordered_set's own __insert_copy/
+    // __append_all_to): private members here are only reachable through
+    // `this->`, not through an arbitrary other same-class-typed parameter
+    // such as `target`.
+    void __append_all_to(std::unordered_map<K, V>& target) const {
+        size_t index = 0;
+        while (index < this->slot_count_) {
+            int state = 0;
+            [[scpp::unsafe]] {
+                state = this->states_[index];
+            }
+            if (state == 1) {
+                unordered_map_entry<K, V>* entry{};
+                [[scpp::unsafe]] {
+                    entry = this->slots_[index];
+                }
+                K entry_key{};
+                V entry_value{};
+                [[scpp::unsafe]] {
+                    entry_key = entry->first;
+                    entry_value = entry->second;
+                }
+                unordered_map_entry<K, V>* fresh{};
+                [[scpp::unsafe]] {
+                    fresh = new unordered_map_entry<K, V>(entry_key, entry_value);
+                }
+                // `target` is always freshly initialized/empty here (both
+                // call sites below run `__initialize_storage` immediately
+                // before `__append_all_to`), so there's no need to check
+                // for an existing key the way the public `emplace` does --
+                // and calling the single-overload `__insert_new_entry`
+                // directly (rather than the overloaded public `emplace`)
+                // sidesteps a real self-hosting-compiler overload-
+                // resolution gap: a method with 2+ overloads (`const V&`/
+                // `V&&`) called through an *external* same-generic-class-
+                // typed parameter (as opposed to `this`) fails to match
+                // any candidate, because the generic witness-check pass
+                // (movecheck/monomorphize.cppm's
+                // check_generic_type_methods_once) never rewrites such an
+                // external parameter's type to its own per-method
+                // synthetic check-class name the way it does for `this`,
+                // so the lookup falls through to the *original*,
+                // un-substituted template's registered signatures (still
+                // literally typed `K`/`V`) instead of the witness-
+                // substituted ones actually in scope here.
+                target.__insert_new_entry(fresh);
+            }
+            index = index + 1;
+        }
+        return;
+    }
+
+    unordered_map() {
+        this->__initialize_storage(8);
+        return;
+    }
+
+    unordered_map(const std::unordered_map<K, V>& other) {
+        this->__initialize_storage(8);
+        other.__append_all_to(*this);
+        return;
+    }
+
+    void operator=(const std::unordered_map<K, V>& other) {
+        this->__initialize_storage(8);
+        other.__append_all_to(*this);
+        return;
+    }
+
+    virtual ~unordered_map() {
+        this->__destroy_storage();
+        return;
+    }
+
+    unordered_map_entry<K, V>* find(const K& key) {
+        return this->__find_entry(key);
+    }
+
+    const unordered_map_entry<K, V>* find(const K& key) const {
+        return this->__find_entry(key);
+    }
+
+    unordered_map_entry<K, V>* end() {
+        unordered_map_entry<K, V>* empty{};
+        return empty;
+    }
+
+    const unordered_map_entry<K, V>* end() const {
+        const unordered_map_entry<K, V>* empty{};
+        return empty;
+    }
+
+    bool contains(const K& key) const {
+        unordered_map_entry<K, V>* empty{};
+        return this->__find_entry(key) != empty;
+    }
+
+    // Note: this container intentionally has no `operator[]` -- the
+    // self-hosting compiler doesn't support user-defined subscript
+    // operator overloads at all yet (declaring one hits an unrelated
+    // "arrays of references are not supported" parse error, and even if
+    // parsing were fixed, `codegen/expressions.cppm`'s `Subscript` case
+    // is hard-restricted to `std::vector`/span/pointer/array with no
+    // operator-overload-resolution fallback for arbitrary classes --
+    // adding general support would be a wide-reaching, multi-file
+    // compiler feature, not a bounded bug fix). `insert_or_assign`
+    // below covers the same "insert-or-overwrite" use case explicitly.
+    void insert_or_assign(const K& key, const V& value) {
+        unordered_map_entry<K, V>* existing = this->__find_entry(key);
+        unordered_map_entry<K, V>* empty{};
+        if (existing != empty) {
+            [[scpp::unsafe]] {
+                existing->second = value;
+            }
+            return;
+        }
+        unordered_map_entry<K, V>* fresh{};
+        [[scpp::unsafe]] {
+            fresh = new unordered_map_entry<K, V>(key, value);
+        }
+        this->__insert_new_entry(fresh);
+        return;
+    }
+
+    void insert_or_assign(const K& key, V&& value) {
+        unordered_map_entry<K, V>* existing = this->__find_entry(key);
+        unordered_map_entry<K, V>* empty{};
+        if (existing != empty) {
+            [[scpp::unsafe]] {
+                existing->second = std::move(value);
+            }
+            return;
+        }
+        unordered_map_entry<K, V>* fresh{};
+        [[scpp::unsafe]] {
+            fresh = new unordered_map_entry<K, V>(key, std::move(value));
+        }
+        this->__insert_new_entry(fresh);
+        return;
+    }
+
+    V& at(const K& key) {
+        unordered_map_entry<K, V>* existing = this->__find_entry(key);
+        unordered_map_entry<K, V>* empty{};
+        if (existing == empty) std::abort();
+        [[scpp::unsafe]] {
+            return existing->second;
+        }
+    }
+
+    const V& at(const K& key) const {
+        unordered_map_entry<K, V>* existing = this->__find_entry(key);
+        unordered_map_entry<K, V>* empty{};
+        if (existing == empty) std::abort();
+        [[scpp::unsafe]] {
+            return existing->second;
+        }
+    }
+
+    unordered_map_emplace_result<K, V> emplace(const K& key, const V& value) {
+        unordered_map_entry<K, V>* existing = this->__find_entry(key);
+        unordered_map_entry<K, V>* empty{};
+        unordered_map_emplace_result<K, V> result{};
+        if (existing != empty) {
+            result.first = existing;
+            result.second = false;
+            return result;
+        }
+        unordered_map_entry<K, V>* fresh{};
+        [[scpp::unsafe]] {
+            fresh = new unordered_map_entry<K, V>(key, value);
+        }
+        result.first = this->__insert_new_entry(fresh);
+        result.second = true;
+        return result;
+    }
+
+    unordered_map_emplace_result<K, V> emplace(const K& key, V&& value) {
+        unordered_map_entry<K, V>* existing = this->__find_entry(key);
+        unordered_map_entry<K, V>* empty{};
+        unordered_map_emplace_result<K, V> result{};
+        if (existing != empty) {
+            result.first = existing;
+            result.second = false;
+            return result;
+        }
+        unordered_map_entry<K, V>* fresh{};
+        [[scpp::unsafe]] {
+            fresh = new unordered_map_entry<K, V>(key, std::move(value));
+        }
+        result.first = this->__insert_new_entry(fresh);
+        result.second = true;
+        return result;
+    }
+
+    size_t size() const {
+        return this->size_;
+    }
+
+    bool empty() const {
+        return this->size_ == 0;
+    }
+
+    void clear() {
+        this->__destroy_live_entries();
+        this->__zero_slots(this->slots_, this->slot_count_);
+        this->__zero_states(this->states_, this->slot_count_);
+        this->size_ = 0;
+        this->tombstones_ = 0;
+        return;
+    }
+};
+
+} // namespace std

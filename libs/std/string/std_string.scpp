@@ -25,12 +25,32 @@ extern "C" {
     void* scpp_string_copy(const void* handle);
     void scpp_string_delete(void* handle);
     size_t scpp_string_length(void* handle);
+    void scpp_string_reserve(void* handle, size_t n);
     const char* scpp_string_c_str(void* handle);
     void scpp_string_append(void* handle, const char* s);
+    void scpp_string_push_back(void* handle, char c);
     int scpp_string_equals(void* handle, const char* s);
+    const char* scpp_int64_to_cstr(int64_t value);
+    const char* scpp_uint64_to_cstr(size_t value);
+    int scpp_string_contains(void* handle, const char* needle);
+    size_t scpp_string_find(void* handle, const char* needle, size_t start);
+    size_t scpp_string_find_char(void* handle, char needle, size_t start);
+    size_t scpp_string_rfind(void* handle, const char* needle);
+    size_t scpp_string_rfind_char(void* handle, char needle);
+    int scpp_string_ends_with(void* handle, const char* suffix);
+    const char* scpp_string_substr(void* handle, size_t pos, size_t len);
 }
 
 namespace std {
+
+// std::string::npos's equivalent: scpp doesn't yet support static data
+// members (see std::string_view's own identical
+// __string_view_not_found workaround in std_string_view.scpp, for the
+// same underlying gap), so find()/rfind() callers compare against this
+// free function's result instead of a true `std::string::npos` constant.
+[[nodiscard]] size_t __string_not_found() {
+    return static_cast<size_t>(-1);
+}
 
 export class string {
 private:
@@ -97,6 +117,21 @@ public:
         return this->length();
     }
 
+    // std::string::reserve(n): a pure capacity hint with no observable
+    // effect on this string's own content/length (forwarded directly to
+    // real std::string::reserve via the C-ABI wrapper).
+    void reserve(size_t n) {
+        [[scpp::unsafe]] {
+            scpp_string_reserve(this->handle, n);
+        }
+        return;
+    }
+
+    // std::string::empty(): true when no bytes are currently stored.
+    bool empty() const {
+        return this->length() == 0;
+    }
+
     // The string's content as a nul-terminated C string, e.g. to hand to
     // another extern "C" function like puts(). Valid only until the next
     // call to append() on this same string (matches
@@ -108,10 +143,31 @@ public:
         }
     }
 
+    // std::string::clear(): empties this string's content in place,
+    // reusing the existing new/delete C-wrapper pair rather than adding a
+    // new one -- equivalent to `*this = string()` but without going
+    // through operator=/a temporary.
+    void clear() {
+        [[scpp::unsafe]] {
+            scpp_string_delete(this->handle);
+            this->handle = scpp_string_new("");
+        }
+        return;
+    }
+
     // Appends `s` to this string's content in place.
     void append(const char* s) {
         [[scpp::unsafe]] {
             scpp_string_append(this->handle, s);
+        }
+        return;
+    }
+
+    // std::string::push_back(c): appends a single character to this
+    // string's content in place.
+    void push_back(char c) {
+        [[scpp::unsafe]] {
+            scpp_string_push_back(this->handle, c);
         }
         return;
     }
@@ -143,6 +199,107 @@ public:
     bool operator!=(const string& other) const {
         return !this->equals(other.c_str());
     }
+
+    // std::string::contains(std::string_view) (C++23): true if `s`
+    // occurs anywhere within this string's content.
+    bool contains(const char* s) const {
+        [[scpp::unsafe]] {
+            return scpp_string_contains(this->handle, s) != 0;
+        }
+    }
+
+    bool contains(const string& s) const {
+        return this->contains(s.c_str());
+    }
+
+    // std::string::find: byte offset of the first occurrence of the
+    // needle at or after `start`, or std::__string_not_found() if
+    // absent (this codebase's stand-in for std::string::npos -- see
+    // that function's own comment above).
+    size_t find(const char* needle, size_t start) const {
+        [[scpp::unsafe]] {
+            return scpp_string_find(this->handle, needle, start);
+        }
+    }
+
+    size_t find(const char* needle) const {
+        return this->find(needle, static_cast<size_t>(0));
+    }
+
+    size_t find(char needle, size_t start) const {
+        [[scpp::unsafe]] {
+            return scpp_string_find_char(this->handle, needle, start);
+        }
+    }
+
+    size_t find(char needle) const {
+        return this->find(needle, static_cast<size_t>(0));
+    }
+
+    // std::string::rfind: byte offset of the LAST occurrence of the
+    // needle (searching backward from the end), or
+    // std::__string_not_found() if absent.
+    size_t rfind(const char* needle) const {
+        [[scpp::unsafe]] {
+            return scpp_string_rfind(this->handle, needle);
+        }
+    }
+
+    size_t rfind(char needle) const {
+        [[scpp::unsafe]] {
+            return scpp_string_rfind_char(this->handle, needle);
+        }
+    }
+
+    // std::string::ends_with (C++20): true if `suffix` is a suffix of
+    // this string's content.
+    bool ends_with(const char* suffix) const {
+        [[scpp::unsafe]] {
+            return scpp_string_ends_with(this->handle, suffix) != 0;
+        }
+    }
+
+    bool ends_with(const string& suffix) const {
+        return this->ends_with(suffix.c_str());
+    }
+
+    // std::string::substr: a fresh string holding `len` bytes starting
+    // at byte offset `pos` (clamped to however many bytes are actually
+    // available, same as real std::string::substr).
+    string substr(size_t pos, size_t len) const {
+        const char* text = "";
+        [[scpp::unsafe]] {
+            text = scpp_string_substr(this->handle, pos, len);
+        }
+        return string(text);
+    }
+
+    string substr(size_t pos) const {
+        return this->substr(pos, this->length());
+    }
 };
+
+// std::to_string(std::int64_t)/std::to_string(std::size_t): formats an
+// integer value as a decimal std::string, mirroring real C++'s
+// std::to_string. Only these two overloads exist here (not the full
+// set of built-in-numeric-type overloads real std::to_string provides)
+// since these are the only argument types actually used by scpp's own
+// self-hosting sources today -- add more overloads if/when another
+// integer type needs converting.
+export string to_string(int64_t value) {
+    const char* text = "";
+    [[scpp::unsafe]] {
+        text = scpp_int64_to_cstr(value);
+    }
+    return string(text);
+}
+
+export string to_string(size_t value) {
+    const char* text = "";
+    [[scpp::unsafe]] {
+        text = scpp_uint64_to_cstr(value);
+    }
+    return string(text);
+}
 
 } // namespace std

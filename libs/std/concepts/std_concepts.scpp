@@ -4,11 +4,11 @@
 // minimal home for standard-library concepts, consumed via
 // `import std;` through std.scpp's `export import :concepts;`
 // aggregation, exactly like std::optional's own `:optional` partition.
-// Mirrors real C++20's own `<concepts>` header -- only the one concept
-// this module currently needs (std::vector<T>'s own copy-related
-// members, see std_vector.scpp) is defined here so far; more of real
-// C++20's `<concepts>` surface can be added the same way as later needs
-// arise.
+// Mirrors real C++20's own `<concepts>` header -- only the concepts this
+// module currently needs (std::vector<T>'s own copy-related and
+// default-construction-related members, see std_vector.scpp) are
+// defined here so far; more of real C++20's `<concepts>` surface can be
+// added the same way as later needs arise.
 export module std:concepts;
 
 namespace std {
@@ -20,5 +20,15 @@ namespace std {
 // shaped compound requirement.
 export template<typename T>
 concept copy_constructible = requires(T t) { T{t}; };
+
+// Real C++20's own `std::default_initializable<T>` (`<concepts>`),
+// checking that `T` can be value-initialized with no arguments.
+// scpp's own concept grammar (parser.cppm's parse_concept_definition)
+// requires a requires-expression to bind exactly one probe parameter of
+// the constrained type `T` even when the requirement itself doesn't
+// need to name it (`t` below is unused, purely a grammar placeholder --
+// same shape as copy_constructible's own `t` above).
+export template<typename T>
+concept default_initializable = requires(T t) { T{}; };
 
 } // namespace std
