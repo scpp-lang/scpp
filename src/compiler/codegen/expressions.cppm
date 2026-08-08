@@ -991,6 +991,18 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         if (is_interface_representation_type(target_type)) {
             return codegen_interface_value_for_target(expr, target_type);
         }
+        // A class-typed target (VarDecl initializer, plain assignment,
+        // return statement, global initializer, ...) needs the same
+        // "adapt a value to a class-typed boundary" treatment that
+        // by-value function arguments already get in codegen_call_args/
+        // codegen_call_args_for_types -- e.g. a string-literal RHS
+        // assigned/initialized into a std::string-typed target must
+        // route through its converting constructor rather than falling
+        // through to a bare codegen_expr, which would leave the value's
+        // LLVM shape mismatched against the target's.
+        if (is_named_record_type(target_type)) {
+            return codegen_class_value_for_boundary(expr, target_type, /*allow_implicit_converting_ctor=*/true);
+        }
         if (target_type.kind == TypeKind::Pointer && expr.kind == ExprKind::Identifier && expr.name == "nullptr" &&
             !expr.explicit_global_qualification) {
             return llvm::LLVMConstNull(to_llvm_type(target_type));
@@ -1100,6 +1112,31 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
             case ExprKind::Sizeof:
                 return codegen_sizeof_value(expr);
+
+            case ExprKind::ValueInit:
+                // `return {};` (ast.cppm's ExprKind::ValueInit) --
+                // `expr.type` was already stamped in by monomorphization
+                // (Monomorphizer::walk_expr) from the enclosing
+                // function's own return type. A class/struct type is
+                // constructed exactly like an empty-braced `Type
+                // var{};` VarDecl (resolve its own zero-argument
+                // constructor, if any, else fall back to in-class field
+                // initializers -- see codegen_constructed_class_value
+                // and initialize_storage_from_brace_args' identical
+                // class-case handling); anything else (a scalar,
+                // pointer, ...) is simply zero-initialized.
+                if (expr.type.kind == TypeKind::Named && find_class_def(expr.type.name) != nullptr) {
+                    std::vector<ExprPtr> no_args;
+                    const Function* ctor_def = resolve_overload_by_type(expr.type.name + "_new", no_args, /*param_offset=*/1);
+                    return codegen_constructed_class_value(expr.type.name, no_args, ctor_def, &expr);
+                }
+                {
+                    llvm::LLVMTypeRef llvm_type = to_llvm_type(expr.type);
+                    std::optional<unsigned> align = alignment_for_type(expr.type);
+                    llvm::LLVMValueRef temp = create_entry_block_alloca(llvm_type, "valueinittmp", align);
+                    zero_initialize_storage(temp, expr.type, align);
+                    return llvm::LLVMBuildLoad2(builder_, llvm_type, temp, "valueinit.value");
+                }
 
             case ExprKind::StringLiteral:
                 // A read-only global byte array (null-terminated, like a
@@ -1381,6 +1418,23 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         size_expr->lhs = clone_expr(*expr.args[0]);
                         size_expr->name = "size";
                         return codegen_expr(*size_expr);
+                    }
+                    if (unwrapped.kind == TypeKind::Named &&
+                        (unwrapped.name == "std::vector" || unwrapped.name == "vector" ||
+                         unwrapped.name.starts_with("std::vector.") || unwrapped.name.starts_with("vector."))) {
+                        // std::vector<T>::size() returns size_t (i64), but
+                        // `$for_range_size` is contractually an `int` (see
+                        // its infer_type/infer_expr_type handling in
+                        // semantics.cppm/calls.cppm) -- truncate to i32 to
+                        // match, exactly like std::span's `.size` property
+                        // just above.
+                        auto size_call = std::make_unique<Expr>();
+                        size_call->kind = ExprKind::Call;
+                        size_call->loc = expr.loc;
+                        size_call->name = "size";
+                        size_call->lhs = clone_expr(*expr.args[0]);
+                        llvm::LLVMValueRef vector_size = codegen_expr(*size_call);
+                        return llvm::LLVMBuildTrunc(builder_, vector_size, llvm::LLVMInt32TypeInContext(context_), "vecsize");
                     }
                     throw CodegenError("range-for requires a fixed-size array or std::span operand", current_loc_);
                 }
@@ -2093,31 +2147,51 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 // function is itself used as a reference-binding source
                 // (`T& r = f(x);`), a reference argument (`g(f(x))`), or
                 // forwarded in a `return` -- see
-                // resolve_borrow_source_root in movecheck.cppm.
+                // resolve_borrow_source_root in movecheck.cppm. It's also
+                // reachable whenever *any* call (reference-returning or
+                // not) is itself used as a method-call receiver -- see
+                // the Lambda case just below's own comment: codegen_call
+                // calls codegen_lvalue on its own `expr.lhs` uniformly,
+                // regardless of receiver shape (e.g.
+                // `some_by_value_call(x).method()`).
                 // codegen_call's raw result is already the referent's
-                // address in that case -- no load needed, unlike
-                // codegen_expr's own Call case. Validity (must actually
-                // be reference-returning) is checked *after* codegen_call
-                // returns rather than before, unlike the pre-method-call
-                // version of this code -- codegen_call must run first
-                // regardless, to resolve a possible method-call receiver
-                // exactly once; an invalid program reaching this far
-                // would already have been rejected by movecheck, so
-                // emitting (and then discarding, via the throw below) a
-                // few extra instructions first is harmless.
+                // address in the reference-returning case -- no load
+                // needed, unlike codegen_expr's own Call case. Validity
+                // (must actually be reference-returning) is checked
+                // *after* codegen_call returns rather than before, unlike
+                // the pre-method-call version of this code -- codegen_call
+                // must run first regardless, to resolve a possible
+                // method-call receiver exactly once; an invalid program
+                // reaching this far would already have been rejected by
+                // movecheck, so emitting a few extra instructions first
+                // (discarded below in the reference case, reused as-is
+                // in the by-value case) is harmless either way.
                 CallResult result = codegen_call(expr);
-                if (result.callee_def == nullptr || result.callee_def->return_type.kind != TypeKind::Reference) {
+                if (result.callee_def != nullptr && result.callee_def->return_type.kind == TypeKind::Reference) {
+                    if (is_interface_reference_type(result.callee_def->return_type)) {
+                        llvm::LLVMValueRef slot =
+                            create_entry_block_alloca(to_llvm_type(result.callee_def->return_type), "ifacereftmp");
+                        create_store(result.value, slot, alignment_for_type(result.callee_def->return_type));
+                        return LValue{slot, result.callee_def->return_type, alignment_for_type(result.callee_def->return_type)};
+                    }
+                    return LValue{result.value, *result.callee_def->return_type.pointee,
+                                  alignment_for_type(*result.callee_def->return_type.pointee)};
+                }
+                // A by-value-returning call (e.g. a method call's own
+                // receiver, `builtin_scalar_keyword_type_name(kind).empty()`)
+                // is a fresh prvalue with no existing place to alias --
+                // materialize it into a temporary and return that
+                // temporary's address, exactly like
+                // codegen_materialize_rvalue_reference_source's identical
+                // pattern.
+                std::optional<Type> result_type = infer_type(expr);
+                if (!result_type.has_value()) {
                     throw CodegenError("expression is not assignable",
                         current_loc_);
                 }
-                if (is_interface_reference_type(result.callee_def->return_type)) {
-                    llvm::LLVMValueRef slot =
-                        create_entry_block_alloca(to_llvm_type(result.callee_def->return_type), "ifacereftmp");
-                    create_store(result.value, slot, alignment_for_type(result.callee_def->return_type));
-                    return LValue{slot, result.callee_def->return_type, alignment_for_type(result.callee_def->return_type)};
-                }
-                return LValue{result.value, *result.callee_def->return_type.pointee,
-                              alignment_for_type(*result.callee_def->return_type.pointee)};
+                llvm::LLVMValueRef temp = create_entry_block_alloca(llvm::LLVMTypeOf(result.value), "calllvaluetmp");
+                llvm::LLVMBuildStore(builder_, result.value, temp);
+                return LValue{temp, *result_type, alignment_for_type(*result_type)};
             }
 
             case ExprKind::Lambda: {

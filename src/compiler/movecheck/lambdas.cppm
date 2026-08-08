@@ -202,19 +202,32 @@ void collect_free_identifiers(const Stmt& stmt, const std::unordered_set<std::st
 // (skipping any name in `excluded` -- a lambda's own params/locals,
 // already-explicit captures, known function names, known type names)
 // into `out`, for a blanket `[=]`/`[&]` capture's own free-variable
-// resolution. A Call's own callee name and a Member's own field name
-// are never variable references (skipped entirely); their receiver/
-// base sub-expressions are still walked normally. A nested lambda's own
-// body is conservatively walked too (v1 simplification: over-
-// approximates rather than precisely tracking what a nested lambda
-// already captures itself -- harmless, since capturing an unused name
-// is safe, just not maximally minimal; see this codebase's general
-// "pragmatic over exhaustive" style elsewhere).
+// resolution. A *qualified* Call's own callee name (`recv.foo(...)`,
+// `expr.lhs != nullptr`) and a Member's own field name are never
+// variable references (skipped entirely); their receiver/base sub-
+// expressions are still walked normally. A *bare* Call's own callee
+// name (`foo(...)`, no receiver, not `::`-qualified) is different: it
+// genuinely can name a captured callable (e.g. a recursive
+// `std::function<...> f = [&](...) { ... f(...); ... };`, where `f`
+// is referenced *only* ever as a bare call's own callee, never as a
+// plain value) -- so it is treated as a free-identifier candidate too,
+// exactly like an ordinary Identifier just above (still subject to the
+// same `excluded` filtering, so an ordinary call to a real function
+// already in `known_function_names_` is correctly left alone). A
+// nested lambda's own body is conservatively walked too (v1
+// simplification: over-approximates rather than precisely tracking
+// what a nested lambda already captures itself -- harmless, since
+// capturing an unused name is safe, just not maximally minimal; see
+// this codebase's general "pragmatic over exhaustive" style
+// elsewhere).
 void collect_free_identifiers(const Expr& expr, const std::unordered_set<std::string>& excluded,
                                 std::unordered_set<std::string>& out) {
     if (expr.kind == ExprKind::Identifier) {
         if (!excluded.contains(expr.name)) out.insert(expr.name);
         return;
+    }
+    if (expr.kind == ExprKind::Call && expr.lhs == nullptr && !expr.explicit_global_qualification) {
+        if (!excluded.contains(expr.name)) out.insert(expr.name);
     }
     if (expr.lhs) collect_free_identifiers(*expr.lhs, excluded, out);
     if (expr.rhs) collect_free_identifiers(*expr.rhs, excluded, out);
@@ -290,6 +303,39 @@ void rewrite_captured_identifiers_as_field_access(Expr& expr, const std::unorder
         expr.lhs = std::move(this_ref);
         // expr.name already holds the captured name -- Member's own
         // field-name slot, unchanged.
+        return;
+    }
+    // ch05 §5.12: a *bare* Call whose own callee name is a captured
+    // name (collect_free_identifiers' own companion case, above in this
+    // file, is what makes such a name a capture candidate in the first
+    // place) is sugar for calling that captured callable's own "call"
+    // method -- mirrors monomorphize.cppm's walk_expr's identical
+    // bare-call-redirect for an ordinary *local* variable, just reached
+    // through `this.name` (a field) instead of a plain local: the
+    // receiver becomes an explicit `this.name` Member (not bare
+    // `this`), so the captured/field name itself is preserved rather
+    // than discarded. Must rewrite in place and stop *without* falling
+    // through to the generic `expr.lhs` recursion below: the freshly-
+    // synthesized `this` Identifier (nested inside that Member) must
+    // never itself be re-visited (an explicit `[this]`/`[&, this]`
+    // capture would otherwise wrongly turn it into `this.this`). The
+    // call's own *arguments* are still real sub-expressions that may
+    // reference other captured names, so they alone are walked
+    // explicitly here.
+    if (expr.kind == ExprKind::Call && expr.lhs == nullptr && !expr.explicit_global_qualification &&
+        captured_names.contains(expr.name)) {
+        auto this_ref = std::make_unique<Expr>();
+        this_ref->kind = ExprKind::Identifier;
+        this_ref->loc = expr.loc;
+        this_ref->name = "this";
+        auto field_ref = std::make_unique<Expr>();
+        field_ref->kind = ExprKind::Member;
+        field_ref->loc = expr.loc;
+        field_ref->lhs = std::move(this_ref);
+        field_ref->name = expr.name;
+        expr.lhs = std::move(field_ref);
+        expr.name = "call";
+        for (ExprPtr& arg : expr.args) rewrite_captured_identifiers_as_field_access(*arg, captured_names);
         return;
     }
     if (expr.lhs) rewrite_captured_identifiers_as_field_access(*expr.lhs, captured_names);

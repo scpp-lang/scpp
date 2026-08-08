@@ -181,6 +181,8 @@ namespace {
             case ExprKind::Alignof:
             case ExprKind::Sizeof:
                 return named_type("size_t");
+            case ExprKind::ValueInit:
+                return expr.type;
             case ExprKind::TypeTrait: return named_type("bool");
             case ExprKind::CharLiteral: return named_type("char");
             case ExprKind::StringLiteral: {
@@ -505,6 +507,7 @@ namespace {
             case ExprKind::Alignof:
             case ExprKind::Sizeof:
             case ExprKind::Lambda:
+            case ExprKind::ValueInit:
                 break;
             case ExprKind::Call: {
                 std::optional<Type> t = infer_type(arg);
@@ -548,6 +551,18 @@ namespace {
             case ExprKind::Member:
             case ExprKind::Subscript:
                 return expr.lhs != nullptr && is_lvalue_copy_source_shape(*expr.lhs);
+            case ExprKind::Unary:
+                // `*p` (ch05 §5.7) is unconditionally a genuine lvalue
+                // "place" -- dereferencing any pointer yields an alias to
+                // already-existing storage, regardless of whether the
+                // pointer expression itself is an lvalue or a fresh
+                // prvalue (e.g. the result of an arrow-access rewritten
+                // by movecheck's rewrite_arrow_receiver into
+                // `*(recv.operator_arrow())`). Matches codegen_lvalue's
+                // own Unary case, which likewise treats Deref (and only
+                // Deref, alongside prefix ++/--) as addressable with no
+                // further recursion into the operand's own shape.
+                return expr.unary_op == UnaryOp::Deref;
             case ExprKind::Call: {
                 // A call expression is only a genuine lvalue "place"
                 // (an alias to an already-existing object, e.g.
@@ -951,25 +966,16 @@ namespace {
         std::vector<const Function*> matches;
         for (const Function* fn : candidates) {
             if (!function_accepts_argument_count(*fn, args.size(), param_offset)) {
-                if (callee_name.find("__bucket_index_for_hash") != std::string::npos) {
-                    std::cerr << "[bucket-reject] arity " << fn->name << "\n";
-                }
                 continue;
             }
             // The receiver (`this`): viable only if the candidate's own
             // `this` mutability doesn't demand more than the receiver
             // place can actually provide.
             if (param_offset == 1 && fn->params[0].type.is_mutable_ref && !receiver_is_mutable) {
-                if (callee_name.find("__bucket_index_for_hash") != std::string::npos) {
-                    std::cerr << "[bucket-reject] mutable-this " << fn->name << "\n";
-                }
                 continue;
             }
             if (param_offset == 1 && receiver_expr != nullptr &&
                 !receiver_matches_method_qualifier(*receiver_expr, *fn)) {
-                if (callee_name.find("__bucket_index_for_hash") != std::string::npos) {
-                    std::cerr << "[bucket-reject] qualifier " << fn->name << "\n";
-                }
                 continue;
             }
             std::size_t fixed_param_count = fn->params.size() - param_offset;
@@ -981,9 +987,6 @@ namespace {
                 }
                 bool arg_match = argument_matches_parameter(*args[i], candidate_param_type) ||
                                  literal_matches_scalar_parameter(*args[i], candidate_param_type);
-                if (callee_name.find("__bucket_index_for_hash") != std::string::npos && !arg_match) {
-                    std::cerr << "[bucket-reject] arg" << i << " " << fn->name << "\n";
-                }
                 all_match = arg_match;
             }
             if (all_match) matches.push_back(fn);

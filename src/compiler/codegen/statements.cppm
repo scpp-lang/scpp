@@ -568,7 +568,20 @@ namespace scpp {
                                             }()
                                     : current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Named &&
                                           find_class_def(current_function_def_->return_type.name) != nullptr
-                                          ? codegen_class_value_for_boundary(*stmt.expr, current_function_def_->return_type)
+                                          // /*allow_implicit_converting_ctor=*/true: mirrors
+                                          // movecheck's own dataflow.cppm return-statement check
+                                          // (return_converting_ctor, via
+                                          // find_single_argument_converting_constructor_signature),
+                                          // which already accepts returning some other type T that
+                                          // the return type has a single-argument converting
+                                          // constructor from (e.g. `return
+                                          // std::unexpected(E{...});` returning into a
+                                          // `std::expected<T, E>`-typed function) -- without this,
+                                          // codegen would emit stmt.expr's own (mismatched) type
+                                          // directly as the `ret` operand instead of constructing
+                                          // the actual return type, tripping LLVM's IR verifier.
+                                          ? codegen_class_value_for_boundary(*stmt.expr, current_function_def_->return_type,
+                                                                             /*allow_implicit_converting_ctor=*/true)
                                     : current_function_def_ != nullptr
                                           ? codegen_value_for_target(*stmt.expr, current_function_def_->return_type)
                                           : codegen_expr(*stmt.expr);
@@ -650,9 +663,27 @@ namespace scpp {
                 llvm::LLVMBuildBr(builder_, cond_block);
 
                 llvm::LLVMPositionBuilderAtEnd(builder_, cond_block);
-                // Same bool_to_i1 narrowing as the If case above.
-                llvm::LLVMValueRef cond = codegen_contextual_bool_i1(*stmt.condition);
-                llvm::LLVMBuildCondBr(builder_, cond, body_block, end_block);
+                // A `while (true)` condition -- including `for (;;)`'s
+                // desugared `true` placeholder condition (see
+                // desugar_classic_for) -- is known at parse time to
+                // always hold. Branch straight to the body unconditionally
+                // instead of through a CondBr in that case: *any* CondBr
+                // targeting end_block, even one whose condition is this
+                // always-true literal, creates a structural "use" of
+                // end_block in the raw (pre-optimization) IR, which would
+                // defeat the "is end_block reachable" check below (see its
+                // comment) -- a truly infinite loop with no `break` would
+                // otherwise look reachable purely because of its own dead
+                // condition-check edge, wrongly demanding a `return` after
+                // it (the false positive this whole branch avoids).
+                bool condition_always_true = stmt.condition->kind == ExprKind::BoolLiteral && stmt.condition->bool_value;
+                if (condition_always_true) {
+                    llvm::LLVMBuildBr(builder_, body_block);
+                } else {
+                    // Same bool_to_i1 narrowing as the If case above.
+                    llvm::LLVMValueRef cond = codegen_contextual_bool_i1(*stmt.condition);
+                    llvm::LLVMBuildCondBr(builder_, cond, body_block, end_block);
+                }
 
                 // The body's scope is popped (and its unique_ptr locals
                 // dropped) at the end of *every* iteration, right before

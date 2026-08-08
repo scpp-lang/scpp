@@ -27,6 +27,17 @@ struct RefTarget {
     // Non-empty only when this reference was tracked by suspending a
     // mutable-reborrow lender rather than by incrementing root borrows.
     std::string lender;
+    // Whether *this* binding itself was mutable, captured once at bind
+    // time (see apply_reference_binding). release_reference_borrow relies
+    // on this rather than re-deriving it from Body::local_types[name] at
+    // release time, since local_types is a flat, whole-function map keyed
+    // only by name (by design -- see Body's own comment) and so no longer
+    // reflects this specific binding's own constness once the same name
+    // has been re-declared elsewhere in the function with a different
+    // mutability (e.g. two sibling loops each reusing the same loop-
+    // variable name, one by const reference and the other by mutable
+    // reference).
+    bool is_mutable = false;
 
     [[nodiscard]] bool is_reborrow() const { return !lender.empty(); }
 
@@ -34,7 +45,23 @@ struct RefTarget {
 };
 
 using RefTargetMap = std::unordered_map<std::string, RefTarget>;
-using ReborrowSuspensionMap = std::unordered_map<std::string, int>;
+
+// Mirrors BorrowState's own shared/mutable split exactly: a lender can
+// simultaneously back any number of *shared* (const) reborrows -- e.g.
+// two separate `const T& a = this->peek();`/`const U& b =
+// this->other_const_accessor();` bindings both derived from the same
+// mutable `this`, alive together, exactly as real Rust allows any number
+// of simultaneous `&T` reborrows of a `&mut T` -- but at most one
+// *mutable* reborrow, which (like a real `&mut` reborrow) requires
+// exclusivity against every other reborrow, shared or mutable alike.
+struct ReborrowSuspension {
+    int shared_count = 0;
+    bool mutable_suspended = false;
+
+    bool operator==(const ReborrowSuspension&) const = default;
+};
+
+using ReborrowSuspensionMap = std::unordered_map<std::string, ReborrowSuspension>;
 using LocalLifetimeSourceMap = std::unordered_map<std::string, RootSet>;
 using ParameterLifetimeMap = std::unordered_map<std::string, LifetimeAnnotation>;
 inline constexpr std::string_view kProgramLifetimeRoot = "<program-lifetime>";
@@ -60,6 +87,14 @@ struct DataflowState {
     ClosureCaptureBorrowMap closure_capture_borrows;
     int unsafe_depth = 0;
     std::string current_class;
+    // Non-empty only inside a lambda's synthesized `_call` method (see
+    // Function::access_context_class's own doc comment, ast.cppm) --
+    // the *additional* class whose private members are also accessible
+    // here (the lambda's lexically enclosing class), alongside
+    // current_class (which for such a method names the closure's own,
+    // unrelated synthetic class). grants_private_access (dataflow.cppm)
+    // is the only reader; every ordinary function leaves this empty.
+    std::string lexical_access_context_class;
     const std::unordered_set<std::string>* class_names = nullptr;
     const ClassFieldTypes* class_field_types = nullptr;
     const ClassFieldAccess* class_field_access = nullptr;
@@ -104,6 +139,7 @@ bool DataflowState::operator==(const DataflowState& other) const {
            suspended_reborrows == other.suspended_reborrows &&
            closure_capture_borrows == other.closure_capture_borrows &&
            unsafe_depth == other.unsafe_depth && current_class == other.current_class &&
+           lexical_access_context_class == other.lexical_access_context_class &&
            class_names == other.class_names && class_field_types == other.class_field_types &&
            class_field_access == other.class_field_access &&
            classes_with_copy_ctor == other.classes_with_copy_ctor &&
@@ -175,9 +211,14 @@ LocalLifetimeSourceMap join_local_lifetime_sources(const LocalLifetimeSourceMap&
 
 ReborrowSuspensionMap join_suspended_reborrows(const ReborrowSuspensionMap& a, const ReborrowSuspensionMap& b) {
     ReborrowSuspensionMap result = a;
-    for (const auto& [name, count] : b) {
+    for (const auto& [name, suspension] : b) {
         auto it = result.find(name);
-        result[name] = it == result.end() ? count : std::max(it->second, count);
+        if (it == result.end()) {
+            result[name] = suspension;
+        } else {
+            it->second.shared_count = std::max(it->second.shared_count, suspension.shared_count);
+            it->second.mutable_suspended = it->second.mutable_suspended || suspension.mutable_suspended;
+        }
     }
     return result;
 }
@@ -215,6 +256,9 @@ DataflowState join_states(const DataflowState& a, const DataflowState& b) {
         // "fail safe" tie-break since there's no meaningful direction to
         // fail toward here).
         a.current_class,
+        // Same "set once per function, never changes" reasoning as
+        // current_class just above.
+        a.lexical_access_context_class,
         a.class_names,
         a.class_field_types,
         a.class_field_access,

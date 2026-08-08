@@ -105,7 +105,7 @@ public:
         auto path_it = import_paths_.find(module_name);
         if (path_it == import_paths_.end()) throw std::runtime_error("unknown test module '" + module_name + "'");
         auto parsed_result = scpp::parse(
-            read_file(path_it->second), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
+            read_file(path_it->second), [this](const std::string& name) -> const scpp::Program* { return &resolve(name); },
             [this](const std::string& key) -> scpp::Program { return resolve_partition(key); });
         if (!parsed_result.has_value()) throw std::move(parsed_result).error();
         auto [inserted, _] = cache_.emplace(module_name, std::move(parsed_result).value());
@@ -116,7 +116,7 @@ public:
         std::optional<std::string> path = infer_partition_path(key);
         if (!path.has_value()) throw std::runtime_error("unknown test partition '" + key + "'");
         auto result = scpp::parse(
-            read_file(*path), [this](const std::string& name) -> const scpp::Program& { return resolve(name); },
+            read_file(*path), [this](const std::string& name) -> const scpp::Program* { return &resolve(name); },
             [this](const std::string& nested_key) -> scpp::Program { return resolve_partition(nested_key); });
         if (!result.has_value()) throw std::move(result).error();
         return std::move(result).value();
@@ -145,7 +145,7 @@ private:
 scpp::Program parse_program_with_std_imports(std::string_view source) {
     TestModuleCache cache(source_module_import_paths());
     auto result = scpp::parse(
-        source, [&cache](const std::string& name) -> const scpp::Program& { return cache.resolve(name); },
+        source, [&cache](const std::string& name) -> const scpp::Program* { return &cache.resolve(name); },
         [&cache](const std::string& key) -> scpp::Program { return cache.resolve_partition(key); });
     if (!result.has_value()) throw std::move(result).error();
     return std::move(result).value();
@@ -154,7 +154,7 @@ scpp::Program parse_program_with_std_imports(std::string_view source) {
 scpp::Program parse_with_std_imports(std::string_view source) {
     TestModuleCache cache(source_module_import_paths());
     auto result = scpp::parse(
-        source, [&cache](const std::string& name) -> const scpp::Program& { return cache.resolve(name); },
+        source, [&cache](const std::string& name) -> const scpp::Program* { return &cache.resolve(name); },
         [&cache](const std::string& key) -> scpp::Program { return cache.resolve_partition(key); });
     if (!result.has_value()) throw std::move(result).error();
     return std::move(result).value();
@@ -503,7 +503,7 @@ void run_module_system_tests() {
             if (!lib_program_result.has_value()) throw std::move(lib_program_result).error();
             scpp::Program lib_program = std::move(lib_program_result.value());
             auto program_result = scpp::parse(
-                main_source, [&lib_program](const std::string&) -> const scpp::Program& { return lib_program; });
+                main_source, [&lib_program](const std::string&) -> const scpp::Program* { return &lib_program; });
             if (!program_result.has_value()) throw std::move(program_result).error();
             scpp::Program program = std::move(program_result.value());
             scpp::check_moves(program);
@@ -1048,6 +1048,119 @@ void run_module_system_tests() {
             }
             expect(threw, case_name + " (direct): expected a::value() to stay invisible (private import is "
                                        "non-transitive)");
+        }
+        std::filesystem::remove(a_path);
+        std::filesystem::remove(b_path);
+    }
+
+    // Regression test for a real compiler bug in movecheck's
+    // validate_constructor_member_initialization (compiler/movecheck/
+    // signatures.cppm): a non-template class's constructor recovered
+    // from an imported module keeps its member_initializers list but has
+    // its own body cleared during the cross-module merge (see
+    // clone_function_declaration's `keep_body` parameter -- only a
+    // generic template keeps a body when merged, so the importer can
+    // monomorphize it locally; an ordinary class's constructor is
+    // declaration-only and defined by the imported module's own object
+    // file). check_moves used to re-validate this now-bodyless, already
+    // -defined-elsewhere constructor as if it were a fresh local
+    // definition, incorrectly flagging its own field as uninitialized
+    // even though the field genuinely is initialized -- just by a
+    // member-initializer-list this recovered declaration no longer
+    // carries a body to display. Fixed by an early-return guard for a
+    // bodyless constructor (necessarily a merged, already-validated-once
+    // redeclaration, never a fresh local one needing validation).
+    {
+        std::string case_name = "imported_class_constructor_with_member_initializer_list_builds";
+        cases_run++;
+        std::filesystem::path lib_path = write_temp_file(case_name, "lib",
+            "export module dm_holder;\n"
+            "namespace dm_holder {\n"
+            "    export struct Holder {\n"
+            "        int value_;\n"
+            "        Holder(int value) : value_{value} {}\n"
+            "    };\n"
+            "}\n");
+        std::string main_source =
+            "import dm_holder;\n"
+            "int main() {\n"
+            "    dm_holder::Holder h{5};\n"
+            "    return h.value_ - 5;\n"
+            "}\n";
+        try {
+            std::filesystem::path exe_path =
+                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                         {{"dm_holder", lib_path.string()}});
+            RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+            std::filesystem::remove(exe_path);
+            expect(run_result.exit_code == 0,
+                   case_name + ": expected the imported class's member-initializer-list constructor to build and "
+                               "run correctly, got exit " + std::to_string(run_result.exit_code) + " output '" +
+                               run_result.stdout_text + "'");
+        } catch (const std::exception& e) {
+            expect(false, case_name + ": threw an exception (movecheck incorrectly rejecting a merged, "
+                                       "already-validated constructor as having an uninitialized field): " +
+                              std::string(e.what()));
+        }
+        std::filesystem::remove(lib_path);
+    }
+
+    // Regression test for a real compiler bug in codegen/orchestration.
+    // cppm: a defaulted special member (e.g. `virtual ~Widget() =
+    // default;`) recovered from an imported-and-*re-exported* module
+    // keeps its is_defaulted flag through clone_function_declaration
+    // (only the clone's body is cleared for non-template functions --
+    // see merge_imported_module's own comment), and is also externally
+    // linked here (declare_function's has_definition/is_exported check)
+    // since a re-export keeps the clone's is_exported flag too (see
+    // clone_function_declaration's `is_reexport && fn.is_exported`).
+    // Before the fix, codegen's top-level definition loop synthesized a
+    // *fresh* external definition for this defaulted destructor in
+    // every module that merged it, regardless of whether it was
+    // recovered from an already-independently-compiled owning module --
+    // producing two externally linked, identically mangled definitions
+    // (one from "dm_a"'s own compilation, one redundantly re-synthesized
+    // while compiling "dm_b") and failing to link with a "multiple
+    // definition" error. This is the same real bug that showed up
+    // between libstd.scppa and libscpp.scppa for std::runtime_error's
+    // destructor (libs/scpp/rand/scpp_rand.scpp re-exports std),
+    // reproduced here with two small first-class modules instead.
+    {
+        std::string case_name = "reexported_defaulted_destructor_does_not_duplicate_definition";
+        cases_run++;
+        std::filesystem::path a_path = write_temp_file(case_name, "a",
+            "export module dm_a;\n"
+            "namespace dm_a {\n"
+            "    export class Widget {\n"
+            "    public:\n"
+            "        virtual ~Widget() = default;\n"
+            "        int tag() { return 7; }\n"
+            "    };\n"
+            "}\n");
+        std::filesystem::path b_path = write_temp_file(case_name, "b",
+            "export module dm_b;\n"
+            "export import dm_a;\n");
+        std::string main_source =
+            "import dm_b;\n"
+            "int main() {\n"
+            "    dm_a::Widget w{};\n"
+            "    return w.tag() - 7;\n"
+            "}\n";
+        try {
+            std::filesystem::path exe_path =
+                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+            scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                         {{"dm_a", a_path.string()}, {"dm_b", b_path.string()}});
+            RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+            std::filesystem::remove(exe_path);
+            expect(run_result.exit_code == 0,
+                   case_name + ": expected build+link to succeed with the re-exported defaulted destructor not "
+                               "duplicating its definition, got exit " + std::to_string(run_result.exit_code) +
+                               " output '" + run_result.stdout_text + "'");
+        } catch (const std::exception& e) {
+            expect(false, case_name + ": threw an exception (this used to be a link-time \"multiple definition\" "
+                                       "error before the fix): " + std::string(e.what()));
         }
         std::filesystem::remove(a_path);
         std::filesystem::remove(b_path);
@@ -2890,6 +3003,168 @@ void run_cli_extension_tests() {
                                (root / "nolink_app").string() + " --import mymod=" + interface_path.string() + " 2>&1");
         expect(missing_link_result.exit_code != 0,
                case_name + ": build without an available companion libmymod.scppa should fail for a stripped concrete body");
+        std::filesystem::remove_all(root);
+    }
+
+    // Regression test for a real compiler bug in driver.cppm's
+    // hoist_non_partition_imports: a bare `module;` line (the global
+    // module fragment opener ch11 §11.2 requires to precede the module
+    // declaration) wasn't recognized as belonging with the module
+    // declaration below it -- is_module_decl only matches "module "/
+    // "export module " with a trailing space before a real name, which a
+    // bare "module;" (no space, just a semicolon) never satisfies. It
+    // fell through to being treated as ordinary body content instead,
+    // and got reordered *after* the hoisted imports in the rendered
+    // interface, corrupting the fragment's required leading position.
+    // Fixed via a dedicated prologue_lines bucket collected before the
+    // module declaration line is seen, re-emitted first, ahead of both
+    // the module declaration and any hoisted imports.
+    {
+        std::string case_name = "leading_global_module_fragment_stays_before_module_declaration";
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::path module_source = root / "gmf_probe.scpp";
+        std::filesystem::path interface_path = root / "gmf_probe.scppm";
+        std::filesystem::path archive_path = root / "libgmf_probe.scppa";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "module;\n"
+                        "\n"
+                        "export module gmf_probe;\n"
+                        "\n"
+                        "import std;\n"
+                        "\n"
+                        "namespace gmf_probe {\n"
+                        "    export int value() { return 42; }\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module with a leading global module fragment should succeed, got '" +
+                   emit_result.stdout_text + "'");
+        std::vector<unsigned char> interface_bytes = read_binary_file(interface_path);
+        if (interface_bytes.size() >= 12) {
+            std::uint32_t interface_length = read_u32_le(interface_bytes, 8);
+            std::string embedded_source(interface_bytes.begin() + 12, interface_bytes.begin() + 12 + interface_length);
+            std::size_t fragment_pos = embedded_source.find("module;");
+            std::size_t decl_pos = embedded_source.find("export module gmf_probe;");
+            expect(fragment_pos != std::string::npos,
+                   case_name + ": expected the embedded interface to keep the leading 'module;' global module "
+                               "fragment, got '" + embedded_source + "'");
+            expect(decl_pos != std::string::npos,
+                   case_name + ": expected the embedded interface to keep 'export module gmf_probe;', got '" +
+                       embedded_source + "'");
+            expect(fragment_pos == 0,
+                   case_name + ": expected 'module;' to remain the very first line of the rendered interface, "
+                               "got '" + embedded_source + "'");
+            expect(fragment_pos < decl_pos,
+                   case_name + ": expected 'module;' to stay before 'export module gmf_probe;' (not get hoisted "
+                               "after it along with imports), got '" + embedded_source + "'");
+        } else {
+            expect(false, case_name + ": expected a well-formed .scppm interface");
+        }
+        // Confirm this isn't just a cosmetic text-ordering nicety: a
+        // consumer must also be able to actually import and use it.
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        write_text_file(consumer_source,
+                        "import gmf_probe;\n"
+                        "int main() {\n"
+                        "    return gmf_probe::value() - 42;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                               exe_path.string() + " --import gmf_probe=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": a consumer should be able to import the rendered interface, got '" +
+                   build_result.stdout_text + "'");
+        if (build_result.exit_code == 0) {
+            RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+            expect(run_result.exit_code == 0,
+                   case_name + ": expected the consumer binary to exit 0, got " +
+                       std::to_string(run_result.exit_code));
+        }
+        std::filesystem::remove_all(root);
+    }
+
+    // Regression test for a real compiler bug in driver.cppm's
+    // strip_concrete_function_bodies: a nested *local* class defined
+    // inside a function body (not a member of the enclosing module's own
+    // struct/class) has its own braces, which used to confuse the
+    // stripping pass's brace-counting -- it stopped consuming the
+    // enclosing function's body one brace too early, leaving the local
+    // class's trailing declarations (and everything textually after the
+    // enclosing function) shifted/corrupted in the rendered interface.
+    // Fixed so the stripper's brace counter treats a nested local class
+    // the same as any other nested `{ ... }` block it must skip over as
+    // a whole before considering the enclosing function's own body
+    // closed.
+    {
+        std::string case_name = "nested_local_class_body_strips_cleanly_without_corrupting_later_declarations";
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::path module_source = root / "nested.scpp";
+        std::filesystem::path interface_path = root / "nested.scppm";
+        std::filesystem::path archive_path = root / "libnested.scppa";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module test_local_class;\n"
+                        "struct Wrapped {\n"
+                        "    int value;\n"
+                        "    Wrapped(int value) : value{value} {}\n"
+                        "};\n"
+                        "int outer_function(Wrapped p) {\n"
+                        "    struct Inner {\n"
+                        "      public:\n"
+                        "        Inner(Wrapped w) : w_{w} {}\n"
+                        "        int compute() {\n"
+                        "            return w_.value;\n"
+                        "        }\n"
+                        "      private:\n"
+                        "        Wrapped w_;\n"
+                        "    };\n"
+                        "    Inner obj{p};\n"
+                        "    return obj.compute();\n"
+                        "}\n"
+                        "export int call_outer(int v) {\n"
+                        "    Wrapped w{v};\n"
+                        "    return outer_function(w);\n"
+                        "}\n"
+                        "export int marker_after() {\n"
+                        "    return 999;\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module for a function with a nested local class should succeed, got '" +
+                   emit_result.stdout_text + "'");
+        std::vector<unsigned char> interface_bytes = read_binary_file(interface_path);
+        if (interface_bytes.size() >= 12) {
+            std::uint32_t interface_length = read_u32_le(interface_bytes, 8);
+            std::string embedded_source(interface_bytes.begin() + 12, interface_bytes.begin() + 12 + interface_length);
+            expect(embedded_source.find("struct Inner") == std::string::npos,
+                   case_name + ": expected the nested local class to be stripped away entirely along with its "
+                               "enclosing function body, got '" + embedded_source + "'");
+            expect(embedded_source.find("int outer_function(Wrapped p) ;") != std::string::npos,
+                   case_name + ": expected outer_function's body (including its nested local class) to strip "
+                               "cleanly to ';', got '" + embedded_source + "'");
+            std::size_t outer_pos = embedded_source.find("outer_function");
+            std::size_t marker_pos = embedded_source.find("export int marker_after() ;");
+            expect(marker_pos != std::string::npos,
+                   case_name + ": expected marker_after's declaration to survive uncorrupted after the nested "
+                               "local class's enclosing function, got '" + embedded_source + "'");
+            expect(outer_pos != std::string::npos && marker_pos != std::string::npos && outer_pos < marker_pos,
+                   case_name + ": expected marker_after to still appear after outer_function in the rendered "
+                               "interface, got '" + embedded_source + "'");
+        } else {
+            expect(false, case_name + ": expected a well-formed .scppm interface");
+        }
         std::filesystem::remove_all(root);
     }
 

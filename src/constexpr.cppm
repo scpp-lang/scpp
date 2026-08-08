@@ -1658,6 +1658,8 @@ private:
             case ExprKind::Alignof:
             case ExprKind::Sizeof:
                 return named_type("size_t");
+            case ExprKind::ValueInit:
+                return expr.type;
             case ExprKind::Destroy: return named_type("void");
             case ExprKind::StringLiteral: return make_const_char_pointer_type();
             case ExprKind::Identifier:
@@ -1806,6 +1808,8 @@ private:
             case ExprKind::StringLiteral: return make_string_literal_pointer(expr);
             case ExprKind::Destroy:
                 throw ConstexprError(expr.loc, "explicit destructor calls are not supported during constant evaluation");
+            case ExprKind::ValueInit:
+                return make_default_cell(expr.type, expr.loc);
             case ExprKind::Alignof: {
                 reject_if_incomplete(expr.type, expr.loc, "alignof");
                 std::optional<TypeLayoutInfo> layout = layout_of_type(program_, expr.type);
@@ -1825,7 +1829,9 @@ private:
                 }
                 reject_if_incomplete(queried_type, expr.loc, "sizeof");
                 std::optional<TypeLayoutInfo> layout = layout_of_type(program_, queried_type);
-                if (!layout.has_value()) throw ConstexprError(expr.loc, "cannot apply 'sizeof' to this type in this version");
+                if (!layout.has_value()) {
+                    throw ConstexprError(expr.loc, "cannot apply 'sizeof' to this type in this version");
+                }
                 return make_scalar_cell(named_type("size_t"), static_cast<long long>(layout->size_bytes));
             }
             case ExprKind::Identifier: return clone_cell(lookup_binding(expr.name, expr.loc).cell);

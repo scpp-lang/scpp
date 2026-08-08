@@ -9,4 +9,4 @@ std = { path = "../libs/std" }
 
 [[lib]]
 name = "scpp-compiler"
-sources = ["compiler/ast.cppm", "compiler/lexer.cppm"]
+sources = ["compiler/ast.cppm", "compiler/lexer.cppm", "compiler/parser.cppm"]

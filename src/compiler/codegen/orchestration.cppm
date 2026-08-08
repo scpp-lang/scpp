@@ -103,6 +103,28 @@ namespace scpp {
         // emitted either (see check_generic_type_methods_once).
         std::unordered_set<std::string> witness_class_names;
         std::unordered_set<std::string> generic_type_template_names;
+        // ch05 §5.14 (witness-driven instantiation gap): a *real*,
+        // concretely-named class instantiated purely as a side effect of
+        // abstractly witness-checking some *other* generic class's method
+        // (e.g. resolving a `std::unexpected<E>`-typed field/local while
+        // witness-checking `std::expected<T, E>`'s own methods, via
+        // resolve_generic_type_optimistic -- see monomorphize.cppm's
+        // `classes_before_method` sweep) is marked is_synthetic_check_only
+        // exactly like check_class itself, so it's skipped from
+        // declare_class below just the same -- but unlike check_class's
+        // own witness-substituted method clones (unconditionally flagged
+        // is_generic_template = true right at synthesis, see
+        // monomorphize.cppm's `check_fn.is_generic_template = true;`),
+        // *this* class's own methods went through the *ordinary*,
+        // real-instantiation cloning path (instantiate_generic_type),
+        // which copies is_generic_template from the original template
+        // method (false for an ordinary, non-check-only generic method).
+        // Without this set, such a method would sail past every other
+        // is_never_compiled check below and reach declare_function/
+        // define_function, which then needs its own (never-declared,
+        // since its owner was skipped above) owner class's layout --
+        // crashing with a bare, hard-to-place "unordered_map::at".
+        std::unordered_set<std::string> synthetic_check_only_class_names;
         for (const StructDef& def : program.structs) {
             if (def.is_forward_declaration) continue;
             if (!def.template_params.empty()) {
@@ -125,7 +147,10 @@ namespace scpp {
                 continue;
             }
             if (def.is_forward_declaration) continue;
-            if (def.is_synthetic_check_only) continue;
+            if (def.is_synthetic_check_only) {
+                synthetic_check_only_class_names.insert(def.name);
+                continue;
+            }
             declare_class(def);
         }
         for (const GlobalVar& global : program.globals) {
@@ -162,6 +187,13 @@ namespace scpp {
             if (!fn.member_owner_class.empty() && witness_class_names.contains(fn.member_owner_class)) {
                 return true;
             }
+            // See synthetic_check_only_class_names' own comment just
+            // above: a real-instantiation-shaped method clone whose
+            // owner class only exists as an abstract witness-checking
+            // side effect, never declared/laid-out for codegen.
+            if (!fn.member_owner_class.empty() && synthetic_check_only_class_names.contains(fn.member_owner_class)) {
+                return true;
+            }
             // ch05 §5.14: a generic class template's own, not-yet-
             // resolved method (its `this` parameter names the template
             // directly, e.g. "Vec", never a concrete instantiation like
@@ -182,6 +214,37 @@ namespace scpp {
             if (is_never_compiled(fn)) continue;
             if (fn.body != nullptr) {
                 define_function(fn);
+            } else if (!fn.owning_module.empty() && fn.is_exported) {
+                // A defaulted special member (e.g. `virtual ~X() = default;`)
+                // or an inherited-method forwarding stub recovered from an
+                // *imported and re-exported* module (`export import`, so
+                // this clone's own is_exported is true too -- see
+                // clone_function_declaration's `is_reexport && fn.is_exported`)
+                // keeps its is_defaulted/forwards_to flag through cloning
+                // (merge_imported_module only clears the clone's own body).
+                // Since it's also externally linked here (declare_function's
+                // own has_definition/is_exported linkage check), defining a
+                // fresh synthesized body for it too would collide at link
+                // time with the identical external definition its owning
+                // module's own compilation already emits -- only
+                // reproducible with a non-template exported class re-
+                // exported by a second package, which is why nothing before
+                // std's own `runtime_error` (re-exported by the "scpp"
+                // package) ever triggered it. A *plain* (non-reexporting)
+                // `import`'s own clone keeps is_exported false, so it still
+                // falls through to the branches below exactly as before --
+                // deliberately so, since that gives it internal linkage (no
+                // link-time collision risk) and covers monomorphized generic
+                // clones too: those also inherit a non-empty owning_module
+                // from their template while compiling as a module (see
+                // movecheck/monomorphize.cppm), but always keep
+                // is_exported false, so this guard leaves their own,
+                // still-needed fresh local synthesis (nothing else will
+                // ever define a never-before-seen concrete instantiation)
+                // untouched. Its owning module is solely responsible for
+                // defining this one; here there is nothing left to do
+                // beyond the plain declaration declare_function already
+                // emitted above.
             } else if (fn.is_defaulted) {
                 define_defaulted_function(fn);
             } else if (!fn.forwards_to.empty()) {
@@ -201,6 +264,10 @@ namespace scpp {
         std::string error(error_message != nullptr ? error_message : "");
         llvm::LLVMDisposeMessage(error_message);
         if (broken) {
+            char* ir_dump = llvm::LLVMPrintModuleToString(module_);
+            std::ofstream dump_out("scratch_selfhost/broken_module_dump.ll");
+            dump_out << ir_dump;
+            llvm::LLVMDisposeMessage(ir_dump);
             throw CodegenError("module verification failed: " + error,
                 current_loc_);
         }
@@ -507,12 +574,35 @@ namespace scpp {
         }
         // fn.name is already fully namespace-qualified (e.g.
         // "std::string_new", see the parser's qualify_name) -- the
-        // mangled symbol's own <function name bytes> segment is just the
-        // last "::"-separated piece (namespace nesting is separately
-        // encoded by the N blocks above).
+        // mangled symbol's own <function name bytes> segment is
+        // whatever remains after stripping that known namespace_path
+        // prefix from the *front* (namespace nesting is separately
+        // encoded by the N blocks above). This must strip by the
+        // function's own *known* namespace_path prefix, not by
+        // searching for the *last* "::" anywhere in fn.name: a
+        // monomorphized clone's own name is a compound cache key (e.g.
+        // "std::__move_only_function_invoke.__lambda19.bool.
+        // scpp::AccessSpecifier.scpp::AccessSpecifier", one segment per
+        // template argument/witness), which can itself embed other
+        // namespace-qualified type names containing their own "::" --
+        // searching from the end would slice into the middle of the
+        // *last* such embedded type name (e.g. yielding a bare_name of
+        // merely "AccessSpecifier"), silently losing the clone's own
+        // __lambdaN/argument-specific identity and colliding with any
+        // other, unrelated clone whose cache key happens to end in the
+        // same embedded type name -- surfacing later as an llvm::LLVM
+        // module-verifier failure ("Global is external, but doesn't
+        // have external or weak linkage!") once two colliding
+        // declarations force llvm::LLVM to silently rename one of them.
         std::string bare_name = fn.name;
-        std::size_t last_separator = bare_name.rfind("::");
-        if (last_separator != std::string::npos) bare_name = bare_name.substr(last_separator + 2);
+        std::string namespace_prefix;
+        for (const std::string& segment : fn.namespace_path) namespace_prefix += segment + "::";
+        if (!namespace_prefix.empty() && bare_name.starts_with(namespace_prefix)) {
+            bare_name = bare_name.substr(namespace_prefix.size());
+        } else {
+            std::size_t last_separator = bare_name.rfind("::");
+            if (last_separator != std::string::npos) bare_name = bare_name.substr(last_separator + 2);
+        }
         mangled += "F" + std::to_string(bare_name.size()) + "_" + bare_name;
         mangled += "Q" + std::to_string(static_cast<int>(fn.receiver_ref_qualifier)) + "_";
         mangled += "P" + std::to_string(fn.params.size()) + "_";

@@ -43,6 +43,7 @@ void validate_increment_decrement_expr(const Expr& expr, DataflowState& state, c
                                        const Signatures& signatures, bool report_errors);
 [[nodiscard]] bool write_is_licensed_by_mutable_reborrow_lender(const Expr& target, const DataflowState& state,
                                                                 const Body& body, const Signatures& signatures);
+[[nodiscard]] bool is_lvalue_copy_source_shape(const Expr& expr);
 [[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type,
                                                  const Body& body, const Signatures& signatures);
 void apply_statement(const MirStatement& stmt, DataflowState& state, const Body& body,
@@ -428,6 +429,18 @@ void validate_deref_expr(const Expr& expr, const DataflowState& state, const Bod
         signatures.contains(underlying->name + "_operator_deref");
     bool is_this_ref = resolved.has_value() && operand.kind == ExprKind::Identifier && operand.name == "this" &&
                        resolved->kind == TypeKind::Reference;
+    if (std::getenv("SCPP_DEBUG_DEREF") != nullptr) {
+        std::cerr << "[DEBUG deref] loc=" << state.current_loc.line << ":" << state.current_loc.column
+                  << " operand_kind=" << static_cast<int>(operand.kind)
+                  << " operand_name=" << operand.name
+                  << " resolved=" << resolved.has_value()
+                  << " resolved_kind=" << (resolved.has_value() ? static_cast<int>(resolved->kind) : -1)
+                  << " underlying_name=" << (underlying != nullptr ? underlying->name : "<none>")
+                  << " underlying_kind=" << (underlying != nullptr ? static_cast<int>(underlying->kind) : -1)
+                  << " checked_key=" << (underlying != nullptr ? underlying->name + "_operator_deref" : "<none>")
+                  << " is_class_deref=" << is_class_deref
+                  << "\n";
+    }
     if (!is_raw_ptr && !is_fn_ptr && !is_class_deref && !is_this_ref) {
         throw DataflowError("cannot dereference ('*') '" + describe +
                              "': only a raw pointer (inside '[[scpp::unsafe]] { }'), a function pointer "
@@ -439,8 +452,15 @@ void validate_deref_expr(const Expr& expr, const DataflowState& state, const Bod
                              "': requires '[[scpp::unsafe]] { }' (spec ch01 §1.3/ch02)",
             state.current_loc);
     }
-    if (operand.kind == ExprKind::Member || expr.implicit_arrow_deref) {
-        return; // no separate per-field state, and implicit arrow derefs resolve their roots elsewhere
+    if (operand.kind == ExprKind::Member || operand.kind == ExprKind::Call || expr.implicit_arrow_deref) {
+        // No separate per-field state for a Member (see above), and no
+        // "local variable" move/borrow state at all for a Call's freshly-
+        // returned pointer/reference -- its callee name lives in the same
+        // Expr::name field an Identifier's variable name would, but it
+        // isn't a tracked local, so looking it up in state.locals below
+        // would (incorrectly) report it as "out of scope" instead of just
+        // relying on the type-only checks already done above.
+        return;
     }
     LocalState current = body.local_types.contains(operand.name)
                              ? lookup(state.locals, operand.name)
@@ -630,6 +650,24 @@ void apply_reference_argument(const Expr& arg, const Type& param_type, DataflowS
     }
 }
 
+// ch04 §4.2/[expr.prim.lambda]: whether `state`'s current lexical
+// position has private-member access to `target_class` -- true either
+// when `target_class` is this function's own class (state.current_class,
+// e.g. an ordinary method's own class, or a lambda's own synthesized
+// closure class for its captured fields) or, for a lambda's synthesized
+// `_call` method specifically, its lexically enclosing class
+// (state.lexical_access_context_class -- see Function::
+// access_context_class's own doc comment, ast.cppm, and
+// DataflowState::lexical_access_context_class's). Every private-access
+// check in this file (member function/constructor calls, field access)
+// should go through this rather than comparing state.current_class
+// directly, so a lambda body's access to *either* of its two relevant
+// classes is recognized uniformly.
+[[nodiscard]] bool grants_private_access(const DataflowState& state, std::string_view target_class) {
+    return state.current_class == target_class ||
+           (!state.lexical_access_context_class.empty() && state.lexical_access_context_class == target_class);
+}
+
 // Checks every argument of a Call expression against its callee's
 // signature (if known), exactly the same way regardless of context --
 // shared by apply_expr's own Call case (a call used as a plain
@@ -714,7 +752,7 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
             state.current_loc);
     }
     if (report_errors && sig != nullptr && sig->access == AccessSpecifier::Private &&
-        !sig->member_owner_class.empty() && state.current_class != sig->member_owner_class) {
+        !sig->member_owner_class.empty() && !grants_private_access(state, sig->member_owner_class)) {
         throw DataflowError("cannot call private member function '" + callee_display + "' of class '" +
                              sig->member_owner_class + "' from outside its own methods",
             state.current_loc);
@@ -796,7 +834,36 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                     arg_pointee->kind == TypeKind::Named && param_pointee->kind == TypeKind::Named &&
                     (find_class_def(*body.program, arg_pointee->name) != nullptr ||
                      find_class_def(*body.program, param_pointee->name) != nullptr);
-                if (needs_class_pointer_validation && arg_type->kind == TypeKind::Pointer &&
+                // ch05 §5.14: a call through an *external* same-generic-
+                // class-typed parameter (e.g. `target.__insert_new_entry
+                // (fresh)`, `target: std::unordered_map<K, V>&` alongside
+                // `this` inside `unordered_map<K, V>::__append_all_to` --
+                // see that method's own comment in std_unordered_map.scpp)
+                // never gets its callee resolved against `target`'s own,
+                // properly witness-substituted per-method synthetic
+                // check-class the way `this->` calls do (only `this`'s
+                // type is rewritten in check_generic_type_methods_once);
+                // it falls back to the *original*, un-substituted
+                // template's registered signature instead (still literally
+                // typed e.g. `unordered_map_entry<K, V>*`), while `fresh`'s
+                // own inferred type is now the real, witness-resolved
+                // instantiation (resolve_generic_type_optimistic having
+                // done its job correctly on it) -- a mismatch with no
+                // bearing on any real, concrete instantiation of this
+                // same method (whose own external parameter *is* the
+                // correctly monomorphized, matching concrete type, via
+                // the ordinary get_or_create_clone/instantiate_generic_type
+                // path), so tolerated here the same way as every other
+                // is_synthetic_check_only-only false positive in this
+                // file.
+                bool caller_is_synthetic_check_only = [&] {
+                    if (body.program == nullptr) return false;
+                    std::string owner_name = enclosing_class_name(body);
+                    if (owner_name.empty()) return false;
+                    const ClassDef* owner_def = find_class_def(*body.program, owner_name);
+                    return owner_def != nullptr && owner_def->is_synthetic_check_only;
+                }();
+                if (needs_class_pointer_validation && !caller_is_synthetic_check_only && arg_type->kind == TypeKind::Pointer &&
                     !raw_pointer_implicitly_convertible(*arg_type, sig->param_types[param_index]) &&
                     !types_compatible_with_base_conversion(*arg_type, sig->param_types[param_index], *body.program,
                                                            enclosing_class_name(body))) {
@@ -816,6 +883,33 @@ void check_call_arguments(const Expr& expr, DataflowState& state, const Body& bo
                 class_value_param ? find_single_argument_converting_constructor_signature(sig->param_types[param_index], arg, body,
                                                                                          signatures)
                                   : nullptr;
+            if (std::getenv("SCPP_DEBUG_ARG") != nullptr && sig != nullptr && param_index < sig->param_types.size()) {
+                std::optional<Type> dbg_arg_type = infer_expr_type(arg, body, signatures);
+                std::cerr << "[DEBUG argcheck] loc=" << state.current_loc.line << ":" << state.current_loc.column
+                          << " param=" << sig->param_names[param_index]
+                          << " param_type=" << sig->param_types[param_index].name
+                          << " param_type_kind=" << static_cast<int>(sig->param_types[param_index].kind)
+                          << " class_value_param=" << class_value_param
+                          << " copyable_lvalue_source=" << copyable_lvalue_source
+                          << " freely_copyable_value_source=" << freely_copyable_value_source
+                          << " produces_rvalue=" << produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures)
+                          << " converting_ctor=" << (converting_ctor != nullptr)
+                          << " arg_type_resolved=" << dbg_arg_type.has_value()
+                          << " arg_type_name=" << (dbg_arg_type.has_value() ? dbg_arg_type->name : "<none>")
+                          << " arg_type_kind=" << (dbg_arg_type.has_value() ? static_cast<int>(dbg_arg_type->kind) : -1)
+                          << " arg_kind=" << static_cast<int>(arg.kind)
+                          << " arg_name=" << arg.name
+                          << " arg_args_size=" << arg.args.size()
+                          << " arg_through_arrow=" << arg.through_arrow
+                          << " arg_lhs_kind=" << (arg.lhs != nullptr ? static_cast<int>(arg.lhs->kind) : -1)
+                          << " arg_lhs_unary_op=" << (arg.lhs != nullptr ? static_cast<int>(arg.lhs->unary_op) : -1)
+                          << " is_copy_ctor=" << (body.program != nullptr ? is_copy_constructible(sig->param_types[param_index].name, *body.program) : false)
+                          << " shape_ok=" << is_lvalue_copy_source_shape(arg)
+                          << " record_ok=" << is_named_record_type_for_call_binding(sig->param_types[param_index], body)
+                          << " bare_same_type_ok=" << is_bare_same_type_copy_source(arg, sig->param_types[param_index], body, signatures)
+                          << " arg_lhs_lhs_kind=" << (arg.lhs != nullptr && arg.lhs->lhs != nullptr ? static_cast<int>(arg.lhs->lhs->kind) : -1)
+                          << "\n";
+            }
             if (report_errors && class_value_param && !copyable_lvalue_source && !freely_copyable_value_source &&
                 !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures) && converting_ctor == nullptr) {
                 throw DataflowError("passing class '" + sig->param_types[param_index].name +
@@ -1021,7 +1115,7 @@ void check_constructor_arguments(const Type& constructed_type, const std::vector
         }
     }
     if (report_errors && sig != nullptr && sig->access == AccessSpecifier::Private &&
-        !sig->member_owner_class.empty() && state.current_class != sig->member_owner_class) {
+        !sig->member_owner_class.empty() && !grants_private_access(state, sig->member_owner_class)) {
         throw DataflowError("cannot call private constructor of class '" + class_name +
                              "' from outside its own methods",
             state.current_loc);
@@ -1086,6 +1180,22 @@ void check_constructor_arguments(const Type& constructed_type, const std::vector
             bool freely_copyable_value_source =
                 class_value_param && is_freely_copyable_class_value_source(arg, sig->param_types[param_index], body, signatures);
             if (arg.kind == ExprKind::Lambda) freely_copyable_value_source = class_value_param;
+            if (std::getenv("SCPP_DEBUG_CTORARG") != nullptr && sig != nullptr && param_index < sig->param_types.size()) {
+                std::cerr << "[DEBUG ctorarg] loc=" << state.current_loc.line << ":" << state.current_loc.column
+                          << " param_index=" << param_index
+                          << " sig_null=" << (sig == nullptr)
+                          << " param_type=" << (sig != nullptr && param_index < sig->param_types.size() ? sig->param_types[param_index].name : "<n/a>")
+                          << " class_value_param=" << class_value_param
+                          << " copyable_lvalue_source=" << copyable_lvalue_source
+                          << " freely_copyable_value_source=" << freely_copyable_value_source
+                          << " produces_rvalue=" << produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures)
+                          << " arg_kind=" << static_cast<int>(arg.kind)
+                          << " arg_name=" << arg.name
+                          << " is_copy_ctor=" << (body.program != nullptr ? is_copy_constructible(sig->param_types[param_index].name, *body.program) : false)
+                          << " bare_same_type_ok=" << is_bare_same_type_copy_source(arg, sig->param_types[param_index], body, signatures)
+                          << " record_ok=" << is_named_record_type_for_call_binding(sig->param_types[param_index], body)
+                          << "\n";
+            }
             if (report_errors && class_value_param && !copyable_lvalue_source && !freely_copyable_value_source &&
                 !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures)) {
                 throw DataflowError("passing class '" + sig->param_types[param_index].name +
@@ -1154,6 +1264,15 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
             return;
         case ExprKind::Alignof:
             if (report_errors) validate_alignof_operand(expr, body, state.current_loc);
+            return;
+        case ExprKind::ValueInit:
+            // `return {};` (ast.cppm's ExprKind::ValueInit) value-
+            // initializes `expr.type` (filled in by monomorphization from
+            // the enclosing function's own return type -- see
+            // Monomorphizer::walk_expr) with zero constructor arguments,
+            // so it needs exactly the same "no default constructor"
+            // validation as an empty-braced `Type var{};` VarDecl.
+            if (report_errors) check_constructor_arguments(expr.type, {}, state, body, signatures, report_errors);
             return;
 
         case ExprKind::Identifier: {
@@ -1654,7 +1773,7 @@ void apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& st
                 if (type_it != body.local_types.end()) {
                     std::string class_name = named_type_name(type_it->second);
                     if (!class_name.empty() && state.class_names->contains(class_name) &&
-                        class_name != state.current_class) {
+                        !grants_private_access(state, class_name)) {
                         AccessSpecifier access = AccessSpecifier::Private;
                         if (state.class_field_access != nullptr) {
                             auto class_it = state.class_field_access->find(class_name);
@@ -1831,10 +1950,12 @@ void apply_reference_binding(const MirStatement& stmt, DataflowState& state, con
                 borrow.shared_count++;
             }
         }
+    } else if (is_mutable) {
+        state.suspended_reborrows[*lender].mutable_suspended = true;
     } else {
-        state.suspended_reborrows[*lender]++;
+        state.suspended_reborrows[*lender].shared_count++;
     }
-    state.ref_targets[stmt.local] = RefTarget{roots, uses_lender_suspension ? *lender : ""};
+    state.ref_targets[stmt.local] = RefTarget{roots, uses_lender_suspension ? *lender : "", is_mutable};
     state.local_lifetime_sources[stmt.local] = roots;
     state.locals[stmt.local] = LocalState::Initialized;
 }
@@ -1896,6 +2017,34 @@ void apply_reference_write_through(const MirStatement& stmt, DataflowState& stat
         case ExprKind::Member:
         case ExprKind::Subscript:
             return expr.lhs != nullptr && is_lvalue_copy_source_shape(*expr.lhs);
+        case ExprKind::Unary: {
+            if (expr.unary_op != UnaryOp::Deref || expr.lhs == nullptr) return false;
+            // A user-written `*p` (a raw pointer or smart-pointer local
+            // dereferenced to reach a field): the same addressable-place
+            // shape resolve_borrow_source_root already recognizes for
+            // borrow sources (borrows.cppm) -- a dereferenced pointer is
+            // just as legitimate an lvalue copy source as a plain
+            // Member/Subscript root.
+            if (!expr.implicit_arrow_deref) return is_lvalue_copy_source_shape(*expr.lhs);
+            // `p->x` on a smart-pointer `p`: monomorphize.cppm's
+            // rewrite_arrow_receiver desugars this into exactly this
+            // Unary/Deref node wrapping one (or more, chained) compiler-
+            // synthesized `operator_arrow` Call node(s), e.g.
+            // `p->field` -> `(*p.operator_arrow()).field`. Each such call
+            // is a pure, receiver-tied accessor (guaranteed by
+            // implicit_arrow_chain_safe -- ast.cppm's own doc comment:
+            // "the one safe carve-out that does not itself require an
+            // unsafe context") that always yields the same address as
+            // `p` itself owns, so it's just as legitimate a copy-source
+            // root as `p` directly -- walk back through the synthesized
+            // call chain to that original receiver.
+            if (!expr.implicit_arrow_chain_safe) return false;
+            const Expr* receiver = expr.lhs.get();
+            while (receiver->kind == ExprKind::Call && receiver->name == "operator_arrow" && receiver->lhs != nullptr) {
+                receiver = receiver->lhs.get();
+            }
+            return is_lvalue_copy_source_shape(*receiver);
+        }
         default:
             return false;
     }
@@ -2342,6 +2491,51 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                     return;
                 }
                 std::optional<Type> returned_type = infer_expr_type(*term.return_value, body, signatures);
+                // ch05 §5.14: check_generic_type_methods_once
+                // (movecheck/monomorphize.cppm) builds one synthetic,
+                // witness-substituted "check" class *per method* of a
+                // generic class (see its own comment on why), and applies
+                // witness substitution only to the checked method's own
+                // signature/body -- not transitively to every *other*
+                // still-generic type (e.g. a sibling nested-generic class,
+                // or a private helper method living in a different,
+                // separately-generated synthetic check class) that the
+                // body happens to touch. Two independent, already-expected
+                // consequences of that, both harmless (a real, concrete
+                // instantiation of the same method is produced and checked
+                // separately, with every type fully monomorphized, so this
+                // never weakens verification of actual generated code):
+                //  - a call to a *sibling* method via `this->` (e.g. a
+                //    private helper) can never resolve here -- the
+                //    sibling's own witness-substituted copy lives in a
+                //    different synthetic check class, under a different
+                //    name -- so `infer_expr_type` correctly reports it as
+                //    unresolved (nullopt), exactly like the already-
+                //    tolerated "unqualified, unmangled lookup" case
+                //    documented on resolve_callee_signature's own
+                //    Member-receiver branch;
+                //  - a field of a nested still-generic type (e.g.
+                //    `Entry<K, V>::second`) keeps that nested type's own,
+                //    un-substituted field type when looked up by name
+                //    (infer_expr_type's Member case finds the nested
+                //    class's *template* ClassDef, never a witness-
+                //    substituted clone of it -- none is ever generated),
+                //    so it reads back as the literal type-parameter name
+                //    instead of this method's own witness type.
+                // Both surface identically here as `returned_type` either
+                // missing or (once resolved) not matching `fn.return_type`
+                // -- see is_synthetic_check_only_function's use below,
+                // gating only the throw itself; the lifetime/root
+                // derivation checks further down remain fully in effect
+                // (they reason about *which parameter a value flows from*,
+                // not its exact type identity, so the witness-substitution
+                // gap above doesn't affect their soundness).
+                bool is_synthetic_check_only_function =
+                    !fn.member_owner_class.empty() && body.program != nullptr &&
+                    [&] {
+                        const ClassDef* owner = find_class_def(*body.program, fn.member_owner_class);
+                        return owner != nullptr && owner->is_synthetic_check_only;
+                    }();
                 bool return_type_compatible = false;
                 if (returned_type.has_value()) {
                     return_type_compatible =
@@ -2382,12 +2576,56 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
                     return_type_compatible = true;
                 }
                 if (!return_type_compatible) {
+                    // Tolerated for a synthetic check-only function (see
+                    // is_synthetic_check_only_function's own comment
+                    // above): the very same witness-substitution gap that
+                    // makes `returned_type` unreliable here also breaks
+                    // the root-derivation checks just below (an unresolved
+                    // sibling-method call can't be traced back to `this`
+                    // either), so there is nothing further this pass could
+                    // reliably validate about this specific return
+                    // statement -- bail out entirely rather than risk a
+                    // second, equally spurious "derived from <unknown>"
+                    // diagnosis immediately after.
+                    if (is_synthetic_check_only_function) return;
                     throw DataflowError("function '" + fn.name + "' returns a lifetime-tracked value from an incompatible source type",
                                         state.current_loc);
                 }
                 if (fn.return_type.kind == TypeKind::Pointer && returned_roots.empty()) {
                     return;
                 }
+                // ch05 §5.14: is_synthetic_check_only_function's own gap,
+                // completed -- `return_type_compatible` (just above) and
+                // `returned_roots` (resolve_lifetime_source_roots, right
+                // before this whole block) are two *independent*
+                // computations over the same return expression: a member
+                // access like `existing->second` (existing: a local
+                // pointer assigned from `this->__find_entry(key)`, a
+                // sibling private-helper call) infers a perfectly correct,
+                // matching *type* from the field's own declared type alone
+                // (no callee resolution needed), so return_type_compatible
+                // can be -- and, for exactly this shape, is -- true even
+                // though `existing`'s own *root* can never be traced
+                // (resolve_lifetime_source_roots's ExprKind::Call case
+                // returns an empty RootSet whenever resolve_callee_signature/
+                // resolve_overload can't resolve the callee, which a
+                // sibling `this->`-qualified call from a synthetic check-
+                // only function's own witness-substituted copy never can,
+                // per this function's own is_synthetic_check_only_function
+                // comment above). So the two checks can genuinely diverge --
+                // the comment on the `!return_type_compatible` branch above
+                // ("the very same witness-substitution gap... also breaks
+                // the root-derivation checks just below") was the right
+                // intent but didn't account for that divergence, only
+                // actually bailing out when the *type* check happened to
+                // fail too. Gating this whole reference/pointer-return
+                // lifetime-derivation block the same way closes that gap
+                // for real: a real, concrete instantiation of this same
+                // method (created via the ordinary get_or_create_clone/
+                // instantiate_generic_type path, every concrete type fully
+                // monomorphized, every callee genuinely resolvable) is
+                // checked separately and unaffected by this tolerance.
+                if (is_synthetic_check_only_function) return;
                 if (fn.return_lifetime.present()) {
                     if (!roots_satisfy_named_lifetime_group(returned_roots, fn, fn.return_lifetime.name)) {
                         throw DataflowError("function '" + fn.name + "' returns a value derived from " +
@@ -2440,14 +2678,50 @@ void check_terminator(const Terminator& term, DataflowState& state, const Functi
             bool freely_copyable_return_source =
                 return_is_class_value &&
                 is_freely_copyable_class_value_source(*term.return_value, fn.return_type, body, signatures);
+            // Deliberately NOT mirroring check_call_arguments' bare-
+            // lvalue escape hatch here: copying *into* a by-value
+            // parameter is always implicit-safe (the callee's copy is
+            // freshly made from whatever lvalue the caller names, and
+            // the caller keeps its own), but copying *out* via a return
+            // is different -- scpp requires it to be an explicit
+            // move/fresh-value/converting-ctor rather than an implicit
+            // bare-name copy of storage the function doesn't own (a
+            // global, another object's field, a reference parameter's
+            // referent, or `this`'s own field -- see the
+            // bare_return_of_*_is_rejected.scpp fixtures). Accepting
+            // is_copyable_class_lvalue_boundary_source here (as an
+            // earlier, since-reverted revision of this function did)
+            // silently defeats all four of those checks.
+            // Mirrors check_call_arguments' identical escape hatch (this
+            // file, ~line 815): a returned value need not itself be
+            // fn.return_type's own type -- it may instead be some other
+            // type T that fn.return_type has a single-argument converting
+            // constructor from (e.g. `return std::unexpected(E{...});`
+            // returning into a `std::expected<T, E>`-typed function,
+            // via std::expected's `expected(const std::unexpected<E>&)`).
+            // Without this, only a same-type source could ever be
+            // returned, even though the exact same conversion is already
+            // accepted when passed as a call *argument*.
+            const FunctionSignature* return_converting_ctor =
+                return_is_class_value ? find_single_argument_converting_constructor_signature(
+                                             fn.return_type, *term.return_value, body, signatures)
+                                       : nullptr;
             bool move_target_context =
                 (return_is_class_value && !freely_copyable_return_source) || term.return_value->kind == ExprKind::Move;
             apply_expr(*term.return_value, move_target_context, state, body, signatures, /*report_errors=*/true);
             if (return_is_class_value && !implicit_move_source && !freely_copyable_return_source &&
-                !produces_rvalue_of_type(*term.return_value, fn.return_type, body, signatures)) {
+                !produces_rvalue_of_type(*term.return_value, fn.return_type, body, signatures) &&
+                return_converting_ctor == nullptr) {
                 throw DataflowError("returning class '" + fn.return_type.name +
                                      "' by value requires either an implicitly copyable same-type source or "
                                      "a fresh value such as std::move(x) or a call returning by value",
+                    state.current_loc);
+            }
+            if (return_converting_ctor != nullptr && return_converting_ctor->is_unsafe && state.unsafe_depth == 0) {
+                throw DataflowError("cannot use '" + fn.return_type.name +
+                                     "'s converting constructor outside '[[scpp::unsafe]] { }': its own declaration is "
+                                     "marked '[[scpp::unsafe]]', so its soundness depends on a precondition only the "
+                                     "caller can guarantee (ch01 §1.2/§1.3)",
                     state.current_loc);
             }
             return;
@@ -2620,6 +2894,21 @@ void check_function(const Function& fn, const Program& program, const Signatures
     } else if (!fn.params.empty() && fn.params[0].name == "this") {
         entry_state.current_class = fn.params[0].type.pointee->name;
     }
+    // A lambda's synthesized `_call` method (see monomorphize.cppm's
+    // resolve_lambda) needs private access to *two* distinct classes at
+    // once: its own closure class (current_class above, e.g. for the
+    // captured-field accesses `rewrite_captured_identifiers_as_field_
+    // access` rewrote into `this.name`) and its lexically enclosing
+    // function's own class (for any private member/method of *that*
+    // class the lambda's body happens to mention directly, exactly as
+    // if the body were still written inline at the lambda-expression's
+    // own position -- see Function::access_context_class's own doc
+    // comment, ast.cppm). A single current_class string can't hold both
+    // at once, so this second, independent field exists purely so
+    // grants_private_access (below) can accept *either* -- every other
+    // function leaves it empty, in which case that second alternative
+    // simply never matches (no class is ever named "").
+    entry_state.lexical_access_context_class = fn.access_context_class;
     entry_state.class_names = &class_names;
     entry_state.class_field_types = &class_field_types;
     entry_state.class_field_access = &class_field_access;
@@ -2654,7 +2943,47 @@ void check_function(const Function& fn, const Program& program, const Signatures
         queued[i] = true;
     }
 
+    bool _dbg_fn = std::getenv("SCPP_DEBUG_FN") != nullptr;
+    bool _dbg_target = _dbg_fn && fn.name.find("qualify_same_namespace_function_calls") != std::string::npos;
+    if (_dbg_fn) {
+        std::cerr << "[SCPP_DEBUG_FN]   check_function(" << fn.name << "): n_blocks=" << n << std::endl;
+        if (_dbg_target) {
+            auto kind_name = [](MirStatementKind k) -> const char* {
+                switch (k) {
+                    case MirStatementKind::Declare: return "Declare";
+                    case MirStatementKind::Assign: return "Assign";
+                    case MirStatementKind::Eval: return "Eval";
+                    case MirStatementKind::Drop: return "Drop";
+                    case MirStatementKind::ScopeExit: return "ScopeExit";
+                    case MirStatementKind::BindReference: return "BindReference";
+                    case MirStatementKind::UnsafeEnter: return "UnsafeEnter";
+                    case MirStatementKind::UnsafeExit: return "UnsafeExit";
+                }
+                return "?";
+            };
+            for (std::size_t i = 0; i < n; i++) {
+                std::vector<std::size_t> succs = successors(body.blocks[i].terminator);
+                std::cerr << "[SCPP_DEBUG_FN]     block[" << i << "] stmts=" << body.blocks[i].statements.size()
+                          << " preds=[";
+                for (std::size_t p : preds[i]) std::cerr << p << ",";
+                std::cerr << "] succs=[";
+                for (std::size_t s : succs) std::cerr << s << ",";
+                std::cerr << "]" << std::endl;
+                for (const MirStatement& ms : body.blocks[i].statements) {
+                    std::cerr << "[SCPP_DEBUG_FN]       stmt: " << kind_name(ms.kind) << " local='" << ms.local
+                              << "' type=" << ms.type.name << " is_mutable_ref=" << ms.type.is_mutable_ref
+                              << std::endl;
+                }
+            }
+        }
+    }
+    long _dbg_iter = 0;
     while (!worklist.empty()) {
+        _dbg_iter++;
+        if (_dbg_fn && (_dbg_iter % 200000) == 0) {
+            std::cerr << "[SCPP_DEBUG_FN]   check_function(" << fn.name << "): iter=" << _dbg_iter
+                      << " worklist.size()=" << worklist.size() << std::endl;
+        }
         std::size_t b = worklist.front();
         worklist.pop_front();
         queued[b] = false;
@@ -2671,13 +3000,105 @@ void check_function(const Function& fn, const Program& program, const Signatures
         }
 
         DataflowState new_out = new_in;
+        static thread_local long _dbg_block2_visits = 0;
+        bool trace_this_visit = _dbg_target && b == 2 && _dbg_block2_visits < 6;
+        if (trace_this_visit) {
+            _dbg_block2_visits++;
+            auto sc = [&](const DataflowState& s) -> int {
+                auto it = s.borrows.find("$for_range_80");
+                return it == s.borrows.end() ? -1 : it->second.shared_count;
+            };
+            std::cerr << "[SCPP_DEBUG_FN]     ===block2 visit#" << _dbg_block2_visits << " new_in.$for_range_80.shared="
+                      << sc(new_in) << std::endl;
+        }
         for (std::size_t i = 0; i < body.blocks[b].statements.size(); i++) {
             apply_statement(body.blocks[b].statements[i], new_out, body, signatures, /*report_errors=*/false);
+            if (trace_this_visit) {
+                auto it = new_out.borrows.find("$for_range_80");
+                std::cerr << "[SCPP_DEBUG_FN]       after stmt[" << i << "] (kind depends) $for_range_80.shared="
+                          << (it == new_out.borrows.end() ? -1 : it->second.shared_count)
+                          << " ref_targets[fn].present=" << new_out.ref_targets.contains("fn") << std::endl;
+            }
             release_dead_references(new_out, body, live_after[b][i]);
+            if (trace_this_visit) {
+                auto it = new_out.borrows.find("$for_range_80");
+                std::cerr << "[SCPP_DEBUG_FN]       after release_dead_references[" << i << "] $for_range_80.shared="
+                          << (it == new_out.borrows.end() ? -1 : it->second.shared_count)
+                          << " ref_targets[fn].present=" << new_out.ref_targets.contains("fn") << std::endl;
+            }
         }
 
         in_states[b] = new_in;
         bool out_changed = !(new_out == out_states[b]);
+        if (_dbg_target && ((_dbg_iter >= 100 && _dbg_iter < 130) || (_dbg_iter >= 10000 && (_dbg_iter % 10000) < 5))) {
+            const DataflowState& old_out = out_states[b];
+            std::cerr << "[SCPP_DEBUG_FN]     iter=" << _dbg_iter << " block=" << b
+                      << " out_changed=" << out_changed << " locals=" << (new_out.locals == old_out.locals)
+                      << " borrows=" << (new_out.borrows == old_out.borrows)
+                      << " ref_targets=" << (new_out.ref_targets == old_out.ref_targets)
+                      << " lls=" << (new_out.local_lifetime_sources == old_out.local_lifetime_sources)
+                      << " susp=" << (new_out.suspended_reborrows == old_out.suspended_reborrows)
+                      << " ccb=" << (new_out.closure_capture_borrows == old_out.closure_capture_borrows)
+                      << " unsafe=" << (new_out.unsafe_depth == old_out.unsafe_depth) << std::endl;
+            if (!(new_out.borrows == old_out.borrows)) {
+                std::cerr << "[SCPP_DEBUG_FN]       borrows sizes: new=" << new_out.borrows.size()
+                          << " old=" << old_out.borrows.size() << std::endl;
+                for (const auto& [place, bs] : new_out.borrows) {
+                    auto it = old_out.borrows.find(place);
+                    if (it == old_out.borrows.end() || !(it->second == bs)) {
+                        std::cerr << "[SCPP_DEBUG_FN]         borrow '" << place << "' new=(shared=" << bs.shared_count
+                                  << ",mut=" << bs.mutable_borrow << ")";
+                        if (it != old_out.borrows.end()) {
+                            std::cerr << " old=(shared=" << it->second.shared_count << ",mut=" << it->second.mutable_borrow
+                                      << ")";
+                        } else {
+                            std::cerr << " (missing in old)";
+                        }
+                        std::cerr << std::endl;
+                    }
+                }
+                for (const auto& [place, bs] : old_out.borrows) {
+                    if (new_out.borrows.find(place) == new_out.borrows.end()) {
+                        std::cerr << "[SCPP_DEBUG_FN]         borrow '" << place << "' removed (was shared="
+                                  << bs.shared_count << ",mut=" << bs.mutable_borrow << ")" << std::endl;
+                    }
+                }
+            }
+            if (!(new_out.ref_targets == old_out.ref_targets)) {
+                std::cerr << "[SCPP_DEBUG_FN]       ref_targets sizes: new=" << new_out.ref_targets.size()
+                          << " old=" << old_out.ref_targets.size() << std::endl;
+                for (const auto& [name, target] : new_out.ref_targets) {
+                    auto it = old_out.ref_targets.find(name);
+                    if (it == old_out.ref_targets.end() || !(it->second == target)) {
+                        std::cerr << "[SCPP_DEBUG_FN]         ref '" << name << "' new_roots=" << format_roots(target.roots)
+                                  << " new_lender='" << target.lender << "'";
+                        if (it != old_out.ref_targets.end()) {
+                            std::cerr << " old_roots=" << format_roots(it->second.roots) << " old_lender='"
+                                      << it->second.lender << "'";
+                        } else {
+                            std::cerr << " (missing in old)";
+                        }
+                        std::cerr << std::endl;
+                    }
+                }
+            }
+            if (!(new_out.local_lifetime_sources == old_out.local_lifetime_sources)) {
+                std::cerr << "[SCPP_DEBUG_FN]       lls sizes: new=" << new_out.local_lifetime_sources.size()
+                          << " old=" << old_out.local_lifetime_sources.size() << std::endl;
+                for (const auto& [name, roots] : new_out.local_lifetime_sources) {
+                    auto it = old_out.local_lifetime_sources.find(name);
+                    if (it == old_out.local_lifetime_sources.end() || !(it->second == roots)) {
+                        std::cerr << "[SCPP_DEBUG_FN]         lls '" << name << "' new=" << format_roots(roots);
+                        if (it != old_out.local_lifetime_sources.end()) {
+                            std::cerr << " old=" << format_roots(it->second);
+                        } else {
+                            std::cerr << " (missing in old)";
+                        }
+                        std::cerr << std::endl;
+                    }
+                }
+            }
+        }
         out_states[b] = std::move(new_out);
 
         if (out_changed) {
@@ -2712,8 +3133,17 @@ void check_function(const Function& fn, const Program& program, const Signatures
 // monomorphization runs before check_moves (see driver.cppm) -- the
 // error is exactly as correct either way.
 void check_moves_impl(const Program& program) {
+    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
+        std::cerr << "[SCPP_DEBUG_FN] entering check_moves_impl, functions.size()=" << program.functions.size() << std::endl;
+    }
     Signatures signatures = build_signatures(program);
+    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
+        std::cerr << "[SCPP_DEBUG_FN] build_signatures done" << std::endl;
+    }
     validate_class_semantics(program, signatures);
+    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
+        std::cerr << "[SCPP_DEBUG_FN] validate_class_semantics done" << std::endl;
+    }
     // ch04 §4.2: every class name in the program, so Member-access
     // checking (apply_expr's own Member case) can tell a class-typed
     // base (access-controlled) apart from a struct-typed one (never
@@ -2756,10 +3186,16 @@ void check_moves_impl(const Program& program) {
         if (is_copy_constructible(def.name, program)) classes_with_copy_ctor.insert(def.name);
         if (is_copy_assignable(def.name, program)) classes_with_copy_assign.insert(def.name);
     }
+    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
+        std::cerr << "[SCPP_DEBUG_FN] copy_ctor/assign sets built, classes.size()=" << program.classes.size() << std::endl;
+    }
     for (const ClassDef& def : program.classes) {
         for (const Function& fn : program.functions) {
             validate_constructor_member_initialization(fn, def, program);
         }
+    }
+    if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
+        std::cerr << "[SCPP_DEBUG_FN] validate_constructor_member_initialization loop done" << std::endl;
     }
     // ch05 §5.11: every concept/bare-`auto` witness class (never a real,
     // user-written one) -- see ClassDef::is_concept_witness and
@@ -2794,6 +3230,9 @@ void check_moves_impl(const Program& program) {
         // deduction-pattern complexity.
         if (!fn.template_params.empty()) continue;
         if (!fn.generic_method_owner_id.empty()) continue;
+        if (std::getenv("SCPP_DEBUG_FN") != nullptr) {
+            std::cerr << "[SCPP_DEBUG_FN] checking " << fn.name << " (owner=" << fn.member_owner_class << ")" << std::endl;
+        }
         check_function(fn, program, signatures, class_names, class_field_types, class_field_access, classes_with_copy_ctor,
                        classes_with_copy_assign, witness_class_names);
     }
