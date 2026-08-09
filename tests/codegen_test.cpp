@@ -480,6 +480,49 @@ void run_switch_end_block_reachability_tests() {
     }
 }
 
+// PR #416: ConstexprError gained a hand-written copy constructor. Nearly
+// all of that PR is a mechanical struct -> class reshaping (adding
+// `public:`, virtual destructors and brace-init) with no behavior delta,
+// but this constructor is genuinely new *code*: scpp's std::runtime_error
+// declares no copy constructor, so the base has to be rebuilt from what()
+// rather than copy-initialized. If it dropped or mangled either the
+// message or the location, every ConstexprError surfaced through
+// std::expected would silently lose its diagnostic -- so assert both
+// survive the copy that std::unexpected's converting constructor makes.
+void run_constexpr_error_copy_tests() {
+    std::string case_name = "constexpr_error_survives_copy_through_expected";
+    cases_run++;
+    scpp::Program program = parse_with_std_imports("consteval int loops_forever() { return loops_forever(); }\n"
+                                                   "int main() { return loops_forever(); }\n");
+    auto result = scpp::fold_immediate_calls(program);
+    expect(!result.has_value(), case_name + ": expected runaway consteval recursion to report an error");
+    if (result.has_value()) return;
+
+    // This error has already been moved into std::unexpected and back out
+    // again by the time it arrives here, so it has been through the copy
+    // constructor under test.
+    const scpp::ConstexprError& error = result.error();
+    const std::string message = error.what();
+    expect(!message.empty(), case_name + ": copied ConstexprError should retain its message");
+    // ConstexprError's constructor prefixes the message with "line:column: ",
+    // so a surviving message proves the base string was rebuilt, and a
+    // matching loc proves the copy carried the location member too.
+    expect(message.find(':') != std::string::npos,
+           case_name + ": copied message should retain its 'line:column: ' prefix, got: " + message);
+    expect(error.loc.line > 0, case_name + ": copied ConstexprError should retain a real source line");
+    const std::string expected_prefix = std::to_string(error.loc.line) + ":" + std::to_string(error.loc.column) + ": ";
+    expect(message.rfind(expected_prefix, 0) == 0,
+           case_name + ": copied message prefix should agree with the copied loc; expected '" + expected_prefix +
+               "' at the start of: " + message);
+
+    // An explicit second copy, exercising the constructor directly rather
+    // than only through std::expected's internals.
+    scpp::ConstexprError copied = error;
+    expect(std::string(copied.what()) == message, case_name + ": an explicit copy should preserve what()");
+    expect(copied.loc.line == error.loc.line && copied.loc.column == error.loc.column,
+           case_name + ": an explicit copy should preserve loc");
+}
+
 } // namespace
 
 int main() {
@@ -488,6 +531,8 @@ int main() {
     test_generate_returns_disengaged_expected_on_failure_without_throwing();
     run_constexpr_engine_direct_api_tests();
     run_switch_end_block_reachability_tests();
+
+    run_constexpr_error_copy_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
