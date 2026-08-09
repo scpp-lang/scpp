@@ -2861,29 +2861,78 @@ public:
         : import_paths_(std::move(import_paths)),
           import_search_dirs_(build_default_import_search_dirs(import_search_dirs)) {}
 
-    const Program& resolve(const std::string& module_name) {
+    // resolve()/resolve_partition() recurse into each other (directly
+    // and via the resolver lambdas parse() calls back into) one native
+    // C++ stack frame per nested `import`, with no upper bound besides
+    // the OS thread stack -- resolving_/partitions_resolving_ above only
+    // catch a *cycle*, not a merely very long finite chain. Converting
+    // this whole path from throw/catch to std::expected (batch 6/#412)
+    // measurably raised the per-level stack cost (std::expected return
+    // values, versus an exception's stack-less unwind), empirically
+    // moving this process's own native crash point from a chain depth
+    // of ~1046-1054 down to ~851-859 on this build/environment's default
+    // 8 MiB thread stack -- a real, if narrow, regression matching the
+    // exact class of risk that made batch 3 lower constexpr.cppm's own
+    // max_recursion_depth 512->256 for the same reason. Real import
+    // graphs never come close (the whole std library totals under 20
+    // import declarations), so this limit exists purely to turn an
+    // unreachable-in-practice pathological chain into a clean, reported
+    // ParseError instead of a raw SIGSEGV -- chosen to match
+    // constexpr.cppm's own max_recursion_depth precedent value, which
+    // leaves a >3x margin below the ~851 empirical native crash point
+    // measured above (and construction below is native C++, not
+    // self-hosted, so no scpp-side stack-cost concern applies to this
+    // counter itself).
+    static constexpr int kMaxResolutionDepth = 256;
+
+    // Returns std::expected rather than throwing on failure now that
+    // parser.cppm's own ModuleResolver alias (batch 6/#412) has a
+    // disengaged state of its own to report through -- see that alias's
+    // comment for the loc.is_known() convention this function's
+    // ParseError must follow: {0, 0} (unknown, the default -- see
+    // ParseError's own constructor) for every resolver-native failure
+    // below (this function's own reasons, or a wrapped DriverError from
+    // read_module_file/deserialize_compile_time_payload, neither of
+    // which ever carries a real position), and a real, non-zero position
+    // only when forwarding imported_result's own ParseError verbatim (a
+    // nested parse() call's failure, already positioned within *that*
+    // file by its own frame -- see parse()'s own comment in
+    // parser.cppm). A pointer rather than a reference return, matching
+    // ModuleResolver's own required shape (see that alias's comment for
+    // why): cache_'s std::unordered_map never invalidates a live
+    // reference/pointer to an existing element on further insertion, so
+    // this is exactly as safe as the reference this function returned
+    // before.
+    [[nodiscard]] std::expected<const Program*, ParseError> resolve(const std::string& module_name) {
         auto cached = cache_.find(module_name);
-        if (cached != cache_.end()) return cached->second;
+        if (cached != cache_.end()) return &cached->second;
 
         if (resolving_.contains(module_name)) {
-            throw DriverError("circular import detected: module '" + module_name +
-                               "' (directly or transitively) imports itself");
+            return std::unexpected(ParseError(0, 0, "circular import detected: module '" + module_name +
+                               "' (directly or transitively) imports itself"));
+        }
+        if (resolution_depth_ >= kMaxResolutionDepth) {
+            return std::unexpected(ParseError(0, 0, "module import chain too deep (nested more than " +
+                               std::to_string(kMaxResolutionDepth) +
+                               " levels) while resolving '" + module_name + "'; check for accidental complexity"));
         }
         auto path_it = import_paths_.find(module_name);
         if (path_it == import_paths_.end()) {
-            std::optional<std::string> inferred = infer_module_path(module_name);
-            if (inferred.has_value()) {
-                path_it = import_paths_.emplace(module_name, *inferred).first;
+            auto inferred_r = infer_module_path(module_name);
+            if (!inferred_r.has_value()) return std::unexpected(std::move(inferred_r).error());
+            if (inferred_r.value().has_value()) {
+                path_it = import_paths_.emplace(module_name, *inferred_r.value()).first;
             } else {
-                throw DriverError("cannot find module '" + module_name + "' (use --import " + module_name +
-                                   "=path/to/file or -I <dir>)");
+                return std::unexpected(ParseError(0, 0, "cannot find module '" + module_name + "' (use --import " + module_name +
+                                   "=path/to/file or -I <dir>)"));
             }
         }
 
         resolving_.insert(module_name);
+        ++resolution_depth_;
         std::string resolved_path = absolute_source_path(path_it->second);
         auto loaded_r = read_module_file(resolved_path);
-        if (!loaded_r.has_value()) throw std::move(loaded_r).error();
+        if (!loaded_r.has_value()) return std::unexpected(ParseError(0, 0, loaded_r.error().what()));
         LoadedModuleFile loaded = std::move(loaded_r).value();
         // Stamps every SourceLocation this parse() produces (see
         // ParseError's and parse_primary()'s own comments) with
@@ -2898,35 +2947,36 @@ public:
         // naming, archive lookup) where deduplicating equivalent paths
         // genuinely matters.
         auto imported_result = parse(
-            loaded.interface_source, [this](const std::string& name) -> const Program* { return &resolve(name); },
-            [this](const std::string& key) -> Program { return resolve_partition(key); }, path_it->second);
-        if (!imported_result.has_value()) throw std::move(imported_result).error();
+            loaded.interface_source, [this](const std::string& name) -> std::expected<const Program*, ParseError> { return resolve(name); },
+            [this](const std::string& key) -> std::expected<Program, ParseError> { return resolve_partition(key); }, path_it->second);
+        if (!imported_result.has_value()) return std::unexpected(std::move(imported_result).error());
         Program imported = std::move(imported_result.value());
         imported.source_path = resolved_path;
         if (loaded.has_compile_time_payload) {
             auto payload_r = deserialize_compile_time_payload(loaded.compile_time_payload_bytes, resolved_path);
-            if (!payload_r.has_value()) throw std::move(payload_r).error();
+            if (!payload_r.has_value()) return std::unexpected(ParseError(0, 0, payload_r.error().what()));
             merge_compile_time_payload(imported, std::move(payload_r).value());
         } else if (!loaded.is_scppm) {
             mark_reachable_hidden_compile_time_dependencies(imported);
         } else if (loaded.is_scppm && program_requires_structured_payload(imported)) {
-            throw DriverError("module interface '" + resolved_path +
+            return std::unexpected(ParseError(0, 0, "module interface '" + resolved_path +
                               "' lacks the required structured compile-time payload; rebuild it with a newer scpp "
-                              "'build-module' output");
+                              "'build-module' output"));
         }
         resolving_.erase(module_name);
+        --resolution_depth_;
 
         if (imported.module_name != module_name) {
-            throw DriverError("'" + path_it->second + "' does not declare module '" + module_name +
+            return std::unexpected(ParseError(0, 0, "'" + path_it->second + "' does not declare module '" + module_name +
                                "' (its own module declaration names '" +
                                (imported.module_name.empty() ? std::string("<none>") : imported.module_name) +
-                               "')");
+                               "')"));
         }
 
         resolution_order_.push_back(module_name);
         resolved_paths_[module_name] = resolved_path;
         auto [it, inserted] = cache_.emplace(module_name, std::move(imported));
-        return it->second;
+        return &it->second;
     }
 
     // ch11 §11.4: resolves a same-module partition key
@@ -2939,29 +2989,39 @@ public:
     // same partition (see PartitionResolver's own comment in
     // parser.cppm for why this v1 limitation -- no shared identity
     // across two importers of the same partition -- is acceptable).
-    Program resolve_partition(const std::string& key) {
+    // Returns std::expected rather than throwing, for exactly the same
+    // reason and following exactly the same loc.is_known() convention as
+    // resolve() above.
+    [[nodiscard]] std::expected<Program, ParseError> resolve_partition(const std::string& key) {
         if (partitions_resolving_.contains(key)) {
-            throw DriverError("circular partition import detected: '" + key +
-                               "' (directly or transitively) imports itself");
+            return std::unexpected(ParseError(0, 0, "circular partition import detected: '" + key +
+                               "' (directly or transitively) imports itself"));
+        }
+        if (resolution_depth_ >= kMaxResolutionDepth) {
+            return std::unexpected(ParseError(0, 0, "module import chain too deep (nested more than " +
+                               std::to_string(kMaxResolutionDepth) +
+                               " levels) while resolving partition '" + key + "'; check for accidental complexity"));
         }
         auto path_it = import_paths_.find(key);
         if (path_it == import_paths_.end()) {
-            std::optional<std::string> inferred = infer_partition_path(key);
-            if (inferred.has_value()) {
-                path_it = import_paths_.emplace(key, *inferred).first;
+            auto inferred_r = infer_partition_path(key);
+            if (!inferred_r.has_value()) return std::unexpected(std::move(inferred_r).error());
+            if (inferred_r.value().has_value()) {
+                path_it = import_paths_.emplace(key, *inferred_r.value()).first;
             } else {
-                throw DriverError("cannot find partition '" + key + "' (use --import " + key +
-                                   "=path/to/file or import its parent module via -I <dir>)");
+                return std::unexpected(ParseError(0, 0, "cannot find partition '" + key + "' (use --import " + key +
+                                   "=path/to/file or import its parent module via -I <dir>)"));
             }
         }
 
         partitions_resolving_.insert(key);
+        ++resolution_depth_;
         auto loaded_r = read_module_file(path_it->second);
-        if (!loaded_r.has_value()) throw std::move(loaded_r).error();
+        if (!loaded_r.has_value()) return std::unexpected(ParseError(0, 0, loaded_r.error().what()));
         LoadedModuleFile loaded = std::move(loaded_r).value();
         if (loaded.is_scppm) {
-            throw DriverError("partition import path '" + path_it->second +
-                              "' must use a source .scpp file, not a compiled .scppm artifact");
+            return std::unexpected(ParseError(0, 0, "partition import path '" + path_it->second +
+                              "' must use a source .scpp file, not a compiled .scppm artifact"));
         }
         // path_it->second (not an absolute_source_path()-normalized
         // form) so this partition's own SourceLocations preserve
@@ -2970,29 +3030,35 @@ public:
         // absolute form internal bookkeeping (e.g. resolved_paths_) can
         // rely on.
         auto partition_result = parse(
-            loaded.interface_source, [this](const std::string& name) -> const Program* { return &resolve(name); },
-            [this](const std::string& nested_key) -> Program { return resolve_partition(nested_key); },
+            loaded.interface_source, [this](const std::string& name) -> std::expected<const Program*, ParseError> { return resolve(name); },
+            [this](const std::string& nested_key) -> std::expected<Program, ParseError> { return resolve_partition(nested_key); },
             path_it->second);
-        if (!partition_result.has_value()) throw std::move(partition_result).error();
+        if (!partition_result.has_value()) return std::unexpected(std::move(partition_result).error());
         Program partition = std::move(partition_result.value());
         partition.source_path = absolute_source_path(path_it->second);
         partitions_resolving_.erase(key);
+        --resolution_depth_;
 
         std::string expected_key = partition.module_name + ":" + partition.partition_name;
         if (expected_key != key) {
-            throw DriverError("'" + path_it->second + "' does not declare partition '" + key +
-                               "' (its own module declaration names '" + expected_key + "')");
+            return std::unexpected(ParseError(0, 0, "'" + path_it->second + "' does not declare partition '" + key +
+                               "' (its own module declaration names '" + expected_key + "')"));
         }
         return partition;
     }
 
-    [[nodiscard]] std::optional<std::string> source_path_for_partition(const std::string& key) {
+    // Returns std::expected<std::optional<...>, ParseError> -- an extra
+    // std::expected layer around the pre-existing std::optional -- since
+    // infer_partition_path (called below) can now itself fail (e.g. a
+    // "multiple source files declare" conflict) instead of throwing; the
+    // inner std::optional keeps meaning exactly what it always did
+    // ("found a path" vs. "no known path, but not an error either" --
+    // see infer_partition_path's own comment). inline_partition_imports
+    // (this method's one external caller) checks both layers in turn.
+    [[nodiscard]] std::expected<std::optional<std::string>, ParseError> source_path_for_partition(const std::string& key) {
         auto path_it = import_paths_.find(key);
         if (path_it != import_paths_.end()) return path_it->second;
-        if (std::optional<std::string> inferred = infer_partition_path(key); inferred.has_value()) {
-            return *inferred;
-        }
-        return std::nullopt;
+        return infer_partition_path(key);
     }
 
     // Every module actually resolved so far, in first-resolved order (a
@@ -3088,25 +3154,31 @@ private:
         if (std::find(conflicts.begin(), conflicts.end(), path) == conflicts.end()) conflicts.push_back(path);
     }
 
-    [[nodiscard]] std::optional<std::string> lookup_discovered_source_path(const std::string& key) const {
+    // Returns std::expected rather than throwing "multiple source files
+    // declare" now that every caller (scan_source_root's own callers,
+    // transitively) is std::expected-based -- see resolve()'s own
+    // comment for the loc.is_known() convention this ParseError follows
+    // (unknown: this is a driver-native conflict with no source position
+    // of its own).
+    [[nodiscard]] std::expected<std::optional<std::string>, ParseError> lookup_discovered_source_path(const std::string& key) const {
         auto conflict_it = discovered_source_path_conflicts_.find(key);
         if (conflict_it != discovered_source_path_conflicts_.end() && !conflict_it->second.empty()) {
-            throw DriverError("multiple source files declare '" + key + "': " + std::accumulate(
+            return std::unexpected(ParseError(0, 0, "multiple source files declare '" + key + "': " + std::accumulate(
                                   std::next(conflict_it->second.begin()), conflict_it->second.end(), conflict_it->second.front(),
-                                  [](std::string acc, const std::string& path) { return std::move(acc) + ", " + path; }));
+                                  [](std::string acc, const std::string& path) { return std::move(acc) + ", " + path; })));
         }
         auto it = discovered_source_paths_.find(key);
         if (it == discovered_source_paths_.end()) return std::nullopt;
         return it->second;
     }
 
-    void scan_source_root(const std::filesystem::path& root) {
+    [[nodiscard]] std::expected<void, ParseError> scan_source_root(const std::filesystem::path& root) {
         std::filesystem::path normalized_root = root.lexically_normal();
         if (normalized_root.empty()) normalized_root = ".";
         std::string root_key = normalized_root.string();
-        if (scanned_source_roots_.contains(root_key)) return;
+        if (scanned_source_roots_.contains(root_key)) return {};
         scanned_source_roots_.insert(root_key);
-        if (!std::filesystem::exists(normalized_root)) return;
+        if (!std::filesystem::exists(normalized_root)) return {};
         std::error_code ec;
         std::filesystem::recursive_directory_iterator it(normalized_root, ec);
         std::filesystem::recursive_directory_iterator end;
@@ -3126,7 +3198,7 @@ private:
                 continue;
             }
             auto loaded_r = read_module_file(entry.path().string());
-            if (!loaded_r.has_value()) throw std::move(loaded_r).error();
+            if (!loaded_r.has_value()) return std::unexpected(ParseError(0, 0, loaded_r.error().what()));
             LoadedModuleFile loaded = std::move(loaded_r).value();
             if (std::optional<ScannedModuleDecl> decl = scan_declared_module_from_source(loaded.interface_source);
                 decl.has_value()) {
@@ -3136,23 +3208,27 @@ private:
             }
             it.increment(ec);
         }
+        return {};
     }
 
-    void ensure_module_source_root_scanned(const std::string& module_name) {
+    [[nodiscard]] std::expected<void, ParseError> ensure_module_source_root_scanned(const std::string& module_name) {
         auto module_it = import_paths_.find(module_name);
-        if (module_it == import_paths_.end()) return;
+        if (module_it == import_paths_.end()) return {};
         std::filesystem::path module_path(module_it->second);
-        if (module_path.extension() != ".scpp") return;
-        scan_source_root(module_path.parent_path());
+        if (module_path.extension() != ".scpp") return {};
+        return scan_source_root(module_path.parent_path());
     }
 
-    void ensure_search_dirs_scanned() {
-        if (search_dirs_scanned_) return;
+    [[nodiscard]] std::expected<void, ParseError> ensure_search_dirs_scanned() {
+        if (search_dirs_scanned_) return {};
         search_dirs_scanned_ = true;
-        for (const std::string& dir : import_search_dirs_) scan_source_root(dir);
+        for (const std::string& dir : import_search_dirs_) {
+            if (auto r = scan_source_root(dir); !r.has_value()) return std::unexpected(std::move(r).error());
+        }
+        return {};
     }
 
-    [[nodiscard]] std::optional<std::string> infer_module_path(const std::string& module_name) {
+    [[nodiscard]] std::expected<std::optional<std::string>, ParseError> infer_module_path(const std::string& module_name) {
         for (const std::string& dir : import_search_dirs_) {
             std::filesystem::path base(dir);
             std::filesystem::path interface_candidate = base / (module_name + ".scppm");
@@ -3160,19 +3236,23 @@ private:
             std::filesystem::path source_candidate = base / (module_name + ".scpp");
             if (std::filesystem::exists(source_candidate)) return source_candidate.string();
         }
-        ensure_search_dirs_scanned();
+        if (auto scan_r = ensure_search_dirs_scanned(); !scan_r.has_value()) return std::unexpected(std::move(scan_r).error());
         return lookup_discovered_source_path(module_name);
     }
 
-    [[nodiscard]] std::optional<std::string> infer_partition_path(const std::string& key) {
+    [[nodiscard]] std::expected<std::optional<std::string>, ParseError> infer_partition_path(const std::string& key) {
         std::size_t colon = key.find(':');
         if (colon == std::string::npos) return std::nullopt;
         std::string module_name = key.substr(0, colon);
-        ensure_module_source_root_scanned(module_name);
-        if (std::optional<std::string> discovered = lookup_discovered_source_path(key); discovered.has_value()) {
-            return *discovered;
+        if (auto scan_r = ensure_module_source_root_scanned(module_name); !scan_r.has_value()) {
+            return std::unexpected(std::move(scan_r).error());
         }
-        ensure_search_dirs_scanned();
+        auto discovered_r = lookup_discovered_source_path(key);
+        if (!discovered_r.has_value()) return std::unexpected(std::move(discovered_r).error());
+        if (discovered_r.value().has_value()) return discovered_r;
+        if (auto scan_r = ensure_search_dirs_scanned(); !scan_r.has_value()) {
+            return std::unexpected(std::move(scan_r).error());
+        }
         return lookup_discovered_source_path(key);
     }
 
@@ -3186,6 +3266,7 @@ private:
     std::unordered_map<std::string, std::string> resolved_paths_;
     std::unordered_set<std::string> resolving_;
     std::unordered_set<std::string> partitions_resolving_;
+    int resolution_depth_ = 0;
     std::vector<std::string> resolution_order_;
 };
 
@@ -3232,12 +3313,16 @@ private:
             std::string partition_name = trimmed.substr(colon + 1, semi == std::string::npos ? std::string::npos
                                                                                             : semi - (colon + 1));
             std::string key = program.module_name + ":" + partition_name;
-            std::optional<std::string> partition_path = cache.source_path_for_partition(key);
-            if (!partition_path.has_value()) {
+            auto partition_path_r = cache.source_path_for_partition(key);
+            if (!partition_path_r.has_value()) {
+                const ParseError& error = partition_path_r.error();
+                return std::unexpected(DriverError(error.what(), error.loc));
+            }
+            if (!partition_path_r.value().has_value()) {
                 return std::unexpected(DriverError("cannot find partition '" + program.module_name + ":" + partition_name +
                                   "' while writing module interface artifacts"));
             }
-            std::string absolute_partition_path = absolute_source_path(*partition_path);
+            std::string absolute_partition_path = absolute_source_path(*partition_path_r.value());
             if (expanded_partition_paths.insert(absolute_partition_path).second) {
                 auto rendered_r = render_module_interface_file(program, cache, absolute_partition_path, module_source_path, keep_concrete_bodies,
                                                     /*keep_module_declaration=*/false, expanded_partition_paths);
@@ -3401,11 +3486,17 @@ llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
     // preserve exactly the same kind distinction without an exception.
     // (ConstexprError is different: both of its sources reachable from
     // here -- fold_immediate_calls just below, and
-    // evaluate_immediate_expr's real exception arriving via
-    // codegen.generate()'s own call chain, caught by this function's
-    // outer `catch (const ConstexprError&)` below -- are fully absorbed
-    // into DriverError already, since nothing external needs to
-    // distinguish ConstexprError from DriverError by type.)
+    // evaluate_immediate_expr's own call chain through codegen.generate()
+    // -- are fully absorbed into DriverError already, since nothing
+    // external needs to distinguish ConstexprError from DriverError by
+    // type. As of batch 6 (#412), evaluate_immediate_expr's own call
+    // sites in codegen/expressions.cppm convert its ConstexprError into a
+    // CodegenError directly instead of throwing, so it now reaches here
+    // -- like every other codegen failure -- through the ordinary
+    // module_result.has_value() check below rather than a dedicated
+    // catch; this function's own former `try`/`catch (const
+    // ConstexprError&)` is gone, since nothing can throw through it
+    // anymore.)
     auto monomorphize_result = monomorphize_generics(program);
     if (!monomorphize_result.has_value()) {
         const DataflowError& error = monomorphize_result.error();
@@ -3419,85 +3510,81 @@ llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
     if (auto fold_result = fold_immediate_calls(program); !fold_result.has_value()) {
         return std::unexpected(DriverError(fold_result.error().what()));
     }
-    try {
-        auto check_moves_result = check_moves(program);
-        if (!check_moves_result.has_value()) {
-            const DataflowError& error = check_moves_result.error();
-            return std::unexpected(DriverError(error.what(), error.loc, DriverErrorKind::Dataflow));
+    auto check_moves_result = check_moves(program);
+    if (!check_moves_result.has_value()) {
+        const DataflowError& error = check_moves_result.error();
+        return std::unexpected(DriverError(error.what(), error.loc, DriverErrorKind::Dataflow));
+    }
+
+    // Real llvm-c/Target.h's own llvm::LLVMInitializeNativeTarget/
+    // llvm::LLVMInitializeNativeAsmPrinter are header-only `static inline`
+    // functions with no real, exported ABI symbol to declare/link
+    // against -- the `llvm` module's own `:target` partition's
+    // scpp_llvm_target_initialize_* bridge calls through to them via
+    // a small shim compiled with the real header available; see
+    // libs/llvm/target.cpp's and libs/llvm/native_target_init.cpp's
+    // own header comments.
+    llvm::scpp_llvm_target_initialize_native_target();
+    llvm::scpp_llvm_target_initialize_native_asm_printer();
+
+    char* default_triple_c = llvm::LLVMGetDefaultTargetTriple();
+    std::string triple = default_triple_c;
+    llvm::LLVMDisposeMessage(default_triple_c);
+
+    llvm::LLVMTargetRef target = nullptr;
+    char* lookup_error_c = nullptr;
+    if (llvm::LLVMGetTargetFromTriple(triple.c_str(), &target, &lookup_error_c)) {
+        std::string lookup_error = lookup_error_c != nullptr ? lookup_error_c : "";
+        llvm::LLVMDisposeMessage(lookup_error_c);
+        return std::unexpected(DriverError("failed to lookup target '" + triple + "': " + lookup_error));
+    }
+
+    // A std::unique_ptr with llvm::LLVMDisposeTargetMachine as its deleter
+    // gives target_machine the exact same "always freed, even if an
+    // exception unwinds through codegen.generate() below" exception
+    // safety the original llvm::TargetMachine unique_ptr had, without
+    // needing a bespoke RAII wrapper type. std::remove_pointer_t
+    // recovers the pointee type from the exported llvm::LLVMTargetMachineRef
+    // alias rather than naming the opaque llvm::LLVMOpaqueTargetMachine
+    // struct tag directly: that tag is declared in the `llvm` module's
+    // own `:target_machine` partition, in that partition's module
+    // purview but never exported (see target_machine.cpp's own header
+    // comment), so it is reachable through the alias but not nameable
+    // by ordinary unqualified lookup here.
+    std::unique_ptr<std::remove_pointer_t<llvm::LLVMTargetMachineRef>, void (*)(llvm::LLVMTargetMachineRef)> target_machine(
+        llvm::LLVMCreateTargetMachine(target, triple.c_str(), "generic", "", codegen_opt_level_for(opt_level),
+                                 llvm::LLVMRelocPIC, llvm::LLVMCodeModelDefault),
+        &llvm::LLVMDisposeTargetMachine);
+    if (!target_machine) {
+        return std::unexpected(DriverError("failed to create target machine for '" + triple + "'"));
+    }
+
+    // The data layout must be set *before* codegen runs: std::make_unique
+    // needs a target-accurate sizeof(T) to call malloc with, which comes
+    // from the module's DataLayout.
+    Codegen codegen("scpp_module", program.source_path, emit_debug_info);
+    llvm::LLVMTargetDataRef target_data = llvm::LLVMCreateTargetDataLayout(target_machine.get());
+    char* data_layout_c = llvm::LLVMCopyStringRepOfTargetData(target_data);
+    codegen.set_target(triple, data_layout_c);
+    llvm::LLVMDisposeMessage(data_layout_c);
+    llvm::LLVMDisposeTargetData(target_data);
+
+    llvm::LLVMModuleRef module;
+    {
+        auto module_result = codegen.generate(program);
+        if (!module_result.has_value()) {
+            const CodegenError& error = module_result.error();
+            return std::unexpected(DriverError(error.what(), error.loc, DriverErrorKind::Codegen));
         }
+        module = std::move(module_result).value();
+    }
 
-        // Real llvm-c/Target.h's own llvm::LLVMInitializeNativeTarget/
-        // llvm::LLVMInitializeNativeAsmPrinter are header-only `static inline`
-        // functions with no real, exported ABI symbol to declare/link
-        // against -- the `llvm` module's own `:target` partition's
-        // scpp_llvm_target_initialize_* bridge calls through to them via
-        // a small shim compiled with the real header available; see
-        // libs/llvm/target.cpp's and libs/llvm/native_target_init.cpp's
-        // own header comments.
-        llvm::scpp_llvm_target_initialize_native_target();
-        llvm::scpp_llvm_target_initialize_native_asm_printer();
-
-        char* default_triple_c = llvm::LLVMGetDefaultTargetTriple();
-        std::string triple = default_triple_c;
-        llvm::LLVMDisposeMessage(default_triple_c);
-
-        llvm::LLVMTargetRef target = nullptr;
-        char* lookup_error_c = nullptr;
-        if (llvm::LLVMGetTargetFromTriple(triple.c_str(), &target, &lookup_error_c)) {
-            std::string lookup_error = lookup_error_c != nullptr ? lookup_error_c : "";
-            llvm::LLVMDisposeMessage(lookup_error_c);
-            return std::unexpected(DriverError("failed to lookup target '" + triple + "': " + lookup_error));
-        }
-
-        // A std::unique_ptr with llvm::LLVMDisposeTargetMachine as its deleter
-        // gives target_machine the exact same "always freed, even if an
-        // exception unwinds through codegen.generate() below" exception
-        // safety the original llvm::TargetMachine unique_ptr had, without
-        // needing a bespoke RAII wrapper type. std::remove_pointer_t
-        // recovers the pointee type from the exported llvm::LLVMTargetMachineRef
-        // alias rather than naming the opaque llvm::LLVMOpaqueTargetMachine
-        // struct tag directly: that tag is declared in the `llvm` module's
-        // own `:target_machine` partition, in that partition's module
-        // purview but never exported (see target_machine.cpp's own header
-        // comment), so it is reachable through the alias but not nameable
-        // by ordinary unqualified lookup here.
-        std::unique_ptr<std::remove_pointer_t<llvm::LLVMTargetMachineRef>, void (*)(llvm::LLVMTargetMachineRef)> target_machine(
-            llvm::LLVMCreateTargetMachine(target, triple.c_str(), "generic", "", codegen_opt_level_for(opt_level),
-                                     llvm::LLVMRelocPIC, llvm::LLVMCodeModelDefault),
-            &llvm::LLVMDisposeTargetMachine);
-        if (!target_machine) {
-            return std::unexpected(DriverError("failed to create target machine for '" + triple + "'"));
-        }
-
-        // The data layout must be set *before* codegen runs: std::make_unique
-        // needs a target-accurate sizeof(T) to call malloc with, which comes
-        // from the module's DataLayout.
-        Codegen codegen("scpp_module", program.source_path, emit_debug_info);
-        llvm::LLVMTargetDataRef target_data = llvm::LLVMCreateTargetDataLayout(target_machine.get());
-        char* data_layout_c = llvm::LLVMCopyStringRepOfTargetData(target_data);
-        codegen.set_target(triple, data_layout_c);
-        llvm::LLVMDisposeMessage(data_layout_c);
-        llvm::LLVMDisposeTargetData(target_data);
-
-        llvm::LLVMModuleRef module;
-        {
-            auto module_result = codegen.generate(program);
-            if (!module_result.has_value()) {
-                const CodegenError& error = module_result.error();
-                return std::unexpected(DriverError(error.what(), error.loc, DriverErrorKind::Codegen));
-            }
-            module = std::move(module_result).value();
-        }
-
-        char* emit_error_c = nullptr;
-        if (llvm::LLVMTargetMachineEmitToFile(target_machine.get(), module, object_path.c_str(), llvm::LLVMObjectFile,
-                                         &emit_error_c)) {
-            std::string emit_error = emit_error_c != nullptr ? emit_error_c : "unknown error";
-            llvm::LLVMDisposeMessage(emit_error_c);
-            return std::unexpected(DriverError("could not emit object file '" + object_path + "': " + emit_error));
-        }
-    } catch (const ConstexprError& error) {
-        return std::unexpected(DriverError(error.what()));
+    char* emit_error_c = nullptr;
+    if (llvm::LLVMTargetMachineEmitToFile(target_machine.get(), module, object_path.c_str(), llvm::LLVMObjectFile,
+                                     &emit_error_c)) {
+        std::string emit_error = emit_error_c != nullptr ? emit_error_c : "unknown error";
+        llvm::LLVMDisposeMessage(emit_error_c);
+        return std::unexpected(DriverError("could not emit object file '" + object_path + "': " + emit_error));
     }
     return {};
 }
@@ -3520,34 +3607,27 @@ llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
 
 // Shared boundary shim for the 3 public entry points below that call
 // parse(): parser.cppm's own ParseError-producing failures surface
-// normally as a disengaged std::expected (see parse()'s signature), but
-// the ModuleResolver/PartitionResolver callbacks passed into parse() --
-// here, cache.resolve()/cache.resolve_partition() -- are fixed,
-// pre-existing std::function signatures (parser.cppm's own PR #404
-// conversion) with no std::expected-shaped room to report a failure
-// resolving/parsing an imported module or partition, so they still
-// signal that by throwing DriverError (their own failures, e.g. "cannot
-// find module") or ParseError (a nested resolve() rethrowing an
-// imported file's own parse failure, see ModuleCache::resolve's
-// comment) instead. This is the one remaining try/catch boundary
-// needed to bring both possibilities back into the std::expected
-// channel new callers of this file's own now-exception-free API expect.
+// normally as a disengaged std::expected (see parse()'s signature), and
+// as of batch 6 (#412) the ModuleResolver/PartitionResolver callbacks
+// passed into parse() -- here, cache.resolve()/cache.resolve_partition()
+// -- report a resolution failure the very same way: both now return
+// std::expected<..., ParseError> directly (see ModuleCache::resolve's
+// own comment for the loc.is_known() convention distinguishing a
+// resolver-native failure from a forwarded, already-positioned nested
+// ParseError), so nothing reaching this function can throw anymore. This
+// is now a plain .has_value() check converting parser.cppm's ParseError
+// into this file's own DriverError, exactly like every other conversion
+// in this file (no try/catch left at all -- src/ is exception-free).
 [[nodiscard]] std::expected<Program, DriverError> parse_source_with_module_cache(std::string_view source, ModuleCache& cache,
                                                                                   const std::string& source_path) {
-    try {
-        auto program_result = parse(
-            source, [&cache](const std::string& name) -> const Program* { return &cache.resolve(name); },
-            [&cache](const std::string& key) -> Program { return cache.resolve_partition(key); }, source_path);
-        if (!program_result.has_value()) {
-            const ParseError& error = program_result.error();
-            return std::unexpected(DriverError(error.what(), error.loc));
-        }
-        return std::move(program_result).value();
-    } catch (const DriverError& error) {
-        return std::unexpected(error);
-    } catch (const ParseError& error) {
+    auto program_result = parse(
+        source, [&cache](const std::string& name) -> std::expected<const Program*, ParseError> { return cache.resolve(name); },
+        [&cache](const std::string& key) -> std::expected<Program, ParseError> { return cache.resolve_partition(key); }, source_path);
+    if (!program_result.has_value()) {
+        const ParseError& error = program_result.error();
         return std::unexpected(DriverError(error.what(), error.loc));
     }
+    return std::move(program_result).value();
 }
 
 } // namespace scpp

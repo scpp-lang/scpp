@@ -49,25 +49,38 @@ public:
 // importing file is parsed (mirrors real C++20: imports must precede
 // every other declaration). Owned and cached by the driver (which knows
 // about `--import name=path` mappings and file I/O -- the parser itself
-// never touches the filesystem); throws if `name` has no known mapping,
-// so a successful call is never expected to return null in practice --
-// this file still treats a null result as a (defensively-checked, not
-// merely asserted) resolution failure rather than trusting that
-// invariant blindly (see parse_import_declarations). A pointer, rather
-// than the reference this alias used before, is required here: scpp's
-// own lifetime checker (self-hosting this file's own compiler) has no
-// mechanism yet for a stored/type-erased callable (this alias's own
-// std::function, ultimately) to carry a lifetime-group relationship
-// tying its return to any of its arguments or captured state across an
-// indirect call -- see std::function<R(Args...)>::call()'s own
-// `this->invoke_(...)` -- so `R` here cannot be a reference (spec
-// ch06.2(24): no mechanism for a class/closure to carry a named
-// lifetime-group parameter). Left default-constructed to
-// no_module_resolver below for any caller with no imports to resolve --
-// never actually invoked unless the source being parsed contains a real
-// `import` declaration, so every existing import-free caller (the whole
-// test suite, today) is unaffected.
-using ModuleResolver = std::function<const Program*(const std::string&)>;
+// never touches the filesystem). Returns std::expected rather than a
+// bare pointer so the driver can report a resolution failure (module
+// not found, circular import, etc.) back through the same channel this
+// file already uses for every other error -- previously this had to
+// throw instead, since a bare `const Program*` return type has no
+// disengaged state of its own to report failure through; see
+// parse_import_declarations for how a disengaged result here is told
+// apart from a propagated, already-positioned ParseError coming back
+// out of a *nested* parse (this callback's own ParseError::loc.is_known()
+// is the signal: unknown means "resolver-native failure, no position of
+// its own yet", known means "forward verbatim, it already points at the
+// real problem inside the imported file"). A successful call is still
+// never expected to return a null pointer in practice -- this file still
+// treats a null value as a (defensively-checked, not merely asserted)
+// resolution failure rather than trusting that invariant blindly (see
+// parse_import_declarations). A pointer, rather than the reference this
+// alias used before, is required here: scpp's own lifetime checker
+// (self-hosting this file's own compiler) has no mechanism yet for a
+// stored/type-erased callable (this alias's own std::function,
+// ultimately) to carry a lifetime-group relationship tying its return to
+// any of its arguments or captured state across an indirect call -- see
+// std::function<R(Args...)>::call()'s own `this->invoke_(...)` -- so `R`
+// here cannot be a reference (spec ch06.2(24): no mechanism for a
+// class/closure to carry a named lifetime-group parameter); wrapping
+// that same pointer in std::expected does not change this -- std::expected
+// stores its T by value, and a pointer is exactly as reference-free
+// wrapped as it was bare. Left default-constructed to no_module_resolver
+// below for any caller with no imports to resolve -- never actually
+// invoked unless the source being parsed contains a real `import`
+// declaration, so every existing import-free caller (the whole test
+// suite, today) is unaffected.
+using ModuleResolver = std::function<std::expected<const Program*, ParseError>(const std::string&)>;
 
 // Callback types for parse_record_body_into's two injection points (a
 // class-scope `using` handler and a field-adder), used in place of the
@@ -120,19 +133,26 @@ using RecordFieldAdderFn = std::function<void(const Type&, const std::string&, A
                                                const std::optional<Initializer>&,
                                                const std::vector<AlignmentSpecifier>&)>;
 
-// Default ModuleResolver: always reports "no module resolvable" via its
-// own return type's natural null state. Used (rather than a `{}`-default-
-// constructed, empty std::function) so parse_module_declaration's `import`
-// handling below never needs to test resolver_ itself for emptiness --
-// this file is compiled both by real clang (genuine std::function, whose
-// only empty-test is an implicit/explicit `operator bool()`) and, via the
+// Default ModuleResolver: always reports "no module resolvable" via a
+// disengaged std::expected. Used (rather than a `{}`-default-constructed,
+// empty std::function) so parse_module_declaration's `import` handling
+// below never needs to test resolver_ itself for emptiness -- this file
+// is compiled both by real clang (genuine std::function, whose only
+// empty-test is an implicit/explicit `operator bool()`) and, via the
 // self-hosting probe, by scpp itself (this file's own hand-written
 // std::function, which has no conversion operators and no nullptr-
 // comparison operator at all -- ch06's explicit-cast-for-bool-conversion
 // rule) -- there is no single spelling of "is resolver_ empty" valid in
-// both worlds, but "did calling it return nullptr" is trivially valid in
-// both, so that's the only check used.
-[[nodiscard]] inline const Program* no_module_resolver(const std::string& module_name [[maybe_unused]]) { return nullptr; }
+// both worlds, but "did calling it return a disengaged std::expected" (a
+// plain `.has_value()` check, exactly like every other ParseError-
+// producing call in this file) is trivially valid in both, so that's the
+// only check used. This ParseError's own loc is deliberately left
+// unknown (default {0, 0}) -- see parse_import_declarations for why that
+// is exactly the signal it needs to enrich this fallback message with
+// the failing `import` statement's own position.
+[[nodiscard]] inline std::expected<const Program*, ParseError> no_module_resolver(const std::string& module_name [[maybe_unused]]) {
+    return std::unexpected(ParseError(0, 0, "no module resolver was configured for this build"));
+}
 
 // ch11 §11.4: given a same-module partition's fully-qualified key
 // ("<module_name>:<partition_name>", e.g. "std:string"), returns a
@@ -151,21 +171,22 @@ using RecordFieldAdderFn = std::function<void(const Type&, const std::string&, A
 // importers of the same partition each get their own independently
 // parsed copy (no shared identity), which is fine for merge_partition's
 // purposes but would not be the right foundation for anything that ever
-// needed cross-partition identity (nothing in v1 does). Left default-
-// constructed to no_partition_resolver below for any caller with no
-// partitions to resolve.
-using PartitionResolver = std::function<Program(const std::string&)>;
+// needed cross-partition identity (nothing in v1 does). Returns
+// std::expected for exactly the same reason ModuleResolver does above --
+// see that alias's own comment for the loc.is_known() convention this
+// callback's error must follow. Left default-constructed to
+// no_partition_resolver below for any caller with no partitions to
+// resolve.
+using PartitionResolver = std::function<std::expected<Program, ParseError>(const std::string&)>;
 
 // Default PartitionResolver, mirroring no_module_resolver above: reports
-// "no partition resolvable" via a default-constructed Program, whose
-// module_name is guaranteed empty (a real, successfully-resolved
-// partition always has a non-empty module_name -- see driver.cppm's
-// ModuleCache::resolve_partition, which itself throws unless a parsed
-// partition's own `module_name + ":" + partition_name` matches the key
-// requested) -- so parse_module_declaration's `import :part;` handling
-// below tests the *returned Program's* module_name instead of ever
-// needing to test partition_resolver_ itself for emptiness.
-[[nodiscard]] inline Program no_partition_resolver(const std::string& partition_key [[maybe_unused]]) { return Program{}; }
+// "no partition resolvable" via a disengaged std::expected, so
+// parse_module_declaration's `import :part;` handling below never needs
+// to test partition_resolver_ itself for emptiness (same reasoning as
+// no_module_resolver). loc is left unknown for the same reason too.
+[[nodiscard]] inline std::expected<Program, ParseError> no_partition_resolver(const std::string& partition_key [[maybe_unused]]) {
+    return std::unexpected(ParseError(0, 0, "no partition resolver was configured for this build"));
+}
 
 [[nodiscard]] std::size_t next_parser_instance_id() {
     static std::size_t counter = 0;
@@ -4296,17 +4317,44 @@ private:
                 std::string key{program.module_name};
                 key += ":";
                 key += partition_name;
-                Program resolved_partition = partition_resolver_(key);
+                auto resolved_partition_r = partition_resolver_(key);
+                if (!resolved_partition_r.has_value()) {
+                    ParseError resolver_error = std::move(resolved_partition_r).error();
+                    // A known loc means partition_resolver_ is forwarding
+                    // a real, already-positioned ParseError from a
+                    // *nested* parse (e.g. a genuine syntax error inside
+                    // the partition file itself) -- that position is
+                    // strictly more useful than this import statement's
+                    // own, so it is forwarded verbatim rather than
+                    // rewritten. An unknown loc means the failure is
+                    // resolver-native (circular import, cannot find
+                    // partition, etc., or no_partition_resolver's own
+                    // fallback above) with no position of its own yet --
+                    // this import statement's own position is the best
+                    // one available, so it is stamped on here.
+                    if (resolver_error.loc.is_known()) return std::unexpected(std::move(resolver_error));
+                    std::string _msg_3661{"cannot resolve partition '"};
+                    _msg_3661 += key;
+                    _msg_3661 += "': ";
+                    _msg_3661 += resolver_error.what();
+                    return std::unexpected(ParseError(import_tok.line, import_tok.column,
+                                  _msg_3661));
+                }
+                Program resolved_partition = std::move(resolved_partition_r).value();
                 if (resolved_partition.module_name.empty()) {
+                    // Defensive: a resolver reporting success (an
+                    // engaged std::expected) must still hand back a
+                    // real, non-empty partition -- see PartitionResolver's
+                    // own comment for why this invariant is checked
+                    // rather than merely trusted.
                     {
-                        std::string _msg_3661{"cannot resolve partition '"};
-                        _msg_3661 += key;
-                        _msg_3661 += "' -- no partition resolver was configured for this build, or it returned no ";
-                        _msg_3661 += "result for it (see the driver's --import ";
-                        _msg_3661 += key;
-                        _msg_3661 += "=path flag)";
+                        std::string _msg_3661b{"partition resolver returned no result for '"};
+                        _msg_3661b += key;
+                        _msg_3661b += "' (see the driver's --import ";
+                        _msg_3661b += key;
+                        _msg_3661b += "=path flag)";
                         return std::unexpected(ParseError(import_tok.line, import_tok.column,
-                                      _msg_3661));
+                                      _msg_3661b));
                     }
                 }
                 if (auto _rv = merge_partition(program, std::move(resolved_partition), import_decl.is_reexport, key, import_tok); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
@@ -4334,13 +4382,31 @@ private:
             import_decl.is_reexport = is_reexport;
             program.imports.push_back(std::move(import_decl));
 
-            const Program* imported_ptr = resolver_(dotted);
-            if (imported_ptr == nullptr) {
+            auto imported_r = resolver_(dotted);
+            if (!imported_r.has_value()) {
+                ParseError resolver_error = std::move(imported_r).error();
+                // See the matching partition-import branch above for
+                // why loc.is_known() is the signal distinguishing a
+                // forwarded, already-positioned nested ParseError
+                // from a resolver-native failure needing this import
+                // statement's own position stamped on.
+                if (resolver_error.loc.is_known()) return std::unexpected(std::move(resolver_error));
                 std::string _msg_3693{"cannot resolve imported module '"};
                 _msg_3693 += dotted;
-                _msg_3693 += "' -- no module resolver was configured for this build, or it returned no ";
-                _msg_3693 += "result for it (see the driver's --import name=path flag)";
+                _msg_3693 += "': ";
+                _msg_3693 += resolver_error.what();
                 return std::unexpected(ParseError(import_tok.line, import_tok.column, _msg_3693));
+            }
+            const Program* imported_ptr = imported_r.value();
+            if (imported_ptr == nullptr) {
+                // Defensive: a resolver reporting success (an engaged
+                // std::expected) must still hand back a real, non-null
+                // Program -- see ModuleResolver's own comment for why
+                // this invariant is checked rather than merely trusted.
+                std::string _msg_3693b{"module resolver returned no result for '"};
+                _msg_3693b += dotted;
+                _msg_3693b += "' (see the driver's --import name=path flag)";
+                return std::unexpected(ParseError(import_tok.line, import_tok.column, _msg_3693b));
             }
             // imported_ptr is known non-null here (checked just above);
             // self-hosting still requires an explicit `[[scpp::unsafe]] { }`

@@ -2349,6 +2349,41 @@ private:
                 if (!resolved.has_value()) return std::unexpected(std::move(resolved).error());
                 type.element = std::make_shared<Type>(std::move(resolved).value());
             }
+            // Function/FunctionPointer: a function-pointer-typed field's
+            // own return/parameter types (e.g. std::function<Sig>'s own
+            // `invoke_` field, `R (*)(void*, Args...)`) are themselves
+            // ordinary Types that may still need generic instantiation
+            // -- e.g. `R` substituted to `std::expected<T, E>` earlier by
+            // instantiate_type_pattern, but not yet collapsed to that
+            // instantiation's own concrete, mangled ClassDef name the way
+            // an ordinary field/return/param Type is via the recursive
+            // calls elsewhere in this function. Without this, a generic
+            // class instantiated with a class-typed Sig leaves this
+            // FunctionPointer field's function_return/function_params
+            // pointing at the *template's* still-unresolved name (e.g.
+            // bare "std::expected" with no concrete args), silently
+            // mismatching the same type resolved anywhere else (a
+            // function's own `-> std::expected<T, E>` return type,
+            // resolved via the ordinary non-empty-template_args branch
+            // below) -- exactly the kind of structural mismatch
+            // types_equal (this file) is meant to catch, surfacing far
+            // downstream as a spurious "returning class ... by value"
+            // dataflow error from inside a call through this field
+            // (produces_rvalue_of_type's function_pointer_field_call_
+            // return_type fallback, calls.cppm) for any Sig whose return
+            // type is itself a generic class -- previously unreachable
+            // in practice since every Sig ever instantiated here had a
+            // scalar/void return, never a class needing this resolution.
+            if (type.function_return) {
+                auto resolved = resolve_generic_type(*type.function_return, loc);
+                if (!resolved.has_value()) return std::unexpected(std::move(resolved).error());
+                type.function_return = std::make_shared<Type>(std::move(resolved).value());
+            }
+            for (Type& param : type.function_params) {
+                auto resolved = resolve_generic_type(param, loc);
+                if (!resolved.has_value()) return std::unexpected(std::move(resolved).error());
+                param = std::move(resolved).value();
+            }
             return type;
         }
         std::vector<Type> resolved_args;
