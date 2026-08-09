@@ -132,7 +132,18 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::codegen_consteval_class_value(const Expr& expr, const std::string& class_name)
 {
         auto value_result = evaluate_immediate_expr(*program_, expr);
-        if (!value_result.has_value()) throw value_result.error();
+        if (!value_result.has_value()) {
+            // evaluate_immediate_expr's ConstexprError bakes its own
+            // "line:col: " position prefix directly into what() (unlike
+            // CodegenError's own separate .loc field) -- see
+            // constexpr.cppm's own comment -- so only the message is
+            // carried across here, exactly like fold_immediate_calls'
+            // sibling conversion in driver.cppm's
+            // emit_object_file_for_program: passing current_loc_ too
+            // would duplicate the position in the final printed
+            // diagnostic.
+            return std::unexpected(CodegenError(value_result.error().what()));
+        }
         ConstexprValue value = std::move(value_result).value();
         auto llvm_type_result = to_llvm_type(named_type(class_name));
         if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
@@ -174,7 +185,12 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     for (const ExprPtr& arg : args) ctor_expr->args.push_back(clone_expr(*arg));
                 }
                 auto value_result = evaluate_immediate_expr(*program_, *ctor_expr);
-                if (!value_result.has_value()) throw value_result.error();
+                if (!value_result.has_value()) {
+                    // See codegen_consteval_class_value's matching
+                    // conversion above for why .loc is deliberately not
+                    // forwarded here.
+                    return std::unexpected(CodegenError(value_result.error().what()));
+                }
                 ConstexprValue value = std::move(value_result).value();
                 if (auto r = store_constexpr_value_into(target.ptr, target.type, value); !r.has_value())
                     return std::unexpected(std::move(r).error());
