@@ -28,8 +28,16 @@ void expect(bool condition, const std::string& message) {
     }
 }
 
-std::string read_file(const std::filesystem::path& path) {
-    std::ifstream file(path);
+std::string join_names(const std::vector<std::string>& names) {
+    std::string joined;
+    for (const std::string& name : names) {
+        if (!joined.empty()) joined += ", ";
+        joined += name;
+    }
+    return joined;
+}
+
+std::string read_file(const std::filesystem::path& path) {    std::ifstream file(path);
     std::ostringstream buffer;
     buffer << file.rdbuf();
     return buffer.str();
@@ -609,6 +617,129 @@ void run_constexpr_cell_data_kind_tests() {
     }
 }
 
+// PR #419: ObjectValue::fields changed from an
+// std::unordered_map<std::string, std::shared_ptr<Cell>> to an ordered
+// std::vector<ObjectField>. That is not purely mechanical -- it changes
+// two observable properties of snapshot_constexpr_value's output, and
+// both are load-bearing:
+//
+//  1. Ordering. The map iterated in *hash* order, so ConstexprValue::
+//     object_fields came out in an order unrelated to the struct's
+//     declaration order. The vector preserves insertion order, which is
+//     the order make_default_cell/collect_class_fields create fields in,
+//     i.e. declaration order. codegen's only consumer
+//     (codegen/expressions.cppm's find_if over object_fields) looks fields
+//     up by name, so this is a latent-hazard fix rather than an output
+//     change -- but "the snapshot is deterministic and in declaration
+//     order" is exactly the kind of property that silently regresses if
+//     someone later swaps the container back.
+//
+//  2. Duplicate-name collapsing. collect_class_fields flattens base and
+//     derived fields into one list without de-duplicating, so a derived
+//     class redeclaring a base field's name yields that name twice.
+//     unordered_map::emplace silently kept the first; ObjectValue::
+//     add_field has to reproduce that explicitly, and a plain
+//     emplace_back would not. The add_field comment calls this out as
+//     load-bearing, so it gets a test rather than only a comment.
+//
+// Both cases below drive the real public API (evaluate_immediate_expr) on
+// a consteval call that yields an object, then inspect the snapshot.
+const scpp::Expr* find_first_var_decl_init(const scpp::Stmt& stmt) {
+    if (stmt.kind == scpp::StmtKind::VarDecl) return stmt.init.get();
+    for (const scpp::StmtPtr& nested : stmt.statements) {
+        if (nested == nullptr) continue;
+        if (const scpp::Expr* found = find_first_var_decl_init(*nested)) return found;
+    }
+    return nullptr;
+}
+
+const scpp::Expr* find_initializer_in_function(const scpp::Program& program, const std::string& function_name) {
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name != function_name || fn.body == nullptr) continue;
+        return find_first_var_decl_init(*fn.body);
+    }
+    return nullptr;
+}
+
+void run_constexpr_object_field_order_tests() {
+    {
+        // Declaration order is deliberately not alphabetical and the names
+        // are deliberately unrelated, so that the sequence below is a real
+        // assertion about insertion order rather than something a hashed
+        // container could reproduce by luck.
+        std::string case_name = "object_fields_snapshot_in_declaration_order";
+        cases_run++;
+        scpp::Program program = parse_with_std_imports(
+            "struct Wide {\n"
+            "    int zulu = 1;\n"
+            "    int alpha = 2;\n"
+            "    int mike = 3;\n"
+            "    int bravo = 4;\n"
+            "    int yankee = 5;\n"
+            "    int charlie = 6;\n"
+            "    int november = 7;\n"
+            "    int delta = 8;\n"
+            "};\n"
+            "consteval Wide make_wide() { Wide w{}; return w; }\n"
+            "int main() { Wide w = make_wide(); return 0; }\n");
+        const scpp::Expr* init = find_initializer_in_function(program, "main");
+        expect(init != nullptr, case_name + ": expected to find the initializer of `Wide w = make_wide();`");
+        if (init == nullptr) return;
+
+        auto snapshot = scpp::evaluate_immediate_expr(program, *init);
+        expect(snapshot.has_value(), case_name + ": expected the consteval call to evaluate, got " +
+                                         (snapshot.has_value() ? std::string() : snapshot.error().what()));
+        if (!snapshot.has_value()) return;
+        expect(snapshot.value().kind == scpp::ConstexprValueKind::Object,
+               case_name + ": expected an Object-kinded snapshot");
+
+        const std::vector<std::string> expected_order = {"zulu",   "alpha",    "mike",  "bravo",
+                                                         "yankee", "charlie", "november", "delta"};
+        std::vector<std::string> actual_order;
+        for (const auto& field : snapshot.value().object_fields) actual_order.push_back(field.first);
+
+        expect(actual_order == expected_order,
+               case_name + ": object_fields should follow struct declaration order; expected [" +
+                   join_names(expected_order) + "] but got [" + join_names(actual_order) + "]");
+    }
+
+    {
+        // A derived class redeclaring a base field name: collect_class_fields
+        // emits `tag` twice, and ObjectValue::add_field must keep only the
+        // first, exactly as unordered_map::emplace used to.
+        std::string case_name = "object_fields_collapse_shadowed_base_field_names";
+        cases_run++;
+        scpp::Program program = parse_with_std_imports(
+            "class Base {\n"
+            "public:\n"
+            "    int tag = 1;\n"
+            "    int only_base = 2;\n"
+            "};\n"
+            "class Derived : public Base {\n"
+            "public:\n"
+            "    int tag = 3;\n"
+            "    int only_derived = 4;\n"
+            "};\n"
+            "consteval Derived make_derived() { Derived d{}; return d; }\n"
+            "int main() { Derived d = make_derived(); return 0; }\n");
+        const scpp::Expr* init = find_initializer_in_function(program, "main");
+        expect(init != nullptr, case_name + ": expected to find the initializer of `Derived d = make_derived();`");
+        if (init == nullptr) return;
+
+        auto snapshot = scpp::evaluate_immediate_expr(program, *init);
+        expect(snapshot.has_value(), case_name + ": expected the consteval call to evaluate, got " +
+                                         (snapshot.has_value() ? std::string() : snapshot.error().what()));
+        if (!snapshot.has_value()) return;
+
+        std::vector<std::string> actual_order;
+        for (const auto& field : snapshot.value().object_fields) actual_order.push_back(field.first);
+        const std::size_t tag_count =
+            static_cast<std::size_t>(std::count(actual_order.begin(), actual_order.end(), std::string("tag")));
+        expect(tag_count == 1, case_name + ": a shadowed base field name should appear exactly once, got " +
+                                   std::to_string(tag_count) + " in [" + join_names(actual_order) + "]");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -621,6 +752,7 @@ int main() {
     run_constexpr_error_copy_tests();
     run_constexpr_null_pointer_storage_tests();
     run_constexpr_cell_data_kind_tests();
+    run_constexpr_object_field_order_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
