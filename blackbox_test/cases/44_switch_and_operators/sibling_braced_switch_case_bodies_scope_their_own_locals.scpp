@@ -1,6 +1,13 @@
 // PR #414: a braced case body is its own scope, so sibling cases may each
-// declare a local of the same name -- even at a different type -- and each case
-// body sees only its own. Every arm is executed and its result checked.
+// declare a local of the same name and each case body reads back its own. Every
+// arm is executed and its result checked.
+//
+// Scope: this asserts that each case's declaration and its own reads resolve to
+// that case's local. It is deliberately not a claim that same-name locals are
+// independent in every respect -- name reuse at a differing type is known to be
+// tracked per-function rather than per-scope in at least one layer of the
+// compiler, and that limitation is not switch-specific, so it is tracked
+// separately rather than pinned here.
 enum class Op { add = 1, negate = 2, scale = 3 };
 
 int apply(Op op, int start) {

@@ -1,7 +1,16 @@
 // PR #336 plus PR #414: each `case` label already opened its own scope before
-// braced case bodies existed, so sibling cases could always reuse a local's name
-// at a different type. This pins that boundary: PR #414 changes which case
-// *shapes* the terminator rule accepts, not how case-local names are scoped.
+// braced case bodies existed. This pins that boundary -- PR #414 changes which
+// case *shapes* the terminator rule accepts, not how case-local names are
+// scoped -- by having each case declare, and then read back, its own `operand`.
+//
+// Scope: what this asserts is that a case's declaration and its own reads
+// resolve to that case's local, and that the name does not leak out (see
+// `braced_switch_case_body_local_is_not_visible_in_a_later_case_is_rejected`).
+// It deliberately does *not* claim that same-name locals are fully independent
+// in every respect: name reuse at a differing type is known to be tracked
+// per-function rather than per-scope in at least one layer of the compiler, and
+// that limitation is not switch-specific -- sibling plain blocks and `if`/`else`
+// branches share it -- so it is tracked separately rather than pinned here.
 int classify(int selector) {
     int total = 0;
     switch (selector) {
