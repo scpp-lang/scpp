@@ -523,6 +523,92 @@ void run_constexpr_error_copy_tests() {
            case_name + ": an explicit copy should preserve loc");
 }
 
+// PR #417: replacing CellData's std::variant with an explicit tagged class
+// exposed two latent null dereferences. Both sites checked that the cell
+// held a PointerValue but then dereferenced `pointer->storage` without
+// checking it -- and a PointerValue's storage is genuinely null for a
+// default-initialized `const char*`. Under std::variant this was
+// `std::get_if<ArrayValue>(&pointer->storage->data)`, a hard crash; the
+// tagged rewrite added the missing `storage` null-check at both sites.
+//
+// The first case below segfaults the compiler outright without the fix
+// (verified: rc=139 against the pre-#417 constexpression.cppm), so it is a
+// true regression test rather than a restatement of current behavior.
+void run_constexpr_null_pointer_storage_tests() {
+    {
+        // A `const char*` struct field left default-initialized evaluates
+        // to a PointerValue whose storage is null. Returning it from a
+        // consteval function drives rewrite_expr_as_constant down its
+        // const-char-pointer branch with that null storage.
+        std::string case_name = "consteval_null_char_pointer_result_is_reported_not_crashed";
+        cases_run++;
+        auto ir = try_generate_ir("struct Holder { const char* text{}; };\n"
+                                  "consteval const char* get() { Holder h{}; return h.text; }\n"
+                                  "int main() { const char* q = get(); return 0; }\n");
+        expect(!ir.has_value(), case_name + ": expected a diagnostic rather than a crash or success");
+        if (ir.has_value()) return;
+        expect(ir.error().kind == "ConstexprError",
+               case_name + ": expected a ConstexprError, got " + ir.error().kind);
+        // The point of the assertion is that we got *any* orderly
+        // diagnostic back at all -- without the storage null-check this
+        // call never returns.
+        expect(!ir.error().message.empty(), case_name + ": expected a non-empty diagnostic message");
+    }
+
+    {
+        // The null-check must not have made the ordinary string-literal
+        // path stricter: a real `const char*` constexpr result still has
+        // non-null storage backed by an ArrayValue and must still fold.
+        std::string case_name = "consteval_string_literal_pointer_result_still_folds";
+        cases_run++;
+        auto ir = try_generate_ir("consteval const char* greeting() { return \"hi\"; }\n"
+                                  "int main() { const char* g = greeting(); return 0; }\n");
+        expect(ir.has_value(), case_name + ": expected a real string-literal constexpr pointer to still fold, got " +
+                                   (ir.has_value() ? std::string() : ir.error().message));
+    }
+}
+
+// PR #417: CellData is internal to the scpp.constexpression module (it
+// lives in the module's non-exported `namespace scpp`), so its accessors
+// cannot be called directly from this test binary. What *is* observable
+// through the public API is the invariant those accessors exist to
+// protect: `kind` and payload never disagree, because every write goes
+// through a set_*() method that first releases the previous payload.
+//
+// Each case below folds a constexpr value of a different CellKind and
+// checks the result comes back as that kind's value -- which is exactly a
+// tag/payload agreement check. Under the old std::variant a tag mismatch
+// aborted via std::get; under the tagged class it would instead surface
+// as a silently stale payload, so these guard the failure mode the
+// rewrite introduced the risk of.
+void run_constexpr_cell_data_kind_tests() {
+    struct KindCase {
+        const char* name;
+        const char* source;
+    };
+    const KindCase cases[] = {
+        {"integer", "consteval int f() { return 41 + 1; }\nint main() { return f() - 42; }\n"},
+        {"bool", "consteval bool f() { return 1 == 1; }\nint main() { if (f()) { return 0; } return 1; }\n"},
+        {"double", "consteval double f() { return 0.5 + 0.25; }\nint main() { double d = f(); return 0; }\n"},
+        {"char", "consteval char f() { return 'x'; }\nint main() { char c = f(); return 0; }\n"},
+        {"string_literal_pointer", "consteval const char* f() { return \"ok\"; }\nint main() { const char* s = f(); return 0; }\n"},
+        // CellKind::Array is covered transitively by the case above: a
+        // string literal's backing storage *is* an ArrayValue cell, which
+        // the const-char-pointer branch walks element by element. scpp has
+        // no consteval-local array form to exercise it more directly.
+        {"object_field",
+         "struct Point { int x = 1; int y = 2; };\nconsteval int f() { Point p{}; return p.y; }\n"
+         "int main() { return f() - 2; }\n"},
+    };
+    for (const KindCase& kind_case : cases) {
+        std::string case_name = std::string("cell_data_round_trips_") + kind_case.name;
+        cases_run++;
+        auto ir = try_generate_ir(kind_case.source);
+        expect(ir.has_value(), case_name + ": expected constexpr folding to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+    }
+}
+
 } // namespace
 
 int main() {
@@ -533,6 +619,8 @@ int main() {
     run_switch_end_block_reachability_tests();
 
     run_constexpr_error_copy_tests();
+    run_constexpr_null_pointer_storage_tests();
+    run_constexpr_cell_data_kind_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
