@@ -181,10 +181,10 @@ std::string type_to_string(const scpp::Type& type) {
     return "?";
 }
 
-std::string read_file(std::string_view path) {
+[[nodiscard]] std::expected<std::string, std::string> read_file(std::string_view path) {
     std::ifstream file{std::string(path)};
     if (!file) {
-        throw std::runtime_error("cannot open file '" + std::string(path) + "'");
+        return std::unexpected("cannot open file '" + std::string(path) + "'");
     }
     std::ostringstream buffer;
     buffer << file.rdbuf();
@@ -252,13 +252,12 @@ bool validate_import_paths(const std::unordered_map<std::string, std::string>& i
 bool append_explicit_source_imports(const std::vector<std::string>& source_paths,
                                     std::unordered_map<std::string, std::string>& import_paths) {
     for (std::size_t i = 1; i < source_paths.size(); i++) {
-        std::string source;
-        try {
-            source = read_file(source_paths[i]);
-        } catch (const std::exception& e) {
-            std::cerr << "error: " << e.what() << "\n";
+        auto source_result = read_file(source_paths[i]);
+        if (!source_result.has_value()) {
+            std::cerr << "error: " << source_result.error() << "\n";
             return false;
         }
+        const std::string& source = *source_result;
         std::optional<ScannedModuleDecl> decl = scan_declared_module_from_source(source);
         if (!decl.has_value()) {
             std::cerr << "error: supplemental source '" << source_paths[i]
@@ -332,14 +331,13 @@ void print_diagnostic(std::string_view path, const std::string& source, scpp::So
     std::string reread_source;
     if (loc.has_source_path() && loc.source_path_text() != path) {
         effective_path = loc.source_path_text();
-        try {
-            reread_source = read_file(effective_path);
+        // Best-effort: still report the right path/line/column below even if
+        // that file can no longer be read (e.g. removed since compilation
+        // started) -- just fall back to no source excerpt, exactly like the
+        // loc-past-EOF case further down.
+        if (auto reread_result = read_file(effective_path); reread_result.has_value()) {
+            reread_source = *std::move(reread_result);
             effective_source = &reread_source;
-        } catch (const std::exception&) {
-            // Best-effort: still report the right path/line/column below
-            // even if that file can no longer be read (e.g. removed
-            // since compilation started) -- just fall back to no source
-            // excerpt, exactly like the loc-past-EOF case further down.
         }
     }
 
@@ -379,13 +377,12 @@ void print_diagnostic(std::string_view path, const std::string& source, scpp::So
 }
 
 int run_lex(std::string_view path) {
-    std::string source;
-    try {
-        source = read_file(path);
-    } catch (const std::exception& e) {
-        std::cerr << "error: " << e.what() << "\n";
+    auto source_result = read_file(path);
+    if (!source_result.has_value()) {
+        std::cerr << "error: " << source_result.error() << "\n";
         return 1;
     }
+    const std::string& source = *source_result;
 
     for (const scpp::Token& tok : scpp::tokenize(source)) {
         std::cout << tok.line << ":" << tok.column << "\t" << token_kind_name(tok.kind);
@@ -654,13 +651,12 @@ void print_stmt(const scpp::Stmt& stmt, int depth) {
 }
 
 int run_parse(std::string_view path) {
-    std::string source;
-    try {
-        source = read_file(path);
-    } catch (const std::exception& e) {
-        std::cerr << "error: " << e.what() << "\n";
+    auto source_result = read_file(path);
+    if (!source_result.has_value()) {
+        std::cerr << "error: " << source_result.error() << "\n";
         return 1;
     }
+    const std::string& source = *source_result;
 
     scpp::Program program;
     {
@@ -705,26 +701,22 @@ int run_build(std::string_view input_path, std::string_view output_path,
               const std::vector<std::string>& extra_link_inputs,
               const std::unordered_map<std::string, std::string>& import_paths,
               const std::vector<std::string>& import_search_dirs, bool static_link, bool emit_debug_info) {
-    std::string source;
-    try {
-        source = read_file(input_path);
-    } catch (const std::exception& e) {
-        std::cerr << "error: " << e.what() << "\n";
+    auto source_result = read_file(input_path);
+    if (!source_result.has_value()) {
+        std::cerr << "error: " << source_result.error() << "\n";
         return 1;
     }
+    const std::string& source = *source_result;
 
-    try {
-        auto result = scpp::compile_to_executable(source, std::string(output_path), extra_link_inputs, import_paths, static_link,
-                                    import_search_dirs, emit_debug_info, std::string(input_path));
-        if (!result.has_value()) {
-            print_diagnostic(input_path, source, result.error().loc, result.error().what());
-            return 1;
-        }
-    } catch (const scpp::DataflowError& e) {
-        print_diagnostic(input_path, source, e.loc, e.what());
-        return 1;
-    } catch (const scpp::CodegenError& e) {
-        print_diagnostic(input_path, source, e.loc, e.what());
+    // compile_to_executable (driver.cppm) fully absorbs
+    // scpp::DataflowError/CodegenError into its returned DriverError (see
+    // the comment on emit_object_file_for_program, which it calls), so no
+    // such exception can reach here anymore -- only the .has_value() check
+    // below is needed.
+    auto result = scpp::compile_to_executable(source, std::string(output_path), extra_link_inputs, import_paths, static_link,
+                                import_search_dirs, emit_debug_info, std::string(input_path));
+    if (!result.has_value()) {
+        print_diagnostic(input_path, source, result.error().loc, result.error().what());
         return 1;
     }
     return 0;
@@ -741,26 +733,21 @@ int run_build_module(std::string_view input_path, std::string_view interface_pat
         std::cerr << "error: module archive output must use the .scppa extension, got '" << archive_path << "'\n";
         return 1;
     }
-    std::string source;
-    try {
-        source = read_file(input_path);
-    } catch (const std::exception& e) {
-        std::cerr << "error: " << e.what() << "\n";
+    auto source_result = read_file(input_path);
+    if (!source_result.has_value()) {
+        std::cerr << "error: " << source_result.error() << "\n";
         return 1;
     }
+    const std::string& source = *source_result;
 
-    try {
-        auto result = scpp::emit_module_artifacts(source, std::string(interface_path), std::string(archive_path), import_paths,
-                                    import_search_dirs, std::string(input_path));
-        if (!result.has_value()) {
-            print_diagnostic(input_path, source, result.error().loc, result.error().what());
-            return 1;
-        }
-    } catch (const scpp::DataflowError& e) {
-        print_diagnostic(input_path, source, e.loc, e.what());
-        return 1;
-    } catch (const scpp::CodegenError& e) {
-        print_diagnostic(input_path, source, e.loc, e.what());
+    // emit_module_artifacts (driver.cppm) fully absorbs
+    // scpp::DataflowError/CodegenError into its returned DriverError the
+    // same way emit_object_file_for_program does, so no such exception can
+    // reach here anymore -- only the .has_value() check below is needed.
+    auto result = scpp::emit_module_artifacts(source, std::string(interface_path), std::string(archive_path), import_paths,
+                                import_search_dirs, std::string(input_path));
+    if (!result.has_value()) {
+        print_diagnostic(input_path, source, result.error().loc, result.error().what());
         return 1;
     }
     return 0;

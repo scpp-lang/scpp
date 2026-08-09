@@ -31,16 +31,35 @@ import scpp.parser;
 
 export namespace scpp {
 
+// Distinguishes which underlying stage produced a DriverError. This
+// exists purely so that callers reached only through DriverError's
+// std::expected channel -- cli.cppm, project.cppm, and tests/driver_test.cpp,
+// as of batch 5 (#411) -- can still tell a movecheck failure apart from a
+// codegen failure the same way distinguishing DataflowError/CodegenError
+// by C++ exception type used to allow, now that this file no longer
+// re-throws either of them (see emit_object_file_for_program below).
+// `Driver` covers every other DriverError source (module resolution,
+// linking, archiving, ParseError/ConstexprError wrapping, etc.) and is
+// the default, so the ~40 other DriverError(...) construction sites
+// throughout this file are unaffected.
+enum class DriverErrorKind {
+    Driver,
+    Dataflow,
+    Codegen,
+};
+
 // SourceLocation defaults to {} for driver-native errors that have no
 // associated source position (e.g. "cannot find module", linker/archiver
 // failures); it is populated only when a DriverError is wrapping a
 // propagated ParseError from parser.cppm's own std::expected result, so
 // that location survives the wrap -- matching the shape ParseError/
-// DataflowError/CodegenError already use.
+// DataflowError/CodegenError already use. `kind` defaults to
+// DriverErrorKind::Driver for the same reason.
 struct DriverError : std::runtime_error {
-    explicit DriverError(const std::string& message, SourceLocation loc = {})
-        : std::runtime_error(message), loc(loc) {}
+    explicit DriverError(const std::string& message, SourceLocation loc = {}, DriverErrorKind kind = DriverErrorKind::Driver)
+        : std::runtime_error(message), loc(loc), kind(kind) {}
     SourceLocation loc;
+    DriverErrorKind kind;
 };
 
 inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 7;
@@ -3366,30 +3385,32 @@ llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
     // argument checking can only work once every call site targets an
     // already-concrete function).
     // monomorphize_generics/check_moves (movecheck) already return
-    // std::expected<void, DataflowError> as of the batch-1 conversion, but
-    // callers throughout this codebase -- cli.cppm, project.cppm, and
-    // ~50 call sites in tests/driver_test.cpp -- still deliberately
-    // `catch (const scpp::DataflowError&)` this function's failures as
-    // their own distinct C++ type (movecheck_test.cpp and codegen_test.cpp
-    // rely on the same type-based dispatch to tell a DataflowError apart
-    // from a CodegenError). Wrapping it into DriverError here would sever
-    // that, so a disengaged result is re-thrown as-is rather than
-    // absorbed into DriverError. codegen.generate() below is symmetric:
-    // it also returns std::expected<LLVMModuleRef, CodegenError> now
-    // (batch 2, #408, merged), but its call site re-throws the raw
-    // CodegenError on failure for the same external-catch-by-type
-    // reason. Unifying every error type onto std::expected end-to-end at
-    // this boundary is deferred to whichever batch finally retires
-    // cli.cppm/project.cppm's own exceptions (batch 5) and updates every
-    // catch site in lockstep. (ConstexprError is different: both of its
-    // sources reachable from here -- fold_immediate_calls just below, and
+    // std::expected<void, DataflowError> as of the batch-1 conversion, and
+    // codegen.generate() below returns std::expected<LLVMModuleRef,
+    // CodegenError> (batch 2, #408). Callers throughout this codebase --
+    // cli.cppm, project.cppm, and tests/driver_test.cpp -- used to
+    // deliberately `catch (const scpp::DataflowError&)`/`catch (const
+    // scpp::CodegenError&)` this function's failures as their own
+    // distinct C++ type (movecheck_test.cpp and codegen_test.cpp still do,
+    // since they call monomorphize_generics/check_moves/codegen.generate()
+    // directly rather than through this function). As of batch 5 (#411),
+    // every external caller reached through *this* function consumes the
+    // std::expected<void, DriverError> result directly instead, so a
+    // disengaged result is wrapped into DriverError with
+    // DriverErrorKind::Dataflow/::Codegen (rather than re-thrown) to
+    // preserve exactly the same kind distinction without an exception.
+    // (ConstexprError is different: both of its sources reachable from
+    // here -- fold_immediate_calls just below, and
     // evaluate_immediate_expr's real exception arriving via
     // codegen.generate()'s own call chain, caught by this function's
     // outer `catch (const ConstexprError&)` below -- are fully absorbed
     // into DriverError already, since nothing external needs to
     // distinguish ConstexprError from DriverError by type.)
     auto monomorphize_result = monomorphize_generics(program);
-    if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+    if (!monomorphize_result.has_value()) {
+        const DataflowError& error = monomorphize_result.error();
+        return std::unexpected(DriverError(error.what(), error.loc, DriverErrorKind::Dataflow));
+    }
     // fold_immediate_calls (constexpr_engine) now returns
     // std::expected<void, ConstexprError> as of batch 3 (#409, merged);
     // the try/catch this call site used to need while it still threw is
@@ -3400,7 +3421,10 @@ llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
     }
     try {
         auto check_moves_result = check_moves(program);
-        if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
+        if (!check_moves_result.has_value()) {
+            const DataflowError& error = check_moves_result.error();
+            return std::unexpected(DriverError(error.what(), error.loc, DriverErrorKind::Dataflow));
+        }
 
         // Real llvm-c/Target.h's own llvm::LLVMInitializeNativeTarget/
         // llvm::LLVMInitializeNativeAsmPrinter are header-only `static inline`
@@ -3458,7 +3482,10 @@ llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
         llvm::LLVMModuleRef module;
         {
             auto module_result = codegen.generate(program);
-            if (!module_result.has_value()) throw std::move(module_result).error();
+            if (!module_result.has_value()) {
+                const CodegenError& error = module_result.error();
+                return std::unexpected(DriverError(error.what(), error.loc, DriverErrorKind::Codegen));
+            }
             module = std::move(module_result).value();
         }
 

@@ -84,19 +84,40 @@ private:
     std::unordered_map<std::string, scpp::Program> cache_;
 };
 
-scpp::Program parse_with_std_imports(std::string_view source) {
+std::expected<scpp::Program, scpp::ParseError> try_parse_with_std_imports(std::string_view source) {
     TestModuleCache cache;
-    auto result = scpp::parse(
+    return scpp::parse(
         source, [&cache](const std::string& name) -> const scpp::Program* { return &cache.resolve(name); },
         [&cache](const std::string& key) -> scpp::Program { return cache.resolve_partition(key); });
+}
+
+scpp::Program parse_with_std_imports(std::string_view source) {
+    auto result = try_parse_with_std_imports(source);
     if (!result.has_value()) throw std::move(result).error();
     return std::move(result.value());
 }
 
-std::string generate_ir(std::string_view source) {
-    scpp::Program program = parse_with_std_imports(source);
+// generate_ir's pipeline touches four independent std::expected-returning
+// stages (scpp::parse, scpp::monomorphize_generics, scpp::fold_immediate_calls,
+// scpp::Codegen::generate), each with its own distinct error type. Since the
+// call site itself already knows which stage it is calling at each step,
+// preserving "which kind of error" is just a matter of tagging the failure
+// with the stage's name at its own return site -- no variant or shared
+// error-kind enum is needed the way driver.cppm's DriverErrorKind is, because
+// there's no single function here that internally absorbs all four error
+// types and needs to report the tag back up through a shared return type.
+struct GenerateIrError {
+    std::string kind; // "ParseError" | "DataflowError" | "ConstexprError" | "CodegenError"
+    std::string message;
+};
+
+std::expected<std::string, GenerateIrError> try_generate_ir(std::string_view source) {
+    auto parse_result = try_parse_with_std_imports(source);
+    if (!parse_result.has_value()) return std::unexpected(GenerateIrError{"ParseError", parse_result.error().what()});
+    scpp::Program program = std::move(parse_result.value());
     auto monomorphize_result = scpp::monomorphize_generics(program);
-    if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+    if (!monomorphize_result.has_value())
+        return std::unexpected(GenerateIrError{"DataflowError", monomorphize_result.error().what()});
     // ch05 §9.4: resolves every array bound (and other constant-expression
     // context, e.g. `alignas`) before codegen ever reads a type's layout --
     // codegen itself never evaluates constant expressions, only the
@@ -104,10 +125,12 @@ std::string generate_ir(std::string_view source) {
     // pipeline ordering (monomorphize_generics -> fold_immediate_calls ->
     // ... -> codegen).
     auto fold_result = scpp::fold_immediate_calls(program);
-    if (!fold_result.has_value()) throw std::move(fold_result).error();
+    if (!fold_result.has_value())
+        return std::unexpected(GenerateIrError{"ConstexprError", fold_result.error().what()});
     scpp::Codegen codegen("test_module");
     auto generate_result = codegen.generate(program);
-    if (!generate_result.has_value()) throw std::move(generate_result).error();
+    if (!generate_result.has_value())
+        return std::unexpected(GenerateIrError{"CodegenError", generate_result.error().what()});
     return codegen.module_ir();
 }
 
@@ -215,9 +238,10 @@ void check_ir_assertion(const Assertion& assertion, const std::string& ir, const
 //                                          (non-overlapping count).
 //   throws: ParseError | DataflowError |
 //           CodegenError | ConstexprError -- parsing (or, if parsing
-//                                          succeeds, codegen) must throw
-//                                          exactly this error type; must
-//                                          be the only line in the file.
+//                                          succeeds, codegen) must fail
+//                                          with exactly this error kind;
+//                                          must be the only line in the
+//                                          file.
 // Adding a new case is just dropping in 2 new files -- no changes to this
 // file or a rebuild of the test harness are needed, just re-running the
 // already-built binary.
@@ -254,37 +278,28 @@ void run_test_case_files() {
             expect(assertions.size() == 1, case_name + ": 'throws:' must be the only line in .expected");
             const std::string& expected_type = assertions[0].args[0];
 
-            std::string actual = "none";
-            try {
-                generate_ir(source);
-            } catch (const scpp::ParseError&) {
-                actual = "ParseError";
-            } catch (const scpp::DataflowError&) {
-                actual = "DataflowError";
-            } catch (const scpp::CodegenError&) {
-                actual = "CodegenError";
-            } catch (const scpp::ConstexprError&) {
-                actual = "ConstexprError";
-            }
+            auto ir_result = try_generate_ir(source);
+            std::string actual = ir_result.has_value() ? "none" : ir_result.error().kind;
             expect(actual == expected_type,
                    case_name + ": expected " + expected_type + " to be thrown, got " + actual);
             continue;
         }
 
-        try {
-            std::string ir = generate_ir(source);
-            for (const Assertion& assertion : assertions) {
-                check_ir_assertion(assertion, ir, case_name);
-            }
-        } catch (const std::exception& e) {
-            expect(false, case_name + ": threw an unexpected exception: " + std::string(e.what()));
+        auto ir_result = try_generate_ir(source);
+        if (!ir_result.has_value()) {
+            expect(false, case_name + ": unexpectedly failed with " + ir_result.error().kind + ": " +
+                              ir_result.error().message);
+            continue;
+        }
+        for (const Assertion& assertion : assertions) {
+            check_ir_assertion(assertion, ir_result.value(), case_name);
         }
     }
 }
 
 // The two tests below exercise scpp::Codegen::generate's
 // std::expected<llvm::LLVMModuleRef, CodegenError> API shape directly,
-// without going through generate_ir's try/catch convenience wrapper --
+// without going through try_generate_ir's tagged-error convenience wrapper --
 // mirroring parser_test.cpp's test_parse_returns_engaged_expected_on_success/
 // test_parse_returns_disengaged_expected_on_failure_without_throwing and
 // movecheck_test.cpp's analogous pair, added when parser.cppm/DataflowError

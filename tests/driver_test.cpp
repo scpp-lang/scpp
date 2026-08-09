@@ -142,22 +142,85 @@ private:
     std::unordered_map<std::string, scpp::Program> cache_;
 };
 
-scpp::Program parse_program_with_std_imports(std::string_view source) {
+std::expected<scpp::Program, scpp::ParseError> try_parse_with_std_imports(std::string_view source) {
     TestModuleCache cache(source_module_import_paths());
-    auto result = scpp::parse(
+    return scpp::parse(
         source, [&cache](const std::string& name) -> const scpp::Program* { return &cache.resolve(name); },
         [&cache](const std::string& key) -> scpp::Program { return cache.resolve_partition(key); });
+}
+
+scpp::Program parse_program_with_std_imports(std::string_view source) {
+    auto result = try_parse_with_std_imports(source);
     if (!result.has_value()) throw std::move(result).error();
     return std::move(result).value();
 }
 
 scpp::Program parse_with_std_imports(std::string_view source) {
-    TestModuleCache cache(source_module_import_paths());
-    auto result = scpp::parse(
-        source, [&cache](const std::string& name) -> const scpp::Program* { return &cache.resolve(name); },
-        [&cache](const std::string& key) -> scpp::Program { return cache.resolve_partition(key); });
+    auto result = try_parse_with_std_imports(source);
     if (!result.has_value()) throw std::move(result).error();
     return std::move(result).value();
+}
+
+// Runs the full parse -> monomorphize_generics -> check_moves ->
+// Codegen::generate pipeline and reports whether any stage failed. Used
+// by tests below that only care "does this program fail to compile", not
+// which specific stage rejected it -- every one of these tests' former
+// catch-by-type cascades (ParseError/DataflowError/CodegenError) set the
+// exact same `threw = true` regardless of which type was actually caught,
+// so collapsing to a single bool here preserves their behavior exactly.
+bool full_pipeline_fails(std::string_view source) {
+    auto program_result = scpp::parse(source);
+    if (!program_result.has_value()) return true;
+    scpp::Program program = std::move(program_result.value());
+    auto monomorphize_result = scpp::monomorphize_generics(program);
+    if (!monomorphize_result.has_value()) return true;
+    auto check_moves_result = scpp::check_moves(program);
+    if (!check_moves_result.has_value()) return true;
+    scpp::Codegen codegen("test_module");
+    auto generate_result = codegen.generate(program);
+    return !generate_result.has_value();
+}
+
+// Same as full_pipeline_fails, but for sources needing `import std;`/
+// `import scpp;` module resolution.
+bool full_pipeline_fails_with_std_imports(std::string_view source) {
+    auto program_result = try_parse_with_std_imports(source);
+    if (!program_result.has_value()) return true;
+    scpp::Program program = std::move(program_result.value());
+    auto monomorphize_result = scpp::monomorphize_generics(program);
+    if (!monomorphize_result.has_value()) return true;
+    auto check_moves_result = scpp::check_moves(program);
+    if (!check_moves_result.has_value()) return true;
+    scpp::Codegen codegen("test_module");
+    auto generate_result = codegen.generate(program);
+    return !generate_result.has_value();
+}
+
+// Like full_pipeline_fails, but stops after monomorphize_generics --
+// used by tests exercising a rejection that monomorphize_generics itself
+// is responsible for, where the original code never went on to call
+// check_moves/codegen at all.
+bool monomorphize_pipeline_fails(std::string_view source) {
+    auto program_result = scpp::parse(source);
+    if (!program_result.has_value()) return true;
+    scpp::Program program = std::move(program_result.value());
+    auto monomorphize_result = scpp::monomorphize_generics(program);
+    return !monomorphize_result.has_value();
+}
+
+// Runs monomorphize_generics then check_moves over an already-parsed
+// program and returns the DataflowError message from whichever stage
+// failed first, or nullopt if both succeeded. Both stages report their
+// failures as scpp::DataflowError, so the original code's single `catch
+// (const scpp::DataflowError&)` covered either stage indiscriminately;
+// this helper preserves that "either stage, same message check" behavior
+// without needing a try/catch.
+std::optional<std::string> monomorphize_or_check_moves_error_message(scpp::Program& program) {
+    auto monomorphize_result = scpp::monomorphize_generics(program);
+    if (!monomorphize_result.has_value()) return std::string(monomorphize_result.error().what());
+    auto check_moves_result = scpp::check_moves(program);
+    if (!check_moves_result.has_value()) return std::string(check_moves_result.error().what());
+    return std::nullopt;
 }
 
 struct RunResult {
@@ -250,10 +313,10 @@ std::string shell_quote(const std::string& text) {
 
 // Compiles `source` to a temporary executable, runs it, and captures both
 // its stdout and exit code (0-255, matching POSIX wait status semantics).
-RunResult compile_and_run(std::string_view source, const std::string& case_name) {
+std::expected<RunResult, scpp::DriverError> try_compile_and_run(std::string_view source, const std::string& case_name) {
     std::filesystem::path exe_path = std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name);
     auto compile_result_1 = scpp::compile_to_executable(source, exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
-    if (!compile_result_1.has_value()) throw std::move(compile_result_1).error();
+    if (!compile_result_1.has_value()) return std::unexpected(std::move(compile_result_1).error());
 
     FILE* pipe = popen(exe_path.string().c_str(), "r");
     std::string output;
@@ -270,14 +333,28 @@ RunResult compile_and_run(std::string_view source, const std::string& case_name)
     return RunResult{WEXITSTATUS(status), output};
 }
 
-RunResult compile_and_run_with_input(std::string_view source, const std::string& case_name, std::string_view input) {
+RunResult compile_and_run(std::string_view source, const std::string& case_name) {
+    auto result = try_compile_and_run(source, case_name);
+    if (!result.has_value()) throw std::move(result).error();
+    return std::move(result).value();
+}
+
+std::expected<RunResult, scpp::DriverError> try_compile_and_run_with_input(std::string_view source,
+                                                                            const std::string& case_name,
+                                                                            std::string_view input) {
     std::filesystem::path exe_path = std::filesystem::current_path() / ("scpp_driver_test_" + case_name);
     auto compile_result_2 = scpp::compile_to_executable(source, exe_path.string(), std_link_inputs(), prebuilt_module_import_paths());
-    if (!compile_result_2.has_value()) throw std::move(compile_result_2).error();
+    if (!compile_result_2.has_value()) return std::unexpected(std::move(compile_result_2).error());
     RunResult result = run_command_capture("printf %s " + shell_quote(std::string(input)) + " | " +
                                            shell_quote(exe_path.string()) + " 2>&1");
     std::filesystem::remove(exe_path);
     return result;
+}
+
+RunResult compile_and_run_with_input(std::string_view source, const std::string& case_name, std::string_view input) {
+    auto result = try_compile_and_run_with_input(source, case_name, input);
+    if (!result.has_value()) throw std::move(result).error();
+    return std::move(result).value();
 }
 
 // A `<name>.expected` file's first line is the expected exit code; anything
@@ -320,17 +397,17 @@ void run_runtime_test_case_files(const std::filesystem::path& dir) {
         ExpectedResult expected = parse_expected(read_file(expected_path));
         cases_run++;
 
-        try {
-            RunResult result = compile_and_run(read_file(source_path), case_name);
-            expect(result.exit_code == expected.exit_code, case_name + ": expected exit code " +
-                                                                std::to_string(expected.exit_code) + ", got " +
-                                                                std::to_string(result.exit_code));
-            expect(result.stdout_text == expected.stdout_text, case_name + ": expected stdout '" +
-                                                                    expected.stdout_text + "', got '" +
-                                                                    result.stdout_text + "'");
-        } catch (const std::exception& e) {
-            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
+        auto result = try_compile_and_run(read_file(source_path), case_name);
+        if (!result.has_value()) {
+            expect(false, case_name + ": threw an exception: " + std::string(result.error().what()));
+            continue;
         }
+        expect(result->exit_code == expected.exit_code, case_name + ": expected exit code " +
+                                                             std::to_string(expected.exit_code) + ", got " +
+                                                             std::to_string(result->exit_code));
+        expect(result->stdout_text == expected.stdout_text, case_name + ": expected stdout '" +
+                                                                 expected.stdout_text + "', got '" +
+                                                                 result->stdout_text + "'");
     }
 }
 
@@ -382,19 +459,26 @@ void run_error_location_tests() {
     };
     for (const Case& c : dataflow_cases) {
         cases_run++;
-        try {
-           scpp::Program program = parse_with_std_imports(c.source);
-           auto monomorphize_result = scpp::monomorphize_generics(program);
-           if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-           auto check_moves_result = scpp::check_moves(program);
-           if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-           expect(false, c.name + ": expected a DataflowError, none was thrown");
-        } catch (const scpp::DataflowError& e) {
-           expect(e.loc.is_known(), c.name + ": DataflowError has no location");
-           expect(e.loc.line == c.expected_line, c.name + ": expected line " +
+        scpp::Program program = parse_with_std_imports(c.source);
+        auto monomorphize_result = scpp::monomorphize_generics(program);
+        if (!monomorphize_result.has_value()) {
+            const scpp::DataflowError& e = monomorphize_result.error();
+            expect(e.loc.is_known(), c.name + ": DataflowError has no location");
+            expect(e.loc.line == c.expected_line, c.name + ": expected line " +
                                                        std::to_string(c.expected_line) + ", got " +
                                                        std::to_string(e.loc.line));
+            continue;
         }
+        auto check_moves_result = scpp::check_moves(program);
+        if (!check_moves_result.has_value()) {
+            const scpp::DataflowError& e = check_moves_result.error();
+            expect(e.loc.is_known(), c.name + ": DataflowError has no location");
+            expect(e.loc.line == c.expected_line, c.name + ": expected line " +
+                                                       std::to_string(c.expected_line) + ", got " +
+                                                       std::to_string(e.loc.line));
+            continue;
+        }
+        expect(false, c.name + ": expected a DataflowError, none was thrown");
     }
 
     std::vector<Case> codegen_cases = {
@@ -402,19 +486,22 @@ void run_error_location_tests() {
     };
     for (const Case& c : codegen_cases) {
         cases_run++;
-        try {
-            auto program_result = scpp::parse(c.source);
-            if (!program_result.has_value()) throw std::move(program_result).error();
-            scpp::Program program = std::move(program_result.value());
-            scpp::Codegen codegen("test_module");
-            auto generate_result = codegen.generate(program);
-            if (!generate_result.has_value()) throw std::move(generate_result).error();
+        auto program_result = scpp::parse(c.source);
+        if (!program_result.has_value()) {
             expect(false, c.name + ": expected a CodegenError, none was thrown");
-        } catch (const scpp::CodegenError& e) {
+            continue;
+        }
+        scpp::Program program = std::move(program_result.value());
+        scpp::Codegen codegen("test_module");
+        auto generate_result = codegen.generate(program);
+        if (!generate_result.has_value()) {
+            const scpp::CodegenError& e = generate_result.error();
             expect(e.loc.is_known(), c.name + ": CodegenError has no location");
             expect(e.loc.line == c.expected_line, c.name + ": expected line " +
                                                        std::to_string(c.expected_line) + ", got " +
                                                        std::to_string(e.loc.line));
+        } else {
+            expect(false, c.name + ": expected a CodegenError, none was thrown");
         }
     }
 }
@@ -458,12 +545,13 @@ void run_module_system_tests() {
             "    print_int(mathlib::square_plus_one(6));\n"
             "    return 0;\n"
             "}\n";
-        try {
-            std::filesystem::path exe_path =
-                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            auto compile_result_3 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
-                                         {{"mathlib", lib_path.string()}});
-            if (!compile_result_3.has_value()) throw std::move(compile_result_3).error();
+        std::filesystem::path exe_path =
+            std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+        auto compile_result_3 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                     {{"mathlib", lib_path.string()}});
+        if (!compile_result_3.has_value()) {
+            expect(false, case_name + ": threw an exception: " + std::string(compile_result_3.error().what()));
+        } else {
             FILE* pipe = popen(exe_path.string().c_str(), "r");
             std::string output;
             if (pipe != nullptr) {
@@ -475,8 +563,6 @@ void run_module_system_tests() {
             std::filesystem::remove(exe_path);
             expect(WEXITSTATUS(status) == 0, case_name + ": expected exit code 0");
             expect(output == "36\n37\n", case_name + ": expected stdout '36\\n37\\n', got '" + output + "'");
-        } catch (const std::exception& e) {
-            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
         }
         std::filesystem::remove(lib_path);
     }
@@ -503,27 +589,20 @@ void run_module_system_tests() {
             "    print_int(mathlib::helper(6));\n"
             "    return 0;\n"
             "}\n";
-        bool threw = false;
-        try {
+        bool threw = [&] {
             auto lib_program_result = scpp::parse(read_file(lib_path));
-            if (!lib_program_result.has_value()) throw std::move(lib_program_result).error();
+            if (!lib_program_result.has_value()) return true;
             scpp::Program lib_program = std::move(lib_program_result.value());
             auto program_result = scpp::parse(
                 main_source, [&lib_program](const std::string&) -> const scpp::Program* { return &lib_program; });
-            if (!program_result.has_value()) throw std::move(program_result).error();
+            if (!program_result.has_value()) return true;
             scpp::Program program = std::move(program_result.value());
             auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
+            if (!check_moves_result.has_value()) return true;
             scpp::Codegen codegen("test_module");
             auto generate_result = codegen.generate(program);
-            if (!generate_result.has_value()) throw std::move(generate_result).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+            return !generate_result.has_value();
+        }();
         expect(threw, case_name + ": expected calling a module-private function to fail");
         std::filesystem::remove(lib_path);
     }
@@ -553,17 +632,16 @@ void run_module_system_tests() {
             "int main() {\n"
             "    return mathlib::is_even(6) - 1;\n"
             "}\n";
-        try {
-            std::filesystem::path exe_path =
-                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            auto compile_result_4 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
-                                         {{"mathlib", lib_path.string()}});
-            if (!compile_result_4.has_value()) throw std::move(compile_result_4).error();
+        std::filesystem::path exe_path =
+            std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+        auto compile_result_4 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                     {{"mathlib", lib_path.string()}});
+        if (!compile_result_4.has_value()) {
+            expect(false, case_name + ": threw an exception: " + std::string(compile_result_4.error().what()));
+        } else {
             RunResult run = run_command_capture(exe_path.string() + " 2>&1");
             std::filesystem::remove(exe_path);
             expect(run.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(run.exit_code));
-        } catch (const std::exception& e) {
-            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
         }
         std::filesystem::remove(lib_path);
     }
@@ -588,17 +666,16 @@ void run_module_system_tests() {
             "    records::Node node = records::make_node(7);\n"
             "    return node.value - 7;\n"
             "}\n";
-        try {
-            std::filesystem::path exe_path =
-                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            auto compile_result_5 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
-                                         {{"records", lib_path.string()}});
-            if (!compile_result_5.has_value()) throw std::move(compile_result_5).error();
+        std::filesystem::path exe_path =
+            std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+        auto compile_result_5 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                     {{"records", lib_path.string()}});
+        if (!compile_result_5.has_value()) {
+            expect(false, case_name + ": threw an exception: " + std::string(compile_result_5.error().what()));
+        } else {
             RunResult run = run_command_capture(exe_path.string() + " 2>&1");
             std::filesystem::remove(exe_path);
             expect(run.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(run.exit_code));
-        } catch (const std::exception& e) {
-            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
         }
         std::filesystem::remove(lib_path);
     }
@@ -609,17 +686,12 @@ void run_module_system_tests() {
         std::string case_name = "module_name_mismatch_is_rejected";
         cases_run++;
         std::filesystem::path lib_path = write_temp_file(case_name, "lib", "export module actuallib;\n");
-        bool threw = false;
-        try {
-            std::filesystem::path exe_path =
-                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            auto compile_result_6 = scpp::compile_to_executable("import mathlib;\nint main() { return 0; }\n", exe_path.string(), {},
-                                         {{"mathlib", lib_path.string()}});
-            if (!compile_result_6.has_value()) throw std::move(compile_result_6).error();
-            std::filesystem::remove(exe_path);
-        } catch (const scpp::DriverError&) {
-            threw = true;
-        }
+        std::filesystem::path exe_path =
+            std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+        auto compile_result_6 = scpp::compile_to_executable("import mathlib;\nint main() { return 0; }\n", exe_path.string(), {},
+                                     {{"mathlib", lib_path.string()}});
+        bool threw = !compile_result_6.has_value();
+        if (!threw) std::filesystem::remove(exe_path);
         expect(threw, case_name + ": expected a DriverError for a module name mismatch");
         std::filesystem::remove(lib_path);
     }
@@ -629,16 +701,11 @@ void run_module_system_tests() {
     {
         std::string case_name = "missing_import_mapping_is_rejected";
         cases_run++;
-        bool threw = false;
-        try {
-            std::filesystem::path exe_path =
-                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            auto compile_result_7 = scpp::compile_to_executable("import nonexistent;\nint main() { return 0; }\n", exe_path.string());
-            if (!compile_result_7.has_value()) throw std::move(compile_result_7).error();
-            std::filesystem::remove(exe_path);
-        } catch (const scpp::DriverError&) {
-            threw = true;
-        }
+        std::filesystem::path exe_path =
+            std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+        auto compile_result_7 = scpp::compile_to_executable("import nonexistent;\nint main() { return 0; }\n", exe_path.string());
+        bool threw = !compile_result_7.has_value();
+        if (!threw) std::filesystem::remove(exe_path);
         expect(threw, case_name + ": expected a DriverError for a missing --import mapping");
     }
 
@@ -652,15 +719,14 @@ void run_module_system_tests() {
         write_text_file(module_path,
                         "export module mathlib;\n"
                         "namespace mathlib { export int value() { return 17; } }\n");
-        try {
-            auto compile_result_8 = scpp::compile_to_executable("import mathlib;\nint main() { return mathlib::value(); }\n", exe_path.string(), {},
-                                        {}, /*static_link=*/false, {module_dir.string()});
-            if (!compile_result_8.has_value()) throw std::move(compile_result_8).error();
+        auto compile_result_8 = scpp::compile_to_executable("import mathlib;\nint main() { return mathlib::value(); }\n", exe_path.string(), {},
+                                    {}, /*static_link=*/false, {module_dir.string()});
+        if (!compile_result_8.has_value()) {
+            expect(false, case_name + ": threw an exception: " + std::string(compile_result_8.error().what()));
+        } else {
             RunResult run = run_command_capture(exe_path.string() + " 2>&1");
             expect(run.exit_code == 17,
                    case_name + ": expected exit code 17, got " + std::to_string(run.exit_code));
-        } catch (const std::exception& e) {
-            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
         }
         std::filesystem::remove(module_path);
         std::filesystem::remove(exe_path);
@@ -681,16 +747,15 @@ void run_module_system_tests() {
                         "export module mathlib;\n"
                         "namespace mathlib { export int value() { return 22; } }\n");
         std::filesystem::path exe_path = std::filesystem::current_path() / "driver_import_search_dir_first_match_exe";
-        try {
-            auto compile_result_9 = scpp::compile_to_executable("import mathlib;\nint main() { return mathlib::value(); }\n", exe_path.string(), {},
-                                        {}, /*static_link=*/false, {first_dir.string(), second_dir.string()});
-            if (!compile_result_9.has_value()) throw std::move(compile_result_9).error();
+        auto compile_result_9 = scpp::compile_to_executable("import mathlib;\nint main() { return mathlib::value(); }\n", exe_path.string(), {},
+                                    {}, /*static_link=*/false, {first_dir.string(), second_dir.string()});
+        if (!compile_result_9.has_value()) {
+            expect(false, case_name + ": threw an exception: " + std::string(compile_result_9.error().what()));
+        } else {
             RunResult run = run_command_capture(exe_path.string() + " 2>&1");
             expect(run.exit_code == 11,
                    case_name + ": expected first -I directory to win, got exit code " +
                        std::to_string(run.exit_code));
-        } catch (const std::exception& e) {
-            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
         }
         std::filesystem::remove(first_dir / "mathlib.scpp");
         std::filesystem::remove(second_dir / "mathlib.scpp");
@@ -706,17 +771,12 @@ void run_module_system_tests() {
         cases_run++;
         std::filesystem::path a_path = write_temp_file(case_name, "a", "export module a;\nimport b;\n");
         std::filesystem::path b_path = write_temp_file(case_name, "b", "export module b;\nimport a;\n");
-        bool threw = false;
-        try {
-            std::filesystem::path exe_path =
-                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            auto compile_result_10 = scpp::compile_to_executable("import a;\nint main() { return 0; }\n", exe_path.string(), {},
-                                         {{"a", a_path.string()}, {"b", b_path.string()}});
-            if (!compile_result_10.has_value()) throw std::move(compile_result_10).error();
-            std::filesystem::remove(exe_path);
-        } catch (const scpp::DriverError&) {
-            threw = true;
-        }
+        std::filesystem::path exe_path =
+            std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+        auto compile_result_10 = scpp::compile_to_executable("import a;\nint main() { return 0; }\n", exe_path.string(), {},
+                                     {{"a", a_path.string()}, {"b", b_path.string()}});
+        bool threw = !compile_result_10.has_value();
+        if (!threw) std::filesystem::remove(exe_path);
         expect(threw, case_name + ": expected a DriverError for a circular import");
         std::filesystem::remove(a_path);
         std::filesystem::remove(b_path);
@@ -748,12 +808,13 @@ void run_module_system_tests() {
             "    print_int(mathlib::sin_deg_approx(90));\n"
             "    return 0;\n"
             "}\n";
-        try {
-            std::filesystem::path exe_path =
-                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            auto compile_result_11 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
-                                         {{"mathlib", lib_path.string()}, {"mathlib:trig", trig_path.string()}});
-            if (!compile_result_11.has_value()) throw std::move(compile_result_11).error();
+        std::filesystem::path exe_path =
+            std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+        auto compile_result_11 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                     {{"mathlib", lib_path.string()}, {"mathlib:trig", trig_path.string()}});
+        if (!compile_result_11.has_value()) {
+            expect(false, case_name + ": threw an exception: " + std::string(compile_result_11.error().what()));
+        } else {
             FILE* pipe = popen(exe_path.string().c_str(), "r");
             std::string output;
             if (pipe != nullptr) {
@@ -765,8 +826,6 @@ void run_module_system_tests() {
             std::filesystem::remove(exe_path);
             expect(WEXITSTATUS(status) == 0, case_name + ": expected exit code 0");
             expect(output == "36\n45\n", case_name + ": expected stdout '36\\n45\\n', got '" + output + "'");
-        } catch (const std::exception& e) {
-            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
         }
         std::filesystem::remove(trig_path);
         std::filesystem::remove(lib_path);
@@ -789,19 +848,12 @@ void run_module_system_tests() {
         std::string main_source =
             "import mathlib;\n"
             "int main() { print_int(mathlib::private_helper(1)); return 0; }\n";
-        bool threw = false;
-        try {
-            std::filesystem::path exe_path =
-                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            auto compile_result_12 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
-                                         {{"mathlib", lib_path.string()}, {"mathlib:trig", trig_path.string()}});
-            if (!compile_result_12.has_value()) throw std::move(compile_result_12).error();
-            std::filesystem::remove(exe_path);
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        }
+        std::filesystem::path exe_path =
+            std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+        auto compile_result_12 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                     {{"mathlib", lib_path.string()}, {"mathlib:trig", trig_path.string()}});
+        bool threw = !compile_result_12.has_value();
+        if (!threw) std::filesystem::remove(exe_path);
         expect(threw, case_name + ": expected private_helper to stay invisible outside the module");
         std::filesystem::remove(trig_path);
         std::filesystem::remove(lib_path);
@@ -823,19 +875,12 @@ void run_module_system_tests() {
         std::string main_source =
             "import mathlib;\n"
             "int main() { print_int(mathlib::sin_deg_approx(90)); return 0; }\n";
-        bool threw = false;
-        try {
-            std::filesystem::path exe_path =
-                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            auto compile_result_13 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
-                                         {{"mathlib", lib_path.string()}, {"mathlib:trig", trig_path.string()}});
-            if (!compile_result_13.has_value()) throw std::move(compile_result_13).error();
-            std::filesystem::remove(exe_path);
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        }
+        std::filesystem::path exe_path =
+            std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+        auto compile_result_13 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                     {{"mathlib", lib_path.string()}, {"mathlib:trig", trig_path.string()}});
+        bool threw = !compile_result_13.has_value();
+        if (!threw) std::filesystem::remove(exe_path);
         expect(threw, case_name + ": expected sin_deg_approx to stay invisible (plain import :part; never "
                                    "re-exports)");
         std::filesystem::remove(trig_path);
@@ -861,21 +906,20 @@ void run_module_system_tests() {
         std::string main_source =
             "import mathlib;\n"
             "int main() { return mathlib::call_hidden(21) - 42; }\n";
-        try {
-            std::filesystem::path exe_path =
-                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            auto compile_result_14 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
-                                         {{"mathlib", lib_path.string()},
-                                          {"mathlib:api", api_path.string()},
-                                          {"mathlib:helper", helper_path.string()}});
-            if (!compile_result_14.has_value()) throw std::move(compile_result_14).error();
+        std::filesystem::path exe_path =
+            std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+        auto compile_result_14 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                     {{"mathlib", lib_path.string()},
+                                      {"mathlib:api", api_path.string()},
+                                      {"mathlib:helper", helper_path.string()}});
+        if (!compile_result_14.has_value()) {
+            expect(false, case_name + ": threw an exception: " + std::string(compile_result_14.error().what()));
+        } else {
             RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
             std::filesystem::remove(exe_path);
             expect(run_result.exit_code == 0,
                    case_name + ": expected same-module private helper call to succeed, got " +
                        std::to_string(run_result.exit_code));
-        } catch (const std::exception& e) {
-            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
         }
         std::filesystem::remove(helper_path);
         std::filesystem::remove(api_path);
@@ -910,12 +954,13 @@ void run_module_system_tests() {
             "    print_int(b::helper());\n"
             "    return 0;\n"
             "}\n";
-        try {
-            std::filesystem::path exe_path =
-                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            auto compile_result_15 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
-                                         {{"a", a_path.string()}, {"b", b_path.string()}});
-            if (!compile_result_15.has_value()) throw std::move(compile_result_15).error();
+        std::filesystem::path exe_path =
+            std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+        auto compile_result_15 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                     {{"a", a_path.string()}, {"b", b_path.string()}});
+        if (!compile_result_15.has_value()) {
+            expect(false, case_name + ": threw an exception: " + std::string(compile_result_15.error().what()));
+        } else {
             FILE* pipe = popen(exe_path.string().c_str(), "r");
             std::string output;
             if (pipe != nullptr) {
@@ -927,8 +972,6 @@ void run_module_system_tests() {
             std::filesystem::remove(exe_path);
             expect(WEXITSTATUS(status) == 0, case_name + ": expected exit code 0");
             expect(output == "42\n43\n", case_name + ": expected stdout '42\\n43\\n', got '" + output + "'");
-        } catch (const std::exception& e) {
-            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
         }
         std::filesystem::remove(a_path);
         std::filesystem::remove(b_path);
@@ -948,19 +991,18 @@ void run_module_system_tests() {
             "int main() {\n"
             "    return inner::helper(41) - 42;\n"
             "}\n";
-        try {
-            std::filesystem::path exe_path =
-                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            auto compile_result_16 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
-                                         {{"exportnsblock", lib_path.string()}});
-            if (!compile_result_16.has_value()) throw std::move(compile_result_16).error();
+        std::filesystem::path exe_path =
+            std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+        auto compile_result_16 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                     {{"exportnsblock", lib_path.string()}});
+        if (!compile_result_16.has_value()) {
+            expect(false, case_name + ": threw an exception: " + std::string(compile_result_16.error().what()));
+        } else {
             RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
             std::filesystem::remove(exe_path);
             expect(run_result.exit_code == 0,
                    case_name + ": expected export-namespace members to import and run, got " +
                        std::to_string(run_result.exit_code));
-        } catch (const std::exception& e) {
-            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
         }
         std::filesystem::remove(lib_path);
     }
@@ -986,14 +1028,15 @@ void run_module_system_tests() {
             "    print_int(mathlib::helper());\n"
             "    return 0;\n"
             "}\n";
-        try {
-            std::filesystem::path exe_path =
-                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            auto compile_result_17 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
-                                         {{"mathlib", mathlib_path.string()},
-                                          {"mathlib:base", base_path.string()},
-                                          {"mathlib:random", random_path.string()}});
-            if (!compile_result_17.has_value()) throw std::move(compile_result_17).error();
+        std::filesystem::path exe_path =
+            std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+        auto compile_result_17 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                     {{"mathlib", mathlib_path.string()},
+                                      {"mathlib:base", base_path.string()},
+                                      {"mathlib:random", random_path.string()}});
+        if (!compile_result_17.has_value()) {
+            expect(false, case_name + ": threw an exception: " + std::string(compile_result_17.error().what()));
+        } else {
             FILE* pipe = popen(exe_path.string().c_str(), "r");
             std::string output;
             if (pipe != nullptr) {
@@ -1005,8 +1048,6 @@ void run_module_system_tests() {
             std::filesystem::remove(exe_path);
             expect(WEXITSTATUS(status) == 0, case_name + ": expected exit code 0");
             expect(output == "42\n43\n", case_name + ": expected stdout '42\\n43\\n', got '" + output + "'");
-        } catch (const std::exception& e) {
-            expect(false, case_name + ": threw an exception: " + std::string(e.what()));
         }
         std::filesystem::remove(base_path);
         std::filesystem::remove(random_path);
@@ -1030,12 +1071,13 @@ void run_module_system_tests() {
         // The indirect call (through b::helper()) must still work fine.
         {
             std::string main_source = "import b;\nint main() { print_int(b::helper()); return 0; }\n";
-            try {
-                std::filesystem::path exe_path = std::filesystem::temp_directory_path() /
-                                                  ("scpp_driver_test_" + case_name + "_indirect_exe");
-                auto compile_result_18 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
-                                             {{"a", a_path.string()}, {"b", b_path.string()}});
-                if (!compile_result_18.has_value()) throw std::move(compile_result_18).error();
+            std::filesystem::path exe_path = std::filesystem::temp_directory_path() /
+                                              ("scpp_driver_test_" + case_name + "_indirect_exe");
+            auto compile_result_18 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                         {{"a", a_path.string()}, {"b", b_path.string()}});
+            if (!compile_result_18.has_value()) {
+                expect(false, case_name + " (indirect): threw an exception: " + std::string(compile_result_18.error().what()));
+            } else {
                 FILE* pipe = popen(exe_path.string().c_str(), "r");
                 std::string output;
                 if (pipe != nullptr) {
@@ -1047,8 +1089,6 @@ void run_module_system_tests() {
                 std::filesystem::remove(exe_path);
                 expect(WEXITSTATUS(status) == 0, case_name + " (indirect): expected exit code 0");
                 expect(output == "43\n", case_name + " (indirect): expected stdout '43\\n', got '" + output + "'");
-            } catch (const std::exception& e) {
-                expect(false, case_name + " (indirect): threw an exception: " + std::string(e.what()));
             }
         }
 
@@ -1057,19 +1097,12 @@ void run_module_system_tests() {
         {
             cases_run++;
             std::string main_source = "import b;\nint main() { print_int(a::value()); return 0; }\n";
-            bool threw = false;
-            try {
-                std::filesystem::path exe_path = std::filesystem::temp_directory_path() /
-                                                  ("scpp_driver_test_" + case_name + "_direct_exe");
-                auto compile_result_19 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
-                                             {{"a", a_path.string()}, {"b", b_path.string()}});
-                if (!compile_result_19.has_value()) throw std::move(compile_result_19).error();
-                std::filesystem::remove(exe_path);
-            } catch (const scpp::CodegenError&) {
-                threw = true;
-            } catch (const scpp::DataflowError&) {
-                threw = true;
-            }
+            std::filesystem::path exe_path = std::filesystem::temp_directory_path() /
+                                              ("scpp_driver_test_" + case_name + "_direct_exe");
+            auto compile_result_19 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                         {{"a", a_path.string()}, {"b", b_path.string()}});
+            bool threw = !compile_result_19.has_value();
+            if (!threw) std::filesystem::remove(exe_path);
             expect(threw, case_name + " (direct): expected a::value() to stay invisible (private import is "
                                        "non-transitive)");
         }
@@ -1111,22 +1144,21 @@ void run_module_system_tests() {
             "    dm_holder::Holder h{5};\n"
             "    return h.value_ - 5;\n"
             "}\n";
-        try {
-            std::filesystem::path exe_path =
-                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            auto compile_result_20 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
-                                         {{"dm_holder", lib_path.string()}});
-            if (!compile_result_20.has_value()) throw std::move(compile_result_20).error();
+        std::filesystem::path exe_path =
+            std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+        auto compile_result_20 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                     {{"dm_holder", lib_path.string()}});
+        if (!compile_result_20.has_value()) {
+            expect(false, case_name + ": threw an exception (movecheck incorrectly rejecting a merged, "
+                                       "already-validated constructor as having an uninitialized field): " +
+                              std::string(compile_result_20.error().what()));
+        } else {
             RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
             std::filesystem::remove(exe_path);
             expect(run_result.exit_code == 0,
                    case_name + ": expected the imported class's member-initializer-list constructor to build and "
                                "run correctly, got exit " + std::to_string(run_result.exit_code) + " output '" +
                                run_result.stdout_text + "'");
-        } catch (const std::exception& e) {
-            expect(false, case_name + ": threw an exception (movecheck incorrectly rejecting a merged, "
-                                       "already-validated constructor as having an uninitialized field): " +
-                              std::string(e.what()));
         }
         std::filesystem::remove(lib_path);
     }
@@ -1172,21 +1204,20 @@ void run_module_system_tests() {
             "    dm_a::Widget w{};\n"
             "    return w.tag() - 7;\n"
             "}\n";
-        try {
-            std::filesystem::path exe_path =
-                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
-            auto compile_result_21 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
-                                         {{"dm_a", a_path.string()}, {"dm_b", b_path.string()}});
-            if (!compile_result_21.has_value()) throw std::move(compile_result_21).error();
+        std::filesystem::path exe_path =
+            std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_exe");
+        auto compile_result_21 = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{},
+                                     {{"dm_a", a_path.string()}, {"dm_b", b_path.string()}});
+        if (!compile_result_21.has_value()) {
+            expect(false, case_name + ": threw an exception (this used to be a link-time \"multiple definition\" "
+                                       "error before the fix): " + std::string(compile_result_21.error().what()));
+        } else {
             RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
             std::filesystem::remove(exe_path);
             expect(run_result.exit_code == 0,
                    case_name + ": expected build+link to succeed with the re-exported defaulted destructor not "
                                "duplicating its definition, got exit " + std::to_string(run_result.exit_code) +
                                " output '" + run_result.stdout_text + "'");
-        } catch (const std::exception& e) {
-            expect(false, case_name + ": threw an exception (this used to be a link-time \"multiple definition\" "
-                                       "error before the fix): " + std::string(e.what()));
         }
         std::filesystem::remove(a_path);
         std::filesystem::remove(b_path);
@@ -1238,25 +1269,7 @@ void run_concept_tests() {
             "    Circle c{};\n"
             "    return print_area(c);\n"
             "}\n";
-        bool threw = false;
-        try {
-            auto program_result = scpp::parse(source);
-            if (!program_result.has_value()) throw std::move(program_result).error();
-            scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-            scpp::Codegen codegen("test_module");
-            auto generate_result = codegen.generate(program);
-            if (!generate_result.has_value()) throw std::move(generate_result).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+        bool threw = full_pipeline_fails(source);
         expect(threw, case_name + ": expected calling an operation not promised by the concept to fail");
     }
 }
@@ -1329,25 +1342,7 @@ int main() {
             "}\n";
         std::string case_name = "generic_class_constrained_method_unsatisfying_type_is_rejected";
         cases_run++;
-        bool threw = false;
-        try {
-            auto program_result = scpp::parse(source);
-            if (!program_result.has_value()) throw std::move(program_result).error();
-            scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-            scpp::Codegen codegen("test_module");
-            auto generate_result = codegen.generate(program);
-            if (!generate_result.has_value()) throw std::move(generate_result).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+        bool threw = full_pipeline_fails(source);
         expect(threw, case_name + ": expected calling a method whose own requires-clause the concrete type "
                                   "argument doesn't satisfy to fail");
     }
@@ -1379,25 +1374,7 @@ int main() {
             "}\n";
         std::string case_name = "variadic_generic_instantiation_clones_constructor";
         cases_run++;
-        bool threw = false;
-        try {
-            auto program_result = scpp::parse(source);
-            if (!program_result.has_value()) throw std::move(program_result).error();
-            scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-            scpp::Codegen codegen("test_module");
-            auto generate_result = codegen.generate(program);
-            if (!generate_result.has_value()) throw std::move(generate_result).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+        bool threw = full_pipeline_fails(source);
         expect(!threw, case_name + ": expected concrete variadic instantiations to inherit cloned constructors");
     }
 
@@ -1426,25 +1403,7 @@ int main() {
             "}\n";
         std::string case_name = "variadic_generic_instantiation_clones_methods";
         cases_run++;
-        bool threw = false;
-        try {
-            auto program_result = scpp::parse(source);
-            if (!program_result.has_value()) throw std::move(program_result).error();
-            scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-            scpp::Codegen codegen("test_module");
-            auto generate_result = codegen.generate(program);
-            if (!generate_result.has_value()) throw std::move(generate_result).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+        bool threw = full_pipeline_fails(source);
         expect(!threw, case_name + ": expected concrete variadic instantiations to clone method bodies");
     }
 
@@ -1468,25 +1427,7 @@ int main() {
             "}\n";
         std::string case_name = "variadic_empty_pack_base_case_clones_fields";
         cases_run++;
-        bool threw = false;
-        try {
-            auto program_result = scpp::parse(source);
-            if (!program_result.has_value()) throw std::move(program_result).error();
-            scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-            scpp::Codegen codegen("test_module");
-            auto generate_result = codegen.generate(program);
-            if (!generate_result.has_value()) throw std::move(generate_result).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+        bool threw = full_pipeline_fails(source);
         expect(!threw, case_name + ": expected the synthesized empty-pack concrete class to keep base-case fields");
     }
 }
@@ -1518,25 +1459,7 @@ void run_generic_pack_deduction_tests() {
             "    h.fn_ = add;\n"
             "    return invoke(h, 19, 23) - 42;\n"
             "}\n";
-        bool threw = false;
-        try {
-            auto program_result = scpp::parse(source);
-            if (!program_result.has_value()) throw std::move(program_result).error();
-            scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-            scpp::Codegen codegen("test_module");
-            auto generate_result = codegen.generate(program);
-            if (!generate_result.has_value()) throw std::move(generate_result).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+        bool threw = full_pipeline_fails(source);
         expect(!threw, case_name + ": expected later Args... deduction to make the earlier Holder<int(Args...)> "
                                     "parameter type compatible");
     }
@@ -1567,25 +1490,7 @@ void run_generic_pack_deduction_tests() {
             "    h.fn_ = add;\n"
             "    return invoke<int>(h, 20, 22) - 42;\n"
             "}\n";
-        bool threw = false;
-        try {
-            auto program_result = scpp::parse(source);
-            if (!program_result.has_value()) throw std::move(program_result).error();
-            scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-            scpp::Codegen codegen("test_module");
-            auto generate_result = codegen.generate(program);
-            if (!generate_result.has_value()) throw std::move(generate_result).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+        bool threw = full_pipeline_fails(source);
         expect(!threw, case_name + ": expected explicit R plus deduced Args... to instantiate successfully");
     }
 
@@ -1614,20 +1519,7 @@ void run_generic_pack_deduction_tests() {
             "    h.fn_ = add;\n"
             "    return invoke(h, 7);\n"
             "}\n";
-        bool threw = false;
-        try {
-            auto program_result = scpp::parse(source);
-            if (!program_result.has_value()) throw std::move(program_result).error();
-            scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+        bool threw = monomorphize_pipeline_fails(source);
         expect(threw, case_name + ": expected a mismatched earlier dependent parameter to be rejected");
     }
 
@@ -1651,25 +1543,7 @@ void run_generic_pack_deduction_tests() {
             "    Box<int> ok{};\n"
             "    return use(ok, 1) - 42;\n"
             "}\n";
-        bool threw = false;
-        try {
-            auto program_result = scpp::parse(source);
-            if (!program_result.has_value()) throw std::move(program_result).error();
-            scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-            scpp::Codegen codegen("test_module");
-            auto generate_result = codegen.generate(program);
-            if (!generate_result.has_value()) throw std::move(generate_result).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+        bool threw = full_pipeline_fails(source);
         expect(!threw, case_name + ": expected Box<int> plus one later arg to satisfy Box<Args...>");
     }
 
@@ -1693,20 +1567,7 @@ void run_generic_pack_deduction_tests() {
             "    Box<int, bool> bad{};\n"
             "    return use(bad, 1) - 42;\n"
             "}\n";
-        bool threw = false;
-        try {
-            auto program_result = scpp::parse(source);
-            if (!program_result.has_value()) throw std::move(program_result).error();
-            scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+        bool threw = monomorphize_pipeline_fails(source);
         expect(threw, case_name + ": expected Box<int, bool> plus one later arg to be rejected as incompatible with "
                                   "Box<Args...> after Args... deduces to <int>");
     }
@@ -1741,25 +1602,7 @@ void run_generic_pack_deduction_tests() {
             "int main() {\n"
             "    return use(\"hi\", 1, true) - 42;\n"
             "}\n";
-        bool threw = false;
-        try {
-            auto program_result = scpp::parse(source);
-            if (!program_result.has_value()) throw std::move(program_result).error();
-            scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-            scpp::Codegen codegen("test_module");
-            auto generate_result = codegen.generate(program);
-            if (!generate_result.has_value()) throw std::move(generate_result).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+        bool threw = full_pipeline_fails(source);
         expect(!threw, case_name + ": expected recursive variadic instantiation to avoid invalidating the active "
                                     "generic function template definition");
     }
@@ -1798,25 +1641,7 @@ void run_generic_pack_deduction_tests() {
             "int main() {\n"
             "    return use(\"hi\", 1, true) - 9;\n"
             "}\n";
-        bool threw = false;
-        try {
-            auto program_result = scpp::parse(source);
-            if (!program_result.has_value()) throw std::move(program_result).error();
-            scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-            scpp::Codegen codegen("test_module");
-            auto generate_result = codegen.generate(program);
-            if (!generate_result.has_value()) throw std::move(generate_result).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+        bool threw = full_pipeline_fails(source);
         expect(!threw, case_name + ": expected codegen to use the concrete variadic instantiation rather than the "
                                     "template-shape declaration");
     }
@@ -1840,25 +1665,7 @@ void run_generic_function_overload_tests() {
             "int main() {\n"
             "    return choose(7) + choose(7, 8) - 3;\n"
             "}\n";
-        bool threw = false;
-        try {
-            auto program_result = scpp::parse(source);
-            if (!program_result.has_value()) throw std::move(program_result).error();
-            scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-            scpp::Codegen codegen("test_module");
-            auto generate_result = codegen.generate(program);
-            if (!generate_result.has_value()) throw std::move(generate_result).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+        bool threw = full_pipeline_fails(source);
         expect(!threw, case_name + ": expected the 1-arg and 2-arg generic overloads to monomorphize independently");
     }
 
@@ -1883,25 +1690,7 @@ void run_generic_function_overload_tests() {
             "int main() {\n"
             "    return invoke(1) - 2;\n"
             "}\n";
-        bool threw = false;
-        try {
-            auto program_result = scpp::parse(source);
-            if (!program_result.has_value()) throw std::move(program_result).error();
-            scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-            scpp::Codegen codegen("test_module");
-            auto generate_result = codegen.generate(program);
-            if (!generate_result.has_value()) throw std::move(generate_result).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+        bool threw = full_pipeline_fails(source);
         expect(!threw, case_name + ": expected unmatched generic helpers to defer to the nongeneric overload");
     }
 }
@@ -1971,37 +1760,19 @@ void run_reference_overload_forwarding_tests() {
     {
         std::string case_name = "const_reference_local_does_not_forward_to_overloaded_mutable_reference_parameter";
         cases_run++;
-        bool threw = false;
-        try {
-            auto program_result = scpp::parse(
-                "namespace demo {\n"
-                "int f(int a, int& b, int c) {\n"
-                "    return a + b + c;\n"
-                "}\n"
-                "int f(int a, const int& b) {\n"
-                "    return f(a, b, 10);\n"
-                "}\n"
-                "}\n"
-                "int main() {\n"
-                "    int x = 1;\n"
-                "    return demo::f(2, x) - 13;\n"
-                "}\n");
-            if (!program_result.has_value()) throw std::move(program_result).error();
-            scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-            scpp::Codegen codegen("test_module");
-            auto generate_result = codegen.generate(program);
-            if (!generate_result.has_value()) throw std::move(generate_result).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+        bool threw = full_pipeline_fails(
+            "namespace demo {\n"
+            "int f(int a, int& b, int c) {\n"
+            "    return a + b + c;\n"
+            "}\n"
+            "int f(int a, const int& b) {\n"
+            "    return f(a, b, 10);\n"
+            "}\n"
+            "}\n"
+            "int main() {\n"
+            "    int x = 1;\n"
+            "    return demo::f(2, x) - 13;\n"
+            "}\n");
         expect(threw, case_name + ": expected mutable-reference overload to remain unavailable");
     }
 }
@@ -2023,23 +1794,7 @@ void run_functional_tests() {
         "    std::function<int(int) const> f(MoveOnlyAdder(std::make_unique<int>(5)));\n"
         "    return f(7);\n"
         "}\n";
-    bool threw = false;
-    try {
-        scpp::Program program = parse_with_std_imports(source);
-        auto monomorphize_result = scpp::monomorphize_generics(program);
-        if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-        auto check_moves_result = scpp::check_moves(program);
-        if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-        scpp::Codegen codegen("test_module");
-        auto generate_result = codegen.generate(program);
-        if (!generate_result.has_value()) throw std::move(generate_result).error();
-    } catch (const scpp::DataflowError&) {
-        threw = true;
-    } catch (const scpp::CodegenError&) {
-        threw = true;
-    } catch (const scpp::ParseError&) {
-        threw = true;
-    }
+    bool threw = full_pipeline_fails_with_std_imports(source);
     expect(threw, case_name + ": expected std::function to reject a move-only callable target");
 }
 
@@ -2053,23 +1808,7 @@ void run_thread_tests() {
         "    std::jthread t([&x]() { print_int(x); });\n"
         "    return 0;\n"
         "}\n";
-    bool threw = false;
-    try {
-        scpp::Program program = parse_with_std_imports(source);
-        auto monomorphize_result = scpp::monomorphize_generics(program);
-        if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-        auto check_moves_result = scpp::check_moves(program);
-        if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-        scpp::Codegen codegen("test_module");
-        auto generate_result = codegen.generate(program);
-        if (!generate_result.has_value()) throw std::move(generate_result).error();
-    } catch (const scpp::DataflowError&) {
-        threw = true;
-    } catch (const scpp::CodegenError&) {
-        threw = true;
-    } catch (const scpp::ParseError&) {
-        threw = true;
-    }
+    bool threw = full_pipeline_fails_with_std_imports(source);
     expect(threw, case_name + ": expected std::jthread to reject a reference-capturing closure target");
 }
 
@@ -2293,20 +2032,15 @@ void run_local_constexpr_array_bound_tests() {
     {
         std::string case_name = "local_constexpr_array_bound_rejects_use_before_declaration";
         cases_run++;
-        bool threw = false;
-        std::string message;
-        try {
-            (void)compile_and_run(
-                "int main() {\n"
-                "    int arr[n];\n"
-                "    constexpr int n = 4;\n"
-                "    return 0;\n"
-                "}\n",
-                case_name);
-        } catch (const scpp::DriverError& error) {
-            threw = true;
-            message = error.what();
-        }
+        auto run_result_22 = try_compile_and_run(
+            "int main() {\n"
+            "    int arr[n];\n"
+            "    constexpr int n = 4;\n"
+            "    return 0;\n"
+            "}\n",
+            case_name);
+        bool threw = !run_result_22.has_value();
+        std::string message = threw ? run_result_22.error().what() : "";
         expect(threw && message.find("identifier 'n' is not available") != std::string::npos,
                case_name + ": expected a local array bound to reject a constexpr declared later in the same "
                            "function, got message '" +
@@ -2316,22 +2050,17 @@ void run_local_constexpr_array_bound_tests() {
     {
         std::string case_name = "local_constexpr_array_bound_respects_nested_block_scope";
         cases_run++;
-        bool threw = false;
-        std::string message;
-        try {
-            (void)compile_and_run(
-                "int main() {\n"
-                "    {\n"
-                "        constexpr int n = 4;\n"
-                "    }\n"
-                "    int arr[n];\n"
-                "    return 0;\n"
-                "}\n",
-                case_name);
-        } catch (const scpp::DriverError& error) {
-            threw = true;
-            message = error.what();
-        }
+        auto run_result_23 = try_compile_and_run(
+            "int main() {\n"
+            "    {\n"
+            "        constexpr int n = 4;\n"
+            "    }\n"
+            "    int arr[n];\n"
+            "    return 0;\n"
+            "}\n",
+            case_name);
+        bool threw = !run_result_23.has_value();
+        std::string message = threw ? run_result_23.error().what() : "";
         expect(threw && message.find("identifier 'n' is not available") != std::string::npos,
                case_name + ": expected a nested block's local constexpr to stay out of scope once its own "
                            "block ends, got message '" +
@@ -2361,24 +2090,19 @@ void run_local_constexpr_array_bound_tests() {
     {
         std::string case_name = "local_constexpr_array_bound_does_not_leak_across_sibling_functions";
         cases_run++;
-        bool threw = false;
-        std::string message;
-        try {
-            (void)compile_and_run(
-                "int main() {\n"
-                "    constexpr int n = 4;\n"
-                "    int arr[n];\n"
-                "    arr[0] = 1;\n"
-                "    return arr[0];\n"
-                "}\n"
-                "void other() {\n"
-                "    int leaked[n];\n"
-                "}\n",
-                case_name);
-        } catch (const scpp::DriverError& error) {
-            threw = true;
-            message = error.what();
-        }
+        auto run_result_24 = try_compile_and_run(
+            "int main() {\n"
+            "    constexpr int n = 4;\n"
+            "    int arr[n];\n"
+            "    arr[0] = 1;\n"
+            "    return arr[0];\n"
+            "}\n"
+            "void other() {\n"
+            "    int leaked[n];\n"
+            "}\n",
+            case_name);
+        bool threw = !run_result_24.has_value();
+        std::string message = threw ? run_result_24.error().what() : "";
         expect(threw && message.find("identifier 'n' is not available") != std::string::npos,
                case_name + ": expected a local constexpr in one function to stay invisible to an unrelated "
                            "sibling function, got message '" +
@@ -2473,26 +2197,8 @@ void run_explicit_destructor_tests() {
     {
         std::string case_name = "object_form_explicit_destructor_is_rejected";
         cases_run++;
-        bool threw = false;
-        try {
-            auto program_result = scpp::parse(
-                "class Box { public: virtual ~Box() { return; } }; int main() { Box b{}; [[scpp::unsafe]] { b.~Box(); } return 0; }");
-            if (!program_result.has_value()) throw std::move(program_result).error();
-            scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-            scpp::Codegen codegen("test_module");
-            auto generate_result = codegen.generate(program);
-            if (!generate_result.has_value()) throw std::move(generate_result).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+        bool threw = full_pipeline_fails(
+            "class Box { public: virtual ~Box() { return; } }; int main() { Box b{}; [[scpp::unsafe]] { b.~Box(); } return 0; }");
         expect(threw, case_name + ": expected object-form explicit destructor call to be rejected");
     }
 }
@@ -2811,25 +2517,21 @@ void run_consteval_tests() {
     {
         std::string case_name = "consteval_rejects_runtime_only_call";
         cases_run++;
-        bool threw = false;
-        try {
-            auto compile_result_40 = scpp::compile_to_executable(
-                "int runtime_only(int x) {\n"
-                "    return x + 1;\n"
-                "}\n"
-                "consteval int answer() {\n"
-                "    return runtime_only(41);\n"
-                "}\n"
-                "int main() {\n"
-                "    return answer();\n"
-                "}\n",
-                (std::filesystem::current_path() / "consteval_rejects_runtime_only_call_exe").string(),
-                std_link_inputs(), prebuilt_module_import_paths());
-            if (!compile_result_40.has_value()) throw std::move(compile_result_40).error();
-        } catch (const scpp::DriverError& error) {
-            threw = std::string(error.what()).find("immediate evaluation may only call constexpr/consteval functions") !=
-                    std::string::npos;
-        }
+        auto compile_result_40 = scpp::compile_to_executable(
+            "int runtime_only(int x) {\n"
+            "    return x + 1;\n"
+            "}\n"
+            "consteval int answer() {\n"
+            "    return runtime_only(41);\n"
+            "}\n"
+            "int main() {\n"
+            "    return answer();\n"
+            "}\n",
+            (std::filesystem::current_path() / "consteval_rejects_runtime_only_call_exe").string(),
+            std_link_inputs(), prebuilt_module_import_paths());
+        bool threw = !compile_result_40.has_value() &&
+                     std::string(compile_result_40.error().what()).find(
+                         "immediate evaluation may only call constexpr/consteval functions") != std::string::npos;
         expect(threw, case_name + ": expected clear runtime-only immediate-call rejection");
     }
 
@@ -2923,20 +2625,17 @@ void run_consteval_tests() {
     {
         std::string case_name = "constexpr_local_rejects_runtime_initializer";
         cases_run++;
-        bool threw = false;
-        try {
-            auto compile_result_44 = scpp::compile_to_executable(
-                "int main() {\n"
-                "    int runtime = 4;\n"
-                "    constexpr int total = runtime + 1;\n"
-                "    return total;\n"
-                "}\n",
-                (std::filesystem::current_path() / "constexpr_local_rejects_runtime_initializer_exe").string(),
-                std_link_inputs(), prebuilt_module_import_paths());
-            if (!compile_result_44.has_value()) throw std::move(compile_result_44).error();
-        } catch (const scpp::DriverError& error) {
-            threw = std::string(error.what()).find("identifier 'runtime' is not available") != std::string::npos;
-        }
+        auto compile_result_44 = scpp::compile_to_executable(
+            "int main() {\n"
+            "    int runtime = 4;\n"
+            "    constexpr int total = runtime + 1;\n"
+            "    return total;\n"
+            "}\n",
+            (std::filesystem::current_path() / "constexpr_local_rejects_runtime_initializer_exe").string(),
+            std_link_inputs(), prebuilt_module_import_paths());
+        bool threw = !compile_result_44.has_value() &&
+                     std::string(compile_result_44.error().what()).find("identifier 'runtime' is not available") !=
+                         std::string::npos;
         expect(threw, case_name + ": expected constexpr local to reject runtime-only initializer");
     }
 
@@ -3012,34 +2711,30 @@ void run_consteval_tests() {
     {
         std::string case_name = "required_constant_evaluation_rejects_user_defined_destructor_execution";
         cases_run++;
-        bool threw = false;
-        try {
-            auto compile_result_47 = scpp::compile_to_executable(
-                "class NeedsDrop {\n"
-                "public:\n"
-                "    int value{};\n"
-                "    constexpr NeedsDrop(int x) : value{x} { return; }\n"
-                "    virtual ~NeedsDrop() {\n"
-                "        return;\n"
-                "    }\n"
-                "};\n"
-                "constexpr int make_value() {\n"
-                "    NeedsDrop box{42};\n"
-                "    return box.value;\n"
-                "}\n"
-                "int main() {\n"
-                "    constexpr int value = make_value();\n"
-                "    return value;\n"
-                "}\n",
-                (std::filesystem::current_path() /
-                 "required_constant_evaluation_rejects_user_defined_destructor_execution_exe")
-                    .string(),
-                std_link_inputs(), prebuilt_module_import_paths());
-            if (!compile_result_47.has_value()) throw std::move(compile_result_47).error();
-        } catch (const scpp::DriverError& error) {
-            threw = std::string(error.what()).find("cannot execute user-defined destructor of 'NeedsDrop'") !=
-                    std::string::npos;
-        }
+        auto compile_result_47 = scpp::compile_to_executable(
+            "class NeedsDrop {\n"
+            "public:\n"
+            "    int value{};\n"
+            "    constexpr NeedsDrop(int x) : value{x} { return; }\n"
+            "    virtual ~NeedsDrop() {\n"
+            "        return;\n"
+            "    }\n"
+            "};\n"
+            "constexpr int make_value() {\n"
+            "    NeedsDrop box{42};\n"
+            "    return box.value;\n"
+            "}\n"
+            "int main() {\n"
+            "    constexpr int value = make_value();\n"
+            "    return value;\n"
+            "}\n",
+            (std::filesystem::current_path() /
+             "required_constant_evaluation_rejects_user_defined_destructor_execution_exe")
+                .string(),
+            std_link_inputs(), prebuilt_module_import_paths());
+        bool threw = !compile_result_47.has_value() &&
+                     std::string(compile_result_47.error().what()).find("cannot execute user-defined destructor of 'NeedsDrop'") !=
+                         std::string::npos;
         expect(threw, case_name + ": expected required constant evaluation to reject user-defined destructor execution");
     }
 }
@@ -5661,86 +5356,55 @@ void run_enum_tests() {
     {
         std::string case_name = "enum_class_cross_type_comparison_is_rejected";
         cases_run++;
-        bool threw = false;
-        try {
-            auto program_result = scpp::parse(
-                "enum class Color { red };\n"
-                "enum class Shape { red };\n"
-                "int main() { return Color::red == Shape::red; }\n");
-            if (!program_result.has_value()) throw std::move(program_result).error();
-            scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-            scpp::Codegen codegen("test_module");
-            auto generate_result = codegen.generate(program);
-            if (!generate_result.has_value()) throw std::move(generate_result).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+        bool threw = full_pipeline_fails(
+            "enum class Color { red };\n"
+            "enum class Shape { red };\n"
+            "int main() { return Color::red == Shape::red; }\n");
         expect(threw, case_name + ": expected cross-enum comparison to be rejected");
     }
 
     {
         std::string case_name = "enum_class_explicit_int_to_enum_cast_is_rejected";
         cases_run++;
-        bool threw = false;
-        try {
+        bool threw = [&] {
             auto program_result = scpp::parse(
                 "enum class Color { red };\n"
                 "int main() { Color color = static_cast<Color>(1); return 0; }\n");
-            if (!program_result.has_value()) throw std::move(program_result).error();
+            if (!program_result.has_value()) return true;
             scpp::Program program = std::move(program_result.value());
             auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
+            if (!monomorphize_result.has_value()) {
+                expect(std::string(monomorphize_result.error().what()).find("scpp::enum_cast<Color>(value)") !=
+                           std::string::npos,
+                       case_name + ": expected enum_cast guidance in move-check diagnostic");
+                return true;
+            }
             auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
+            if (!check_moves_result.has_value()) {
+                expect(std::string(check_moves_result.error().what()).find("scpp::enum_cast<Color>(value)") !=
+                           std::string::npos,
+                       case_name + ": expected enum_cast guidance in move-check diagnostic");
+                return true;
+            }
             scpp::Codegen codegen("test_module");
             auto generate_result = codegen.generate(program);
-            if (!generate_result.has_value()) throw std::move(generate_result).error();
-        } catch (const scpp::DataflowError& e) {
-            threw = true;
-            expect(std::string(e.what()).find("scpp::enum_cast<Color>(value)") != std::string::npos,
-                   case_name + ": expected enum_cast guidance in move-check diagnostic");
-        } catch (const scpp::CodegenError& e) {
-            threw = true;
-            expect(std::string(e.what()).find("scpp::enum_cast<Color>(value)") != std::string::npos,
-                   case_name + ": expected enum_cast guidance in codegen diagnostic");
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+            if (!generate_result.has_value()) {
+                expect(std::string(generate_result.error().what()).find("scpp::enum_cast<Color>(value)") !=
+                           std::string::npos,
+                       case_name + ": expected enum_cast guidance in codegen diagnostic");
+                return true;
+            }
+            return false;
+        }();
         expect(threw, case_name + ": expected explicit int-to-enum cast to be rejected");
     }
 
     {
         std::string case_name = "enum_class_implicit_enum_to_int_is_rejected";
         cases_run++;
-        bool threw = false;
-        try {
-            auto program_result = scpp::parse(
-                "enum class Color { red };\n"
-                "int main() { int value = Color::red; return value; }\n");
-            if (!program_result.has_value()) throw std::move(program_result).error();
-            scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-            scpp::Codegen codegen("test_module");
-            auto generate_result = codegen.generate(program);
-            if (!generate_result.has_value()) throw std::move(generate_result).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        } catch (const scpp::CodegenError&) {
-            threw = true;
-        } catch (const scpp::ParseError&) {
-            threw = true;
-        }
+        bool threw = full_pipeline_fails(
+            "enum class Color { red };\n"
+            "int main() { int value = Color::red; return value; }\n");
         expect(threw, case_name + ": expected implicit enum-to-int conversion to be rejected");
     }
 
@@ -5781,26 +5445,23 @@ void run_switch_tests() {
         cases_run++;
         std::filesystem::path exe_path = std::filesystem::current_path() / (case_name + "_exe");
         std::filesystem::remove(exe_path);
-        bool threw = false;
-        try {
-            auto compile_result_49 = scpp::compile_to_executable(
-                "int main() {\n"
-                "    int value = 0;\n"
-                "    switch (1) {\n"
-                "        case 1:\n"
-                "            value = 1;\n"
-                "        case 2:\n"
-                "            value = 2;\n"
-                "        default:\n"
-                "            return value;\n"
-                "    }\n"
-                "}\n",
-                exe_path.string(), std_link_inputs(),
-                prebuilt_module_import_paths());
-            if (!compile_result_49.has_value()) throw std::move(compile_result_49).error();
-        } catch (const scpp::DriverError& e) {
-            threw = true;
-            expect(std::string(e.what()).find("must end with 'break;'") != std::string::npos,
+        auto compile_result_49 = scpp::compile_to_executable(
+            "int main() {\n"
+            "    int value = 0;\n"
+            "    switch (1) {\n"
+            "        case 1:\n"
+            "            value = 1;\n"
+            "        case 2:\n"
+            "            value = 2;\n"
+            "        default:\n"
+            "            return value;\n"
+            "    }\n"
+            "}\n",
+            exe_path.string(), std_link_inputs(),
+            prebuilt_module_import_paths());
+        bool threw = !compile_result_49.has_value();
+        if (threw) {
+            expect(std::string(compile_result_49.error().what()).find("must end with 'break;'") != std::string::npos,
                    case_name + ": expected explicit-terminator diagnostic");
         }
         std::filesystem::remove(exe_path);
@@ -5873,27 +5534,24 @@ void run_switch_tests() {
     {
         std::string case_name = "switch_duplicate_case_values_are_rejected";
         cases_run++;
+        auto program_result = scpp::parse(
+            "int main() {\n"
+            "    switch (1) {\n"
+            "        case 1:\n"
+            "            return 1;\n"
+            "        case 1:\n"
+            "            return 0;\n"
+            "    }\n"
+            "}\n");
         bool threw = false;
-        try {
-            auto program_result = scpp::parse(
-                "int main() {\n"
-                "    switch (1) {\n"
-                "        case 1:\n"
-                "            return 1;\n"
-                "        case 1:\n"
-                "            return 0;\n"
-                "    }\n"
-                "}\n");
-            if (!program_result.has_value()) throw std::move(program_result).error();
+        if (program_result.has_value()) {
             scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-        } catch (const scpp::DataflowError& e) {
-            threw = true;
-            expect(std::string(e.what()).find("duplicate switch case value") != std::string::npos,
-                   case_name + ": expected duplicate-case diagnostic");
+            auto error_message = monomorphize_or_check_moves_error_message(program);
+            if (error_message.has_value()) {
+                threw = true;
+                expect(error_message->find("duplicate switch case value") != std::string::npos,
+                       case_name + ": expected duplicate-case diagnostic");
+            }
         }
         expect(threw, case_name + ": expected a DataflowError");
     }
@@ -5901,27 +5559,24 @@ void run_switch_tests() {
     {
         std::string case_name = "switch_on_non_integral_type_is_rejected";
         cases_run++;
+        auto program_result = scpp::parse(
+            "struct Box { int value; };\n"
+            "int main() {\n"
+            "    Box box{1};\n"
+            "    switch (box) {\n"
+            "        default:\n"
+            "            return 0;\n"
+            "    }\n"
+            "}\n");
         bool threw = false;
-        try {
-            auto program_result = scpp::parse(
-                "struct Box { int value; };\n"
-                "int main() {\n"
-                "    Box box{1};\n"
-                "    switch (box) {\n"
-                "        default:\n"
-                "            return 0;\n"
-                "    }\n"
-                "}\n");
-            if (!program_result.has_value()) throw std::move(program_result).error();
+        if (program_result.has_value()) {
             scpp::Program program = std::move(program_result.value());
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-        } catch (const scpp::DataflowError& e) {
-            threw = true;
-            expect(std::string(e.what()).find("integral or enum") != std::string::npos,
-                   case_name + ": expected integral-or-enum diagnostic");
+            auto error_message = monomorphize_or_check_moves_error_message(program);
+            if (error_message.has_value()) {
+                threw = true;
+                expect(error_message->find("integral or enum") != std::string::npos,
+                       case_name + ": expected integral-or-enum diagnostic");
+            }
         }
         expect(threw, case_name + ": expected a DataflowError");
     }
@@ -5975,64 +5630,53 @@ void run_nodiscard_tests() {
     {
         std::string case_name = "nodiscard_function_discard_is_rejected";
         cases_run++;
-        bool threw = false;
-        try {
-            auto compile_result_52 = scpp::compile_to_executable(
-                "[[nodiscard]] int answer() { return 7; }\n"
-                "int main() {\n"
-                "    answer();\n"
-                "    return 0;\n"
-                "}\n",
-                (std::filesystem::current_path() / case_name).string());
-            if (!compile_result_52.has_value()) throw std::move(compile_result_52).error();
-        } catch (const scpp::DataflowError& e) {
-            threw = std::string(e.what()).find("nodiscard function 'answer'") != std::string::npos;
-        }
+        auto compile_result_52 = scpp::compile_to_executable(
+            "[[nodiscard]] int answer() { return 7; }\n"
+            "int main() {\n"
+            "    answer();\n"
+            "    return 0;\n"
+            "}\n",
+            (std::filesystem::current_path() / case_name).string());
+        bool threw = !compile_result_52.has_value() &&
+                     std::string(compile_result_52.error().what()).find("nodiscard function 'answer'") != std::string::npos;
         expect(threw, case_name + ": expected nodiscard discard diagnostic");
     }
 
     {
         std::string case_name = "nodiscard_reason_is_included_in_diagnostic";
         cases_run++;
-        bool threw = false;
-        try {
-            auto compile_result_53 = scpp::compile_to_executable(
-                "[[nodiscard(\"check the status\")]] int answer() { return 7; }\n"
-                "int main() {\n"
-                "    answer();\n"
-                "    return 0;\n"
-                "}\n",
-                (std::filesystem::current_path() / case_name).string());
-            if (!compile_result_53.has_value()) throw std::move(compile_result_53).error();
-        } catch (const scpp::DataflowError& e) {
-            std::string message = e.what();
-            threw = message.find("check the status") != std::string::npos;
-        }
+        auto compile_result_53 = scpp::compile_to_executable(
+            "[[nodiscard(\"check the status\")]] int answer() { return 7; }\n"
+            "int main() {\n"
+            "    answer();\n"
+            "    return 0;\n"
+            "}\n",
+            (std::filesystem::current_path() / case_name).string());
+        bool threw = !compile_result_53.has_value() &&
+                     std::string(compile_result_53.error().what()).find("check the status") != std::string::npos;
         expect(threw, case_name + ": expected nodiscard reason in diagnostic");
     }
 
     {
         std::string case_name = "nodiscard_type_propagates_to_returning_function";
         cases_run++;
+        auto compile_result_54 = scpp::compile_to_executable(
+            "struct [[nodiscard(\"keep the status\")]] status {\n"
+            "    int code;\n"
+            "};\n"
+            "status make_status() {\n"
+            "    status s{};\n"
+            "    s.code = 5;\n"
+            "    return s;\n"
+            "}\n"
+            "int main() {\n"
+            "    make_status();\n"
+            "    return 0;\n"
+            "}\n",
+            (std::filesystem::current_path() / case_name).string());
         bool threw = false;
-        try {
-            auto compile_result_54 = scpp::compile_to_executable(
-                "struct [[nodiscard(\"keep the status\")]] status {\n"
-                "    int code;\n"
-                "};\n"
-                "status make_status() {\n"
-                "    status s{};\n"
-                "    s.code = 5;\n"
-                "    return s;\n"
-                "}\n"
-                "int main() {\n"
-                "    make_status();\n"
-                "    return 0;\n"
-                "}\n",
-                (std::filesystem::current_path() / case_name).string());
-            if (!compile_result_54.has_value()) throw std::move(compile_result_54).error();
-        } catch (const scpp::DataflowError& e) {
-            std::string message = e.what();
+        if (!compile_result_54.has_value()) {
+            std::string message = compile_result_54.error().what();
             threw = message.find("nodiscard type 'status'") != std::string::npos &&
                     message.find("keep the status") != std::string::npos;
         }
@@ -6146,10 +5790,8 @@ int main() {
     {
         std::string case_name = "private_constructor_is_not_callable_outside_the_class";
         cases_run++;
-        bool threw = false;
-        try {
-            auto compile_result_55 = scpp::compile_to_executable(
-                R"SCPP(class Box {
+        auto compile_result_55 = scpp::compile_to_executable(
+            R"SCPP(class Box {
 public:
     virtual ~Box() = default;
     static int reveal(int value) {
@@ -6165,21 +5807,17 @@ int main() {
     return 0;
 }
 )SCPP",
-                (std::filesystem::current_path() / case_name).string());
-            if (!compile_result_55.has_value()) throw std::move(compile_result_55).error();
-        } catch (const scpp::DataflowError& e) {
-            threw = std::string(e.what()).find("private constructor") != std::string::npos;
-        }
+            (std::filesystem::current_path() / case_name).string());
+        bool threw = !compile_result_55.has_value() &&
+                     std::string(compile_result_55.error().what()).find("private constructor") != std::string::npos;
         expect(threw, case_name + ": expected private constructor diagnostic");
     }
 
     {
         std::string case_name = "static_member_function_cannot_use_this";
         cases_run++;
-        bool threw = false;
-        try {
-            auto compile_result_56 = scpp::compile_to_executable(
-                R"SCPP(class Box {
+        auto compile_result_56 = scpp::compile_to_executable(
+            R"SCPP(class Box {
 public:
     virtual ~Box() = default;
     int secret;
@@ -6189,11 +5827,9 @@ public:
 };
 int main() { return 0; }
 )SCPP",
-                (std::filesystem::current_path() / case_name).string());
-            if (!compile_result_56.has_value()) throw std::move(compile_result_56).error();
-        } catch (const scpp::CodegenError& e) {
-            threw = std::string(e.what()).find("undeclared variable 'this'") != std::string::npos;
-        }
+            (std::filesystem::current_path() / case_name).string());
+        bool threw = !compile_result_56.has_value() &&
+                     std::string(compile_result_56.error().what()).find("undeclared variable 'this'") != std::string::npos;
         expect(threw, case_name + ": expected static method to reject use of this");
     }
 }
@@ -6276,16 +5912,13 @@ void run_default_argument_tests() {
 
     {
         std::string case_name = "default_argument_trailing_rule_is_rejected";
-        bool threw = false;
-        try {
-            auto compile_result_57 = scpp::compile_to_executable(
-                "int bad(int x = 1, int y) { return x + y; }\n"
-                "int main() { return bad(1, 2); }\n",
-                (std::filesystem::current_path() / case_name).string());
-            if (!compile_result_57.has_value()) throw std::move(compile_result_57).error();
-        } catch (const scpp::DriverError& e) {
-            threw = std::string(e.what()).find("every later parameter must also have one") != std::string::npos;
-        }
+        auto compile_result_57 = scpp::compile_to_executable(
+            "int bad(int x = 1, int y) { return x + y; }\n"
+            "int main() { return bad(1, 2); }\n",
+            (std::filesystem::current_path() / case_name).string());
+        bool threw = !compile_result_57.has_value() &&
+                     std::string(compile_result_57.error().what()).find("every later parameter must also have one") !=
+                         std::string::npos;
         expect(threw, case_name + ": expected trailing-only default-argument diagnostic");
     }
 }
@@ -6313,10 +5946,8 @@ void run_static_local_lifetime_tests() {
     {
         std::string case_name = "returning_reference_to_non_static_local_is_still_rejected";
         cases_run++;
-        bool threw = false;
-        try {
-            auto compile_result_58 = scpp::compile_to_executable(
-                R"SCPP(class Holder {
+        auto compile_result_58 = scpp::compile_to_executable(
+            R"SCPP(class Holder {
 public:
     const int& dangling_value() const {
         int value = 42;
@@ -6329,11 +5960,10 @@ int main() {
     return holder.dangling_value();
 }
 )SCPP",
-                (std::filesystem::current_path() / case_name).string());
-            if (!compile_result_58.has_value()) throw std::move(compile_result_58).error();
-        } catch (const scpp::DataflowError& e) {
-            threw = std::string(e.what()).find("returns a reference derived from 'value'") != std::string::npos;
-        }
+            (std::filesystem::current_path() / case_name).string());
+        bool threw = !compile_result_58.has_value() &&
+                     std::string(compile_result_58.error().what()).find("returns a reference derived from 'value'") !=
+                         std::string::npos;
         expect(threw, case_name + ": expected ordinary local reference return to remain rejected");
     }
 }
@@ -6397,10 +6027,8 @@ void run_implicit_member_field_access_tests() {
         std::string case_name = "member_optional_deref_without_explicit_this_compiles";
         cases_run++;
         std::filesystem::path exe_path = std::filesystem::current_path() / case_name;
-        bool threw = false;
-        try {
-            auto compile_result_59 = scpp::compile_to_executable(
-                R"SCPP(import std;
+        auto compile_result_59 = scpp::compile_to_executable(
+            R"SCPP(import std;
 class Holder {
 public:
     std::optional<std::string> text{};
@@ -6413,11 +6041,8 @@ int main() {
     return 0;
 }
 )SCPP",
-                exe_path.string());
-            if (!compile_result_59.has_value()) throw std::move(compile_result_59).error();
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        }
+            exe_path.string());
+        bool threw = !compile_result_59.has_value();
         expect(!threw, case_name + ": expected optional member deref to compile without explicit this");
         std::filesystem::remove(exe_path);
     }
@@ -6425,10 +6050,8 @@ int main() {
     {
         std::string case_name = "local_optional_deref_still_cannot_escape";
         cases_run++;
-        bool threw = false;
-        try {
-            auto compile_result_60 = scpp::compile_to_executable(
-                R"SCPP(import std;
+        auto compile_result_60 = scpp::compile_to_executable(
+            R"SCPP(import std;
 class Holder {
 public:
     const std::string& broken() const {
@@ -6441,11 +6064,10 @@ int main() {
     return 0;
 }
 )SCPP",
-                (std::filesystem::current_path() / case_name).string());
-            if (!compile_result_60.has_value()) throw std::move(compile_result_60).error();
-        } catch (const scpp::DataflowError& e) {
-            threw = std::string(e.what()).find("returns a reference derived from 'text'") != std::string::npos;
-        }
+            (std::filesystem::current_path() / case_name).string());
+        bool threw = !compile_result_60.has_value() &&
+                     std::string(compile_result_60.error().what()).find("returns a reference derived from 'text'") !=
+                         std::string::npos;
         expect(threw, case_name + ": expected local optional deref escape to remain rejected");
     }
 }
@@ -7356,10 +6978,8 @@ int main() {
     {
         std::string case_name = "std_expected_discard_is_rejected_by_nodiscard";
         cases_run++;
-        bool threw = false;
-        try {
-            auto compile_result_61 = scpp::compile_to_executable(
-                R"SCPP(import std;
+        auto compile_result_61 = scpp::compile_to_executable(
+            R"SCPP(import std;
 enum class calc_error { invalid };
 std::expected<int, calc_error> fail() {
     std::unexpected<calc_error> err{calc_error::invalid};
@@ -7371,10 +6991,10 @@ int main() {
     return 0;
 }
 )SCPP",
-                (std::filesystem::current_path() / case_name).string());
-            if (!compile_result_61.has_value()) throw std::move(compile_result_61).error();
-        } catch (const scpp::DataflowError& e) {
-            std::string message = e.what();
+            (std::filesystem::current_path() / case_name).string());
+        bool threw = false;
+        if (!compile_result_61.has_value()) {
+            std::string message = compile_result_61.error().what();
             threw = message.find("nodiscard type") != std::string::npos &&
                     message.find("expected results must be checked") != std::string::npos;
         }
@@ -7654,11 +7274,8 @@ void run_subscripted_deref_tests() {
     {
         std::string case_name = "forward_declared_member_vector_optional_element_can_be_dereferenced_through_subscript";
         cases_run++;
-        bool threw = false;
-        std::string unexpected;
-        try {
-            auto compile_result_62 = scpp::compile_to_executable(
-                R"SCPP(import std;
+        auto compile_result_62 = scpp::compile_to_executable(
+            R"SCPP(import std;
 class Box;
 class Box {
 public:
@@ -7670,23 +7287,18 @@ const int& first(const Box& box) {
 }
 int main() { return 0; }
 )SCPP",
-                (std::filesystem::current_path() / case_name).string());
-            if (!compile_result_62.has_value()) throw std::move(compile_result_62).error();
-        } catch (const std::exception& e) {
-            threw = true;
-            unexpected = e.what();
-        }
+            (std::filesystem::current_path() / case_name).string());
+        bool threw = !compile_result_62.has_value();
+        std::string unexpected = threw ? compile_result_62.error().what() : std::string();
         expect(!threw, case_name + ": expected forward-declared owner subscripted deref to compile, got '" + unexpected + "'");
     }
 
     {
         std::string case_name = "returning_ref_through_local_forward_declared_member_vector_optional_element_is_still_rejected";
         cases_run++;
-        bool threw = false;
         std::string unexpected;
-        try {
-            auto compile_result_63 = scpp::compile_to_executable(
-                R"SCPP(import std;
+        auto compile_result_63 = scpp::compile_to_executable(
+            R"SCPP(import std;
 class Box;
 class Box {
 public:
@@ -7706,12 +7318,15 @@ int main() {
     return 0;
 }
 )SCPP",
-                (std::filesystem::current_path() / case_name).string());
-            if (!compile_result_63.has_value()) throw std::move(compile_result_63).error();
-        } catch (const scpp::DataflowError& e) {
-            threw = std::string(e.what()).find("returns a reference derived from 'box'") != std::string::npos;
-        } catch (const std::exception& e) {
-            unexpected = e.what();
+            (std::filesystem::current_path() / case_name).string());
+        bool threw = false;
+        if (!compile_result_63.has_value()) {
+            const scpp::DriverError& error = compile_result_63.error();
+            if (error.kind == scpp::DriverErrorKind::Dataflow) {
+                threw = std::string(error.what()).find("returns a reference derived from 'box'") != std::string::npos;
+            } else {
+                unexpected = error.what();
+            }
         }
         expect(threw, case_name + ": expected local vector element deref escape to remain rejected, got '" + unexpected + "'");
     }
@@ -7719,11 +7334,9 @@ int main() {
     {
         std::string case_name = "assigning_forward_declared_owner_while_subscripted_optional_ref_is_live_is_still_rejected";
         cases_run++;
-        bool threw = false;
         std::string unexpected;
-        try {
-            auto compile_result_64 = scpp::compile_to_executable(
-                R"SCPP(import std;
+        auto compile_result_64 = scpp::compile_to_executable(
+            R"SCPP(import std;
 class Box;
 class Box {
 public:
@@ -7742,13 +7355,16 @@ int main() {
     return current;
 }
 )SCPP",
-                (std::filesystem::current_path() / case_name).string());
-            if (!compile_result_64.has_value()) throw std::move(compile_result_64).error();
-        } catch (const scpp::DataflowError& e) {
-            threw = std::string(e.what()).find("cannot assign to this place: 'box' is currently borrowed") !=
-                    std::string::npos;
-        } catch (const std::exception& e) {
-            unexpected = e.what();
+            (std::filesystem::current_path() / case_name).string());
+        bool threw = false;
+        if (!compile_result_64.has_value()) {
+            const scpp::DriverError& error = compile_result_64.error();
+            if (error.kind == scpp::DriverErrorKind::Dataflow) {
+                threw = std::string(error.what()).find("cannot assign to this place: 'box' is currently borrowed") !=
+                        std::string::npos;
+            } else {
+                unexpected = error.what();
+            }
         }
         expect(threw, case_name + ": expected container reassignment while element-derived ref is live to remain rejected, got '" +
                           unexpected + "'");
@@ -7954,19 +7570,15 @@ int main() {
 void run_for_loop_tests() {
     {
         std::string case_name = "classic_for_init_decl_is_out_of_scope_after_loop";
-        bool threw = false;
-        try {
-            (void)compile_and_run(
-                R"SCPP(int main() {
+        auto result = try_compile_and_run(
+            R"SCPP(int main() {
     for (int j = 0; j < 2; j = j + 1) {
     }
     return j;
 }
 )SCPP",
-                case_name);
-        } catch (const std::exception&) {
-            threw = true;
-        }
+            case_name);
+        bool threw = !result.has_value();
         expect(threw, case_name + ": expected loop-init declaration to be out of scope after the loop");
     }
     {
@@ -8013,10 +7625,8 @@ int main() {
     }
     {
         std::string case_name = "range_for_const_reference_rejects_mutation";
-        bool threw = false;
-        try {
-            (void)compile_and_run(
-                R"SCPP(int main() {
+        auto result = try_compile_and_run(
+            R"SCPP(int main() {
     int values[2];
     for (const auto& value : values) {
         value = 1;
@@ -8024,10 +7634,8 @@ int main() {
     return 0;
 }
 )SCPP",
-                case_name);
-        } catch (const std::exception&) {
-            threw = true;
-        }
+            case_name);
+        bool threw = !result.has_value();
         expect(threw, case_name + ": expected mutation through const auto& to be rejected");
     }
 }
@@ -8190,26 +7798,22 @@ void run_inheritance_constructor_and_destructor_tests() {
     {
         std::string case_name = "missing_required_base_initializer_is_rejected";
         cases_run++;
-        bool threw = false;
-        try {
-            (void)compile_and_run(
-                "class Base {\n"
-                "public:\n"
-                "    virtual ~Base() = default;\n"
-                "    Base(int seed) { return; }\n"
-                "};\n"
-                "class Derived : public Base {\n"
-                "public:\n"
-                "    Derived() { return; }\n"
-                "};\n"
-                "int main() {\n"
-                "    Derived d{};\n"
-                "    return 0;\n"
-                "}\n",
-                case_name);
-        } catch (const std::exception&) {
-            threw = true;
-        }
+        auto result = try_compile_and_run(
+            "class Base {\n"
+            "public:\n"
+            "    virtual ~Base() = default;\n"
+            "    Base(int seed) { return; }\n"
+            "};\n"
+            "class Derived : public Base {\n"
+            "public:\n"
+            "    Derived() { return; }\n"
+            "};\n"
+            "int main() {\n"
+            "    Derived d{};\n"
+            "    return 0;\n"
+            "}\n",
+            case_name);
+        bool threw = !result.has_value();
         expect(threw, case_name + ": expected missing base initializer to be rejected");
     }
 }
@@ -8218,10 +7822,8 @@ void run_default_constructor_selection_tests() {
     {
         std::string case_name = "struct_default_brace_init_with_only_parameterized_ctor_reports_dataflow_error";
         cases_run++;
-        bool threw = false;
-        try {
-            auto compile_result_65 = scpp::compile_to_executable(
-                R"SCPP(struct User {
+        auto compile_result_65 = scpp::compile_to_executable(
+            R"SCPP(struct User {
     int id{};
     User(int initial_id) : id{initial_id} { return; }
 };
@@ -8231,21 +7833,17 @@ int main() {
     return 0;
 }
 )SCPP",
-                (std::filesystem::current_path() / case_name).string());
-            if (!compile_result_65.has_value()) throw std::move(compile_result_65).error();
-        } catch (const scpp::DataflowError& e) {
-            threw = std::string(e.what()).find("no default constructor") != std::string::npos;
-        }
+            (std::filesystem::current_path() / case_name).string());
+        bool threw = !compile_result_65.has_value() &&
+                     std::string(compile_result_65.error().what()).find("no default constructor") != std::string::npos;
         expect(threw, case_name + ": expected movecheck to reject missing default constructor");
     }
 
     {
         std::string case_name = "class_default_brace_init_with_only_parameterized_ctor_reports_dataflow_error";
         cases_run++;
-        bool threw = false;
-        try {
-            auto compile_result_66 = scpp::compile_to_executable(
-                R"SCPP(class User {
+        auto compile_result_66 = scpp::compile_to_executable(
+            R"SCPP(class User {
 public:
     int id{};
     User(int initial_id) : id{initial_id} { return; }
@@ -8257,11 +7855,9 @@ int main() {
     return 0;
 }
 )SCPP",
-                (std::filesystem::current_path() / case_name).string());
-            if (!compile_result_66.has_value()) throw std::move(compile_result_66).error();
-        } catch (const scpp::DataflowError& e) {
-            threw = std::string(e.what()).find("no default constructor") != std::string::npos;
-        }
+            (std::filesystem::current_path() / case_name).string());
+        bool threw = !compile_result_66.has_value() &&
+                     std::string(compile_result_66.error().what()).find("no default constructor") != std::string::npos;
         expect(threw, case_name + ": expected movecheck to reject missing default constructor");
     }
 
@@ -8335,17 +7931,12 @@ void run_member_lifetime_tests() {
             "    int value;\n"
             "    int* data() [[scpp::lifetime(this)]] { return &value; }\n"
             "};\n");
-        bool threw = false;
-        try {
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-        } catch (const scpp::DataflowError& e) {
-            threw = true;
-            expect(false, case_name + ": expected check_moves to accept receiver-tied member return, got '" + e.what() + "'");
+        auto error_message = monomorphize_or_check_moves_error_message(program);
+        if (error_message.has_value()) {
+            expect(false, case_name + ": expected check_moves to accept receiver-tied member return, got '" +
+                              *error_message + "'");
         }
-        expect(!threw, case_name + ": expected receiver-tied member return to pass");
+        expect(!error_message.has_value(), case_name + ": expected receiver-tied member return to pass");
     }
 
     {
@@ -8358,18 +7949,12 @@ void run_member_lifetime_tests() {
             "    int value;\n"
             "    int* data(int* p) [[scpp::lifetime(this)]] { return p; }\n"
             "};\n");
-        bool threw = false;
-        try {
-            auto monomorphize_result = scpp::monomorphize_generics(program);
-            if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-            auto check_moves_result = scpp::check_moves(program);
-            if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-        } catch (const scpp::DataflowError& e) {
-            threw = true;
-            expect(std::string(e.what()).find("not from lifetime group 'this'") != std::string::npos,
-                   case_name + ": expected receiver lifetime mismatch diagnostic, got '" + e.what() + "'");
+        auto error_message = monomorphize_or_check_moves_error_message(program);
+        if (error_message.has_value()) {
+            expect(error_message->find("not from lifetime group 'this'") != std::string::npos,
+                   case_name + ": expected receiver lifetime mismatch diagnostic, got '" + *error_message + "'");
         }
-        expect(threw, case_name + ": expected check_moves to reject non-receiver return");
+        expect(error_message.has_value(), case_name + ": expected check_moves to reject non-receiver return");
     }
 }
 
@@ -8451,10 +8036,8 @@ int main() {
     {
         std::string case_name = "const_qualified_type_argument_makes_substituted_reference_read_only";
         cases_run++;
-        bool threw = false;
-        try {
-            (void)compile_and_run(
-                R"SCPP(import std;
+        auto run_result_67 = try_compile_and_run(
+            R"SCPP(import std;
 template<typename T>
 class Mutator {
 public:
@@ -8467,10 +8050,8 @@ int main() {
     return value;
 }
 )SCPP",
-                case_name);
-        } catch (const scpp::DataflowError&) {
-            threw = true;
-        }
+            case_name);
+        bool threw = !run_result_67.has_value();
         expect(threw, case_name + ": expected a write through 'T&' with 'T = const int' to be rejected");
     }
 
@@ -8544,39 +8125,34 @@ int main() {
 
     {
         std::string case_name = "nested_lifetime_annotation_rejects_non_eligible_template_argument";
-        bool threw = false;
-        try {
-            (void)compile_and_run(
-                R"SCPP(import std;
+        auto result = try_compile_and_run(
+            R"SCPP(import std;
 int* bad(std::optional<int [[scpp::lifetime(source)]]> source) [[scpp::lifetime(source)]] {
     return 0;
 }
 int main() { return 0; }
 )SCPP",
-                case_name);
-        } catch (const std::exception& ex) {
-            threw = std::string(ex.what()).find("does not denote a reference, pointer, span, or std::reference_wrapper-carried reference") !=
-                    std::string::npos;
-        }
+            case_name);
+        bool threw = !result.has_value() &&
+                     std::string(result.error().what())
+                             .find("does not denote a reference, pointer, span, or std::reference_wrapper-carried reference") !=
+                         std::string::npos;
         expect(threw, case_name + ": expected non-eligible nested lifetime annotation to be rejected");
     }
 
     {
         std::string case_name = "reference_wrapper_optional_counts_as_eligible_pointer_source_for_ambiguity";
-        bool threw = false;
-        try {
-            (void)compile_and_run(
-                R"SCPP(import std;
+        auto result = try_compile_and_run(
+            R"SCPP(import std;
 const int* ambiguous(std::optional<std::reference_wrapper<const int>> source, const int& other) {
     if (!source.has_value()) return &other;
     return &source->get();
 }
 int main() { return 0; }
 )SCPP",
-                case_name);
-        } catch (const std::exception& ex) {
-            threw = std::string(ex.what()).find("more than one eligible source parameter") != std::string::npos;
-        }
+            case_name);
+        bool threw = !result.has_value() &&
+                     std::string(result.error().what()).find("more than one eligible source parameter") != std::string::npos;
         expect(threw, case_name + ": expected optional<reference_wrapper<T>> to participate in pointer-source ambiguity");
     }
 }
