@@ -45,7 +45,7 @@ enum class ConstexprValueKind {
 struct ConstexprValue {
     Type type;
     ConstexprValueKind kind = ConstexprValueKind::Void;
-    long long int_value = 0;
+    std::int64_t int_value = 0;
     double double_value = 0.0;
     bool bool_value = false;
     std::string string_value;
@@ -70,12 +70,12 @@ struct Cell;
 struct PointerValue {
     std::shared_ptr<Cell> storage;
     std::string storage_id;
-    long long index = 0;
+    std::int64_t index = 0;
 };
 
 struct SpanValue {
     PointerValue pointer;
-    long long size = 0;
+    std::int64_t size = 0;
 };
 
 struct ObjectValue {
@@ -88,7 +88,7 @@ struct ArrayValue {
     std::vector<std::shared_ptr<Cell>> elements;
 };
 
-using CellData = std::variant<std::monostate, long long, double, bool, PointerValue, SpanValue, ObjectValue, ArrayValue>;
+using CellData = std::variant<std::monostate, std::int64_t, double, bool, PointerValue, SpanValue, ObjectValue, ArrayValue>;
 
 struct Cell {
     Type type;
@@ -279,7 +279,7 @@ public:
     // (e.g. from `validate_constexpr_stmt_tree`, which runs inside a
     // `frames_` scope pushed by `validate_constexpr_locals`). Use
     // `resolve_root_array_bound` instead at a true top-level call site.
-    [[nodiscard]] std::expected<long long, ConstexprError> evaluate_and_validate_array_bound(const Expr& expr) {
+    [[nodiscard]] std::expected<std::int64_t, ConstexprError> evaluate_and_validate_array_bound(const Expr& expr) {
         auto value_result = evaluate_expr(expr);
         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
         std::shared_ptr<Cell> value = std::move(value_result).value();
@@ -289,7 +289,7 @@ public:
         }
         auto raw_result = as_integer(value, expr.loc);
         if (!raw_result.has_value()) return std::unexpected(std::move(raw_result).error());
-        long long raw = raw_result.value();
+        std::int64_t raw = raw_result.value();
         if (raw <= 0) {
             return std::unexpected(ConstexprError(expr.loc, "array bound must be greater than zero (got " + std::to_string(raw) + ")"));
         }
@@ -299,7 +299,7 @@ public:
     // Top-level entry point: resets evaluation state (mirroring
     // `resolve_root_alignment_specs`) before evaluating. Only safe to call
     // when no other evaluation is already in progress on this engine.
-    [[nodiscard]] std::expected<long long, ConstexprError> resolve_root_array_bound(const Expr& expr) {
+    [[nodiscard]] std::expected<std::int64_t, ConstexprError> resolve_root_array_bound(const Expr& expr) {
         frames_.clear();
         steps_ = 0;
         call_depth_ = 0;
@@ -488,7 +488,7 @@ private:
         }
         auto raw_result = as_integer(value, spec.loc);
         if (!raw_result.has_value()) return std::unexpected(std::move(raw_result).error());
-        long long raw = raw_result.value();
+        std::int64_t raw = raw_result.value();
         if (raw < 0) {
             return std::unexpected(ConstexprError(spec.loc, "'alignas' requires a non-negative alignment value"));
         }
@@ -622,7 +622,7 @@ private:
         std::visit(
             [&](const auto& data) {
                 using T = std::decay_t<decltype(data)>;
-                if constexpr (std::is_same_v<T, std::monostate> || std::is_same_v<T, long long> ||
+                if constexpr (std::is_same_v<T, std::monostate> || std::is_same_v<T, std::int64_t> ||
                               std::is_same_v<T, double> || std::is_same_v<T, bool> ||
                               std::is_same_v<T, PointerValue> || std::is_same_v<T, SpanValue>) {
                     copy->data = data;
@@ -642,7 +642,7 @@ private:
         return copy;
     }
 
-    [[nodiscard]] std::shared_ptr<Cell> make_scalar_cell(Type type, long long value) {
+    [[nodiscard]] std::shared_ptr<Cell> make_scalar_cell(Type type, std::int64_t value) {
         auto cell = std::make_shared<Cell>();
         cell->type = std::move(type);
         cell->data = value;
@@ -685,7 +685,7 @@ private:
         switch (type.kind) {
             case TypeKind::Named:
                 if (is_integral_named_type(type.name) && type.name != "bool") {
-                    cell->data = 0LL;
+                    cell->data = static_cast<std::int64_t>(0);
                     return cell;
                 }
                 if (type.name == "bool") {
@@ -738,7 +738,7 @@ private:
                 if (!type.element) return std::unexpected(ConstexprError(loc, "malformed array type in constexpr evaluator"));
                 ArrayValue array;
                 array.element_type = *type.element;
-                for (long long i = 0; i < type.array_size; ++i) {
+                for (std::int64_t i = 0; i < type.array_size; ++i) {
                     auto element_result = make_default_cell(*type.element, loc);
                     if (!element_result.has_value()) return std::unexpected(std::move(element_result).error());
                     array.elements.push_back(std::move(element_result).value());
@@ -807,12 +807,12 @@ private:
         return value;
     }
 
-    [[nodiscard]] std::expected<long long, ConstexprError> as_integer(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
+    [[nodiscard]] std::expected<std::int64_t, ConstexprError> as_integer(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
         if (!is_integer_like(cell->type)) {
             return std::unexpected(ConstexprError(loc, "expected an integer-like constexpr value"));
         }
-        if (is_named_type(cell->type, "bool")) return std::get<bool>(cell->data) ? 1LL : 0LL;
-        return std::get<long long>(cell->data);
+        if (is_named_type(cell->type, "bool")) return std::get<bool>(cell->data) ? static_cast<std::int64_t>(1) : static_cast<std::int64_t>(0);
+        return std::get<std::int64_t>(cell->data);
     }
 
     [[nodiscard]] std::expected<double, ConstexprError> as_double(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
@@ -843,13 +843,13 @@ private:
         return false;
     }
 
-    [[nodiscard]] std::expected<long long, ConstexprError> switch_match_key(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
+    [[nodiscard]] std::expected<std::int64_t, ConstexprError> switch_match_key(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
         if (is_integer_like(cell->type)) return as_integer(cell, loc);
-        if (is_enum_like(cell->type)) return std::get<long long>(cell->data);
+        if (is_enum_like(cell->type)) return std::get<std::int64_t>(cell->data);
         return std::unexpected(ConstexprError(loc, "switch requires an integral or enum constexpr value"));
     }
 
-    [[nodiscard]] std::pair<long long, long long> integer_bounds_for_type(const Type& type) const {
+    [[nodiscard]] std::pair<std::int64_t, std::int64_t> integer_bounds_for_type(const Type& type) const {
         if (is_named_type(type, "char")) return {0, 255};
         if (is_named_type(type, "bool")) return {0, 1};
         if (is_named_type(type, "int")) {
@@ -864,15 +864,15 @@ private:
         }
         if (is_named_type(type, "unsigned int")) return {0, std::numeric_limits<std::uint32_t>::max()};
         if (is_named_type(type, "size_t") || is_named_type(type, "uint64_t") || is_named_type(type, "unsigned long")) {
-            return {0, std::numeric_limits<long long>::max()};
+            return {0, std::numeric_limits<std::int64_t>::max()};
         }
         if (is_named_type(type, "ptrdiff_t") || is_named_type(type, "int64_t") || is_named_type(type, "long")) {
-            return {std::numeric_limits<long long>::min(), std::numeric_limits<long long>::max()};
+            return {std::numeric_limits<std::int64_t>::min(), std::numeric_limits<std::int64_t>::max()};
         }
-        return {std::numeric_limits<long long>::min(), std::numeric_limits<long long>::max()};
+        return {std::numeric_limits<std::int64_t>::min(), std::numeric_limits<std::int64_t>::max()};
     }
 
-    [[nodiscard]] std::expected<void, ConstexprError> checked_assign_integer(const std::shared_ptr<Cell>& target, long long value, const SourceLocation& loc) {
+    [[nodiscard]] std::expected<void, ConstexprError> checked_assign_integer(const std::shared_ptr<Cell>& target, std::int64_t value, const SourceLocation& loc) {
         if (is_named_type(target->type, "bool")) {
             target->data = (value != 0);
             return {};
@@ -885,11 +885,11 @@ private:
         return {};
     }
 
-    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> make_checked_int_cell(long long value, const SourceLocation& loc) {
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> make_checked_int_cell(std::int64_t value, const SourceLocation& loc) {
         return make_checked_int_cell_as(named_type("int"), value, loc);
     }
 
-    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> make_checked_int_cell_as(const Type& type, long long value, const SourceLocation& loc) {
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> make_checked_int_cell_as(const Type& type, std::int64_t value, const SourceLocation& loc) {
         auto cell = std::make_shared<Cell>();
         cell->type = type;
         auto result = checked_assign_integer(cell, value, loc);
@@ -932,7 +932,7 @@ private:
                 return std::unexpected(ConstexprError(loc, "string-literal element type does not match std::span element type"));
             }
             span.pointer = *pointer;
-            span.size = static_cast<long long>(array->elements.size()) - 1;
+            span.size = static_cast<std::int64_t>(array->elements.size()) - 1;
             result->data = std::move(span);
             return result;
         }
@@ -950,7 +950,7 @@ private:
         span.pointer.storage = source.cell;
         span.pointer.index = 0;
         span.pointer.storage_id = "span#" + std::to_string(string_storage_counter_ + 1);
-        span.size = static_cast<long long>(array->elements.size());
+        span.size = static_cast<std::int64_t>(array->elements.size());
         result->data = std::move(span);
         return result;
     }
@@ -998,7 +998,7 @@ private:
                 if (!index_value_result.has_value()) return std::unexpected(std::move(index_value_result).error());
                 auto index_result = as_integer(index_value_result.value(), expr.loc);
                 if (!index_result.has_value()) return std::unexpected(std::move(index_result).error());
-                long long index = index_result.value();
+                std::int64_t index = index_result.value();
                 if (auto* array = std::get_if<ArrayValue>(&base->data)) {
                     if (index < 0 || static_cast<std::size_t>(index) >= array->elements.size()) {
                         return std::unexpected(ConstexprError(expr.loc, "constexpr subscript out of bounds"));
@@ -1052,12 +1052,12 @@ private:
         Type array_type;
         array_type.kind = TypeKind::Array;
         array_type.element = std::make_shared<Type>(named_type("char"));
-        array_type.array_size = static_cast<long long>(expr.name.size()) + 1;
+        array_type.array_size = static_cast<std::int64_t>(expr.name.size()) + 1;
         auto storage = std::make_shared<Cell>();
         storage->type = array_type;
         ArrayValue array;
         array.element_type = named_type("char");
-        for (unsigned char ch : expr.name) array.elements.push_back(make_scalar_cell(named_type("char"), static_cast<long long>(ch)));
+        for (unsigned char ch : expr.name) array.elements.push_back(make_scalar_cell(named_type("char"), static_cast<std::int64_t>(ch)));
         array.elements.push_back(make_scalar_cell(named_type("char"), 0));
         storage->data = std::move(array);
 
@@ -1473,7 +1473,7 @@ private:
             if (!double_result.has_value()) return std::unexpected(std::move(double_result).error());
             auto result = std::make_shared<Cell>();
             result->type = target_type;
-            auto assign_result = checked_assign_integer(result, static_cast<long long>(double_result.value()), loc);
+            auto assign_result = checked_assign_integer(result, static_cast<std::int64_t>(double_result.value()), loc);
             if (!assign_result.has_value()) return std::unexpected(std::move(assign_result).error());
             return result;
         }
@@ -1507,22 +1507,22 @@ private:
             if (!left_result.has_value()) return std::unexpected(std::move(left_result).error());
             auto right_result = as_integer(rhs, expr.loc);
             if (!right_result.has_value()) return std::unexpected(std::move(right_result).error());
-            long long left = left_result.value();
-            long long right = right_result.value();
+            std::int64_t left = left_result.value();
+            std::int64_t right = right_result.value();
             Type result_type = types_equal(lhs->type, rhs->type) ? lhs->type : named_type("int");
             switch (expr.binary_op) {
                 case BinaryOp::Add: {
-                    long long result;
+                    std::int64_t result;
                     if (__builtin_add_overflow(left, right, &result)) return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
                     return make_checked_int_cell_as(result_type, result, expr.loc);
                 }
                 case BinaryOp::Sub: {
-                    long long result;
+                    std::int64_t result;
                     if (__builtin_sub_overflow(left, right, &result)) return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
                     return make_checked_int_cell_as(result_type, result, expr.loc);
                 }
                 case BinaryOp::Mul: {
-                    long long result;
+                    std::int64_t result;
                     if (__builtin_mul_overflow(left, right, &result)) return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
                     return make_checked_int_cell_as(result_type, result, expr.loc);
                 }
@@ -2053,7 +2053,7 @@ private:
                 }
                 std::optional<TypeLayoutInfo> layout = layout_of_type(program_, expr.type);
                 if (!layout.has_value()) return std::unexpected(ConstexprError(expr.loc, "cannot apply 'alignof' to this type in this version"));
-                return make_scalar_cell(named_type("size_t"), static_cast<long long>(layout->abi_align_bytes));
+                return make_scalar_cell(named_type("size_t"), static_cast<std::int64_t>(layout->abi_align_bytes));
             }
             case ExprKind::Sizeof: {
                 Type queried_type;
@@ -2073,7 +2073,7 @@ private:
                 if (!layout.has_value()) {
                     return std::unexpected(ConstexprError(expr.loc, "cannot apply 'sizeof' to this type in this version"));
                 }
-                return make_scalar_cell(named_type("size_t"), static_cast<long long>(layout->size_bytes));
+                return make_scalar_cell(named_type("size_t"), static_cast<std::int64_t>(layout->size_bytes));
             }
             case ExprKind::Identifier: {
                 auto binding_result = lookup_binding(expr.name, expr.loc);
@@ -2200,8 +2200,8 @@ private:
                         }
                         auto integer_result = as_integer(operand, expr.loc);
                         if (!integer_result.has_value()) return std::unexpected(std::move(integer_result).error());
-                        long long value = integer_result.value();
-                        if (value == std::numeric_limits<long long>::min()) {
+                        std::int64_t value = integer_result.value();
+                        if (value == std::numeric_limits<std::int64_t>::min()) {
                             return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
                         }
                         return make_checked_int_cell(-value, expr.loc);
@@ -2235,7 +2235,7 @@ private:
                             if (!offset_value_result.has_value()) return std::unexpected(std::move(offset_value_result).error());
                             auto offset_result = as_integer(offset_value_result.value(), expr.loc);
                             if (!offset_result.has_value()) return std::unexpected(std::move(offset_result).error());
-                            long long offset = offset_result.value();
+                            std::int64_t offset = offset_result.value();
                             // Speculative: prefer resolving the subscript's
                             // base as a real lvalue array; a non-lvalue
                             // base (e.g. a function call returning a
@@ -2430,7 +2430,7 @@ private:
                 std::shared_ptr<Cell> condition_value = std::move(condition_value_result).value();
                 auto condition_key_result = switch_match_key(condition_value, stmt.loc);
                 if (!condition_key_result.has_value()) return std::unexpected(std::move(condition_key_result).error());
-                long long condition_key = condition_key_result.value();
+                std::int64_t condition_key = condition_key_result.value();
                 frames_.push_back({});
                 std::expected<ExecOutcome, ConstexprError> result = ExecOutcome{};
                 bool matched = false;
@@ -2556,13 +2556,13 @@ private:
 [[nodiscard]] std::expected<void, ConstexprError> rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value) {
     if (is_named_type(value->type, "int")) {
         expr.kind = ExprKind::IntegerLiteral;
-        expr.int_value = std::get<long long>(value->data);
+        expr.int_value = std::get<std::int64_t>(value->data);
         expr.float_value = 0.0;
         expr.bool_value = false;
         expr.name.clear();
     } else if (is_named_type(value->type, "char")) {
         expr.kind = ExprKind::CharLiteral;
-        expr.int_value = std::get<long long>(value->data);
+        expr.int_value = std::get<std::int64_t>(value->data);
         expr.float_value = 0.0;
         expr.bool_value = false;
         expr.name.clear();
@@ -2587,7 +2587,7 @@ private:
         expr.kind = ExprKind::StringLiteral;
         expr.name.clear();
         for (const auto& element : array->elements) {
-            long long ch = std::get<long long>(element->data);
+            std::int64_t ch = std::get<std::int64_t>(element->data);
             if (ch == 0) break;
             expr.name.push_back(static_cast<char>(ch));
         }
@@ -2615,7 +2615,7 @@ private:
     }
     if (is_named_type(value->type, "int") || is_named_type(value->type, "char")) {
         snapshot.kind = ConstexprValueKind::Integer;
-        snapshot.int_value = std::get<long long>(value->data);
+        snapshot.int_value = std::get<std::int64_t>(value->data);
         return snapshot;
     }
     if (is_named_type(value->type, "bool")) {
@@ -2635,8 +2635,8 @@ private:
             return std::unexpected(ConstexprError(loc, "unsupported constexpr pointer result"));
         }
         snapshot.kind = ConstexprValueKind::StringLiteralPointer;
-        for (std::size_t i = static_cast<std::size_t>(std::max(pointer->index, 0LL)); i < array->elements.size(); ++i) {
-            long long ch = std::get<long long>(array->elements[i]->data);
+        for (std::size_t i = static_cast<std::size_t>(std::max(pointer->index, static_cast<std::int64_t>(0))); i < array->elements.size(); ++i) {
+            std::int64_t ch = std::get<std::int64_t>(array->elements[i]->data);
             if (ch == 0) break;
             snapshot.string_value.push_back(static_cast<char>(ch));
         }
