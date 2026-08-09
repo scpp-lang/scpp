@@ -1,0 +1,33 @@
+// PR #336 plus PR #414: each `case` label already opened its own scope before
+// braced case bodies existed, so sibling cases could always reuse a local's name
+// at a different type. This pins that boundary: PR #414 changes which case
+// *shapes* the terminator rule accepts, not how case-local names are scoped.
+int classify(int selector) {
+    int total = 0;
+    switch (selector) {
+        case 0:
+            int operand = 7;
+            total = total + operand;
+            break;
+        case 1:
+            bool operand = true;
+            if (operand) {
+                total = total + 2;
+            }
+            break;
+        default:
+            char operand = 'A';
+            if (operand == 'A') {
+                total = total + 3;
+            }
+            break;
+    }
+    return total;
+}
+
+int main() {
+    if (classify(0) != 7) return 1;
+    if (classify(1) != 2) return 2;
+    if (classify(9) != 3) return 3;
+    return 0;
+}

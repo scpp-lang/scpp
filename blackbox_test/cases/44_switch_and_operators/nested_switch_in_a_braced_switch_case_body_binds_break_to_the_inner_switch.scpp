@@ -1,0 +1,35 @@
+// PR #414: a braced case body may contain a whole nested `switch`. Each `break;`
+// binds to its own nearest enclosing switch -- the inner cases' breaks leave the
+// inner switch and fall to the statements after it, and only the outer body's
+// final `break;` leaves the outer switch.
+int classify(int outer, int inner) {
+    int total = 0;
+    switch (outer) {
+        case 0: {
+            switch (inner) {
+                case 0: {
+                    total = 1;
+                    break;
+                }
+                default: {
+                    total = 2;
+                    break;
+                }
+            }
+            total = total + 10;
+            break;
+        }
+        default: {
+            total = 100;
+            break;
+        }
+    }
+    return total;
+}
+
+int main() {
+    if (classify(0, 0) != 11) return 1;
+    if (classify(0, 5) != 12) return 2;
+    if (classify(7, 0) != 100) return 3;
+    return 0;
+}

@@ -1,0 +1,29 @@
+// PR #414: a `break;` inside a loop nested in a braced case body still leaves
+// that loop, not the switch -- only the body's own final `break;` leaves the
+// switch. The braced body therefore ends with an explicit terminator while its
+// inner `break;` means something else entirely.
+int classify(int selector) {
+    int total = 0;
+    switch (selector) {
+        case 0: {
+            for (int i = 0; i < 5; i = i + 1) {
+                total = total + 1;
+                if (i == 2) {
+                    break;
+                }
+            }
+            total = total + 100;
+            break;
+        }
+        default: {
+            return 7;
+        }
+    }
+    return total;
+}
+
+int main() {
+    if (classify(0) != 103) return 1;
+    if (classify(4) != 7) return 2;
+    return 0;
+}

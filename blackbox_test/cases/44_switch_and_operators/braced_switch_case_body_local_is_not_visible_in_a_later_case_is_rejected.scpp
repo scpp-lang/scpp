@@ -1,0 +1,20 @@
+// PR #414: the braces really do scope the body. A local declared inside one
+// case's braced body is out of scope in a later case, so naming it there is
+// rejected -- the same-name reuse the braces enable is only safe because the
+// names do not escape.
+int main() {
+    int total = 0;
+    switch (1) {
+        case 0: {
+            int step = 1;
+            total = total + step;
+            break;
+        }
+        case 1:
+            total = total + step;
+            break;
+        default:
+            return 1;
+    }
+    return total;
+}

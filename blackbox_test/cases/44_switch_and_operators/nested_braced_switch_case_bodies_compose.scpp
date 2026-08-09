@@ -1,0 +1,35 @@
+// PR #414: the braced-case-body rule composes through further nesting -- a
+// block terminates its case if its own last statement does, recursively. That
+// holds for both directions control can leave a case: a deeply nested `return`
+// leaves the function, a deeply nested `break` leaves the switch.
+int classify(int selector) {
+    int total = 0;
+    switch (selector) {
+        case 0: {
+            {
+                {
+                    total = 5;
+                    break;
+                }
+            }
+        }
+        case 1: {
+            {
+                {
+                    return 42;
+                }
+            }
+        }
+        default: {
+            return 99;
+        }
+    }
+    return total + 1;
+}
+
+int main() {
+    if (classify(0) != 6) return 1;
+    if (classify(1) != 42) return 2;
+    if (classify(3) != 99) return 3;
+    return 0;
+}

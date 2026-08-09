@@ -1,0 +1,25 @@
+// PR #414: `return ...;` is an explicit case terminator, so a braced case body
+// whose last statement is a `return` is accepted too -- including for the
+// `default:` label.
+int classify(int selector) {
+    switch (selector) {
+        case 0: {
+            int base = 10;
+            return base + 1;
+        }
+        case 1: {
+            int base = 20;
+            return base + 2;
+        }
+        default: {
+            return 99;
+        }
+    }
+}
+
+int main() {
+    if (classify(0) != 11) return 1;
+    if (classify(1) != 22) return 2;
+    if (classify(8) != 99) return 3;
+    return 0;
+}

@@ -1,0 +1,40 @@
+// PR #414: a braced case body is its own scope, so sibling cases may each
+// declare a local of the same name -- even at a different type -- and each case
+// body sees only its own. Every arm is executed and its result checked.
+enum class Op { add = 1, negate = 2, scale = 3 };
+
+int apply(Op op, int start) {
+    int total = start;
+    switch (op) {
+        case Op::add: {
+            int operand = 7;
+            total = total + operand;
+            break;
+        }
+        case Op::negate: {
+            bool operand = true;
+            if (operand) {
+                total = 0 - total;
+            }
+            break;
+        }
+        case Op::scale: {
+            char operand = 'A';
+            if (operand == 'A') {
+                total = total * 3;
+            }
+            break;
+        }
+        default: {
+            return 0;
+        }
+    }
+    return total;
+}
+
+int main() {
+    if (apply(Op::add, 5) != 12) return 1;
+    if (apply(Op::negate, 5) != 0 - 5) return 2;
+    if (apply(Op::scale, 5) != 15) return 3;
+    return 0;
+}

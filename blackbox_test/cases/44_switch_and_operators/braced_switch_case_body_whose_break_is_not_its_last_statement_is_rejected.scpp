@@ -1,0 +1,19 @@
+// PR #414: only the braced body's own final statement is consulted. A `break;`
+// buried in an earlier `if` leaves a path that runs off the end of the block and
+// into the next case, which is exactly the implicit fallthrough the rule
+// forbids, so this is rejected.
+int main() {
+    int flag = 1;
+    int total = 0;
+    switch (1) {
+        case 1: {
+            if (flag == 1) {
+                break;
+            }
+            total = total + 1;
+        }
+        default:
+            return 1;
+    }
+    return total;
+}
