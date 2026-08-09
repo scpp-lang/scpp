@@ -1,0 +1,15 @@
+// PR #414: `[[fallthrough]];` stays restricted to a case's own final top-level
+// statement and is not accepted as a braced body's terminator, even though
+// `break;`/`return ...;`/`continue;` are. It describes control leaving this case
+// for the next one -- a property of the case, not of an inner block.
+int main() {
+    switch (1) {
+        case 1: {
+            [[fallthrough]];
+        }
+        case 2:
+            return 0;
+        default:
+            return 1;
+    }
+}

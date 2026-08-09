@@ -1,0 +1,32 @@
+// PR #414 (refines PR #336): a `case` whose body is a braced block is accepted
+// when that block's own last statement is `break;`. The "no implicit
+// fallthrough" rule is about a case ending explicitly, and a braced body ending
+// in `break;` does exactly that.
+int classify(int selector) {
+    int total = 0;
+    switch (selector) {
+        case 0: {
+            int step = 1;
+            total = total + step;
+            break;
+        }
+        case 1: {
+            int step = 10;
+            total = total + step;
+            break;
+        }
+        default: {
+            int step = 100;
+            total = total + step;
+            break;
+        }
+    }
+    return total;
+}
+
+int main() {
+    if (classify(0) != 1) return 1;
+    if (classify(1) != 10) return 2;
+    if (classify(7) != 100) return 3;
+    return 0;
+}

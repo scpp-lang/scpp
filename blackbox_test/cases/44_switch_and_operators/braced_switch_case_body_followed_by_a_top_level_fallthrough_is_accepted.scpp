@@ -1,0 +1,20 @@
+// PR #414: since `[[fallthrough]];` may not sit inside the braced body, the way
+// to combine a scoped case body with an explicit fallthrough is to close the
+// block and write `[[fallthrough]];` after it -- the case's last top-level
+// statement is then the fallthrough, which has always been accepted.
+int main() {
+    int total = 0;
+    switch (1) {
+        case 1: {
+            int step = 5;
+            total = total + step;
+        }
+        [[fallthrough]];
+        case 2:
+            total = total + 30;
+            break;
+        default:
+            return 1;
+    }
+    return total - 35;
+}

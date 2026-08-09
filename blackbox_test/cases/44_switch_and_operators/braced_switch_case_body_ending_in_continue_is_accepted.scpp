@@ -1,0 +1,24 @@
+// PR #414: `continue;` is an explicit case terminator as well, so a braced case
+// body ending in one is accepted when the `switch` sits inside a loop -- and it
+// still continues the enclosing loop, skipping the statements after the switch.
+int main() {
+    int total = 0;
+    for (int i = 0; i < 4; i = i + 1) {
+        switch (i) {
+            case 1: {
+                int step = 1;
+                total = total + step;
+                continue;
+            }
+            default: {
+                int step = 2;
+                total = total + step;
+                break;
+            }
+        }
+        total = total + 100;
+    }
+    // i=0: +2 then +100; i=1: +1 and `continue` skips the +100;
+    // i=2: +2 then +100; i=3: +2 then +100 -> 307.
+    return total - 307;
+}

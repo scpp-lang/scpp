@@ -1,0 +1,16 @@
+// PR #336 plus PR #414: `[[fallthrough]];` still requires a following label to
+// fall into, so it cannot end the last case. PR #414 widened only which
+// statements may terminate a case; it did not relax where `[[fallthrough]];`
+// itself is allowed.
+int main() {
+    int value = 0;
+    switch (1) {
+        case 1:
+            value = 1;
+            break;
+        default:
+            value = 2;
+            [[fallthrough]];
+    }
+    return value - 1;
+}
