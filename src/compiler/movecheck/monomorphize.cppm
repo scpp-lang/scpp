@@ -1567,7 +1567,7 @@ private:
     // zero size can likewise turn an otherwise-innocuous `char
     // storage_[sizeof(T)]` field (std::optional/std::expected's own
     // in-place storage) into a rejected zero-length array once T is
-    // substituted with it, throwing a ConstexprError (constexpr.cppm)
+    // substituted with it, throwing a ConstexprError (constexpression.cppm)
     // rather than a DataflowError -- a different exception type, but
     // the exact same "this witness doesn't work for this particular
     // nested shape" situation, so both (and, defensively, any other
@@ -1661,7 +1661,7 @@ private:
                 // abstract witness-check can resolve a call through it, so
                 // it must be marked is_synthetic_check_only right below,
                 // exactly like check_class itself just past this point --
-                // otherwise resolve_class_array_bounds (constexpr.cppm)
+                // otherwise resolve_class_array_bounds (constexpression.cppm)
                 // legitimately validates its fields as if it were real
                 // storage, and a `sizeof`-based field (e.g.
                 // std::optional/std::expected's own in-place storage

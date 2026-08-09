@@ -1,6 +1,6 @@
 module;
 
-export module scpp.constexpr_engine;
+export module scpp.constexpression;
 
 import std;
 import scpp.ast;

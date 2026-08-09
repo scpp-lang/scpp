@@ -397,7 +397,7 @@ Rejected alternatives:
 
 ## 4.4.2 Module placement
 
-Add a new frontend module, e.g. `src/constexpr.cppm`, exporting:
+Add a new frontend module, e.g. `src/compiler/constexpression.cppm`, exporting:
 
 - `ConstValue`
 - `ConstexprError`

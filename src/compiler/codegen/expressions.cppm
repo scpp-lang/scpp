@@ -136,7 +136,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             // evaluate_immediate_expr's ConstexprError bakes its own
             // "line:col: " position prefix directly into what() (unlike
             // CodegenError's own separate .loc field) -- see
-            // constexpr.cppm's own comment -- so only the message is
+            // constexpression.cppm's own comment -- so only the message is
             // carried across here, exactly like fold_immediate_calls'
             // sibling conversion in driver.cppm's
             // emit_object_file_for_program: passing current_loc_ too
