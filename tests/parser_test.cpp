@@ -4827,6 +4827,230 @@ void test_switch_statement_parses_with_cases_default_and_fallthrough() {
            "switch_statement_parses_with_cases_default_and_fallthrough: final case should be default");
 }
 
+// PR #414: is_explicit_switch_case_terminator now accepts a trailing
+// Block whose own last statement is an explicit terminator, so a braced
+// case body satisfies the "no implicit fallthrough" rule the same way a
+// bare one does. The rule stays purely syntactic -- these tests pin down
+// both what that newly admits and what it deliberately still rejects.
+//
+// Asserts on the diagnostic *text*, not merely on failure, so a case that
+// starts failing for some unrelated reason (e.g. a syntax error in the
+// fixture itself) cannot masquerade as the rejection under test.
+void expect_switch_parse_error(std::string_view source, std::string_view needle, const std::string& case_name) {
+    auto result = scpp::parse(source);
+    expect(!result.has_value(), case_name + ": expected a ParseError");
+    if (result.has_value()) return;
+    const std::string message = result.error().what();
+    expect(message.find(needle) != std::string::npos,
+           case_name + ": expected diagnostic to contain '" + std::string(needle) + "', got: " + message);
+}
+
+// The tail diagnostic every "case does not end explicitly" rejection
+// shares, spelled once so a wording change shows up as one edit.
+const char* const kSwitchCaseTerminatorDiagnostic =
+    "a non-empty switch case must end with 'break;', 'return ...;', 'continue;', or '[[fallthrough]];'";
+
+// Recursively finds the first Switch statement in a statement tree.
+// Used instead of hardcoded child indices because `for` desugars into a
+// Block wrapping a While, so the switch's depth is an implementation
+// detail this test should not encode.
+const scpp::Stmt* find_first_switch(const scpp::Stmt& stmt) {
+    if (stmt.kind == scpp::StmtKind::Switch) return &stmt;
+    for (const scpp::StmtPtr& child : stmt.statements) {
+        if (child == nullptr) continue;
+        if (const scpp::Stmt* found = find_first_switch(*child); found != nullptr) return found;
+    }
+    if (stmt.then_branch != nullptr) {
+        if (const scpp::Stmt* found = find_first_switch(*stmt.then_branch); found != nullptr) return found;
+    }
+    if (stmt.else_branch != nullptr) {
+        if (const scpp::Stmt* found = find_first_switch(*stmt.else_branch); found != nullptr) return found;
+    }
+    for (const scpp::SwitchCase& switch_case : stmt.switch_cases) {
+        for (const scpp::StmtPtr& child : switch_case.statements) {
+            if (child == nullptr) continue;
+            if (const scpp::Stmt* found = find_first_switch(*child); found != nullptr) return found;
+        }
+    }
+    return nullptr;
+}
+
+void test_braced_switch_case_body_ending_in_terminator_is_accepted() {
+    // One braced body per explicit terminator kind. `continue;` needs an
+    // enclosing loop, so this shape doubles as the loop-context case.
+    scpp::Program program = expect_parse_ok(
+        "int main() {\n"
+        "    int total = 0;\n"
+        "    for (int i = 0; i < 3; i = i + 1) {\n"
+        "        switch (i) {\n"
+        "            case 0: {\n"
+        "                int step = 1;\n"
+        "                total = total + step;\n"
+        "                break;\n"
+        "            }\n"
+        "            case 1: {\n"
+        "                int step = 10;\n"
+        "                continue;\n"
+        "            }\n"
+        "            default: {\n"
+        "                return total;\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "    return total;\n"
+        "}\n");
+    const scpp::Function* main_fn = find_function_named(program, "main");
+    expect(main_fn != nullptr, "braced_switch_case_body_ending_in_terminator_is_accepted: expected main");
+    if (main_fn == nullptr || main_fn->body == nullptr) return;
+    // Each case body should be a single Block statement -- i.e. the braces
+    // really were parsed as a block, not silently flattened into the
+    // shared switch scope (the scoping half of this change).
+    const scpp::Stmt* switch_stmt = find_first_switch(*main_fn->body);
+    expect(switch_stmt != nullptr,
+           "braced_switch_case_body_ending_in_terminator_is_accepted: expected a Switch");
+    if (switch_stmt == nullptr) return;
+    expect(switch_stmt->switch_cases.size() == 3,
+           "braced_switch_case_body_ending_in_terminator_is_accepted: expected 3 cases");
+    if (switch_stmt->switch_cases.size() != 3) return;
+    for (std::size_t i = 0; i < switch_stmt->switch_cases.size(); i++) {
+        expect(switch_stmt->switch_cases[i].statements.size() == 1 &&
+                   switch_stmt->switch_cases[i].statements[0]->kind == scpp::StmtKind::Block,
+               "braced_switch_case_body_ending_in_terminator_is_accepted: case " + std::to_string(i) +
+                   " should be a single Block statement");
+    }
+    // The two sibling `step` locals prove braces give each case its own
+    // scope -- this source would be a redeclaration without them.
+}
+
+void test_nested_braced_switch_case_bodies_compose() {
+    // block_body_terminates_switch_case recurses, so arbitrarily nested
+    // blocks terminate the case as long as the innermost tail does.
+    scpp::Program program = expect_parse_ok(
+        "int main() {\n"
+        "    switch (1) {\n"
+        "        case 1: {\n"
+        "            {\n"
+        "                {\n"
+        "                    return 0;\n"
+        "                }\n"
+        "            }\n"
+        "        }\n"
+        "        default:\n"
+        "            return 1;\n"
+        "    }\n"
+        "}\n");
+    const scpp::Function* main_fn = find_function_named(program, "main");
+    expect(main_fn != nullptr, "nested_braced_switch_case_bodies_compose: expected main");
+}
+
+void test_empty_braced_switch_case_body_is_rejected() {
+    // `{ }` terminates nothing, so it is still an implicit fallthrough.
+    // block_body_terminates_switch_case's `!stmt.statements.empty()` guard
+    // is what keeps this an error.
+    expect_switch_parse_error("int main() {\n"
+                              "    switch (1) {\n"
+                              "        case 1: {\n"
+                              "        }\n"
+                              "        default:\n"
+                              "            return 1;\n"
+                              "    }\n"
+                              "}\n",
+                              kSwitchCaseTerminatorDiagnostic, "empty_braced_switch_case_body_is_rejected");
+}
+
+void test_braced_switch_case_body_without_terminator_is_rejected() {
+    // Braces alone do not satisfy the rule; the block's own last statement
+    // still has to be a terminator.
+    expect_switch_parse_error("int main() {\n"
+                              "    switch (1) {\n"
+                              "        case 1: {\n"
+                              "            int value = 0;\n"
+                              "            value = value + 1;\n"
+                              "        }\n"
+                              "        default:\n"
+                              "            return 1;\n"
+                              "    }\n"
+                              "}\n",
+                              kSwitchCaseTerminatorDiagnostic,
+                              "braced_switch_case_body_without_terminator_is_rejected");
+}
+
+void test_braced_switch_case_body_ending_in_if_else_is_rejected() {
+    // Deliberately still rejected even though both branches return: the
+    // check is syntactic and does not do the flow analysis that would be
+    // needed to prove an if/else always terminates.
+    expect_switch_parse_error("int main() {\n"
+                              "    switch (1) {\n"
+                              "        case 1: {\n"
+                              "            if (1 == 1) {\n"
+                              "                return 0;\n"
+                              "            } else {\n"
+                              "                return 2;\n"
+                              "            }\n"
+                              "        }\n"
+                              "        default:\n"
+                              "            return 1;\n"
+                              "    }\n"
+                              "}\n",
+                              kSwitchCaseTerminatorDiagnostic,
+                              "braced_switch_case_body_ending_in_if_else_is_rejected");
+}
+
+void test_fallthrough_nested_in_braced_switch_case_body_is_rejected() {
+    // `[[fallthrough]];` is deliberately absent from
+    // block_body_terminates_switch_case: it describes control leaving the
+    // *case*, not the inner block. reject_nested_fallthrough runs first
+    // and is what produces this diagnostic, so the assertion pins that
+    // specific wording rather than the generic terminator one -- i.e.
+    // `case X: { [[fallthrough]]; }` is handled deliberately.
+    expect_switch_parse_error("int main() {\n"
+                              "    switch (1) {\n"
+                              "        case 1: {\n"
+                              "            [[fallthrough]];\n"
+                              "        }\n"
+                              "        default:\n"
+                              "            return 1;\n"
+                              "    }\n"
+                              "}\n",
+                              "'[[fallthrough]];' is only valid as the final top-level statement of a switch case",
+                              "fallthrough_nested_in_braced_switch_case_body_is_rejected");
+}
+
+void test_top_level_fallthrough_after_braced_body_is_still_accepted() {
+    // The pre-existing top-level `[[fallthrough]];` positioning rule is
+    // unaffected by the block change: it is still accepted as a case's own
+    // final top-level statement, even when preceded by a braced body.
+    scpp::Program program = expect_parse_ok("int main() {\n"
+                                            "    switch (1) {\n"
+                                            "        case 1: {\n"
+                                            "            int value = 0;\n"
+                                            "            value = value + 1;\n"
+                                            "        }\n"
+                                            "        [[fallthrough]];\n"
+                                            "        default:\n"
+                                            "            return 1;\n"
+                                            "    }\n"
+                                            "}\n");
+    const scpp::Function* main_fn = find_function_named(program, "main");
+    expect(main_fn != nullptr, "top_level_fallthrough_after_braced_body_is_still_accepted: expected main");
+}
+
+void test_bare_switch_case_without_terminator_is_still_rejected() {
+    // Regression guard on the *unchanged* half of the rule: a bare
+    // (unbraced) case body that does not end in a terminator must still
+    // produce the same diagnostic it always did.
+    expect_switch_parse_error("int main() {\n"
+                              "    switch (1) {\n"
+                              "        case 1:\n"
+                              "            return 0;\n"
+                              "        default:\n"
+                              "            int value = 0;\n"
+                              "    }\n"
+                              "}\n",
+                              kSwitchCaseTerminatorDiagnostic,
+                              "bare_switch_case_without_terminator_is_still_rejected");
+}
+
 void test_namespaced_enum_case_label_resolves_to_qualified_enumerator() {
     scpp::Program program = expect_parse_ok(
         "namespace calc {\n"
@@ -5065,6 +5289,14 @@ int main() {
     test_break_outside_loop_is_rejected();
     test_continue_outside_loop_is_rejected();
     test_switch_statement_parses_with_cases_default_and_fallthrough();
+    test_braced_switch_case_body_ending_in_terminator_is_accepted();
+    test_nested_braced_switch_case_bodies_compose();
+    test_empty_braced_switch_case_body_is_rejected();
+    test_braced_switch_case_body_without_terminator_is_rejected();
+    test_braced_switch_case_body_ending_in_if_else_is_rejected();
+    test_fallthrough_nested_in_braced_switch_case_body_is_rejected();
+    test_top_level_fallthrough_after_braced_body_is_still_accepted();
+    test_bare_switch_case_without_terminator_is_still_rejected();
     test_namespaced_enum_case_label_resolves_to_qualified_enumerator();
     test_break_parses_inside_switch();
     test_fallthrough_outside_switch_is_rejected();
