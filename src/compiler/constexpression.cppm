@@ -24,12 +24,27 @@ struct ConstexprLimits {
     int max_loop_iterations = 262144;
 };
 
-struct ConstexprError : std::runtime_error {
-    SourceLocation loc;
-
+// `class`, not `struct`: scpp only lets a `struct` hold scalars, pointers,
+// trivial structs/unions and fixed-size arrays of those (spec ch04), and
+// `struct X : Base` is not spellable at all -- a base clause requires
+// `class` with an explicit access specifier. Same shape as parser.cppm's
+// ParseError, which derives from std::runtime_error for the same reason.
+class ConstexprError : public std::runtime_error {
+public:
     ConstexprError(const SourceLocation& loc, const std::string& message)
-        : std::runtime_error(std::to_string(loc.line) + ":" + std::to_string(loc.column) + ": " + message),
-          loc(loc) {}
+        : runtime_error{std::to_string(loc.line) + ":" + std::to_string(loc.column) + ": " + message}, loc{loc} {}
+
+    // Explicit copy constructor, mirroring ParseError's: scpp's
+    // std::runtime_error (std_stdexcept.scpp) declares no copy constructor
+    // of its own, so the base has to be rebuilt from what() rather than
+    // copy-initialized. Needed so a ConstexprError can travel into a
+    // std::expected<T, ConstexprError> through std::expected's copy-based
+    // std::unexpected<E> converting constructor.
+    ConstexprError(const ConstexprError& other) : runtime_error{std::string{other.what()}}, loc{other.loc} {}
+
+    virtual ~ConstexprError() override = default;
+
+    SourceLocation loc;
 };
 
 enum class ConstexprValueKind {
@@ -42,7 +57,13 @@ enum class ConstexprValueKind {
     Array,
 };
 
-struct ConstexprValue {
+class ConstexprValue {
+public:
+    virtual ~ConstexprValue() = default;
+    ConstexprValue() = default;
+    ConstexprValue(const ConstexprValue&) = default;
+    ConstexprValue& operator=(const ConstexprValue&) = default;
+
     Type type;
     ConstexprValueKind kind = ConstexprValueKind::Void;
     std::int64_t int_value = 0;
@@ -60,52 +81,108 @@ struct ConstexprValue {
 } // namespace scpp
 
 namespace scpp {
-namespace {
 
-struct Cell;
+class Cell;
 
 [[nodiscard]] std::expected<void, ConstexprError> rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value);
 [[nodiscard]] std::expected<ConstexprValue, ConstexprError> snapshot_constexpr_value(const std::shared_ptr<Cell>& value, const SourceLocation& loc);
 
-struct PointerValue {
+class PointerValue {
+public:
+    virtual ~PointerValue() = default;
+    PointerValue() = default;
+    PointerValue(const PointerValue&) = default;
+    PointerValue& operator=(const PointerValue&) = default;
+
     std::shared_ptr<Cell> storage;
     std::string storage_id;
     std::int64_t index = 0;
 };
 
-struct SpanValue {
+class SpanValue {
+public:
+    virtual ~SpanValue() = default;
+    SpanValue() = default;
+    SpanValue(const SpanValue&) = default;
+    SpanValue& operator=(const SpanValue&) = default;
+
     PointerValue pointer;
     std::int64_t size = 0;
 };
 
-struct ObjectValue {
+class ObjectValue {
+public:
+    virtual ~ObjectValue() = default;
+    ObjectValue() = default;
+    ObjectValue(const ObjectValue&) = default;
+    ObjectValue& operator=(const ObjectValue&) = default;
+
     std::string type_name;
     std::unordered_map<std::string, std::shared_ptr<Cell>> fields;
 };
 
-struct ArrayValue {
+class ArrayValue {
+public:
+    virtual ~ArrayValue() = default;
+    ArrayValue() = default;
+    ArrayValue(const ArrayValue&) = default;
+    ArrayValue& operator=(const ArrayValue&) = default;
+
     Type element_type;
     std::vector<std::shared_ptr<Cell>> elements;
 };
 
 using CellData = std::variant<std::monostate, std::int64_t, double, bool, PointerValue, SpanValue, ObjectValue, ArrayValue>;
 
-struct Cell {
+class Cell {
+public:
+    virtual ~Cell() = default;
+    Cell() = default;
+    Cell(const Cell&) = default;
+    Cell& operator=(const Cell&) = default;
+
     Type type;
     CellData data;
 };
 
-struct Binding {
+// Binding, LValue, ExprRewrite and ExecOutcome each get an explicit
+// constructor matching what used to be aggregate initialization: a class
+// with a declared destructor is not an aggregate, and scpp does not do
+// positional brace-aggregate init in the first place. Declaring the
+// constructors keeps every existing `Binding{cell, false}`-style call site
+// working unchanged.
+class Binding {
+public:
+    virtual ~Binding() = default;
+    Binding() = default;
+    Binding(std::shared_ptr<Cell> cell, bool read_only) : cell{std::move(cell)}, read_only{read_only} {}
+    Binding(const Binding&) = default;
+    Binding& operator=(const Binding&) = default;
+
     std::shared_ptr<Cell> cell;
     bool read_only = false;
 };
 
-struct LValue {
+class LValue {
+public:
+    virtual ~LValue() = default;
+    LValue() = default;
+    LValue(std::shared_ptr<Cell> cell, bool read_only) : cell{std::move(cell)}, read_only{read_only} {}
+    LValue(const LValue&) = default;
+    LValue& operator=(const LValue&) = default;
+
     std::shared_ptr<Cell> cell;
     bool read_only = false;
 };
 
-struct ExprRewrite {
+class ExprRewrite {
+public:
+    virtual ~ExprRewrite() = default;
+    ExprRewrite() = default;
+    ExprRewrite(Expr* target, std::shared_ptr<Cell> value) : target{target}, value{std::move(value)} {}
+    ExprRewrite(const ExprRewrite&) = default;
+    ExprRewrite& operator=(const ExprRewrite&) = default;
+
     Expr* target = nullptr;
     std::shared_ptr<Cell> value;
 };
@@ -124,7 +201,14 @@ struct ExprRewrite {
 // per-construct `catch` clauses used to leave uncaught).
 enum class ExecFlow { Normal, Return, Break, Continue };
 
-struct ExecOutcome {
+class ExecOutcome {
+public:
+    virtual ~ExecOutcome() = default;
+    ExecOutcome() = default;
+    ExecOutcome(ExecFlow flow, std::shared_ptr<Cell> return_value) : flow{flow}, return_value{std::move(return_value)} {}
+    ExecOutcome(const ExecOutcome&) = default;
+    ExecOutcome& operator=(const ExecOutcome&) = default;
+
     ExecFlow flow = ExecFlow::Normal;
     std::shared_ptr<Cell> return_value;
 };
@@ -230,6 +314,7 @@ struct ExecOutcome {
 
 class ConstexprEngine {
 public:
+    virtual ~ConstexprEngine() = default;
     ConstexprEngine(const Program& program, ConstexprLimits limits)
         : program_(program), limits_(limits) {
         for (std::size_t i = 0; i < program_.functions.size(); ++i) functions_by_name_[program_.functions[i].name].push_back(i);
@@ -2798,6 +2883,7 @@ void rewrite_consteval_if_for_runtime(Stmt& stmt) {
 
 class AlignmentResolver {
 public:
+    virtual ~AlignmentResolver() = default;
     AlignmentResolver(Program& program, ConstexprEngine& engine) : program_(program), engine_(engine) {
         // ch05 §9.4/§9.3: an uninstantiated generic struct/class template
         // may freely mention its own not-yet-substituted type parameter
@@ -3383,8 +3469,6 @@ private:
         return {};
     }
 };
-
-} // namespace
 
 [[nodiscard]] std::expected<void, ConstexprError> fold_immediate_calls(Program& program, ConstexprLimits limits) {
     ConstexprEngine engine(program, limits);
