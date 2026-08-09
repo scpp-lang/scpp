@@ -782,7 +782,6 @@ namespace scpp {
                     case_blocks.push_back(llvm::LLVMAppendBasicBlockInContext(context_, current_function, "switch.case"));
                 }
                 llvm::LLVMBasicBlockRef default_block = end_block;
-                bool has_default = false;
                 std::vector<std::pair<llvm::LLVMValueRef, llvm::LLVMBasicBlockRef>> value_cases;
                 for (std::size_t i = 0; i < stmt.switch_cases.size(); i++) {
                     if (stmt.switch_cases[i].value) {
@@ -790,11 +789,9 @@ namespace scpp {
                         if (!case_value_result.has_value()) return std::unexpected(std::move(case_value_result).error());
                         value_cases.push_back({std::move(case_value_result).value(), case_blocks[i]});
                     } else {
-                        has_default = true;
                         default_block = case_blocks[i];
                     }
                 }
-                bool end_block_reachable = !has_default;
 
                 llvm::LLVMBasicBlockRef current_test_block = llvm::LLVMGetInsertBlock(builder_);
                 for (std::size_t i = 0; i < value_cases.size(); i++) {
@@ -828,21 +825,26 @@ namespace scpp {
                         stmt.switch_cases[i].statements.empty() ||
                         (!stmt.switch_cases[i].statements.empty() &&
                          stmt.switch_cases[i].statements.back()->kind == StmtKind::Fallthrough);
-                    bool ends_with_break = !stmt.switch_cases[i].statements.empty() &&
-                                           stmt.switch_cases[i].statements.back()->kind == StmtKind::Break;
                     pop_scope();
                     control_flow_stack_.pop_back();
-                    if (ends_with_break) end_block_reachable = true;
                     if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) == nullptr) {
                         llvm::LLVMBasicBlockRef target =
                             (falls_into_next_case && i + 1 < case_blocks.size()) ? case_blocks[i + 1] : end_block;
-                        if (target == end_block) end_block_reachable = true;
                         llvm::LLVMBuildBr(builder_, target);
                     }
                 }
 
                 llvm::LLVMPositionBuilderAtEnd(builder_, end_block);
-                if (!end_block_reachable) llvm::LLVMBuildUnreachable(builder_);
+                // Ask LLVM whether anything actually branches here, rather
+                // than trying to predict it from the shape of the source:
+                // a `break;` reaching this block can sit arbitrarily deep
+                // inside a case (`case X: { ...; break; }`, or inside an
+                // `if` within the case), so no syntactic peek at a case's
+                // last statement can see all of them. Same idiom as the
+                // `if` merge block and the `while` end block above.
+                if (llvm::LLVMGetFirstUse(llvm::LLVMBasicBlockAsValue(end_block)) == nullptr) {
+                    llvm::LLVMBuildUnreachable(builder_);
+                }
                 return {};
             }
 

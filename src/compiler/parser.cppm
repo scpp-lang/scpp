@@ -8855,9 +8855,46 @@ private:
         return {};
     }
 
+    // Does `stmt` -- a statement sitting at the tail of a switch case's
+    // braced body -- explicitly terminate that case? `break;`/`return
+    // ...;`/`continue;` do, and a further nested block does iff its own
+    // last statement does, so `case X: { { return v; } }` composes
+    // naturally. An empty `{ }` terminates nothing, so it is not a
+    // terminator (`case X: { }` stays an error).
+    //
+    // `[[fallthrough]];` is deliberately absent here: it is only ever
+    // valid as a case's own *final top-level* statement, and
+    // reject_nested_fallthrough above already rejects it anywhere else
+    // with a diagnostic that says exactly that. Accepting it from inside
+    // a block would be wrong anyway -- `[[fallthrough]];` describes
+    // control leaving this case for the next one, which is a property of
+    // the case, not of some inner block that happens to end with it.
+    // Spelling that out here (rather than leaning on the fact that
+    // reject_nested_fallthrough runs first and would have already
+    // errored) keeps this predicate correct on its own terms.
+    [[nodiscard]] bool block_body_terminates_switch_case(const Stmt& stmt) {
+        if (stmt.kind == StmtKind::Break || stmt.kind == StmtKind::Return || stmt.kind == StmtKind::Continue) {
+            return true;
+        }
+        if (stmt.kind == StmtKind::Block && !stmt.statements.empty()) {
+            return block_body_terminates_switch_case(*stmt.statements.back());
+        }
+        return false;
+    }
+
+    // The rule being enforced is "no implicit fallthrough": every non-empty
+    // case must end in a statement that explicitly says where control goes
+    // next. A braced case body whose own last statement is such a statement
+    // satisfies that rule exactly as well as a bare one does, so it is
+    // accepted -- braces additionally give each case its own scope, so
+    // same-named locals in sibling cases no longer collide.
+    //
+    // This stays a purely *syntactic* tail check, though: a trailing
+    // `if`/`else` whose branches all return is still rejected, because
+    // proving that needs the flow analysis this check deliberately does
+    // not do.
     [[nodiscard]] bool is_explicit_switch_case_terminator(const Stmt& stmt) {
-        return stmt.kind == StmtKind::Break || stmt.kind == StmtKind::Return || stmt.kind == StmtKind::Continue ||
-               stmt.kind == StmtKind::Fallthrough;
+        return stmt.kind == StmtKind::Fallthrough || block_body_terminates_switch_case(stmt);
     }
 
     [[nodiscard]] std::expected<void, ParseError> validate_switch_fallthrough(const Stmt& stmt) {
