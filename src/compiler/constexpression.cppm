@@ -132,7 +132,109 @@ public:
     std::vector<std::shared_ptr<Cell>> elements;
 };
 
-using CellData = std::variant<std::monostate, std::int64_t, double, bool, PointerValue, SpanValue, ObjectValue, ArrayValue>;
+// What a Cell currently holds. This is a hand-rolled tagged union rather
+// than a std::variant because scpp has neither std::variant nor the
+// machinery a variant needs: no `if constexpr`, no `std::is_same_v` /
+// `std::decay_t`, and no way to write std::visit's generic-lambda dispatch.
+// A real union is no help either -- scpp unions hold trivial types only,
+// and four of these alternatives own heap memory.
+//
+// The shape follows ConstexprValue above (a `kind` plus one field per
+// alternative), which already does exactly this in this file's public API.
+// The cost is that a Cell is now the *sum* of its alternatives rather than
+// the max, since the four class-type payloads can no longer overlap.
+enum class CellKind {
+    Empty,
+    Integer,
+    Double,
+    Bool,
+    Pointer,
+    Span,
+    Object,
+    Array,
+};
+
+// Read a payload only after checking `kind` (or calling the matching
+// is_*() predicate) -- exactly the discipline std::get<T> used to enforce
+// by aborting. Write only through the set_*() methods, so `kind` can never
+// disagree with the payload it describes.
+class CellData {
+public:
+    virtual ~CellData() = default;
+    CellData() = default;
+    CellData(const CellData&) = default;
+    CellData& operator=(const CellData&) = default;
+
+    CellKind kind = CellKind::Empty;
+    std::int64_t int_value = 0;
+    double double_value = 0.0;
+    bool bool_value = false;
+    PointerValue pointer;
+    SpanValue span;
+    ObjectValue object;
+    ArrayValue array;
+
+    [[nodiscard]] bool is_empty() const { return kind == CellKind::Empty; }
+    [[nodiscard]] bool is_integer() const { return kind == CellKind::Integer; }
+    [[nodiscard]] bool is_double() const { return kind == CellKind::Double; }
+    [[nodiscard]] bool is_bool() const { return kind == CellKind::Bool; }
+    [[nodiscard]] bool is_pointer() const { return kind == CellKind::Pointer; }
+    [[nodiscard]] bool is_span() const { return kind == CellKind::Span; }
+    [[nodiscard]] bool is_object() const { return kind == CellKind::Object; }
+    [[nodiscard]] bool is_array() const { return kind == CellKind::Array; }
+
+    void set_empty() { become(CellKind::Empty); }
+    void set_integer(std::int64_t value) {
+        become(CellKind::Integer);
+        int_value = value;
+    }
+    void set_double(double value) {
+        become(CellKind::Double);
+        double_value = value;
+    }
+    void set_bool(bool value) {
+        become(CellKind::Bool);
+        bool_value = value;
+    }
+    void set_pointer(PointerValue value) {
+        become(CellKind::Pointer);
+        pointer = std::move(value);
+    }
+    void set_span(SpanValue value) {
+        become(CellKind::Span);
+        span = std::move(value);
+    }
+    void set_object(ObjectValue value) {
+        become(CellKind::Object);
+        object = std::move(value);
+    }
+    void set_array(ArrayValue value) {
+        become(CellKind::Array);
+        array = std::move(value);
+    }
+
+private:
+    // Release whatever the cell held before, so switching kinds drops the
+    // old payload's storage (and, for Object/Array, its shared_ptr<Cell>
+    // references) the way destroying a std::variant alternative did.
+    // Scalars need no clearing, and a same-kind write overwrites its own
+    // payload anyway.
+    void become(CellKind new_kind) {
+        if (kind != new_kind) {
+            switch (kind) {
+                case CellKind::Pointer: pointer = PointerValue{}; break;
+                case CellKind::Span: span = SpanValue{}; break;
+                case CellKind::Object: object = ObjectValue{}; break;
+                case CellKind::Array: array = ArrayValue{}; break;
+                case CellKind::Empty:
+                case CellKind::Integer:
+                case CellKind::Double:
+                case CellKind::Bool: break;
+            }
+        }
+        kind = new_kind;
+    }
+};
 
 class Cell {
 public:
@@ -301,15 +403,17 @@ public:
         }
         return pointer.storage;
     }
-    auto* array = std::get_if<ArrayValue>(&pointer.storage->data);
-    if (!array) return std::unexpected(ConstexprError(loc, "constexpr pointer does not point to supported storage"));
-    if (!types_equal(*pointer_type.pointee, array->element_type)) {
+    if (!pointer.storage->data.is_array()) {
+        return std::unexpected(ConstexprError(loc, "constexpr pointer does not point to supported storage"));
+    }
+    const ArrayValue& array = pointer.storage->data.array;
+    if (!types_equal(*pointer_type.pointee, array.element_type)) {
         return std::unexpected(ConstexprError(loc, "constexpr pointer element type does not match the pointed-to storage"));
     }
-    if (pointer.index < 0 || static_cast<std::size_t>(pointer.index) >= array->elements.size()) {
+    if (pointer.index < 0 || static_cast<std::size_t>(pointer.index) >= array.elements.size()) {
         return std::unexpected(ConstexprError(loc, "constexpr dereference out of bounds"));
     }
-    return array->elements[static_cast<std::size_t>(pointer.index)];
+    return array.elements[static_cast<std::size_t>(pointer.index)];
 }
 
 class ConstexprEngine {
@@ -704,47 +808,54 @@ private:
     [[nodiscard]] std::shared_ptr<Cell> clone_cell(const std::shared_ptr<Cell>& cell) {
         auto copy = std::make_shared<Cell>();
         copy->type = cell->type;
-        std::visit(
-            [&](const auto& data) {
-                using T = std::decay_t<decltype(data)>;
-                if constexpr (std::is_same_v<T, std::monostate> || std::is_same_v<T, std::int64_t> ||
-                              std::is_same_v<T, double> || std::is_same_v<T, bool> ||
-                              std::is_same_v<T, PointerValue> || std::is_same_v<T, SpanValue>) {
-                    copy->data = data;
-                } else if constexpr (std::is_same_v<T, ObjectValue>) {
-                    ObjectValue object_copy;
-                    object_copy.type_name = data.type_name;
-                    for (const auto& [name, field] : data.fields) object_copy.fields.emplace(name, clone_cell(field));
-                    copy->data = std::move(object_copy);
-                } else if constexpr (std::is_same_v<T, ArrayValue>) {
-                    ArrayValue array_copy;
-                    array_copy.element_type = data.element_type;
-                    for (const auto& element : data.elements) array_copy.elements.push_back(clone_cell(element));
-                    copy->data = std::move(array_copy);
-                }
-            },
-            cell->data);
+        // Was a std::visit over the variant with an `if constexpr` chain;
+        // a plain switch on the tag says the same thing directly, and is
+        // the only form available without `if constexpr`.
+        switch (cell->data.kind) {
+            case CellKind::Empty:
+            case CellKind::Integer:
+            case CellKind::Double:
+            case CellKind::Bool:
+            case CellKind::Pointer:
+            case CellKind::Span:
+                copy->data = cell->data;
+                break;
+            case CellKind::Object: {
+                ObjectValue object_copy;
+                object_copy.type_name = cell->data.object.type_name;
+                for (const auto& [name, field] : cell->data.object.fields) object_copy.fields.emplace(name, clone_cell(field));
+                copy->data.set_object(std::move(object_copy));
+                break;
+            }
+            case CellKind::Array: {
+                ArrayValue array_copy;
+                array_copy.element_type = cell->data.array.element_type;
+                for (const auto& element : cell->data.array.elements) array_copy.elements.push_back(clone_cell(element));
+                copy->data.set_array(std::move(array_copy));
+                break;
+            }
+        }
         return copy;
     }
 
     [[nodiscard]] std::shared_ptr<Cell> make_scalar_cell(Type type, std::int64_t value) {
         auto cell = std::make_shared<Cell>();
         cell->type = std::move(type);
-        cell->data = value;
+        cell->data.set_integer(value);
         return cell;
     }
 
     [[nodiscard]] std::shared_ptr<Cell> make_double_cell(double value) {
         auto cell = std::make_shared<Cell>();
         cell->type = named_type("double");
-        cell->data = value;
+        cell->data.set_double(value);
         return cell;
     }
 
     [[nodiscard]] std::shared_ptr<Cell> make_bool_cell(bool value) {
         auto cell = std::make_shared<Cell>();
         cell->type = named_type("bool");
-        cell->data = value;
+        cell->data.set_bool(value);
         return cell;
     }
 
@@ -770,19 +881,19 @@ private:
         switch (type.kind) {
             case TypeKind::Named:
                 if (is_integral_named_type(type.name) && type.name != "bool") {
-                    cell->data = static_cast<std::int64_t>(0);
+                    cell->data.set_integer(0);
                     return cell;
                 }
                 if (type.name == "bool") {
-                    cell->data = false;
+                    cell->data.set_bool(false);
                     return cell;
                 }
                 if (is_floating_like(type)) {
-                    cell->data = 0.0;
+                    cell->data.set_double(0.0);
                     return cell;
                 }
                 if (type.name == "void") {
-                    cell->data = std::monostate{};
+                    cell->data.set_empty();
                     return cell;
                 }
                 if (auto struct_it = structs_by_name_.find(type.name); struct_it != structs_by_name_.end()) {
@@ -793,7 +904,7 @@ private:
                         if (!field_result.has_value()) return std::unexpected(std::move(field_result).error());
                         object.fields.emplace(field.name, std::move(field_result).value());
                     }
-                    cell->data = std::move(object);
+                    cell->data.set_object(std::move(object));
                     return cell;
                 }
                 if (auto class_it = classes_by_name_.find(type.name); class_it != classes_by_name_.end()) {
@@ -812,12 +923,12 @@ private:
                             object.fields.emplace(field.name, std::move(field_result).value());
                         }
                     }
-                    cell->data = std::move(object);
+                    cell->data.set_object(std::move(object));
                     return cell;
                 }
                 return std::unexpected(ConstexprError(loc, "type '" + type.name + "' is not constexpr-compatible in Phase D1"));
             case TypeKind::Pointer:
-                cell->data = PointerValue{};
+                cell->data.set_pointer(PointerValue{});
                 return cell;
             case TypeKind::Array: {
                 if (!type.element) return std::unexpected(ConstexprError(loc, "malformed array type in constexpr evaluator"));
@@ -828,7 +939,7 @@ private:
                     if (!element_result.has_value()) return std::unexpected(std::move(element_result).error());
                     array.elements.push_back(std::move(element_result).value());
                 }
-                cell->data = std::move(array);
+                cell->data.set_array(std::move(array));
                 return cell;
             }
             case TypeKind::Reference:
@@ -839,7 +950,7 @@ private:
                 if (type.is_mutable_ref) {
                     return std::unexpected(ConstexprError(loc, "mutable std::span<T> is not supported during constant evaluation"));
                 }
-                cell->data = SpanValue{};
+                cell->data.set_span(SpanValue{});
                 return cell;
         }
         return std::unexpected(ConstexprError(loc, "unsupported constexpr type"));
@@ -896,12 +1007,12 @@ private:
         if (!is_integer_like(cell->type)) {
             return std::unexpected(ConstexprError(loc, "expected an integer-like constexpr value"));
         }
-        if (is_named_type(cell->type, "bool")) return std::get<bool>(cell->data) ? static_cast<std::int64_t>(1) : static_cast<std::int64_t>(0);
-        return std::get<std::int64_t>(cell->data);
+        if (is_named_type(cell->type, "bool")) return cell->data.bool_value ? static_cast<std::int64_t>(1) : static_cast<std::int64_t>(0);
+        return cell->data.int_value;
     }
 
     [[nodiscard]] std::expected<double, ConstexprError> as_double(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
-        if (is_floating_like(cell->type)) return std::get<double>(cell->data);
+        if (is_floating_like(cell->type)) return cell->data.double_value;
         if (is_integer_like(cell->type)) {
             auto result = as_integer(cell, loc);
             if (!result.has_value()) return std::unexpected(std::move(result).error());
@@ -911,7 +1022,7 @@ private:
     }
 
     [[nodiscard]] std::expected<bool, ConstexprError> as_bool(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
-        if (is_named_type(cell->type, "bool")) return std::get<bool>(cell->data);
+        if (is_named_type(cell->type, "bool")) return cell->data.bool_value;
         if (is_integer_like(cell->type)) {
             auto result = as_integer(cell, loc);
             if (!result.has_value()) return std::unexpected(std::move(result).error());
@@ -930,7 +1041,7 @@ private:
 
     [[nodiscard]] std::expected<std::int64_t, ConstexprError> switch_match_key(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
         if (is_integer_like(cell->type)) return as_integer(cell, loc);
-        if (is_enum_like(cell->type)) return std::get<std::int64_t>(cell->data);
+        if (is_enum_like(cell->type)) return cell->data.int_value;
         return std::unexpected(ConstexprError(loc, "switch requires an integral or enum constexpr value"));
     }
 
@@ -959,14 +1070,14 @@ private:
 
     [[nodiscard]] std::expected<void, ConstexprError> checked_assign_integer(const std::shared_ptr<Cell>& target, std::int64_t value, const SourceLocation& loc) {
         if (is_named_type(target->type, "bool")) {
-            target->data = (value != 0);
+            target->data.set_bool(value != 0);
             return {};
         }
         auto [min_value, max_value] = integer_bounds_for_type(target->type);
         if (value < min_value || value > max_value) {
             return std::unexpected(ConstexprError(loc, "constexpr integer overflow"));
         }
-        target->data = value;
+        target->data.set_integer(value);
         return {};
     }
 
@@ -1008,35 +1119,36 @@ private:
             auto pointer_cell_result = evaluate_expr(init_expr);
             if (!pointer_cell_result.has_value()) return std::unexpected(std::move(pointer_cell_result).error());
             std::shared_ptr<Cell> pointer_cell = std::move(pointer_cell_result).value();
-            auto* pointer = std::get_if<PointerValue>(&pointer_cell->data);
-            auto* array = pointer && pointer->storage ? std::get_if<ArrayValue>(&pointer->storage->data) : nullptr;
-            if (!pointer || !array) {
+            if (!pointer_cell->data.is_pointer() || !pointer_cell->data.pointer.storage ||
+                !pointer_cell->data.pointer.storage->data.is_array()) {
                 return std::unexpected(ConstexprError(loc, "string-literal span binding lost its backing storage"));
             }
-            if (!types_equal(*span_type.pointee, array->element_type)) {
+            const PointerValue& pointer = pointer_cell->data.pointer;
+            const ArrayValue& array = pointer.storage->data.array;
+            if (!types_equal(*span_type.pointee, array.element_type)) {
                 return std::unexpected(ConstexprError(loc, "string-literal element type does not match std::span element type"));
             }
-            span.pointer = *pointer;
-            span.size = static_cast<std::int64_t>(array->elements.size()) - 1;
-            result->data = std::move(span);
+            span.pointer = pointer;
+            span.size = static_cast<std::int64_t>(array.elements.size()) - 1;
+            result->data.set_span(std::move(span));
             return result;
         }
 
         auto source_result = resolve_lvalue(init_expr);
         if (!source_result.has_value()) return std::unexpected(std::move(source_result).error());
         LValue source = std::move(source_result).value();
-        auto* array = std::get_if<ArrayValue>(&source.cell->data);
-        if (!array) {
+        if (!source.cell->data.is_array()) {
             return std::unexpected(ConstexprError(loc, "std::span<const T> can only be constructed from an array or string literal"));
         }
-        if (!types_equal(*span_type.pointee, array->element_type)) {
+        const ArrayValue& array = source.cell->data.array;
+        if (!types_equal(*span_type.pointee, array.element_type)) {
             return std::unexpected(ConstexprError(loc, "array element type does not match std::span element type"));
         }
         span.pointer.storage = source.cell;
         span.pointer.index = 0;
         span.pointer.storage_id = "span#" + std::to_string(string_storage_counter_ + 1);
-        span.size = static_cast<std::int64_t>(array->elements.size());
-        result->data = std::move(span);
+        span.size = static_cast<std::int64_t>(array.elements.size());
+        result->data.set_span(std::move(span));
         return result;
     }
 
@@ -1053,10 +1165,12 @@ private:
                 auto base_result = resolve_lvalue(*expr.lhs);
                 if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
                 LValue base = std::move(base_result).value();
-                auto* object = std::get_if<ObjectValue>(&base.cell->data);
-                if (!object) return std::unexpected(ConstexprError(expr.loc, "member access requires a constexpr object value"));
-                auto it = object->fields.find(expr.name);
-                if (it == object->fields.end()) {
+                if (!base.cell->data.is_object()) {
+                    return std::unexpected(ConstexprError(expr.loc, "member access requires a constexpr object value"));
+                }
+                const ObjectValue& object = base.cell->data.object;
+                auto it = object.fields.find(expr.name);
+                if (it == object.fields.end()) {
                     return std::unexpected(ConstexprError(expr.loc, "unknown constexpr field '" + expr.name + "'"));
                 }
                 return LValue{it->second, base.read_only};
@@ -1084,29 +1198,32 @@ private:
                 auto index_result = as_integer(index_value_result.value(), expr.loc);
                 if (!index_result.has_value()) return std::unexpected(std::move(index_result).error());
                 std::int64_t index = index_result.value();
-                if (auto* array = std::get_if<ArrayValue>(&base->data)) {
-                    if (index < 0 || static_cast<std::size_t>(index) >= array->elements.size()) {
+                if (base->data.is_array()) {
+                    const ArrayValue& array = base->data.array;
+                    if (index < 0 || static_cast<std::size_t>(index) >= array.elements.size()) {
                         return std::unexpected(ConstexprError(expr.loc, "constexpr subscript out of bounds"));
                     }
-                    return LValue{array->elements[static_cast<std::size_t>(index)], base_read_only};
+                    return LValue{array.elements[static_cast<std::size_t>(index)], base_read_only};
                 }
-                if (auto* span = std::get_if<SpanValue>(&base->data)) {
-                    if (index < 0 || index >= span->size) {
+                if (base->data.is_span()) {
+                    const SpanValue& span = base->data.span;
+                    if (index < 0 || index >= span.size) {
                         return std::unexpected(ConstexprError(expr.loc, "constexpr span subscript out of bounds"));
                     }
-                    PointerValue element_ptr = span->pointer;
+                    PointerValue element_ptr = span.pointer;
                     element_ptr.index += index;
                     auto dereferenced = dereference_pointer(element_ptr, make_pointer_type_to(*base->type.pointee, false), expr.loc);
                     if (!dereferenced.has_value()) return std::unexpected(std::move(dereferenced).error());
                     return LValue{std::move(dereferenced).value(), true};
                 }
-                if (auto* pointer = std::get_if<PointerValue>(&base->data)) {
+                if (base->data.is_pointer()) {
                     if (!base->type.pointee) return std::unexpected(ConstexprError(expr.loc, "malformed constexpr pointer type"));
-                    PointerValue shifted = *pointer;
+                    PointerValue shifted = base->data.pointer;
                     shifted.index += index;
-                    auto* array = shifted.storage ? std::get_if<ArrayValue>(&shifted.storage->data) : nullptr;
-                    if (!array) return std::unexpected(ConstexprError(expr.loc, "constexpr pointer does not point to indexable storage"));
-                    if (shifted.index < 0 || static_cast<std::size_t>(shifted.index) >= array->elements.size()) {
+                    if (!shifted.storage || !shifted.storage->data.is_array()) {
+                        return std::unexpected(ConstexprError(expr.loc, "constexpr pointer does not point to indexable storage"));
+                    }
+                    if (shifted.index < 0 || static_cast<std::size_t>(shifted.index) >= shifted.storage->data.array.elements.size()) {
                         return std::unexpected(ConstexprError(expr.loc, "constexpr subscript out of bounds"));
                     }
                     auto dereferenced = dereference_pointer(shifted, base->type, expr.loc);
@@ -1120,9 +1237,10 @@ private:
                     auto pointer_cell_result = evaluate_expr(*expr.lhs);
                     if (!pointer_cell_result.has_value()) return std::unexpected(std::move(pointer_cell_result).error());
                     std::shared_ptr<Cell> pointer_cell = std::move(pointer_cell_result).value();
-                    auto* pointer = std::get_if<PointerValue>(&pointer_cell->data);
-                    if (!pointer) return std::unexpected(ConstexprError(expr.loc, "constexpr dereference requires a pointer"));
-                    auto dereferenced = dereference_pointer(*pointer, pointer_cell->type, expr.loc);
+                    if (!pointer_cell->data.is_pointer()) {
+                        return std::unexpected(ConstexprError(expr.loc, "constexpr dereference requires a pointer"));
+                    }
+                    auto dereferenced = dereference_pointer(pointer_cell->data.pointer, pointer_cell->type, expr.loc);
                     if (!dereferenced.has_value()) return std::unexpected(std::move(dereferenced).error());
                     return LValue{std::move(dereferenced).value(), true};
                 }
@@ -1144,14 +1262,14 @@ private:
         array.element_type = named_type("char");
         for (unsigned char ch : expr.name) array.elements.push_back(make_scalar_cell(named_type("char"), static_cast<std::int64_t>(ch)));
         array.elements.push_back(make_scalar_cell(named_type("char"), 0));
-        storage->data = std::move(array);
+        storage->data.set_array(std::move(array));
 
         auto result = std::make_shared<Cell>();
         result->type = make_const_char_pointer_type();
         PointerValue pointer;
         pointer.storage = storage;
         pointer.storage_id = "string#" + std::to_string(++string_storage_counter_);
-        result->data = std::move(pointer);
+        result->data.set_pointer(std::move(pointer));
         return result;
     }
 
@@ -1219,7 +1337,7 @@ private:
             return std::unexpected(ConstexprError(loc, "constexpr value is not compatible with requested parameter type"));
         }
         clone->type = target_type;
-        if (auto* object = std::get_if<ObjectValue>(&clone->data)) object->type_name = target_type.name;
+        if (clone->data.is_object()) clone->data.object.type_name = target_type.name;
         return clone;
     }
 
@@ -1228,14 +1346,16 @@ private:
         if (!is_same_or_base_class_type(target_type, cell->type)) {
             return std::unexpected(ConstexprError(loc, "constexpr object is not compatible with requested reference type"));
         }
-        auto* object = std::get_if<ObjectValue>(&cell->data);
-        if (!object) return std::unexpected(ConstexprError(loc, "constexpr base-class binding requires an object value"));
+        if (!cell->data.is_object()) {
+            return std::unexpected(ConstexprError(loc, "constexpr base-class binding requires an object value"));
+        }
+        const ObjectValue& object = cell->data.object;
         auto alias = std::make_shared<Cell>();
         alias->type = target_type;
         ObjectValue alias_object;
         alias_object.type_name = target_type.name;
-        for (const auto& [name, field] : object->fields) alias_object.fields.emplace(name, field);
-        alias->data = std::move(alias_object);
+        for (const auto& [name, field] : object.fields) alias_object.fields.emplace(name, field);
+        alias->data.set_object(std::move(alias_object));
         return alias;
     }
 
@@ -1328,13 +1448,13 @@ private:
     [[nodiscard]] std::expected<void, ConstexprError> apply_default_initializers_to_named_object(const std::shared_ptr<Cell>& object_cell, const Type& object_type,
                                                     const SourceLocation& loc) {
         if (object_type.kind != TypeKind::Named) return {};
-        auto* object = std::get_if<ObjectValue>(&object_cell->data);
-        if (!object) return {};
+        if (!object_cell->data.is_object()) return {};
+        ObjectValue& object = object_cell->data.object;
         if (auto struct_it = structs_by_name_.find(object_type.name); struct_it != structs_by_name_.end()) {
             for (const StructField& field : struct_it->second->fields) {
                 if (!field.default_initializer) continue;
-                auto field_it = object->fields.find(field.name);
-                if (field_it == object->fields.end()) continue;
+                auto field_it = object.fields.find(field.name);
+                if (field_it == object.fields.end()) continue;
                 if (auto result = apply_initializer_to_field(field_it->second, field.type, *field.default_initializer, loc);
                     !result.has_value()) {
                     return result;
@@ -1347,8 +1467,8 @@ private:
             if (!fields_result.has_value()) return std::unexpected(std::move(fields_result).error());
             for (const ClassField& field : fields_result.value()) {
                 if (!field.default_initializer) continue;
-                auto field_it = object->fields.find(field.name);
-                if (field_it == object->fields.end()) continue;
+                auto field_it = object.fields.find(field.name);
+                if (field_it == object.fields.end()) continue;
                 if (auto result = apply_initializer_to_field(field_it->second, field.type, *field.default_initializer, loc);
                     !result.has_value()) {
                     return result;
@@ -1474,8 +1594,10 @@ private:
         auto this_binding_result = lookup_binding("this", fn.loc);
         if (!this_binding_result.has_value()) return std::unexpected(std::move(this_binding_result).error());
         Binding this_binding = std::move(this_binding_result).value();
-        auto* object = std::get_if<ObjectValue>(&this_binding.cell->data);
-        if (!object) return std::unexpected(ConstexprError(fn.loc, "constructor receiver is not an object during constant evaluation"));
+        if (!this_binding.cell->data.is_object()) {
+            return std::unexpected(ConstexprError(fn.loc, "constructor receiver is not an object during constant evaluation"));
+        }
+        ObjectValue& object = this_binding.cell->data.object;
         if (auto struct_it = structs_by_name_.find(fn.member_owner_class); struct_it != structs_by_name_.end()) {
             for (const StructField& field : struct_it->second->fields) {
                 const Initializer* selected = nullptr;
@@ -1487,8 +1609,8 @@ private:
                 }
                 if (selected == nullptr && field.default_initializer) selected = &*field.default_initializer;
                 if (selected == nullptr) continue;
-                auto field_it = object->fields.find(field.name);
-                if (field_it == object->fields.end()) {
+                auto field_it = object.fields.find(field.name);
+                if (field_it == object.fields.end()) {
                     return std::unexpected(ConstexprError(fn.loc, "missing constexpr storage for field '" + field.name + "'"));
                 }
                 if (auto result = apply_initializer_to_field(field_it->second, field.type, *selected, fn.loc); !result.has_value()) {
@@ -1511,8 +1633,8 @@ private:
             }
             if (selected == nullptr && field.default_initializer) selected = &*field.default_initializer;
             if (selected == nullptr) continue;
-            auto field_it = object->fields.find(field.name);
-            if (field_it == object->fields.end()) {
+            auto field_it = object.fields.find(field.name);
+            if (field_it == object.fields.end()) {
                 return std::unexpected(ConstexprError(fn.loc, "missing constexpr storage for field '" + field.name + "'"));
             }
             if (auto result = apply_initializer_to_field(field_it->second, field.type, *selected, fn.loc); !result.has_value()) {
@@ -2176,8 +2298,8 @@ private:
                 auto base_result = evaluate_expr(*expr.lhs);
                 if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
                 std::shared_ptr<Cell> base = std::move(base_result).value();
-                if (auto* span = std::get_if<SpanValue>(&base->data); span && expr.name == "size") {
-                    return make_checked_int_cell(span->size, expr.loc);
+                if (base->data.is_span() && expr.name == "size") {
+                    return make_checked_int_cell(base->data.span.size, expr.loc);
                 }
                 auto lvalue_result = resolve_lvalue(expr);
                 if (!lvalue_result.has_value()) return std::unexpected(std::move(lvalue_result).error());
@@ -2200,8 +2322,8 @@ private:
                         auto value_result = evaluate_expr(*expr.args[0]);
                         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                         std::shared_ptr<Cell> value = std::move(value_result).value();
-                        if (auto* span = std::get_if<SpanValue>(&value->data)) {
-                            return make_checked_int_cell(span->size, expr.loc);
+                        if (value->data.is_span()) {
+                            return make_checked_int_cell(value->data.span.size, expr.loc);
                         }
                     }
                     return std::unexpected(ConstexprError(expr.loc, "range-for requires a fixed-size array or std::span operand"));
@@ -2330,7 +2452,7 @@ private:
                             auto base_lvalue_result = resolve_lvalue(*expr.lhs->lhs);
                             if (base_lvalue_result.has_value()) {
                                 LValue base_lvalue = std::move(base_lvalue_result).value();
-                                if (std::holds_alternative<ArrayValue>(base_lvalue.cell->data)) {
+                                if (base_lvalue.cell->data.is_array()) {
                                     pointer.storage = base_lvalue.cell;
                                     pointer.index = offset;
                                 } else {
@@ -2341,11 +2463,11 @@ private:
                                 auto base_value_result = evaluate_expr(*expr.lhs->lhs);
                                 if (!base_value_result.has_value()) return std::unexpected(std::move(base_value_result).error());
                                 std::shared_ptr<Cell> base_value = std::move(base_value_result).value();
-                                if (auto* span = std::get_if<SpanValue>(&base_value->data)) {
-                                    pointer = span->pointer;
+                                if (base_value->data.is_span()) {
+                                    pointer = base_value->data.span.pointer;
                                     pointer.index += offset;
-                                } else if (auto* base_pointer = std::get_if<PointerValue>(&base_value->data)) {
-                                    pointer = *base_pointer;
+                                } else if (base_value->data.is_pointer()) {
+                                    pointer = base_value->data.pointer;
                                     pointer.index += offset;
                                 } else {
                                     pointer.storage = target.cell;
@@ -2356,7 +2478,7 @@ private:
                             pointer.storage = target.cell;
                             pointer.index = 0;
                         }
-                        result->data = std::move(pointer);
+                        result->data.set_pointer(std::move(pointer));
                         return result;
                     }
                 }
@@ -2641,38 +2763,43 @@ private:
 [[nodiscard]] std::expected<void, ConstexprError> rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value) {
     if (is_named_type(value->type, "int")) {
         expr.kind = ExprKind::IntegerLiteral;
-        expr.int_value = std::get<std::int64_t>(value->data);
+        expr.int_value = value->data.int_value;
         expr.float_value = 0.0;
         expr.bool_value = false;
         expr.name.clear();
     } else if (is_named_type(value->type, "char")) {
         expr.kind = ExprKind::CharLiteral;
-        expr.int_value = std::get<std::int64_t>(value->data);
+        expr.int_value = value->data.int_value;
         expr.float_value = 0.0;
         expr.bool_value = false;
         expr.name.clear();
     } else if (is_named_type(value->type, "bool")) {
         expr.kind = ExprKind::BoolLiteral;
-        expr.bool_value = std::get<bool>(value->data);
+        expr.bool_value = value->data.bool_value;
         expr.int_value = 0;
         expr.float_value = 0.0;
         expr.name.clear();
     } else if (is_named_type(value->type, "double")) {
         expr.kind = ExprKind::FloatLiteral;
-        expr.float_value = std::get<double>(value->data);
+        expr.float_value = value->data.double_value;
         expr.int_value = 0;
         expr.bool_value = false;
         expr.name.clear();
     } else if (types_equal(value->type, make_const_char_pointer_type())) {
-        auto* pointer = std::get_if<PointerValue>(&value->data);
-        auto* array = pointer ? std::get_if<ArrayValue>(&pointer->storage->data) : nullptr;
-        if (!pointer || !array || pointer->index != 0) {
+        // The storage null-check is new: this site used to read
+        // `pointer->storage->data` while only having tested `pointer`
+        // itself, unlike the otherwise-identical span-binding check above
+        // which does test `storage`. A PointerValue with null storage
+        // would have dereferenced null here.
+        if (!value->data.is_pointer() || !value->data.pointer.storage ||
+            !value->data.pointer.storage->data.is_array() || value->data.pointer.index != 0) {
             return std::unexpected(ConstexprError(expr.loc, "Phase D1 cannot yet lower this constexpr pointer result back into source form"));
         }
+        const ArrayValue& array = value->data.pointer.storage->data.array;
         expr.kind = ExprKind::StringLiteral;
         expr.name.clear();
-        for (const auto& element : array->elements) {
-            std::int64_t ch = std::get<std::int64_t>(element->data);
+        for (const auto& element : array.elements) {
+            std::int64_t ch = element->data.int_value;
             if (ch == 0) break;
             expr.name.push_back(static_cast<char>(ch));
         }
@@ -2700,45 +2827,47 @@ private:
     }
     if (is_named_type(value->type, "int") || is_named_type(value->type, "char")) {
         snapshot.kind = ConstexprValueKind::Integer;
-        snapshot.int_value = std::get<std::int64_t>(value->data);
+        snapshot.int_value = value->data.int_value;
         return snapshot;
     }
     if (is_named_type(value->type, "bool")) {
         snapshot.kind = ConstexprValueKind::Bool;
-        snapshot.bool_value = std::get<bool>(value->data);
+        snapshot.bool_value = value->data.bool_value;
         return snapshot;
     }
     if (is_named_type(value->type, "double")) {
         snapshot.kind = ConstexprValueKind::Double;
-        snapshot.double_value = std::get<double>(value->data);
+        snapshot.double_value = value->data.double_value;
         return snapshot;
     }
     if (types_equal(value->type, make_const_char_pointer_type())) {
-        auto* pointer = std::get_if<PointerValue>(&value->data);
-        auto* array = pointer ? std::get_if<ArrayValue>(&pointer->storage->data) : nullptr;
-        if (!pointer || !array) {
+        // Same added storage null-check as in rewrite_expr_as_constant.
+        if (!value->data.is_pointer() || !value->data.pointer.storage ||
+            !value->data.pointer.storage->data.is_array()) {
             return std::unexpected(ConstexprError(loc, "unsupported constexpr pointer result"));
         }
+        const PointerValue& pointer = value->data.pointer;
+        const ArrayValue& array = pointer.storage->data.array;
         snapshot.kind = ConstexprValueKind::StringLiteralPointer;
-        for (std::size_t i = static_cast<std::size_t>(std::max(pointer->index, static_cast<std::int64_t>(0))); i < array->elements.size(); ++i) {
-            std::int64_t ch = std::get<std::int64_t>(array->elements[i]->data);
+        for (std::size_t i = static_cast<std::size_t>(std::max(pointer.index, static_cast<std::int64_t>(0))); i < array.elements.size(); ++i) {
+            std::int64_t ch = array.elements[i]->data.int_value;
             if (ch == 0) break;
             snapshot.string_value.push_back(static_cast<char>(ch));
         }
         return snapshot;
     }
-    if (auto* object = std::get_if<ObjectValue>(&value->data)) {
+    if (value->data.is_object()) {
         snapshot.kind = ConstexprValueKind::Object;
-        for (const auto& [name, field] : object->fields) {
+        for (const auto& [name, field] : value->data.object.fields) {
             auto field_result = snapshot_constexpr_value(field, loc);
             if (!field_result.has_value()) return std::unexpected(std::move(field_result).error());
             snapshot.object_fields.push_back({name, std::make_shared<ConstexprValue>(std::move(field_result).value())});
         }
         return snapshot;
     }
-    if (auto* array = std::get_if<ArrayValue>(&value->data)) {
+    if (value->data.is_array()) {
         snapshot.kind = ConstexprValueKind::Array;
-        for (const auto& element : array->elements) {
+        for (const auto& element : value->data.array.elements) {
             auto element_result = snapshot_constexpr_value(element, loc);
             if (!element_result.has_value()) return std::unexpected(std::move(element_result).error());
             snapshot.elements.push_back(std::move(element_result).value());
