@@ -373,6 +373,113 @@ void run_constexpr_engine_direct_api_tests() {
     }
 }
 
+// PR #414: the switch end block used to be marked `unreachable` based on a
+// syntactic peek at each case's *last* statement (`ends_with_break`), which
+// cannot see a `break;` nested inside an `if` or a block. When a switch had
+// a `default` (so `end_block_reachable` started false) and every reaching
+// `break;` was nested, codegen emitted `unreachable` at a block that control
+// really does branch to -- a silent miscompile that traps or falls into
+// undefined behavior at run time. The fix asks LLVM (LLVMGetFirstUse)
+// whether anything actually branches there.
+void run_switch_end_block_reachability_tests() {
+    {
+        // The pure codegen regression: this source parses fine on the
+        // pre-#414 parser too (the case body is unbraced and ends in
+        // `return`), so it isolates the reachability bug from the parser
+        // change. The only way to reach the end block is the `break;`
+        // nested inside the `if`.
+        std::string case_name = "switch_end_reached_only_by_break_nested_in_if_is_not_unreachable";
+        cases_run++;
+        auto ir = try_generate_ir("int main() {\n"
+                                  "    int total = 0;\n"
+                                  "    switch (1) {\n"
+                                  "        case 1:\n"
+                                  "            if (total == 0) {\n"
+                                  "                break;\n"
+                                  "            }\n"
+                                  "            return 9;\n"
+                                  "        default:\n"
+                                  "            return 8;\n"
+                                  "    }\n"
+                                  "    return total;\n"
+                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed");
+        if (!ir.has_value()) return;
+        expect(ir.value().find("unreachable") == std::string::npos,
+               case_name + ": switch end block is reachable via the nested break, so no 'unreachable' should be "
+                           "emitted anywhere in this function");
+    }
+
+    {
+        // The same bug reached through a braced case body -- the form PR
+        // #414's parser half newly admits.
+        std::string case_name = "switch_end_reached_only_by_break_nested_in_block_is_not_unreachable";
+        cases_run++;
+        auto ir = try_generate_ir("int main() {\n"
+                                  "    int total = 0;\n"
+                                  "    switch (1) {\n"
+                                  "        case 1: {\n"
+                                  "            if (total == 0) {\n"
+                                  "                break;\n"
+                                  "            }\n"
+                                  "            return 9;\n"
+                                  "        }\n"
+                                  "        default: {\n"
+                                  "            return 8;\n"
+                                  "        }\n"
+                                  "    }\n"
+                                  "    return total;\n"
+                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed");
+        if (!ir.has_value()) return;
+        expect(ir.value().find("unreachable") == std::string::npos,
+               case_name + ": switch end block is reachable via the break nested in the braced case body");
+    }
+
+    {
+        // The other direction: when the end block genuinely cannot be
+        // reached (every case returns, and a `default` covers the rest),
+        // `unreachable` must still be emitted. Without this the fix could
+        // "pass" by simply never emitting `unreachable` again.
+        std::string case_name = "switch_end_is_unreachable_when_every_case_returns";
+        cases_run++;
+        auto ir = try_generate_ir("int main() {\n"
+                                  "    switch (1) {\n"
+                                  "        case 1:\n"
+                                  "            return 1;\n"
+                                  "        default:\n"
+                                  "            return 0;\n"
+                                  "    }\n"
+                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed");
+        if (!ir.has_value()) return;
+        expect(ir.value().find("unreachable") != std::string::npos,
+               case_name + ": no case branches to the switch end block, so it must still be marked 'unreachable'");
+    }
+
+    {
+        // A top-level `break;` still keeps the end block reachable -- the
+        // pre-existing behavior the old `ends_with_break` peek got right,
+        // guarded here so the rewrite did not regress it.
+        std::string case_name = "switch_end_reached_by_top_level_break_is_not_unreachable";
+        cases_run++;
+        auto ir = try_generate_ir("int main() {\n"
+                                  "    int total = 0;\n"
+                                  "    switch (1) {\n"
+                                  "        case 1:\n"
+                                  "            break;\n"
+                                  "        default:\n"
+                                  "            return 8;\n"
+                                  "    }\n"
+                                  "    return total;\n"
+                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed");
+        if (!ir.has_value()) return;
+        expect(ir.value().find("unreachable") == std::string::npos,
+               case_name + ": a top-level break keeps the switch end block reachable");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -380,6 +487,7 @@ int main() {
     test_generate_returns_engaged_expected_on_success();
     test_generate_returns_disengaged_expected_on_failure_without_throwing();
     run_constexpr_engine_direct_api_tests();
+    run_switch_end_block_reachability_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
