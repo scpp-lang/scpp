@@ -1,7 +1,7 @@
 // PR #414: the braces really do scope the body. A local declared inside one
 // case's braced body is out of scope in a later case, so naming it there is
-// rejected -- the same-name reuse the braces enable is only safe because the
-// names do not escape.
+// rejected -- this is the half of "sibling cases may reuse a name" that is
+// solidly established: the name does not leak out of the case that declared it.
 int main() {
     int total = 0;
     switch (1) {
