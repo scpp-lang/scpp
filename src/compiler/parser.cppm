@@ -4042,7 +4042,7 @@ private:
     // `alignas(...)`'s own operand uses (parse_alignment_specifier_seq).
     // It is stored, unevaluated, in the new Array Type's
     // `array_size_expr`; the constexpr engine's array-bound resolution
-    // pass (constexpr.cppm) evaluates and validates it later (or, for a
+    // pass (constexpression.cppm) evaluates and validates it later (or, for a
     // template-parameter-dependent bound such as `sizeof(T)`, at each
     // point of instantiation -- see monomorphize.cppm), then fills in
     // `array_size` and clears `array_size_expr`.

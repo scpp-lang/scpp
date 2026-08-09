@@ -18,7 +18,7 @@ export module scpp.compiler.codegen:api;
 import std;
 import llvm;
 import scpp.ast;
-import scpp.constexpr_engine;
+import scpp.constexpression;
 import :errors;
 
 export namespace scpp {
@@ -1145,7 +1145,7 @@ private:
 
     // Attempts to read `expr` as a compile-time-constant integer without
     // any general constant-expression evaluation (that broader job
-    // belongs to scpp.constexpr_engine, which runs in an earlier pass,
+    // belongs to scpp.constexpression, which runs in an earlier pass,
     // well before codegen ever sees this expression) -- just the same
     // narrow, single-token recognition codegen_value_for_target already
     // gives a bare/negated integer literal (`10`, `-1`), since that's the

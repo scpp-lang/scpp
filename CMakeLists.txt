@@ -116,7 +116,7 @@ add_library(scpp_constexpr)
 target_sources(scpp_constexpr
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/constexpr.cppm)
+            src/compiler/constexpression.cppm)
 target_link_libraries(scpp_constexpr PUBLIC scpp_ast)
 
 add_library(scpp_driver)

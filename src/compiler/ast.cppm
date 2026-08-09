@@ -124,7 +124,7 @@ class Type {
     // then. A freshly-parsed array declarator never sets this directly
     // any more; it always starts out only as `array_size_expr` below,
     // which the constexpr engine's array-bound resolution pass
-    // (constexpr.cppm's AlignmentResolver, extended for ch05 §9.4)
+    // (constexpression.cppm's AlignmentResolver, extended for ch05 §9.4)
     // evaluates and validates (a converted constant expression of
     // `std::size_t`, strictly > 0) before clearing `array_size_expr`
     // back to null and storing the resulting value here -- mirroring how

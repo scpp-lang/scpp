@@ -393,7 +393,7 @@ Type substitute_type_pack(const Type& pattern,
 
 ## 4.4.2 模块落点
 
-新增一个前端模块，例如 `src/constexpr.cppm`，导出：
+新增一个前端模块，例如 `src/compiler/constexpression.cppm`，导出：
 
 - `ConstValue`
 - `ConstexprError`

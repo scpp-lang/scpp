@@ -1,6 +1,6 @@
 import scpp.compiler.codegen;
 import scpp.compiler.movecheck;
-import scpp.constexpr_engine;
+import scpp.constexpression;
 import scpp.parser;
 import scpp.ast;
 import std;
@@ -344,7 +344,7 @@ void test_generate_returns_disengaged_expected_on_failure_without_throwing() {
            "message");
 }
 
-// Exercises scpp.constexpr_engine's public API directly against its new
+// Exercises scpp.constexpression's public API directly against its new
 // std::expected<T, ConstexprError> return type (rather than only indirectly,
 // via the .scpp/.expected `throws: ConstexprError` case above), to confirm
 // callers can report both success and failure without relying on

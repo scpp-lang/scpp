@@ -24,7 +24,7 @@ import std;
 import llvm;
 import scpp.ast;
 import scpp.compiler.codegen;
-import scpp.constexpr_engine;
+import scpp.constexpression;
 import scpp.lexer;
 import scpp.compiler.movecheck;
 import scpp.parser;
@@ -2872,13 +2872,13 @@ public:
     // moving this process's own native crash point from a chain depth
     // of ~1046-1054 down to ~851-859 on this build/environment's default
     // 8 MiB thread stack -- a real, if narrow, regression matching the
-    // exact class of risk that made batch 3 lower constexpr.cppm's own
+    // exact class of risk that made batch 3 lower constexpression.cppm's own
     // max_recursion_depth 512->256 for the same reason. Real import
     // graphs never come close (the whole std library totals under 20
     // import declarations), so this limit exists purely to turn an
     // unreachable-in-practice pathological chain into a clean, reported
     // ParseError instead of a raw SIGSEGV -- chosen to match
-    // constexpr.cppm's own max_recursion_depth precedent value, which
+    // constexpression.cppm's own max_recursion_depth precedent value, which
     // leaves a >3x margin below the ~851 empirical native crash point
     // measured above (and construction below is native C++, not
     // self-hosted, so no scpp-side stack-cost concern applies to this
@@ -3502,7 +3502,7 @@ llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
         const DataflowError& error = monomorphize_result.error();
         return std::unexpected(DriverError(error.what(), error.loc, DriverErrorKind::Dataflow));
     }
-    // fold_immediate_calls (constexpr_engine) now returns
+    // fold_immediate_calls (constexpression) now returns
     // std::expected<void, ConstexprError> as of batch 3 (#409, merged);
     // the try/catch this call site used to need while it still threw is
     // gone, replaced by the same explicit .has_value() check used
