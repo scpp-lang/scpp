@@ -90,34 +90,34 @@ private:
     std::unordered_map<std::string, scpp::Program> cache_;
 };
 
-scpp::Program parse_with_std_imports(std::string_view source) {
+std::expected<scpp::Program, scpp::ParseError> try_parse_with_std_imports(std::string_view source) {
     TestModuleCache cache;
-    auto result = scpp::parse(
+    return scpp::parse(
         source, [&cache](const std::string& name) -> const scpp::Program* { return &cache.resolve(name); },
         [&cache](const std::string& key) -> scpp::Program { return cache.resolve_partition(key); });
+}
+
+scpp::Program parse_with_std_imports(std::string_view source) {
+    auto result = try_parse_with_std_imports(source);
     if (!result.has_value()) throw std::move(result).error();
     return std::move(result.value());
 }
 
 std::optional<std::string> move_error_message(std::string_view source) {
-    try {
-        scpp::Program program = parse_with_std_imports(source);
-        // ch05 §5.11: monomorphize_generics must run before check_moves,
-        // exactly like the real pipeline (driver.cppm's
-        // emit_object_file_for_program) -- a generic function's call
-        // site is only ever type-correct against a witness-typed
-        // signature *before* this rewrite; concept-satisfaction
-        // rejection also only happens here, so a movetest_source case
-        // exercising either would otherwise never see it.
-        auto monomorphize_result = scpp::monomorphize_generics(program);
-        if (!monomorphize_result.has_value()) throw std::move(monomorphize_result).error();
-        auto check_moves_result = scpp::check_moves(program);
-        if (!check_moves_result.has_value()) throw std::move(check_moves_result).error();
-    } catch (const scpp::ParseError& e) {
-        return e.what();
-    } catch (const scpp::DataflowError& e) {
-        return e.what();
-    }
+    auto parse_result = try_parse_with_std_imports(source);
+    if (!parse_result.has_value()) return parse_result.error().what();
+    scpp::Program program = std::move(parse_result.value());
+    // ch05 §5.11: monomorphize_generics must run before check_moves,
+    // exactly like the real pipeline (driver.cppm's
+    // emit_object_file_for_program) -- a generic function's call
+    // site is only ever type-correct against a witness-typed
+    // signature *before* this rewrite; concept-satisfaction
+    // rejection also only happens here, so a movetest_source case
+    // exercising either would otherwise never see it.
+    auto monomorphize_result = scpp::monomorphize_generics(program);
+    if (!monomorphize_result.has_value()) return monomorphize_result.error().what();
+    auto check_moves_result = scpp::check_moves(program);
+    if (!check_moves_result.has_value()) return check_moves_result.error().what();
     return std::nullopt;
 }
 
@@ -424,8 +424,8 @@ void test_lambda_by_reference_capture_still_rejects_mutation_through_const_refer
 
 // The two tests below exercise scpp::monomorphize_generics/scpp::check_moves's
 // std::expected<void, DataflowError> API shape directly, without going
-// through move_error_message's try/catch convenience wrapper -- mirroring
-// parser_test.cpp's test_parse_returns_engaged_expected_on_success/
+// through move_error_message's optional<string>-message convenience wrapper
+// -- mirroring parser_test.cpp's test_parse_returns_engaged_expected_on_success/
 // test_parse_returns_disengaged_expected_on_failure_without_throwing added
 // when parser.cppm made this same exceptions -> std::expected transition.
 void test_check_moves_returns_engaged_expected_on_success() {

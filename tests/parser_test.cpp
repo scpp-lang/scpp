@@ -105,11 +105,15 @@ private:
     std::unordered_map<std::string, scpp::Program> cache_;
 };
 
-scpp::Program parse_with_std_imports(std::string_view source) {
+std::expected<scpp::Program, scpp::ParseError> try_parse_with_std_imports(std::string_view source) {
     TestModuleCache cache;
-    auto result = scpp::parse(
+    return scpp::parse(
         source, [&cache](const std::string& name) -> const scpp::Program* { return &cache.resolve(name); },
         [&cache](const std::string& key) -> scpp::Program { return cache.resolve_partition(key); });
+}
+
+scpp::Program parse_with_std_imports(std::string_view source) {
+    auto result = try_parse_with_std_imports(source);
     if (!result.has_value()) throw std::move(result).error();
     return std::move(result.value());
 }
@@ -663,8 +667,7 @@ void test_range_for_loop_named_element_forms_desugar() {
 
 void test_range_for_body_parse_errors_are_not_misattributed_to_loop_var() {
     bool threw = false;
-    try {
-        (void)parse_with_std_imports(
+    if (auto _r = try_parse_with_std_imports(
             "import std;\n"
             "struct Capture { int value = 0; };\n"
             "struct Holder { std::vector<Capture> captures{}; };\n"
@@ -675,7 +678,8 @@ void test_range_for_body_parse_errors_are_not_misattributed_to_loop_var() {
             "    }\n"
             "    return 0;\n"
             "}\n");
-    } catch (const scpp::ParseError& e) {
+        !_r.has_value()) {
+        const scpp::ParseError& e = _r.error();
         threw = true;
         expect(e.loc.line == 6,
                "range_for_body_parse_errors_are_not_misattributed_to_loop_var: expected body diagnostic on line 6");
@@ -3069,11 +3073,7 @@ void test_rvalue_reference_rejected_outside_parameter_position() {
     auto expect_rejected = [](const std::string& source, const char* label) {
         bool threw = false;
         if (source.find("import std;") != std::string::npos) {
-            try {
-                parse_with_std_imports(source);
-            } catch (const scpp::ParseError&) {
-                threw = true;
-            }
+            if (auto _r = try_parse_with_std_imports(source); !_r.has_value()) threw = true;
         } else {
             if (auto _r = scpp::parse(source); !_r.has_value()) threw = true;
         }
