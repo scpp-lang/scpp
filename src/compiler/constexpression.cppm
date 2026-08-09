@@ -57,6 +57,26 @@ enum class ConstexprValueKind {
     Array,
 };
 
+class ConstexprValue;
+
+// One entry of ConstexprValue::object_fields, replacing the
+// std::pair<std::string, std::shared_ptr<ConstexprValue>> it used to be:
+// scpp has no <utility>/std::pair. The members keep pair's `first`/`second`
+// names on purpose so the sole consumer -- codegen/expressions.cppm's
+// find_if over object_fields -- compiles against this unchanged.
+class ConstexprField {
+public:
+    virtual ~ConstexprField() = default;
+    ConstexprField() = default;
+    ConstexprField(const ConstexprField&) = default;
+    ConstexprField& operator=(const ConstexprField&) = default;
+    ConstexprField(std::string name, std::shared_ptr<ConstexprValue> value)
+        : first{std::move(name)}, second{std::move(value)} {}
+
+    std::string first;
+    std::shared_ptr<ConstexprValue> second;
+};
+
 class ConstexprValue {
 public:
     virtual ~ConstexprValue() = default;
@@ -70,7 +90,7 @@ public:
     double double_value = 0.0;
     bool bool_value = false;
     std::string string_value;
-    std::vector<std::pair<std::string, std::shared_ptr<ConstexprValue>>> object_fields;
+    std::vector<ConstexprField> object_fields;
     std::vector<ConstexprValue> elements;
 };
 
@@ -83,6 +103,31 @@ public:
 namespace scpp {
 
 class Cell;
+
+// Replaces std::numeric_limits, which scpp has no <limits> for. Written as
+// `-max - 1` rather than as a negative literal because the magnitude of the
+// most negative value is not representable as a positive literal of its own
+// type.
+inline constexpr std::int64_t int32_max_value = 2147483647;
+inline constexpr std::int64_t int32_min_value = -int32_max_value - 1;
+inline constexpr std::int64_t uint32_max_value = 4294967295;
+inline constexpr std::int64_t int64_max_value = 9223372036854775807;
+inline constexpr std::int64_t int64_min_value = -int64_max_value - 1;
+
+// Inclusive value range of an integer type. Replaces the
+// std::pair<std::int64_t, std::int64_t> integer_bounds_for_type returned;
+// scpp has no <utility>/std::pair, and no structured bindings to unpack one.
+class IntegerBounds {
+public:
+    virtual ~IntegerBounds() = default;
+    IntegerBounds() = default;
+    IntegerBounds(const IntegerBounds&) = default;
+    IntegerBounds& operator=(const IntegerBounds&) = default;
+    IntegerBounds(std::int64_t min, std::int64_t max) : min_value{min}, max_value{max} {}
+
+    std::int64_t min_value = 0;
+    std::int64_t max_value = 0;
+};
 
 [[nodiscard]] std::expected<void, ConstexprError> rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value);
 [[nodiscard]] std::expected<ConstexprValue, ConstexprError> snapshot_constexpr_value(const std::shared_ptr<Cell>& value, const SourceLocation& loc);
@@ -110,6 +155,25 @@ public:
     std::int64_t size = 0;
 };
 
+// One field of an ObjectValue. ObjectValue::fields used to be an
+// unordered_map<std::string, std::shared_ptr<Cell>>, but scpp's
+// std::unordered_map has no begin()/iteration at all, and three sites here
+// iterate it. A vector also makes field order *insertion order* -- i.e. the
+// declaration order the fields were created in -- rather than hash order;
+// see snapshot_constexpr_value for why that matters.
+class ObjectField {
+public:
+    virtual ~ObjectField() = default;
+    ObjectField() = default;
+    ObjectField(const ObjectField&) = default;
+    ObjectField& operator=(const ObjectField&) = default;
+    ObjectField(std::string field_name, std::shared_ptr<Cell> field_cell)
+        : name{std::move(field_name)}, cell{std::move(field_cell)} {}
+
+    std::string name;
+    std::shared_ptr<Cell> cell;
+};
+
 class ObjectValue {
 public:
     virtual ~ObjectValue() = default;
@@ -118,7 +182,34 @@ public:
     ObjectValue& operator=(const ObjectValue&) = default;
 
     std::string type_name;
-    std::unordered_map<std::string, std::shared_ptr<Cell>> fields;
+    std::vector<ObjectField> fields;
+
+    // Index of the field named `name`, or -1 if there is none. Replaces the
+    // `find(name) != end()` idiom the unordered_map version used; objects
+    // here have a handful of fields, so the linear scan is not a concern.
+    [[nodiscard]] std::int64_t field_index(const std::string& name) const {
+        for (std::size_t i = 0; i < fields.size(); ++i) {
+            if (fields[i].name == name) return static_cast<std::int64_t>(i);
+        }
+        return -1;
+    }
+
+    // First insertion of a name wins, exactly as unordered_map::emplace did.
+    // This is load-bearing, not defensive: collect_class_fields flattens base
+    // and derived fields into one list without de-duplicating, so a derived
+    // class that redeclares a base field's name yields that name twice.
+    // std::format's validators do exactly this --
+    // `format_string<Head, Tail...> : private format_string<Tail...>` and both
+    // levels declare `const char* text_{}` -- so a 6-argument std::println
+    // produces seven `text_` entries. The map silently collapsed them; a plain
+    // emplace_back would keep all seven, and only the one the constructor
+    // reaches gets initialized, leaving the rest as null const char* that
+    // snapshot_constexpr_value rejects with "unsupported constexpr pointer
+    // result".
+    void add_field(std::string name, std::shared_ptr<Cell> cell) {
+        if (field_index(name) >= 0) return;
+        fields.emplace_back(std::move(name), std::move(cell));
+    }
 };
 
 class ArrayValue {
@@ -655,7 +746,15 @@ private:
     }
 
     [[nodiscard]] static bool is_power_of_two(std::uint64_t value) {
-        return value != 0 && (value & (value - 1)) == 0;
+        // Spelled with division rather than `value & (value - 1)`: scpp has no
+        // bitwise operators, the same reason ast.cppm's align_up is written as
+        // `((value + align - 1) / align) * align`.
+        if (value == 0) return false;
+        while (value > 1) {
+            if (value / 2 * 2 != value) return false;
+            value = value / 2;
+        }
+        return true;
     }
 
     [[nodiscard]] std::expected<std::uint64_t, ConstexprError> evaluate_alignment_operand(const AlignmentSpecifier& spec) {
@@ -823,7 +922,9 @@ private:
             case CellKind::Object: {
                 ObjectValue object_copy;
                 object_copy.type_name = cell->data.object.type_name;
-                for (const auto& [name, field] : cell->data.object.fields) object_copy.fields.emplace(name, clone_cell(field));
+                for (const ObjectField& field : cell->data.object.fields) {
+                    object_copy.add_field(field.name, clone_cell(field.cell));
+                }
                 copy->data.set_object(std::move(object_copy));
                 break;
             }
@@ -902,7 +1003,7 @@ private:
                     for (const StructField& field : struct_it->second->fields) {
                         auto field_result = make_default_cell(field.type, loc);
                         if (!field_result.has_value()) return std::unexpected(std::move(field_result).error());
-                        object.fields.emplace(field.name, std::move(field_result).value());
+                        object.add_field(field.name, std::move(field_result).value());
                     }
                     cell->data.set_object(std::move(object));
                     return cell;
@@ -916,11 +1017,11 @@ private:
                         if (field.type.kind == TypeKind::Reference && field.type.pointee) {
                             auto field_result = make_default_cell(*field.type.pointee, loc);
                             if (!field_result.has_value()) return std::unexpected(std::move(field_result).error());
-                            object.fields.emplace(field.name, std::move(field_result).value());
+                            object.add_field(field.name, std::move(field_result).value());
                         } else {
                             auto field_result = make_default_cell(field.type, loc);
                             if (!field_result.has_value()) return std::unexpected(std::move(field_result).error());
-                            object.fields.emplace(field.name, std::move(field_result).value());
+                            object.add_field(field.name, std::move(field_result).value());
                         }
                     }
                     cell->data.set_object(std::move(object));
@@ -957,9 +1058,12 @@ private:
     }
 
     [[nodiscard]] std::expected<Binding, ConstexprError> lookup_binding(const std::string& name, const SourceLocation& loc) {
-        for (auto it = frames_.rbegin(); it != frames_.rend(); ++it) {
-            auto binding_it = it->find(name);
-            if (binding_it != it->end()) return binding_it->second;
+        // std::vector has no rbegin()/rend() yet -- walk backwards (innermost
+        // frame first) by index instead, as parser.cppm already does.
+        for (std::size_t i = frames_.size(); i > 0; --i) {
+            const std::unordered_map<std::string, Binding>& frame = frames_[i - 1];
+            auto binding_it = frame.find(name);
+            if (binding_it != frame.end()) return binding_it->second;
         }
         auto global_result = resolve_global_constant(name, loc);
         if (!global_result.has_value()) return std::unexpected(std::move(global_result).error());
@@ -1045,27 +1149,26 @@ private:
         return std::unexpected(ConstexprError(loc, "switch requires an integral or enum constexpr value"));
     }
 
-    [[nodiscard]] std::pair<std::int64_t, std::int64_t> integer_bounds_for_type(const Type& type) const {
-        if (is_named_type(type, "char")) return {0, 255};
-        if (is_named_type(type, "bool")) return {0, 1};
+    [[nodiscard]] IntegerBounds integer_bounds_for_type(const Type& type) const {
+        if (is_named_type(type, "char")) return IntegerBounds{0, 255};
+        if (is_named_type(type, "bool")) return IntegerBounds{0, 1};
         if (is_named_type(type, "int")) {
-            return {std::numeric_limits<int>::min(), std::numeric_limits<int>::max()};
+            return IntegerBounds{int32_min_value, int32_max_value};
         }
-        if (is_named_type(type, "int8_t")) return {-128, 127};
-        if (is_named_type(type, "uint8_t")) return {0, 255};
-        if (is_named_type(type, "int16_t")) return {-32768, 32767};
-        if (is_named_type(type, "uint16_t")) return {0, 65535};
+        if (is_named_type(type, "int8_t")) return IntegerBounds{-128, 127};
+        if (is_named_type(type, "uint8_t")) return IntegerBounds{0, 255};
+        if (is_named_type(type, "int16_t")) return IntegerBounds{-32768, 32767};
+        if (is_named_type(type, "uint16_t")) return IntegerBounds{0, 65535};
         if (is_named_type(type, "int32_t")) {
-            return {std::numeric_limits<std::int32_t>::min(), std::numeric_limits<std::int32_t>::max()};
+            return IntegerBounds{int32_min_value, int32_max_value};
         }
-        if (is_named_type(type, "unsigned int")) return {0, std::numeric_limits<std::uint32_t>::max()};
+        if (is_named_type(type, "unsigned int")) return IntegerBounds{0, uint32_max_value};
         if (is_named_type(type, "size_t") || is_named_type(type, "uint64_t") || is_named_type(type, "unsigned long")) {
-            return {0, std::numeric_limits<std::int64_t>::max()};
+            return IntegerBounds{0, int64_max_value};
         }
-        if (is_named_type(type, "ptrdiff_t") || is_named_type(type, "int64_t") || is_named_type(type, "long")) {
-            return {std::numeric_limits<std::int64_t>::min(), std::numeric_limits<std::int64_t>::max()};
-        }
-        return {std::numeric_limits<std::int64_t>::min(), std::numeric_limits<std::int64_t>::max()};
+        // ptrdiff_t/int64_t/long fall through to the same 64-bit bounds the
+        // default returns, so they need no branch of their own.
+        return IntegerBounds{int64_min_value, int64_max_value};
     }
 
     [[nodiscard]] std::expected<void, ConstexprError> checked_assign_integer(const std::shared_ptr<Cell>& target, std::int64_t value, const SourceLocation& loc) {
@@ -1073,8 +1176,8 @@ private:
             target->data.set_bool(value != 0);
             return {};
         }
-        auto [min_value, max_value] = integer_bounds_for_type(target->type);
-        if (value < min_value || value > max_value) {
+        IntegerBounds bounds = integer_bounds_for_type(target->type);
+        if (value < bounds.min_value || value > bounds.max_value) {
             return std::unexpected(ConstexprError(loc, "constexpr integer overflow"));
         }
         target->data.set_integer(value);
@@ -1169,11 +1272,11 @@ private:
                     return std::unexpected(ConstexprError(expr.loc, "member access requires a constexpr object value"));
                 }
                 const ObjectValue& object = base.cell->data.object;
-                auto it = object.fields.find(expr.name);
-                if (it == object.fields.end()) {
+                std::int64_t field_slot = object.field_index(expr.name);
+                if (field_slot < 0) {
                     return std::unexpected(ConstexprError(expr.loc, "unknown constexpr field '" + expr.name + "'"));
                 }
-                return LValue{it->second, base.read_only};
+                return LValue{object.fields[static_cast<std::size_t>(field_slot)].cell, base.read_only};
             }
             case ExprKind::Subscript: {
                 std::shared_ptr<Cell> base;
@@ -1354,7 +1457,7 @@ private:
         alias->type = target_type;
         ObjectValue alias_object;
         alias_object.type_name = target_type.name;
-        for (const auto& [name, field] : object.fields) alias_object.fields.emplace(name, field);
+        for (const ObjectField& field : object.fields) alias_object.add_field(field.name, field.cell);
         alias->data.set_object(std::move(alias_object));
         return alias;
     }
@@ -1453,9 +1556,10 @@ private:
         if (auto struct_it = structs_by_name_.find(object_type.name); struct_it != structs_by_name_.end()) {
             for (const StructField& field : struct_it->second->fields) {
                 if (!field.default_initializer) continue;
-                auto field_it = object.fields.find(field.name);
-                if (field_it == object.fields.end()) continue;
-                if (auto result = apply_initializer_to_field(field_it->second, field.type, *field.default_initializer, loc);
+                std::int64_t field_slot = object.field_index(field.name);
+                if (field_slot < 0) continue;
+                if (auto result = apply_initializer_to_field(object.fields[static_cast<std::size_t>(field_slot)].cell,
+                                                            field.type, *field.default_initializer, loc);
                     !result.has_value()) {
                     return result;
                 }
@@ -1467,9 +1571,10 @@ private:
             if (!fields_result.has_value()) return std::unexpected(std::move(fields_result).error());
             for (const ClassField& field : fields_result.value()) {
                 if (!field.default_initializer) continue;
-                auto field_it = object.fields.find(field.name);
-                if (field_it == object.fields.end()) continue;
-                if (auto result = apply_initializer_to_field(field_it->second, field.type, *field.default_initializer, loc);
+                std::int64_t field_slot = object.field_index(field.name);
+                if (field_slot < 0) continue;
+                if (auto result = apply_initializer_to_field(object.fields[static_cast<std::size_t>(field_slot)].cell,
+                                                            field.type, *field.default_initializer, loc);
                     !result.has_value()) {
                     return result;
                 }
@@ -1609,11 +1714,13 @@ private:
                 }
                 if (selected == nullptr && field.default_initializer) selected = &*field.default_initializer;
                 if (selected == nullptr) continue;
-                auto field_it = object.fields.find(field.name);
-                if (field_it == object.fields.end()) {
+                std::int64_t field_slot = object.field_index(field.name);
+                if (field_slot < 0) {
                     return std::unexpected(ConstexprError(fn.loc, "missing constexpr storage for field '" + field.name + "'"));
                 }
-                if (auto result = apply_initializer_to_field(field_it->second, field.type, *selected, fn.loc); !result.has_value()) {
+                if (auto result = apply_initializer_to_field(object.fields[static_cast<std::size_t>(field_slot)].cell,
+                                                            field.type, *selected, fn.loc);
+                    !result.has_value()) {
                     return result;
                 }
             }
@@ -1633,11 +1740,13 @@ private:
             }
             if (selected == nullptr && field.default_initializer) selected = &*field.default_initializer;
             if (selected == nullptr) continue;
-            auto field_it = object.fields.find(field.name);
-            if (field_it == object.fields.end()) {
+            std::int64_t field_slot = object.field_index(field.name);
+            if (field_slot < 0) {
                 return std::unexpected(ConstexprError(fn.loc, "missing constexpr storage for field '" + field.name + "'"));
             }
-            if (auto result = apply_initializer_to_field(field_it->second, field.type, *selected, fn.loc); !result.has_value()) {
+            if (auto result = apply_initializer_to_field(object.fields[static_cast<std::size_t>(field_slot)].cell,
+                                                         field.type, *selected, fn.loc);
+                !result.has_value()) {
                 return result;
             }
         }
@@ -2408,7 +2517,7 @@ private:
                         auto integer_result = as_integer(operand, expr.loc);
                         if (!integer_result.has_value()) return std::unexpected(std::move(integer_result).error());
                         std::int64_t value = integer_result.value();
-                        if (value == std::numeric_limits<std::int64_t>::min()) {
+                        if (value == int64_min_value) {
                             return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
                         }
                         return make_checked_int_cell(-value, expr.loc);
@@ -2858,10 +2967,16 @@ private:
     }
     if (value->data.is_object()) {
         snapshot.kind = ConstexprValueKind::Object;
-        for (const auto& [name, field] : value->data.object.fields) {
-            auto field_result = snapshot_constexpr_value(field, loc);
+        // Fields are now snapshotted in the order they were created (i.e. the
+        // order they are declared in the struct/class) rather than in
+        // unordered_map hash order, so a given object always produces the same
+        // object_fields sequence. codegen's only consumer looks fields up by
+        // name, so this is a latent-hazard fix, not an output change.
+        for (const ObjectField& field : value->data.object.fields) {
+            auto field_result = snapshot_constexpr_value(field.cell, loc);
             if (!field_result.has_value()) return std::unexpected(std::move(field_result).error());
-            snapshot.object_fields.push_back({name, std::make_shared<ConstexprValue>(std::move(field_result).value())});
+            snapshot.object_fields.emplace_back(field.name,
+                                                std::make_shared<ConstexprValue>(std::move(field_result).value()));
         }
         return snapshot;
     }
