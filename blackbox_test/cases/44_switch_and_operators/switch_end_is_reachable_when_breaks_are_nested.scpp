@@ -1,0 +1,35 @@
+// PR #414: the code after a `switch` must stay reachable when every `break;`
+// reaching it is nested inside a case rather than being the case's own last
+// top-level statement. Codegen used to predict this from the shape of the
+// source -- "does this case's last statement happen to be `break;`?" -- which
+// cannot see a `break;` inside a braced body or inside an `if`, and so marked
+// the switch's exit block `unreachable` while real branches still targeted
+// it. It now asks LLVM whether anything actually branches there.
+int run(int selector, int flag) {
+    int total = 0;
+    switch (selector) {
+        case 0: {
+            total = total + 1;
+            break;
+        }
+        case 1:
+            if (flag == 1) {
+                total = total + 2;
+                break;
+            }
+            return 100;
+        default: {
+            total = total + 10;
+            break;
+        }
+    }
+    return total;
+}
+
+int main() {
+    if (run(0, 0) != 1) return 1;
+    if (run(1, 1) != 2) return 2;
+    if (run(1, 0) != 100) return 3;
+    if (run(5, 0) != 10) return 4;
+    return 0;
+}

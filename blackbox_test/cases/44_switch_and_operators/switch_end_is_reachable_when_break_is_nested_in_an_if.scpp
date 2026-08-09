@@ -1,0 +1,27 @@
+// PR #414: regression test for a codegen bug that predates braced case bodies
+// and is reproducible with plain, always-legal switch syntax. Every case here
+// ends in an explicit `return;`, so no case's *last* statement is `break;` --
+// yet the `break;` nested inside the `if` still branches to the switch's exit
+// block. Codegen used to decide the exit block was unreachable by peeking at
+// each case's final statement, so it emitted `unreachable` there and the
+// program crashed at run time with no diagnostic.
+int run(int flag) {
+    int total = 0;
+    switch (0) {
+        case 0:
+            if (flag == 1) {
+                total = total + 2;
+                break;
+            }
+            return 100;
+        default:
+            return 10;
+    }
+    return total;
+}
+
+int main() {
+    if (run(1) != 2) return 1;
+    if (run(0) != 100) return 2;
+    return 0;
+}
