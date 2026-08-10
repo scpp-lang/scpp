@@ -44,7 +44,7 @@ public:
 
     virtual ~ConstexprError() override = default;
 
-    SourceLocation loc;
+    SourceLocation loc{};
 };
 
 enum class ConstexprValueKind {
@@ -73,8 +73,8 @@ public:
     ConstexprField(std::string name, std::shared_ptr<ConstexprValue> value)
         : first{std::move(name)}, second{std::move(value)} {}
 
-    std::string first;
-    std::shared_ptr<ConstexprValue> second;
+    std::string first{};
+    std::shared_ptr<ConstexprValue> second{};
 };
 
 class ConstexprValue {
@@ -84,14 +84,14 @@ public:
     ConstexprValue(const ConstexprValue&) = default;
     ConstexprValue& operator=(const ConstexprValue&) = default;
 
-    Type type;
+    Type type{};
     ConstexprValueKind kind = ConstexprValueKind::Void;
     std::int64_t int_value = 0;
     double double_value = 0.0;
     bool bool_value = false;
-    std::string string_value;
-    std::vector<ConstexprField> object_fields;
-    std::vector<ConstexprValue> elements;
+    std::string string_value{};
+    std::vector<ConstexprField> object_fields{};
+    std::vector<ConstexprValue> elements{};
 };
 
 [[nodiscard]] std::expected<void, ConstexprError> fold_immediate_calls(Program& program, ConstexprLimits limits = {});
@@ -107,12 +107,14 @@ class Cell;
 // Replaces std::numeric_limits, which scpp has no <limits> for. Written as
 // `-max - 1` rather than as a negative literal because the magnitude of the
 // most negative value is not representable as a positive literal of its own
-// type.
-inline constexpr std::int64_t int32_max_value = 2147483647;
-inline constexpr std::int64_t int32_min_value = -int32_max_value - 1;
-inline constexpr std::int64_t uint32_max_value = 4294967295;
-inline constexpr std::int64_t int64_max_value = 9223372036854775807;
-inline constexpr std::int64_t int64_min_value = -int64_max_value - 1;
+// type. Not `inline constexpr`: scpp has no `inline` variables (it parses
+// `inline` as a function specifier), and in a module interface these are
+// one entity across all importers anyway, so `inline` bought nothing here.
+constexpr std::int64_t int32_max_value = 2147483647;
+constexpr std::int64_t int32_min_value = -int32_max_value - 1;
+constexpr std::int64_t uint32_max_value = 4294967295;
+constexpr std::int64_t int64_max_value = 9223372036854775807;
+constexpr std::int64_t int64_min_value = -int64_max_value - 1;
 
 // Inclusive value range of an integer type. Replaces the
 // std::pair<std::int64_t, std::int64_t> integer_bounds_for_type returned;
@@ -139,8 +141,8 @@ public:
     PointerValue(const PointerValue&) = default;
     PointerValue& operator=(const PointerValue&) = default;
 
-    std::shared_ptr<Cell> storage;
-    std::string storage_id;
+    std::shared_ptr<Cell> storage{};
+    std::string storage_id{};
     std::int64_t index = 0;
 };
 
@@ -151,7 +153,7 @@ public:
     SpanValue(const SpanValue&) = default;
     SpanValue& operator=(const SpanValue&) = default;
 
-    PointerValue pointer;
+    PointerValue pointer{};
     std::int64_t size = 0;
 };
 
@@ -170,8 +172,8 @@ public:
     ObjectField(std::string field_name, std::shared_ptr<Cell> field_cell)
         : name{std::move(field_name)}, cell{std::move(field_cell)} {}
 
-    std::string name;
-    std::shared_ptr<Cell> cell;
+    std::string name{};
+    std::shared_ptr<Cell> cell{};
 };
 
 class ObjectValue {
@@ -181,8 +183,8 @@ public:
     ObjectValue(const ObjectValue&) = default;
     ObjectValue& operator=(const ObjectValue&) = default;
 
-    std::string type_name;
-    std::vector<ObjectField> fields;
+    std::string type_name{};
+    std::vector<ObjectField> fields{};
 
     // Index of the field named `name`, or -1 if there is none. Replaces the
     // `find(name) != end()` idiom the unordered_map version used; objects
@@ -219,8 +221,8 @@ public:
     ArrayValue(const ArrayValue&) = default;
     ArrayValue& operator=(const ArrayValue&) = default;
 
-    Type element_type;
-    std::vector<std::shared_ptr<Cell>> elements;
+    Type element_type{};
+    std::vector<std::shared_ptr<Cell>> elements{};
 };
 
 // What a Cell currently holds. This is a hand-rolled tagged union rather
@@ -260,10 +262,10 @@ public:
     std::int64_t int_value = 0;
     double double_value = 0.0;
     bool bool_value = false;
-    PointerValue pointer;
-    SpanValue span;
-    ObjectValue object;
-    ArrayValue array;
+    PointerValue pointer{};
+    SpanValue span{};
+    ObjectValue object{};
+    ArrayValue array{};
 
     [[nodiscard]] bool is_empty() const { return kind == CellKind::Empty; }
     [[nodiscard]] bool is_integer() const { return kind == CellKind::Integer; }
@@ -334,8 +336,8 @@ public:
     Cell(const Cell&) = default;
     Cell& operator=(const Cell&) = default;
 
-    Type type;
-    CellData data;
+    Type type{};
+    CellData data{};
 };
 
 // Binding, LValue, ExprRewrite and ExecOutcome each get an explicit
@@ -352,7 +354,7 @@ public:
     Binding(const Binding&) = default;
     Binding& operator=(const Binding&) = default;
 
-    std::shared_ptr<Cell> cell;
+    std::shared_ptr<Cell> cell{};
     bool read_only = false;
 };
 
@@ -364,7 +366,7 @@ public:
     LValue(const LValue&) = default;
     LValue& operator=(const LValue&) = default;
 
-    std::shared_ptr<Cell> cell;
+    std::shared_ptr<Cell> cell{};
     bool read_only = false;
 };
 
@@ -377,7 +379,7 @@ public:
     ExprRewrite& operator=(const ExprRewrite&) = default;
 
     Expr* target = nullptr;
-    std::shared_ptr<Cell> value;
+    std::shared_ptr<Cell> value{};
 };
 
 // scpp (the language) has no exceptions, so `execute_stmt`'s own
@@ -403,7 +405,7 @@ public:
     ExecOutcome& operator=(const ExecOutcome&) = default;
 
     ExecFlow flow = ExecFlow::Normal;
-    std::shared_ptr<Cell> return_value;
+    std::shared_ptr<Cell> return_value{};
 };
 
 [[nodiscard]] bool types_equal(const Type& a, const Type& b) {
@@ -447,7 +449,7 @@ public:
 }
 
 [[nodiscard]] Type make_const_char_pointer_type() {
-    Type result;
+    Type result{};
     result.kind = TypeKind::Pointer;
     result.pointee = std::make_shared<Type>(named_type("char"));
     result.is_mutable_pointee = false;
@@ -475,7 +477,7 @@ public:
 }
 
 [[nodiscard]] Type make_pointer_type_to(const Type& pointee, bool is_mutable_pointee) {
-    Type type;
+    Type type{};
     type.kind = TypeKind::Pointer;
     type.pointee = std::make_shared<Type>(pointee);
     type.is_mutable_pointee = is_mutable_pointee;
@@ -511,7 +513,7 @@ class ConstexprEngine {
 public:
     virtual ~ConstexprEngine() = default;
     ConstexprEngine(const Program& program, ConstexprLimits limits)
-        : program_(program), limits_(limits) {
+        : program_{program}, limits_{limits} {
         for (std::size_t i = 0; i < program_.functions.size(); ++i) functions_by_name_[program_.functions[i].name].push_back(i);
         for (const ClassDef& def : program_.classes) classes_by_name_.emplace(def.name, &def);
         for (const StructDef& def : program_.structs) structs_by_name_.emplace(def.name, &def);
@@ -534,7 +536,7 @@ public:
         steps_ = 0;
         call_depth_ = 0;
         string_storage_counter_ = 0;
-        frames_.push_back({});
+        frames_.emplace_back();
         auto result = validate_constexpr_stmt_tree(*fn.body);
         frames_.pop_back();
         return result;
@@ -657,12 +659,12 @@ public:
         steps_ = 0;
         call_depth_ = 0;
         string_storage_counter_ = 0;
-        frames_.push_back({});
+        frames_.emplace_back();
     }
 
     void end_local_array_bound_scope() { frames_.pop_back(); }
 
-    void push_local_array_bound_scope() { frames_.push_back({}); }
+    void push_local_array_bound_scope() { frames_.emplace_back(); }
     void pop_local_array_bound_scope() { frames_.pop_back(); }
 
     // Mirrors validate_constexpr_stmt_tree's own VarDecl handling below
@@ -699,15 +701,15 @@ public:
 
 private:
     const Program& program_;
-    ConstexprLimits limits_;
+    ConstexprLimits limits_{};
     int steps_ = 0;
     int call_depth_ = 0;
     int string_storage_counter_ = 0;
-    std::vector<std::unordered_map<std::string, Binding>> frames_;
-    std::unordered_map<std::string, std::vector<std::size_t>> functions_by_name_;
-    std::unordered_map<std::string, const ClassDef*> classes_by_name_;
-    std::unordered_map<std::string, const StructDef*> structs_by_name_;
-    std::unordered_set<std::string> incomplete_type_names_;
+    std::vector<std::unordered_map<std::string, Binding>> frames_{};
+    std::unordered_map<std::string, std::vector<std::size_t>> functions_by_name_{};
+    std::unordered_map<std::string, const ClassDef*> classes_by_name_{};
+    std::unordered_map<std::string, const StructDef*> structs_by_name_{};
+    std::unordered_set<std::string> incomplete_type_names_{};
     // ch05 §9.4(8)/06-constant-evaluation.md: a required constant
     // expression (an array bound, an `alignas` operand, ...) may name a
     // global `constexpr` variable (e.g. `constexpr int kBufferSize = 64;
@@ -721,9 +723,9 @@ private:
     // to reference it); globals_resolving_ detects `constexpr int A =
     // B; constexpr int B = A;`-style circular dependencies instead of
     // recursing forever.
-    std::unordered_map<std::string, const GlobalVar*> globals_by_name_;
-    std::unordered_map<std::string, std::shared_ptr<Cell>> resolved_global_constants_;
-    std::unordered_set<std::string> globals_resolving_;
+    std::unordered_map<std::string, const GlobalVar*> globals_by_name_{};
+    std::unordered_map<std::string, std::shared_ptr<Cell>> resolved_global_constants_{};
+    std::unordered_set<std::string> globals_resolving_{};
 
     // ch05 §9.4(6): `struct Self { char buf[sizeof(Self)]; };` -- Self is
     // incomplete at this point, so evaluating its size/alignment must be
@@ -848,8 +850,8 @@ private:
                 return {};
             }
             case StmtKind::Block: {
-                frames_.push_back({});
-                std::expected<void, ConstexprError> result;
+                frames_.emplace_back();
+                std::expected<void, ConstexprError> result{};
                 for (StmtPtr& nested : stmt.statements) {
                     result = validate_constexpr_stmt_tree(*nested);
                     if (!result.has_value()) break;
@@ -859,13 +861,13 @@ private:
             }
             case StmtKind::If: {
                 if (stmt.then_branch) {
-                    frames_.push_back({});
+                    frames_.emplace_back();
                     auto result = validate_constexpr_stmt_tree(*stmt.then_branch);
                     frames_.pop_back();
                     if (!result.has_value()) return result;
                 }
                 if (stmt.else_branch) {
-                    frames_.push_back({});
+                    frames_.emplace_back();
                     auto result = validate_constexpr_stmt_tree(*stmt.else_branch);
                     frames_.pop_back();
                     if (!result.has_value()) return result;
@@ -874,7 +876,7 @@ private:
             }
             case StmtKind::While: {
                 if (stmt.then_branch) {
-                    frames_.push_back({});
+                    frames_.emplace_back();
                     auto result = validate_constexpr_stmt_tree(*stmt.then_branch);
                     frames_.pop_back();
                     if (!result.has_value()) return result;
@@ -883,8 +885,8 @@ private:
             }
             case StmtKind::Switch: {
                 for (SwitchCase& switch_case : stmt.switch_cases) {
-                    frames_.push_back({});
-                    std::expected<void, ConstexprError> result;
+                    frames_.emplace_back();
+                    std::expected<void, ConstexprError> result{};
                     for (StmtPtr& nested : switch_case.statements) {
                         result = validate_constexpr_stmt_tree(*nested);
                         if (!result.has_value()) break;
@@ -920,7 +922,7 @@ private:
                 copy->data = cell->data;
                 break;
             case CellKind::Object: {
-                ObjectValue object_copy;
+                ObjectValue object_copy{};
                 object_copy.type_name = cell->data.object.type_name;
                 for (const ObjectField& field : cell->data.object.fields) {
                     object_copy.add_field(field.name, clone_cell(field.cell));
@@ -929,9 +931,11 @@ private:
                 break;
             }
             case CellKind::Array: {
-                ArrayValue array_copy;
+                ArrayValue array_copy{};
                 array_copy.element_type = cell->data.array.element_type;
-                for (const auto& element : cell->data.array.elements) array_copy.elements.push_back(clone_cell(element));
+                for (const std::shared_ptr<Cell>& element : cell->data.array.elements) {
+                    array_copy.elements.push_back(clone_cell(element));
+                }
                 copy->data.set_array(std::move(array_copy));
                 break;
             }
@@ -961,11 +965,11 @@ private:
     }
 
     [[nodiscard]] std::expected<std::vector<ClassField>, ConstexprError> collect_class_fields(const ClassDef& def) {
-        std::vector<ClassField> fields;
-        if (auto base = def.direct_ordinary_base()) {
+        std::vector<ClassField> fields{};
+        if (auto base = def.direct_ordinary_base(); base.has_value()) {
             auto base_it = classes_by_name_.find(base->get().base_type.name);
             if (base_it == classes_by_name_.end()) {
-                return std::unexpected(ConstexprError({}, "missing constexpr class definition for base class '" + base->get().base_type.name + "'"));
+                return std::unexpected(ConstexprError(SourceLocation{}, "missing constexpr class definition for base class '" + base->get().base_type.name + "'"));
             }
             auto base_fields_result = collect_class_fields(*base_it->second);
             if (!base_fields_result.has_value()) return std::unexpected(std::move(base_fields_result).error());
@@ -998,7 +1002,7 @@ private:
                     return cell;
                 }
                 if (auto struct_it = structs_by_name_.find(type.name); struct_it != structs_by_name_.end()) {
-                    ObjectValue object;
+                    ObjectValue object{};
                     object.type_name = type.name;
                     for (const StructField& field : struct_it->second->fields) {
                         auto field_result = make_default_cell(field.type, loc);
@@ -1009,7 +1013,7 @@ private:
                     return cell;
                 }
                 if (auto class_it = classes_by_name_.find(type.name); class_it != classes_by_name_.end()) {
-                    ObjectValue object;
+                    ObjectValue object{};
                     object.type_name = type.name;
                     auto fields_result = collect_class_fields(*class_it->second);
                     if (!fields_result.has_value()) return std::unexpected(std::move(fields_result).error());
@@ -1033,7 +1037,7 @@ private:
                 return cell;
             case TypeKind::Array: {
                 if (!type.element) return std::unexpected(ConstexprError(loc, "malformed array type in constexpr evaluator"));
-                ArrayValue array;
+                ArrayValue array{};
                 array.element_type = *type.element;
                 for (std::int64_t i = 0; i < type.array_size; ++i) {
                     auto element_result = make_default_cell(*type.element, loc);
@@ -1067,7 +1071,7 @@ private:
         }
         auto global_result = resolve_global_constant(name, loc);
         if (!global_result.has_value()) return std::unexpected(std::move(global_result).error());
-        if (std::shared_ptr<Cell> global_value = std::move(global_result).value()) {
+        if (std::shared_ptr<Cell> global_value = std::move(global_result).value(); global_value != nullptr) {
             return Binding{global_value, /*read_only=*/true};
         }
         return std::unexpected(ConstexprError(loc, "expression is not a constant expression: identifier '" + name + "' is not available"));
@@ -1216,7 +1220,7 @@ private:
 
         auto result = std::make_shared<Cell>();
         result->type = span_type;
-        SpanValue span;
+        SpanValue span{};
 
         if (init_expr.kind == ExprKind::StringLiteral) {
             auto pointer_cell_result = evaluate_expr(init_expr);
@@ -1279,7 +1283,7 @@ private:
                 return LValue{object.fields[static_cast<std::size_t>(field_slot)].cell, base.read_only};
             }
             case ExprKind::Subscript: {
-                std::shared_ptr<Cell> base;
+                std::shared_ptr<Cell> subscript_base{};
                 bool base_read_only = false;
                 // Speculatively try lvalue resolution first (needed so
                 // that e.g. `arr[i] = 1` assigns through the real
@@ -1289,39 +1293,39 @@ private:
                 // try/catch(const ConstexprError&) fallback exactly.
                 auto base_lvalue_result = resolve_lvalue(*expr.lhs);
                 if (base_lvalue_result.has_value()) {
-                    base = base_lvalue_result.value().cell;
+                    subscript_base = base_lvalue_result.value().cell;
                     base_read_only = base_lvalue_result.value().read_only;
                 } else {
                     auto base_value_result = evaluate_expr(*expr.lhs);
                     if (!base_value_result.has_value()) return std::unexpected(std::move(base_value_result).error());
-                    base = std::move(base_value_result).value();
+                    subscript_base = std::move(base_value_result).value();
                 }
                 auto index_value_result = evaluate_expr(*expr.rhs);
                 if (!index_value_result.has_value()) return std::unexpected(std::move(index_value_result).error());
                 auto index_result = as_integer(index_value_result.value(), expr.loc);
                 if (!index_result.has_value()) return std::unexpected(std::move(index_result).error());
                 std::int64_t index = index_result.value();
-                if (base->data.is_array()) {
-                    const ArrayValue& array = base->data.array;
+                if (subscript_base->data.is_array()) {
+                    const ArrayValue& array = subscript_base->data.array;
                     if (index < 0 || static_cast<std::size_t>(index) >= array.elements.size()) {
                         return std::unexpected(ConstexprError(expr.loc, "constexpr subscript out of bounds"));
                     }
                     return LValue{array.elements[static_cast<std::size_t>(index)], base_read_only};
                 }
-                if (base->data.is_span()) {
-                    const SpanValue& span = base->data.span;
+                if (subscript_base->data.is_span()) {
+                    const SpanValue& span = subscript_base->data.span;
                     if (index < 0 || index >= span.size) {
                         return std::unexpected(ConstexprError(expr.loc, "constexpr span subscript out of bounds"));
                     }
                     PointerValue element_ptr = span.pointer;
                     element_ptr.index += index;
-                    auto dereferenced = dereference_pointer(element_ptr, make_pointer_type_to(*base->type.pointee, false), expr.loc);
+                    auto dereferenced = dereference_pointer(element_ptr, make_pointer_type_to(*subscript_base->type.pointee, false), expr.loc);
                     if (!dereferenced.has_value()) return std::unexpected(std::move(dereferenced).error());
                     return LValue{std::move(dereferenced).value(), true};
                 }
-                if (base->data.is_pointer()) {
-                    if (!base->type.pointee) return std::unexpected(ConstexprError(expr.loc, "malformed constexpr pointer type"));
-                    PointerValue shifted = base->data.pointer;
+                if (subscript_base->data.is_pointer()) {
+                    if (!subscript_base->type.pointee) return std::unexpected(ConstexprError(expr.loc, "malformed constexpr pointer type"));
+                    PointerValue shifted = subscript_base->data.pointer;
                     shifted.index += index;
                     if (!shifted.storage || !shifted.storage->data.is_array()) {
                         return std::unexpected(ConstexprError(expr.loc, "constexpr pointer does not point to indexable storage"));
@@ -1329,7 +1333,7 @@ private:
                     if (shifted.index < 0 || static_cast<std::size_t>(shifted.index) >= shifted.storage->data.array.elements.size()) {
                         return std::unexpected(ConstexprError(expr.loc, "constexpr subscript out of bounds"));
                     }
-                    auto dereferenced = dereference_pointer(shifted, base->type, expr.loc);
+                    auto dereferenced = dereference_pointer(shifted, subscript_base->type, expr.loc);
                     if (!dereferenced.has_value()) return std::unexpected(std::move(dereferenced).error());
                     return LValue{std::move(dereferenced).value(), true};
                 }
@@ -1355,21 +1359,30 @@ private:
     }
 
     [[nodiscard]] std::shared_ptr<Cell> make_string_literal_pointer(const Expr& expr) {
-        Type array_type;
+        Type array_type{};
         array_type.kind = TypeKind::Array;
         array_type.element = std::make_shared<Type>(named_type("char"));
         array_type.array_size = static_cast<std::int64_t>(expr.name.size()) + 1;
         auto storage = std::make_shared<Cell>();
         storage->type = array_type;
-        ArrayValue array;
+        ArrayValue array{};
         array.element_type = named_type("char");
-        for (unsigned char ch : expr.name) array.elements.push_back(make_scalar_cell(named_type("char"), static_cast<std::int64_t>(ch)));
+        for (std::size_t i = 0; i < expr.name.size(); ++i) {
+            // Index loop rather than a range-for, and std::uint8_t rather
+            // than the bare `unsigned char` shorthand: scpp's range-for
+            // takes a fixed-size array, std::span or std::vector (not a
+            // std::string), and requires `unsigned` be followed by
+            // `int`/`long` (ch06 §6). The cast through std::uint8_t keeps
+            // bytes >= 0x80 positive, exactly as `unsigned char` did.
+            std::int64_t ch = static_cast<std::int64_t>(static_cast<std::uint8_t>(expr.name.at(i)));
+            array.elements.push_back(make_scalar_cell(named_type("char"), ch));
+        }
         array.elements.push_back(make_scalar_cell(named_type("char"), 0));
         storage->data.set_array(std::move(array));
 
         auto result = std::make_shared<Cell>();
         result->type = make_const_char_pointer_type();
-        PointerValue pointer;
+        PointerValue pointer{};
         pointer.storage = storage;
         pointer.storage_id = "string#" + std::to_string(++string_storage_counter_);
         result->data.set_pointer(std::move(pointer));
@@ -1455,7 +1468,7 @@ private:
         const ObjectValue& object = cell->data.object;
         auto alias = std::make_shared<Cell>();
         alias->type = target_type;
-        ObjectValue alias_object;
+        ObjectValue alias_object{};
         alias_object.type_name = target_type.name;
         for (const ObjectField& field : object.fields) alias_object.add_field(field.name, field.cell);
         alias->data.set_object(std::move(alias_object));
@@ -1630,15 +1643,15 @@ private:
         }
         if (field_type.kind == TypeKind::Named &&
             (is_class_name(field_type.name) || structs_by_name_.contains(field_type.name)) && init.has_brace_args) {
-            std::vector<std::shared_ptr<Cell>> arg_values;
+            std::vector<std::shared_ptr<Cell>> arg_values{};
             arg_values.reserve(init.brace_args.size());
             for (const ExprPtr& arg : init.brace_args) {
                 auto arg_result = evaluate_expr(*arg);
                 if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
                 arg_values.push_back(std::move(arg_result).value());
             }
-            if (const Function* ctor = find_constructor(field_type.name, arg_values, /*require_constexpr=*/true)) {
-                std::vector<Binding> bindings;
+            if (const Function* ctor = find_constructor(field_type.name, arg_values, /*require_constexpr=*/true); ctor != nullptr) {
+                std::vector<Binding> bindings{};
                 bindings.reserve(ctor->params.size());
                 bindings.push_back(Binding{field_cell, false});
                 for (std::size_t i = 1; i < ctor->params.size(); ++i) {
@@ -1803,19 +1816,19 @@ private:
             if (!left_result.has_value()) return std::unexpected(std::move(left_result).error());
             auto right_result = as_double(rhs, expr.loc);
             if (!right_result.has_value()) return std::unexpected(std::move(right_result).error());
-            double left = left_result.value();
-            double right = right_result.value();
+            double left_double = left_result.value();
+            double right_double = right_result.value();
             switch (expr.binary_op) {
-                case BinaryOp::Add: return make_double_cell(left + right);
-                case BinaryOp::Sub: return make_double_cell(left - right);
-                case BinaryOp::Mul: return make_double_cell(left * right);
-                case BinaryOp::Div: return make_double_cell(left / right);
-                case BinaryOp::Eq: return make_bool_cell(left == right);
-                case BinaryOp::Ne: return make_bool_cell(left != right);
-                case BinaryOp::Lt: return make_bool_cell(left < right);
-                case BinaryOp::Gt: return make_bool_cell(left > right);
-                case BinaryOp::Le: return make_bool_cell(left <= right);
-                case BinaryOp::Ge: return make_bool_cell(left >= right);
+                case BinaryOp::Add: return make_double_cell(left_double + right_double);
+                case BinaryOp::Sub: return make_double_cell(left_double - right_double);
+                case BinaryOp::Mul: return make_double_cell(left_double * right_double);
+                case BinaryOp::Div: return make_double_cell(left_double / right_double);
+                case BinaryOp::Eq: return make_bool_cell(left_double == right_double);
+                case BinaryOp::Ne: return make_bool_cell(left_double != right_double);
+                case BinaryOp::Lt: return make_bool_cell(left_double < right_double);
+                case BinaryOp::Gt: return make_bool_cell(left_double > right_double);
+                case BinaryOp::Le: return make_bool_cell(left_double <= right_double);
+                case BinaryOp::Ge: return make_bool_cell(left_double >= right_double);
                 default: break;
             }
         } else {
@@ -1828,17 +1841,17 @@ private:
             Type result_type = types_equal(lhs->type, rhs->type) ? lhs->type : named_type("int");
             switch (expr.binary_op) {
                 case BinaryOp::Add: {
-                    std::int64_t result;
+                    std::int64_t result{};
                     if (__builtin_add_overflow(left, right, &result)) return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
                     return make_checked_int_cell_as(result_type, result, expr.loc);
                 }
                 case BinaryOp::Sub: {
-                    std::int64_t result;
+                    std::int64_t result{};
                     if (__builtin_sub_overflow(left, right, &result)) return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
                     return make_checked_int_cell_as(result_type, result, expr.loc);
                 }
                 case BinaryOp::Mul: {
-                    std::int64_t result;
+                    std::int64_t result{};
                     if (__builtin_mul_overflow(left, right, &result)) return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
                     return make_checked_int_cell_as(result_type, result, expr.loc);
                 }
@@ -1876,11 +1889,11 @@ private:
                 return std::unexpected(std::move(result).error());
             }
         }
-        frames_.push_back({});
-        auto& frame = frames_.back();
+        frames_.emplace_back();
+        std::unordered_map<std::string, Binding>& frame = frames_.back();
         for (std::size_t i = 0; i < fn.params.size(); ++i) frame.emplace(fn.params[i].name, std::move(bindings[i]));
         auto init_result = execute_constructor_member_initializers(fn);
-        std::expected<ExecOutcome, ConstexprError> body_result;
+        std::expected<ExecOutcome, ConstexprError> body_result{};
         if (init_result.has_value()) {
             body_result = execute_stmt(*fn.body, fn.return_type);
         }
@@ -1902,7 +1915,7 @@ private:
 
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> call_with_expr_arg_views(const Function& fn, const std::vector<const Expr*>& args,
                                                                  const SourceLocation& loc) {
-        std::vector<Binding> bindings;
+        std::vector<Binding> bindings{};
         bindings.reserve(fn.params.size());
         for (std::size_t i = 0; i < fn.params.size(); ++i) {
             const Param& param = fn.params[i];
@@ -1944,7 +1957,7 @@ private:
                     // that aliasing fails, fall back to plain evaluation,
                     // exactly like the original try/catch(const
                     // ConstexprError&) fallback (which covered both steps).
-                    std::shared_ptr<Cell> bound_value;
+                    std::shared_ptr<Cell> bound_value{};
                     bool can_bind_lvalue = false;
                     auto arg_lvalue_result = resolve_lvalue(arg_expr);
                     if (arg_lvalue_result.has_value()) {
@@ -1995,7 +2008,7 @@ private:
                     auto object_result = make_default_cell(param.type, loc);
                     if (!object_result.has_value()) return std::unexpected(std::move(object_result).error());
                     auto object = std::move(object_result).value();
-                    std::vector<Binding> ctor_bindings;
+                    std::vector<Binding> ctor_bindings{};
                     ctor_bindings.push_back(Binding{object, false});
                     ctor_bindings.push_back(Binding{value, false});
                     auto ctor_call_result = call_function(*ctor, std::move(ctor_bindings), loc);
@@ -2011,7 +2024,7 @@ private:
 
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> call_with_expr_args(const Function& fn, const std::vector<ExprPtr>& args,
                                                             const SourceLocation& loc) {
-        std::vector<const Expr*> arg_views;
+        std::vector<const Expr*> arg_views{};
         arg_views.reserve(args.size());
         for (const ExprPtr& arg : args) arg_views.push_back(arg.get());
         return call_with_expr_arg_views(fn, arg_views, loc);
@@ -2020,7 +2033,7 @@ private:
     [[nodiscard]] std::expected<const Function*, ConstexprError> find_method_callable(const Expr& receiver_expr, std::string_view method_name,
                                                        const std::vector<std::shared_ptr<Cell>>& arg_values,
                                                        bool require_constexpr) {
-        std::shared_ptr<Cell> receiver_value;
+        std::shared_ptr<Cell> receiver_value{};
         bool receiver_is_lvalue = false;
         bool receiver_read_only = false;
         // Speculative: prefer resolving the receiver as a real lvalue (so
@@ -2079,7 +2092,7 @@ private:
         auto object_result = make_default_cell(object_type, expr.loc);
         if (!object_result.has_value()) return std::unexpected(std::move(object_result).error());
         auto object = std::move(object_result).value();
-        std::vector<std::shared_ptr<Cell>> arg_values;
+        std::vector<std::shared_ptr<Cell>> arg_values{};
         arg_values.reserve(expr.args.size());
         for (const ExprPtr& arg : expr.args) {
             auto arg_result = evaluate_expr(*arg);
@@ -2100,7 +2113,7 @@ private:
             }
             return std::unexpected(ConstexprError(expr.loc, "no constexpr/consteval constructor matches for type '" + expr.name + "'"));
         }
-        std::vector<Binding> bindings;
+        std::vector<Binding> bindings{};
         bindings.reserve(ctor->params.size());
         bindings.push_back(Binding{object, false});
         for (std::size_t i = 1; i < ctor->params.size(); ++i) {
@@ -2144,7 +2157,7 @@ private:
 
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_call_expr(const Expr& expr) {
         if (expr.lhs) {
-            std::vector<std::shared_ptr<Cell>> arg_values;
+            std::vector<std::shared_ptr<Cell>> arg_values{};
             arg_values.reserve(expr.args.size());
             for (const ExprPtr& arg : expr.args) {
                 auto arg_result = evaluate_expr(*arg);
@@ -2158,14 +2171,14 @@ private:
                 return std::unexpected(ConstexprError(expr.loc,
                                      "no constexpr/consteval overload of method '" + expr.name + "' matches this immediate call"));
             }
-            std::vector<const Expr*> all_args;
+            std::vector<const Expr*> all_args{};
             all_args.reserve(expr.args.size() + 1);
             all_args.push_back(expr.lhs.get());
             for (const ExprPtr& arg : expr.args) all_args.push_back(arg.get());
             return call_with_expr_arg_views(*fn, all_args, expr.loc);
         }
         if (is_class_name(expr.name)) return evaluate_constructor_expr(expr);
-        std::vector<std::shared_ptr<Cell>> arg_values;
+        std::vector<std::shared_ptr<Cell>> arg_values{};
         arg_values.reserve(expr.args.size());
         for (const ExprPtr& arg : expr.args) {
             auto arg_result = evaluate_expr(*arg);
@@ -2213,13 +2226,13 @@ private:
                 // ConstexprError&) fallback.
                 auto binding_result = lookup_binding(expr.name, expr.loc);
                 if (binding_result.has_value()) return binding_result.value().cell->type;
-                if (const EnumDef* def = find_enum_for_variant(expr.name)) return named_type(def->name);
+                if (const EnumDef* def = find_enum_for_variant(expr.name); def != nullptr) return named_type(def->name);
                 return std::nullopt;
             }
             case ExprKind::Move:
                 return expr.lhs ? infer_unevaluated_expr_type(*expr.lhs) : std::nullopt;
             case ExprKind::New: {
-                Type result;
+                Type result{};
                 result.kind = TypeKind::Pointer;
                 result.pointee = std::make_shared<Type>(expr.type);
                 result.is_mutable_pointee = true;
@@ -2241,7 +2254,8 @@ private:
             case ExprKind::Member: {
                 std::optional<Type> base = infer_unevaluated_expr_type(*expr.lhs);
                 if (!base.has_value()) return std::nullopt;
-                if (auto* span_pointee = base->kind == TypeKind::Span ? base->pointee.get() : nullptr; span_pointee && expr.name == "size") {
+                Type* span_pointee = base->kind == TypeKind::Span ? base->pointee.get() : nullptr;
+                if (span_pointee != nullptr && expr.name == "size") {
                     return named_type("size_t");
                 }
                 const Type& base_named = base->kind == TypeKind::Reference ? *base->pointee : *base;
@@ -2372,7 +2386,7 @@ private:
                 return make_scalar_cell(named_type("size_t"), static_cast<std::int64_t>(layout->abi_align_bytes));
             }
             case ExprKind::Sizeof: {
-                Type queried_type;
+                Type queried_type{};
                 if (expr.sizeof_operand_is_type) {
                     queried_type = expr.type;
                 } else {
@@ -2516,11 +2530,11 @@ private:
                         }
                         auto integer_result = as_integer(operand, expr.loc);
                         if (!integer_result.has_value()) return std::unexpected(std::move(integer_result).error());
-                        std::int64_t value = integer_result.value();
-                        if (value == int64_min_value) {
+                        std::int64_t negated_value = integer_result.value();
+                        if (negated_value == int64_min_value) {
                             return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
                         }
-                        return make_checked_int_cell(-value, expr.loc);
+                        return make_checked_int_cell(-negated_value, expr.loc);
                     }
                     case UnaryOp::Not: {
                         auto operand_result = evaluate_expr(*expr.lhs);
@@ -2545,7 +2559,7 @@ private:
                         LValue target = std::move(target_result).value();
                         auto result = std::make_shared<Cell>();
                         result->type = make_pointer_type_to(target.cell->type, !target.read_only);
-                        PointerValue pointer;
+                        PointerValue pointer{};
                         if (expr.lhs->kind == ExprKind::Subscript && expr.lhs->lhs && expr.lhs->rhs) {
                             auto offset_value_result = evaluate_expr(*expr.lhs->rhs);
                             if (!offset_value_result.has_value()) return std::unexpected(std::move(offset_value_result).error());
@@ -2626,10 +2640,10 @@ private:
                 if (!cell_result.has_value()) return std::unexpected(std::move(cell_result).error());
                 auto cell = std::move(cell_result).value();
                 if (stmt.has_ctor_args) {
-                    std::vector<Binding> ctor_bindings;
+                    std::vector<Binding> ctor_bindings{};
                     ctor_bindings.reserve(stmt.ctor_args.size() + 1);
                     ctor_bindings.push_back(Binding{cell, false});
-                    std::vector<std::shared_ptr<Cell>> arg_values;
+                    std::vector<std::shared_ptr<Cell>> arg_values{};
                     arg_values.reserve(stmt.ctor_args.size() + 1);
                     arg_values.push_back(cell);
                     for (const ExprPtr& arg : stmt.ctor_args) {
@@ -2692,8 +2706,8 @@ private:
             }
             case StmtKind::ExprStmt:
                 if (stmt.expr) {
-                    auto result = evaluate_expr(*stmt.expr);
-                    if (!result.has_value()) return std::unexpected(std::move(result).error());
+                    auto expr_stmt_result = evaluate_expr(*stmt.expr);
+                    if (!expr_stmt_result.has_value()) return std::unexpected(std::move(expr_stmt_result).error());
                 }
                 return ExecOutcome{};
             case StmtKind::If:
@@ -2747,7 +2761,7 @@ private:
                 auto condition_key_result = switch_match_key(condition_value, stmt.loc);
                 if (!condition_key_result.has_value()) return std::unexpected(std::move(condition_key_result).error());
                 std::int64_t condition_key = condition_key_result.value();
-                frames_.push_back({});
+                frames_.emplace_back();
                 std::expected<ExecOutcome, ConstexprError> result = ExecOutcome{};
                 bool matched = false;
                 for (const SwitchCase& switch_case : stmt.switch_cases) {
@@ -2771,7 +2785,7 @@ private:
                     }
                     if (!case_matches) continue;
                     matched = true;
-                    ExecOutcome case_outcome;
+                    ExecOutcome case_outcome{};
                     bool case_broke = false;
                     for (const StmtPtr& nested : switch_case.statements) {
                         auto nested_result = execute_stmt(*nested, return_type);
@@ -2814,7 +2828,7 @@ private:
             case StmtKind::Fallthrough: return ExecOutcome{};
             case StmtKind::Block: {
                 if (stmt.is_unsafe) return std::unexpected(ConstexprError(stmt.loc, "unsafe blocks are not allowed in constant evaluation"));
-                frames_.push_back({});
+                frames_.emplace_back();
                 std::expected<ExecOutcome, ConstexprError> result = ExecOutcome{};
                 for (const StmtPtr& nested : stmt.statements) {
                     result = execute_stmt(*nested, return_type);
@@ -2907,7 +2921,7 @@ private:
         const ArrayValue& array = value->data.pointer.storage->data.array;
         expr.kind = ExprKind::StringLiteral;
         expr.name.clear();
-        for (const auto& element : array.elements) {
+        for (const std::shared_ptr<Cell>& element : array.elements) {
             std::int64_t ch = element->data.int_value;
             if (ch == 0) break;
             expr.name.push_back(static_cast<char>(ch));
@@ -2928,7 +2942,7 @@ private:
 }
 
 [[nodiscard]] std::expected<ConstexprValue, ConstexprError> snapshot_constexpr_value(const std::shared_ptr<Cell>& value, const SourceLocation& loc) {
-    ConstexprValue snapshot;
+    ConstexprValue snapshot{};
     snapshot.type = value->type;
     if (is_named_type(value->type, "void")) {
         snapshot.kind = ConstexprValueKind::Void;
@@ -2982,7 +2996,7 @@ private:
     }
     if (value->data.is_array()) {
         snapshot.kind = ConstexprValueKind::Array;
-        for (const auto& element : value->data.array.elements) {
+        for (const std::shared_ptr<Cell>& element : value->data.array.elements) {
             auto element_result = snapshot_constexpr_value(element, loc);
             if (!element_result.has_value()) return std::unexpected(std::move(element_result).error());
             snapshot.elements.push_back(std::move(element_result).value());
@@ -3110,7 +3124,7 @@ void rewrite_consteval_if_for_runtime(Stmt& stmt) {
     if (stmt.kind != StmtKind::If || stmt.if_mode == IfMode::Runtime) return;
     SourceLocation loc = stmt.loc;
     IfMode mode = stmt.if_mode;
-    StmtPtr selected;
+    StmtPtr selected{};
     if (mode == IfMode::ConstevalFalse) {
         selected = std::move(stmt.then_branch);
     } else {
@@ -3128,7 +3142,7 @@ void rewrite_consteval_if_for_runtime(Stmt& stmt) {
 class AlignmentResolver {
 public:
     virtual ~AlignmentResolver() = default;
-    AlignmentResolver(Program& program, ConstexprEngine& engine) : program_(program), engine_(engine) {
+    AlignmentResolver(Program& program, ConstexprEngine& engine) : program_{program}, engine_{engine} {
         // ch05 §9.4/§9.3: an uninstantiated generic struct/class template
         // may freely mention its own not-yet-substituted type parameter
         // inside an array bound or `alignas` operand (e.g. `sizeof(T)`)
@@ -3239,21 +3253,21 @@ public:
 private:
     Program& program_;
     ConstexprEngine& engine_;
-    std::unordered_set<std::string> resolving_structs_;
-    std::unordered_set<std::string> resolved_structs_;
-    std::unordered_set<std::string> resolving_classes_;
-    std::unordered_set<std::string> resolved_classes_;
-    std::unordered_set<std::string> generic_template_owner_names_;
+    std::unordered_set<std::string> resolving_structs_{};
+    std::unordered_set<std::string> resolved_structs_{};
+    std::unordered_set<std::string> resolving_classes_{};
+    std::unordered_set<std::string> resolved_classes_{};
+    std::unordered_set<std::string> generic_template_owner_names_{};
     // ch05 §9.4: separate tracking sets for `resolve_array_bounds()`'s own
     // early pass above -- deliberately NOT shared with
     // resolving_structs_/resolved_structs_ (which mean "fully resolved,
     // alignas included" for `run()`'s later, different pass). Reusing
     // those would make `run()` wrongly skip a struct/class's alignas work
     // entirely, believing it already fully resolved.
-    std::unordered_set<std::string> array_bounds_resolving_structs_;
-    std::unordered_set<std::string> array_bounds_resolved_structs_;
-    std::unordered_set<std::string> array_bounds_resolving_classes_;
-    std::unordered_set<std::string> array_bounds_resolved_classes_;
+    std::unordered_set<std::string> array_bounds_resolving_structs_{};
+    std::unordered_set<std::string> array_bounds_resolved_structs_{};
+    std::unordered_set<std::string> array_bounds_resolving_classes_{};
+    std::unordered_set<std::string> array_bounds_resolved_classes_{};
 
     // Named-type-aware recursive Type walker used only by
     // resolve_array_bounds() above -- mirrors resolve_type_dependencies
@@ -3264,9 +3278,9 @@ private:
     [[nodiscard]] std::expected<void, ConstexprError> resolve_array_bounds_type_dependencies(Type& type) {
         switch (type.kind) {
             case TypeKind::Named:
-                if (StructDef* def = find_struct_mut(type.name)) {
+                if (StructDef* def = find_struct_mut(type.name); def != nullptr) {
                     return resolve_struct_array_bounds(def->name);
-                } else if (ClassDef* def = find_class_mut(type.name)) {
+                } else if (ClassDef* def = find_class_mut(type.name); def != nullptr) {
                     return resolve_class_array_bounds(def->name);
                 }
                 return {};
@@ -3379,7 +3393,7 @@ private:
                         if (auto result = resolve_array_bounds_in_expr(*switch_case.value); !result.has_value()) return result;
                     }
                     engine_.push_local_array_bound_scope();
-                    std::expected<void, ConstexprError> result;
+                    std::expected<void, ConstexprError> result{};
                     for (StmtPtr& nested : switch_case.statements) {
                         result = resolve_array_bounds_in_stmt(*nested);
                         if (!result.has_value()) break;
@@ -3391,7 +3405,7 @@ private:
             }
             case StmtKind::Block: {
                 engine_.push_local_array_bound_scope();
-                std::expected<void, ConstexprError> result;
+                std::expected<void, ConstexprError> result{};
                 for (StmtPtr& nested : stmt.statements) {
                     result = resolve_array_bounds_in_stmt(*nested);
                     if (!result.has_value()) break;
@@ -3477,7 +3491,7 @@ private:
             return {};
         }
         engine_.mark_type_incomplete(name);
-        if (auto base = def->direct_ordinary_base()) {
+        if (auto base = def->direct_ordinary_base(); base.has_value()) {
             Type base_type = base->get().base_type;
             if (auto result = resolve_array_bounds_type_dependencies(base_type); !result.has_value()) return result;
         }
@@ -3507,9 +3521,9 @@ private:
     [[nodiscard]] std::expected<void, ConstexprError> resolve_type_dependencies(Type& type) {
         switch (type.kind) {
             case TypeKind::Named:
-                if (StructDef* def = find_struct_mut(type.name)) {
+                if (StructDef* def = find_struct_mut(type.name); def != nullptr) {
                     return resolve_struct(def->name);
-                } else if (ClassDef* def = find_class_mut(type.name)) {
+                } else if (ClassDef* def = find_class_mut(type.name); def != nullptr) {
                     return resolve_class(def->name);
                 }
                 return {};
@@ -3551,8 +3565,8 @@ private:
     [[nodiscard]] bool type_has_strengthened_record_alignment(const Type& type) {
         if (type.kind == TypeKind::Array && type.element) return type_has_strengthened_record_alignment(*type.element);
         if (type.kind != TypeKind::Named) return false;
-        if (StructDef* def = find_struct_mut(type.name)) return def->resolved_alignment != 0;
-        if (ClassDef* def = find_class_mut(type.name)) return def->resolved_alignment != 0;
+        if (StructDef* def = find_struct_mut(type.name); def != nullptr) return def->resolved_alignment != 0;
+        if (ClassDef* def = find_class_mut(type.name); def != nullptr) return def->resolved_alignment != 0;
         return false;
     }
 
@@ -3572,7 +3586,7 @@ private:
         if (def.is_packed) return 1;
         std::uint64_t overall = 1;
         for (const StructField& field : def.fields) {
-            if (std::optional<std::uint64_t> align = natural_field_alignment(field)) {
+            if (std::optional<std::uint64_t> align = natural_field_alignment(field); align.has_value()) {
                 overall = std::max(overall, *align);
             }
         }
@@ -3581,12 +3595,12 @@ private:
 
     [[nodiscard]] std::uint64_t natural_class_alignment(const ClassDef& def) {
         std::uint64_t overall = 1;
-        if (auto base = def.direct_ordinary_base()) {
+        if (auto base = def.direct_ordinary_base(); base.has_value()) {
             std::optional<TypeLayoutInfo> base_layout = layout_of_type(program_, base->get().base_type);
             if (base_layout.has_value()) overall = std::max(overall, base_layout->abi_align_bytes);
         }
         for (const ClassField& field : def.fields) {
-            if (std::optional<std::uint64_t> align = natural_field_alignment(field)) {
+            if (std::optional<std::uint64_t> align = natural_field_alignment(field); align.has_value()) {
                 overall = std::max(overall, *align);
             }
         }
@@ -3640,8 +3654,7 @@ private:
             if (def->is_packed && type_has_strengthened_record_alignment(field.type)) {
                 return std::unexpected(ConstexprError(field.loc,
                                      "'[[scpp::packed]]' member '" + field.name +
-                                         "' cannot have a class/struct/union type whose alignment was strengthened by "
-                                         "'alignas'"));
+                                         "' cannot have a class/struct/union type whose alignment was strengthened by 'alignas'"));
             }
         }
         std::uint64_t natural_align = natural_struct_alignment(*def);
@@ -3683,7 +3696,7 @@ private:
             return {};
         }
         engine_.mark_type_incomplete(name);
-        if (auto base = def->direct_ordinary_base()) {
+        if (auto base = def->direct_ordinary_base(); base.has_value()) {
             Type base_type = base->get().base_type;
             if (auto result = resolve_type_dependencies(base_type); !result.has_value()) return result;
         }
@@ -3715,8 +3728,8 @@ private:
 };
 
 [[nodiscard]] std::expected<void, ConstexprError> fold_immediate_calls(Program& program, ConstexprLimits limits) {
-    ConstexprEngine engine(program, limits);
-    AlignmentResolver aligner(program, engine);
+    ConstexprEngine engine{program, limits};
+    AlignmentResolver aligner{program, engine};
     // ch05 §9.4: array bounds must be resolved before *any* immediate-call
     // folding below, since folding a call to a consteval function actually
     // executes its body (via evaluate_root_expr/execute_stmt) -- including
@@ -3724,8 +3737,8 @@ private:
     // would otherwise get around to validating that same function. See
     // resolve_array_bounds()'s own comment for the full rationale.
     if (auto result = aligner.resolve_array_bounds(); !result.has_value()) return result;
-    std::vector<ExprRewrite> expr_rewrites;
-    std::vector<Stmt*> consteval_if_rewrites;
+    std::vector<ExprRewrite> expr_rewrites{};
+    std::vector<Stmt*> consteval_if_rewrites{};
     for (Function& fn : program.functions) {
         if (!fn.body) continue;
         if (auto result = collect_runtime_stmt_rewrites(program, *fn.body, engine, expr_rewrites, consteval_if_rewrites);
@@ -3751,7 +3764,7 @@ private:
 }
 
 [[nodiscard]] std::expected<ConstexprValue, ConstexprError> evaluate_immediate_expr(const Program& program, const Expr& expr, ConstexprLimits limits) {
-    ConstexprEngine engine(program, limits);
+    ConstexprEngine engine{program, limits};
     auto value_result = engine.evaluate_root_expr(expr);
     if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
     return snapshot_constexpr_value(value_result.value(), expr.loc);
