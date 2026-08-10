@@ -585,11 +585,21 @@ public:
     virtual ~ConstexprEngine() = default;
     ConstexprEngine(const Program& program, ConstexprLimits limits)
         : program_{program}, limits_{limits} {
-        for (std::size_t i = 0; i < program_.functions.size(); ++i) functions_by_name_[program_.functions[i].name].push_back(i);
-        for (const ClassDef& def : program_.classes) classes_by_name_.emplace(def.name, &def);
-        for (const StructDef& def : program_.structs) structs_by_name_.emplace(def.name, &def);
-        for (const GlobalVar& global : program_.globals) {
-            if (global.decl != nullptr) globals_by_name_.emplace(global.decl->var_name, &global);
+        for (std::size_t i = 0; i < program_.functions.size(); ++i) {
+            const std::string& function_name = program_.functions[i].name;
+            if (functions_by_name_.contains(function_name)) {
+                functions_by_name_.at(function_name).push_back(i);
+            } else {
+                std::vector<std::size_t> overload_indices{};
+                overload_indices.push_back(i);
+                functions_by_name_.emplace(function_name, std::move(overload_indices));
+            }
+        }
+        for (std::size_t i = 0; i < program_.classes.size(); ++i) classes_by_name_.emplace(program_.classes[i].name, i);
+        for (std::size_t i = 0; i < program_.structs.size(); ++i) structs_by_name_.emplace(program_.structs[i].name, i);
+        for (std::size_t i = 0; i < program_.globals.size(); ++i) {
+            const GlobalVar& global = program_.globals[i];
+            if (global.decl != nullptr) globals_by_name_.emplace(global.decl->var_name, i);
         }
     }
 
@@ -782,8 +792,8 @@ private:
     int string_storage_counter_ = 0;
     std::vector<std::unordered_map<std::string, Binding>> frames_{};
     std::unordered_map<std::string, std::vector<std::size_t>> functions_by_name_{};
-    std::unordered_map<std::string, const ClassDef*> classes_by_name_{};
-    std::unordered_map<std::string, const StructDef*> structs_by_name_{};
+    std::unordered_map<std::string, std::size_t> classes_by_name_{};
+    std::unordered_map<std::string, std::size_t> structs_by_name_{};
     std::unordered_set<std::string> incomplete_type_names_{};
     // ch05 §9.4(8)/06-constant-evaluation.md: a required constant
     // expression (an array bound, an `alignas` operand, ...) may name a
@@ -798,7 +808,7 @@ private:
     // to reference it); globals_resolving_ detects `constexpr int A =
     // B; constexpr int B = A;`-style circular dependencies instead of
     // recursing forever.
-    std::unordered_map<std::string, const GlobalVar*> globals_by_name_{};
+    std::unordered_map<std::string, std::size_t> globals_by_name_{};
     std::unordered_map<std::string, std::shared_ptr<Cell>> resolved_global_constants_{};
     std::unordered_set<std::string> globals_resolving_{};
 
@@ -1058,15 +1068,15 @@ private:
     [[nodiscard]] std::expected<std::vector<ClassField>, ConstexprError> collect_class_fields(const ClassDef& def) {
         std::vector<ClassField> fields{};
         if (auto base = def.direct_ordinary_base(); base.has_value()) {
-            auto base_it = classes_by_name_.find(base->get().base_type.name);
-            if (base_it == classes_by_name_.end()) {
+            if (!classes_by_name_.contains(base->get().base_type.name)) {
                 std::string message{};
                 message += "missing constexpr class definition for base class '";
                 message += base->get().base_type.name;
                 message += "'";
                 return std::unexpected(ConstexprError(SourceLocation{}, message));
             }
-            auto base_fields_result = collect_class_fields(*base_it->second);
+            const ClassDef& base_def = program_.classes[classes_by_name_.at(base->get().base_type.name)];
+            auto base_fields_result = collect_class_fields(base_def);
             if (!base_fields_result.has_value()) return std::unexpected(std::move(base_fields_result).error());
             std::vector<ClassField> base_fields = std::move(base_fields_result).value();
             fields.insert(fields.end(), base_fields.begin(), base_fields.end());
@@ -1096,10 +1106,11 @@ private:
                     cell->data.set_empty();
                     return cell;
                 }
-                if (auto struct_it = structs_by_name_.find(type.name); struct_it != structs_by_name_.end()) {
+                if (structs_by_name_.contains(type.name)) {
+                    const StructDef& struct_def = program_.structs[structs_by_name_.at(type.name)];
                     ObjectValue object{};
                     object.type_name = type.name;
-                    for (const StructField& field : struct_it->second->fields) {
+                    for (const StructField& field : struct_def.fields) {
                         auto field_result = make_default_cell(field.type, loc);
                         if (!field_result.has_value()) return std::unexpected(std::move(field_result).error());
                         object.add_field(field.name, std::move(field_result).value());
@@ -1107,10 +1118,11 @@ private:
                     cell->data.set_object(std::move(object));
                     return cell;
                 }
-                if (auto class_it = classes_by_name_.find(type.name); class_it != classes_by_name_.end()) {
+                if (classes_by_name_.contains(type.name)) {
+                    const ClassDef& class_def = program_.classes[classes_by_name_.at(type.name)];
                     ObjectValue object{};
                     object.type_name = type.name;
-                    auto fields_result = collect_class_fields(*class_it->second);
+                    auto fields_result = collect_class_fields(class_def);
                     if (!fields_result.has_value()) return std::unexpected(std::move(fields_result).error());
                     for (const ClassField& field : fields_result.value()) {
                         if (field.type.kind == TypeKind::Reference && field.type.pointee) {
@@ -1166,8 +1178,7 @@ private:
         // frame first) by index instead, as parser.cppm already does.
         for (std::size_t i = frames_.size(); i > 0; --i) {
             const std::unordered_map<std::string, Binding>& frame = frames_[i - 1];
-            auto binding_it = frame.find(name);
-            if (binding_it != frame.end()) return binding_it->second;
+            if (frame.contains(name)) return frame.at(name);
         }
         auto global_result = resolve_global_constant(name, loc);
         if (!global_result.has_value()) return std::unexpected(std::move(global_result).error());
@@ -1193,12 +1204,9 @@ private:
     // globals/functions, never whatever local variables happen to be
     // live in the caller that triggered this lookup.
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> resolve_global_constant(const std::string& name, const SourceLocation& loc) {
-        if (auto cached = resolved_global_constants_.find(name); cached != resolved_global_constants_.end()) {
-            return cached->second;
-        }
-        auto global_it = globals_by_name_.find(name);
-        if (global_it == globals_by_name_.end()) return nullptr;
-        const GlobalVar& global = *global_it->second;
+        if (resolved_global_constants_.contains(name)) return resolved_global_constants_.at(name);
+        if (!globals_by_name_.contains(name)) return nullptr;
+        const GlobalVar& global = program_.globals[globals_by_name_.at(name)];
         if (global.decl == nullptr || !global.decl->is_constexpr || !global.decl->init) return nullptr;
         if (globals_resolving_.contains(name)) {
             std::string message{};
@@ -1505,9 +1513,8 @@ private:
 
     [[nodiscard]] OptionalFunctionRef find_callable(const std::string& name, const std::vector<std::shared_ptr<Cell>>& args,
                                                 bool require_constexpr) {
-        auto it = functions_by_name_.find(name);
-        if (it == functions_by_name_.end()) return {};
-        for (std::size_t fn_index : it->second) {
+        if (!functions_by_name_.contains(name)) return {};
+        for (std::size_t fn_index : functions_by_name_.at(name)) {
             const Function& fn = program_.functions[fn_index];
             if (!fn.body) continue;
             if (require_constexpr && fn.eval_mode == FunctionEvalMode::RuntimeOnly) continue;
@@ -1530,9 +1537,8 @@ private:
         std::string constructor_name{};
         constructor_name += class_name;
         constructor_name += "_new";
-        auto it = functions_by_name_.find(constructor_name);
-        if (it == functions_by_name_.end()) return {};
-        for (std::size_t fn_index : it->second) {
+        if (!functions_by_name_.contains(constructor_name)) return {};
+        for (std::size_t fn_index : functions_by_name_.at(constructor_name)) {
             const Function& fn = program_.functions[fn_index];
             if (!fn.body) continue;
             if (require_constexpr && fn.eval_mode == FunctionEvalMode::RuntimeOnly) continue;
@@ -1556,9 +1562,9 @@ private:
         if (!is_class_name(expected.name) || !is_class_name(actual.name)) return false;
         std::string current = actual.name;
         while (true) {
-            auto it = classes_by_name_.find(current);
-            if (it == classes_by_name_.end()) return false;
-            auto base = it->second->direct_ordinary_base();
+            if (!classes_by_name_.contains(current)) return false;
+            const ClassDef& current_def = program_.classes[classes_by_name_.at(current)];
+            auto base = current_def.direct_ordinary_base();
             if (!base.has_value()) return false;
             current = base->get().base_type.name;
             if (current == expected.name) return true;
@@ -1622,9 +1628,8 @@ private:
         std::string constructor_name{};
         constructor_name += class_name;
         constructor_name += "_new";
-        auto it = functions_by_name_.find(constructor_name);
-        if (it == functions_by_name_.end()) return {};
-        for (std::size_t fn_index : it->second) {
+        if (!functions_by_name_.contains(constructor_name)) return {};
+        for (std::size_t fn_index : functions_by_name_.at(constructor_name)) {
             const Function& fn = program_.functions[fn_index];
             if (!fn.body) continue;
             if (require_constexpr && fn.eval_mode == FunctionEvalMode::RuntimeOnly) continue;
@@ -1659,9 +1664,8 @@ private:
     }
 
     [[nodiscard]] bool has_runtime_only_match(const std::string& name, const std::vector<std::shared_ptr<Cell>>& args) {
-        auto it = functions_by_name_.find(name);
-        if (it == functions_by_name_.end()) return false;
-        for (std::size_t fn_index : it->second) {
+        if (!functions_by_name_.contains(name)) return false;
+        for (std::size_t fn_index : functions_by_name_.at(name)) {
             const Function& fn = program_.functions[fn_index];
             if (!fn.body || fn.eval_mode != FunctionEvalMode::RuntimeOnly || fn.params.size() != args.size()) continue;
             bool params_match = true;
@@ -1688,8 +1692,9 @@ private:
         if (object_type.kind != TypeKind::Named) return {};
         if (!object_cell->data.is_object()) return {};
         ObjectValue& object = object_cell->data.object;
-        if (auto struct_it = structs_by_name_.find(object_type.name); struct_it != structs_by_name_.end()) {
-            for (const StructField& field : struct_it->second->fields) {
+        if (structs_by_name_.contains(object_type.name)) {
+            const StructDef& struct_def = program_.structs[structs_by_name_.at(object_type.name)];
+            for (const StructField& field : struct_def.fields) {
                 if (!field.default_initializer) continue;
                 std::int64_t field_slot = object.field_index(field.name);
                 if (field_slot < 0) continue;
@@ -1701,8 +1706,9 @@ private:
             }
             return {};
         }
-        if (auto class_it = classes_by_name_.find(object_type.name); class_it != classes_by_name_.end()) {
-            auto fields_result = collect_class_fields(*class_it->second);
+        if (classes_by_name_.contains(object_type.name)) {
+            const ClassDef& class_def = program_.classes[classes_by_name_.at(object_type.name)];
+            auto fields_result = collect_class_fields(class_def);
             if (!fields_result.has_value()) return std::unexpected(std::move(fields_result).error());
             for (const ClassField& field : fields_result.value()) {
                 if (!field.default_initializer) continue;
@@ -1841,8 +1847,9 @@ private:
             return std::unexpected(ConstexprError(fn.loc, "constructor receiver is not an object during constant evaluation"));
         }
         ObjectValue& object = this_binding.cell->data.object;
-        if (auto struct_it = structs_by_name_.find(fn.member_owner_class); struct_it != structs_by_name_.end()) {
-            for (const StructField& field : struct_it->second->fields) {
+        if (structs_by_name_.contains(fn.member_owner_class)) {
+            const StructDef& struct_def = program_.structs[structs_by_name_.at(fn.member_owner_class)];
+            for (const StructField& field : struct_def.fields) {
                 OptionalInitializerRef selected{};
                 for (const MemberInitializer& init : fn.member_initializers) {
                     if (init.member_name == field.name) {
@@ -1870,15 +1877,15 @@ private:
             }
             return {};
         }
-        auto class_it = classes_by_name_.find(fn.member_owner_class);
-        if (class_it == classes_by_name_.end()) {
+        if (!classes_by_name_.contains(fn.member_owner_class)) {
             std::string message{};
             message += "missing constexpr class definition for '";
             message += fn.member_owner_class;
             message += "'";
             return std::unexpected(ConstexprError(fn.loc, message));
         }
-        for (const ClassField& field : class_it->second->fields) {
+        const ClassDef& owner_def = program_.classes[classes_by_name_.at(fn.member_owner_class)];
+        for (const ClassField& field : owner_def.fields) {
             OptionalInitializerRef selected{};
             for (const MemberInitializer& init : fn.member_initializers) {
                 if (init.member_name == field.name) {
@@ -1915,9 +1922,8 @@ private:
         std::string destructor_name{};
         destructor_name += class_name;
         destructor_name += "_delete";
-        auto it = functions_by_name_.find(destructor_name);
-        if (it == functions_by_name_.end()) return false;
-        for (std::size_t fn_index : it->second) {
+        if (!functions_by_name_.contains(destructor_name)) return false;
+        for (std::size_t fn_index : functions_by_name_.at(destructor_name)) {
             if (program_.functions[fn_index].body) return true;
         }
         return false;
@@ -2212,9 +2218,8 @@ private:
         full_name += receiver_value->type.name;
         full_name += "_";
         full_name += method_name;
-        auto it = functions_by_name_.find(full_name);
-        if (it == functions_by_name_.end()) return {};
-        for (std::size_t fn_index : it->second) {
+        if (!functions_by_name_.contains(full_name)) return {};
+        for (std::size_t fn_index : functions_by_name_.at(full_name)) {
             const Function& fn = program_.functions[fn_index];
             if (!fn.body) continue;
             if (require_constexpr && fn.eval_mode == FunctionEvalMode::RuntimeOnly) continue;
@@ -2436,16 +2441,18 @@ private:
                 }
                 const Type& base_named = base->kind == TypeKind::Reference ? *base->pointee : *base;
                 if (base_named.kind != TypeKind::Named) return std::nullopt;
-                if (auto struct_it = structs_by_name_.find(base_named.name); struct_it != structs_by_name_.end()) {
-                    for (const StructField& field : struct_it->second->fields) {
+                if (structs_by_name_.contains(base_named.name)) {
+                    const StructDef& struct_def = program_.structs[structs_by_name_.at(base_named.name)];
+                    for (const StructField& field : struct_def.fields) {
                         if (field.name == expr.name) return field.type;
                     }
                 }
-                if (auto class_it = classes_by_name_.find(base_named.name); class_it != classes_by_name_.end()) {
+                if (classes_by_name_.contains(base_named.name)) {
                     // Best-effort: a missing base-class definition is a
                     // real diagnostic elsewhere (e.g. make_default_cell);
                     // here it just means this type can't be inferred.
-                    auto fields_result = collect_class_fields(*class_it->second);
+                    const ClassDef& class_def = program_.classes[classes_by_name_.at(base_named.name)];
+                    auto fields_result = collect_class_fields(class_def);
                     if (fields_result.has_value()) {
                         for (const ClassField& field : fields_result.value()) {
                             if (field.name == expr.name) return field.type.kind == TypeKind::Reference ? *field.type.pointee : field.type;
@@ -2521,17 +2528,16 @@ private:
                     full_name += receiver_named.name;
                     full_name += "_";
                     full_name += expr.name;
-                    auto it = functions_by_name_.find(full_name);
-                    if (it == functions_by_name_.end()) return std::nullopt;
-                    for (std::size_t fn_index : it->second) {
+                    if (!functions_by_name_.contains(full_name)) return std::nullopt;
+                    for (std::size_t fn_index : functions_by_name_.at(full_name)) {
                         const Function& fn = program_.functions[fn_index];
                         if (fn.params.size() == expr.args.size() + 1) return fn.return_type;
                     }
                     return std::nullopt;
                 }
                 if (is_class_name(expr.name)) return named_type(expr.name);
-                if (auto it = functions_by_name_.find(expr.name); it != functions_by_name_.end()) {
-                    for (std::size_t fn_index : it->second) {
+                if (functions_by_name_.contains(expr.name)) {
+                    for (std::size_t fn_index : functions_by_name_.at(expr.name)) {
                         const Function& fn = program_.functions[fn_index];
                         if (fn.params.size() == expr.args.size()) return fn.return_type;
                     }

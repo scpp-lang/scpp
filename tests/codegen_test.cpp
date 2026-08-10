@@ -893,6 +893,89 @@ void run_constexpr_diagnostic_text_tests() {
 
 } // namespace
 
+
+// ConstexprEngine indexes the program's classes, structs, globals and
+// function overloads by name. Those indexes used to hold raw pointers taken
+// with `&def` inside a range-for; they now hold positions into the matching
+// `program_` vector. A pointer could only ever be right or dangling, but an
+// index can silently be *off*, which would quietly resolve a name to a
+// neighbouring definition. Each case below therefore declares several
+// same-shaped definitions with distinguishable payloads and asserts that a
+// name resolves to its own definition, not to the one beside it.
+void run_constexpr_name_index_tests() {
+    struct IndexCase {
+        std::string case_name;
+        std::string source;
+        std::int64_t expected_value;
+    };
+    const std::vector<IndexCase> index_cases = {
+        // structs_by_name_: `Third` is neither first nor last in
+        // program_.structs, so an off-by-one either way is visible.
+        {"struct_defaults_resolve_to_their_own_definition",
+         "struct First { int v = 11; };\n"
+         "struct Second { int v = 22; };\n"
+         "struct Third { int v = 33; };\n"
+         "struct Fourth { int v = 44; };\n"
+         "consteval int probe() { Third t{}; return t.v; }\n"
+         "int main() { int r = probe(); return r; }\n",
+         33},
+        // classes_by_name_, including the base-class walk in
+        // collect_class_fields: BaseB is the second of three bases.
+        {"class_base_fields_resolve_to_their_own_definition",
+         "class BaseA {\n  public:\n    int a = 1;\n};\n"
+         "class BaseB {\n  public:\n    int a = 7;\n};\n"
+         "class BaseC {\n  public:\n    int a = 9;\n};\n"
+         "class Derived : public BaseB {\n  public:\n    int b = 100;\n};\n"
+         "consteval int probe() { Derived d{}; return d.a + d.b; }\n"
+         "int main() { int r = probe(); return r; }\n",
+         107},
+        // globals_by_name_: `g_third` sits in the middle of program_.globals.
+        {"global_constants_resolve_to_their_own_definition",
+         "constexpr int g_first = 5;\n"
+         "constexpr int g_second = 6;\n"
+         "constexpr int g_third = 7;\n"
+         "constexpr int g_fourth = 8;\n"
+         "consteval int probe() { return g_third; }\n"
+         "int main() { int r = probe(); return r; }\n",
+         7},
+        // functions_by_name_ maps one name to a vector of overload
+        // positions, so it is the only index built with an insert-or-append
+        // step. Calling both overloads means the case fails if the append
+        // branch drops the second position rather than merely misplacing it.
+        {"function_overloads_resolve_to_their_own_definition",
+         "consteval int pick(int a) { return 1000 + a; }\n"
+         "consteval int pick(bool b) { return b ? 1 : 2; }\n"
+         "consteval int probe() { return pick(5) + pick(true); }\n"
+         "int main() { int r = probe(); return r; }\n",
+         1006},
+    };
+
+    for (const IndexCase& index_case : index_cases) {
+        cases_run++;
+        scpp::Program program = parse_with_std_imports(index_case.source);
+        const scpp::Expr* init = find_initializer_in_function(program, "probe");
+        static_cast<void>(init);
+        auto folded = scpp::fold_immediate_calls(program);
+        expect(folded.has_value(), index_case.case_name + ": expected folding to succeed, got " +
+                                       (folded.has_value() ? std::string() : folded.error().what()));
+        if (!folded.has_value()) continue;
+
+        const scpp::Expr* main_init = find_initializer_in_function(program, "main");
+        expect(main_init != nullptr, index_case.case_name + ": expected to find main's initializer");
+        if (main_init == nullptr) continue;
+
+        auto value = scpp::evaluate_immediate_expr(program, *main_init);
+        expect(value.has_value(), index_case.case_name + ": expected the consteval call to evaluate, got " +
+                                      (value.has_value() ? std::string() : value.error().what()));
+        if (!value.has_value()) continue;
+        expect(value.value().kind == scpp::ConstexprValueKind::Integer,
+               index_case.case_name + ": expected an Integer-kinded snapshot");
+        expect(value.value().int_value == index_case.expected_value,
+               index_case.case_name + ": expected " + std::to_string(index_case.expected_value) + " but got " +
+                   std::to_string(value.value().int_value));
+    }
+}
+
 int main() {
     run_test_case_files();
     test_generate_returns_engaged_expected_on_success();
@@ -906,6 +989,7 @@ int main() {
     run_constexpr_object_field_order_tests();
     run_constexpr_string_literal_byte_tests();
     run_constexpr_diagnostic_text_tests();
+    run_constexpr_name_index_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
