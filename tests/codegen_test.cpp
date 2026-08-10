@@ -740,6 +740,54 @@ void run_constexpr_object_field_order_tests() {
     }
 }
 
+void run_constexpr_string_literal_byte_tests() {
+    // The string-literal cell builder used to iterate `for (unsigned char ch :
+    // expr.name)`. scpp cannot spell that loop, so it is now an index loop that
+    // casts through std::uint8_t. Bytes >= 0x80 must therefore still widen as
+    // unsigned; a plain `static_cast<std::int64_t>(expr.name.at(i))` would
+    // sign-extend `char` and turn 0xE2 into -30.
+    struct ByteCase {
+        std::string case_name;
+        std::vector<int> bytes;
+        std::int64_t index;
+        std::int64_t expected;
+    };
+    // scpp's lexer supports only \n \t \r \\ \' \" \0, so the high bytes are
+    // embedded literally rather than as \x escapes.
+    const std::vector<ByteCase> byte_cases = {
+        {"string_literal_high_byte_stays_unsigned_first", {0xE2, 0x82, 0xAC}, 0, 226},
+        {"string_literal_high_byte_stays_unsigned_middle", {0xE2, 0x82, 0xAC}, 1, 130},
+        {"string_literal_high_byte_stays_unsigned_last", {0xE2, 0x82, 0xAC}, 2, 172},
+        {"string_literal_ascii_byte_unchanged", {0x41, 0x7F}, 1, 127},
+        {"string_literal_max_byte_stays_unsigned", {0xFF}, 0, 255},
+        {"string_literal_nul_terminator_present", {0xFF}, 1, 0},
+    };
+
+    for (const ByteCase& byte_case : byte_cases) {
+        cases_run++;
+        std::string literal;
+        for (int byte : byte_case.bytes) literal.push_back(static_cast<char>(byte));
+        scpp::Program program = parse_with_std_imports(
+            "consteval int byte_at() { const char* s = \"" + literal + "\"; return s[" +
+            std::to_string(byte_case.index) +
+            "]; }\n"
+            "int main() { int v = byte_at(); return 0; }\n");
+        const scpp::Expr* init = find_initializer_in_function(program, "main");
+        expect(init != nullptr, byte_case.case_name + ": expected to find the initializer of `int v = byte_at();`");
+        if (init == nullptr) continue;
+
+        auto snapshot = scpp::evaluate_immediate_expr(program, *init);
+        expect(snapshot.has_value(), byte_case.case_name + ": expected the consteval call to evaluate, got " +
+                                         (snapshot.has_value() ? std::string() : snapshot.error().what()));
+        if (!snapshot.has_value()) continue;
+        expect(snapshot.value().kind == scpp::ConstexprValueKind::Integer,
+               byte_case.case_name + ": expected an Integer-kinded snapshot");
+        expect(snapshot.value().int_value == byte_case.expected,
+               byte_case.case_name + ": expected byte " + std::to_string(byte_case.expected) + " but got " +
+                   std::to_string(snapshot.value().int_value));
+    }
+}
+
 } // namespace
 
 int main() {
@@ -753,6 +801,7 @@ int main() {
     run_constexpr_null_pointer_storage_tests();
     run_constexpr_cell_data_kind_tests();
     run_constexpr_object_field_order_tests();
+    run_constexpr_string_literal_byte_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
