@@ -225,7 +225,8 @@ public:
     // result".
     void add_field(std::string name, std::shared_ptr<Cell> cell) {
         if (field_index(name) >= 0) return;
-        fields.emplace_back(std::move(name), std::move(cell));
+        ObjectField field{std::move(name), std::move(cell)};
+        fields.push_back(std::move(field));
     }
 };
 
@@ -385,15 +386,61 @@ public:
     bool read_only = false;
 };
 
+// scpp has no nullable-reference type and rejects dereferencing a raw
+// pointer outside `[[scpp::unsafe]] { }` (ch01 §1.3/ch02), so every "found
+// it, or didn't" lookup below returns an optional reference instead of a
+// raw `T*`. This is the same shape ast.cppm's own find_struct/find_class/
+// find_enum already use, and it keeps the found-object accesses inside the
+// safety checker rather than escaping it.
+using OptionalExprRef = std::optional<std::reference_wrapper<const Expr>>;
+using OptionalInitializerRef = std::optional<std::reference_wrapper<const Initializer>>;
+using OptionalFunctionRef = std::optional<std::reference_wrapper<const Function>>;
+using OptionalStructDefRef = std::optional<std::reference_wrapper<StructDef>>;
+using OptionalClassDefRef = std::optional<std::reference_wrapper<ClassDef>>;
+
+// scpp cannot yet construct through an alias of a template specialization
+// (`OptionalFunctionRef{...}` is rejected with "cannot deduce template
+// arguments"), so every non-empty optional reference is built by one of
+// these helpers, which spell the specialization out in full. The empty
+// case is a bare `return {}`.
+[[nodiscard]] OptionalExprRef make_expr_ref(const Expr& expr) {
+    return std::optional<std::reference_wrapper<const Expr>>{std::reference_wrapper<const Expr>{expr}};
+}
+
+[[nodiscard]] OptionalInitializerRef make_initializer_ref(const Initializer& initializer) {
+    return std::optional<std::reference_wrapper<const Initializer>>{std::reference_wrapper<const Initializer>{initializer}};
+}
+
+[[nodiscard]] OptionalFunctionRef make_function_ref(const Function& fn) {
+    return std::optional<std::reference_wrapper<const Function>>{std::reference_wrapper<const Function>{fn}};
+}
+
+[[nodiscard]] OptionalStructDefRef make_struct_def_ref(StructDef& def) {
+    return std::optional<std::reference_wrapper<StructDef>>{std::reference_wrapper<StructDef>{def}};
+}
+
+[[nodiscard]] OptionalClassDefRef make_class_def_ref(ClassDef& def) {
+    return std::optional<std::reference_wrapper<ClassDef>>{std::reference_wrapper<ClassDef>{def}};
+}
+
+// A possibly-empty ExprPtr, as an optional reference. `sp.get()` would
+// hand back a raw pointer the safety checker then refuses to dereference.
+[[nodiscard]] OptionalExprRef optional_expr_ref(const ExprPtr& expr) {
+    if (!expr) return {};
+    return make_expr_ref(*expr);
+}
+
 class ExprRewrite {
 public:
     virtual ~ExprRewrite() = default;
-    ExprRewrite() = default;
-    ExprRewrite(Expr* target, std::shared_ptr<Cell> value) : target{target}, value{std::move(value)} {}
+    ExprRewrite(Expr& target, std::shared_ptr<Cell> value)
+        : target{std::reference_wrapper<Expr>{target}}, value{std::move(value)} {}
     ExprRewrite(const ExprRewrite&) = default;
     ExprRewrite& operator=(const ExprRewrite&) = default;
 
-    Expr* target = nullptr;
+    // Never empty: every ExprRewrite is built from a live Expr during the
+    // traversal below, so this is a reference rather than a raw pointer.
+    std::reference_wrapper<Expr> target;
     std::shared_ptr<Cell> value{};
 };
 
@@ -1447,49 +1494,51 @@ private:
         return result;
     }
 
-    [[nodiscard]] const Function* find_callable(std::string_view name, const std::vector<std::shared_ptr<Cell>>& args,
+    [[nodiscard]] OptionalFunctionRef find_callable(std::string_view name, const std::vector<std::shared_ptr<Cell>>& args,
                                                 bool require_constexpr) {
         auto it = functions_by_name_.find(std::string(name));
-        if (it == functions_by_name_.end()) return nullptr;
+        if (it == functions_by_name_.end()) return {};
         for (std::size_t fn_index : it->second) {
-            const Function* fn = &program_.functions[fn_index];
-            if (!fn->body) continue;
-            if (require_constexpr && fn->eval_mode == FunctionEvalMode::RuntimeOnly) continue;
-            if (fn->params.size() != args.size()) continue;
+            const Function& fn = program_.functions[fn_index];
+            if (!fn.body) continue;
+            if (require_constexpr && fn.eval_mode == FunctionEvalMode::RuntimeOnly) continue;
+            if (fn.params.size() != args.size()) continue;
             bool params_match = true;
             for (std::size_t i = 0; i < args.size(); ++i) {
-                if (!constexpr_argument_matches_parameter(fn->params[i].type, args[i], require_constexpr)) {
+                if (!constexpr_argument_matches_parameter(fn.params[i].type, args[i], require_constexpr)) {
                     params_match = false;
                     break;
                 }
             }
-            if (params_match) return fn;
+            if (params_match) return make_function_ref(fn);
         }
-        return nullptr;
+        return {};
     }
 
-    [[nodiscard]] const Function* find_single_argument_converting_constructor(std::string_view class_name,
+    [[nodiscard]] OptionalFunctionRef find_single_argument_converting_constructor(std::string_view class_name,
                                                                               const std::shared_ptr<Cell>& arg,
                                                                               bool require_constexpr) {
         std::string constructor_name{};
         constructor_name += std::string(class_name);
         constructor_name += "_new";
         auto it = functions_by_name_.find(constructor_name);
-        if (it == functions_by_name_.end()) return nullptr;
+        if (it == functions_by_name_.end()) return {};
         for (std::size_t fn_index : it->second) {
-            const Function* fn = &program_.functions[fn_index];
-            if (!fn->body) continue;
-            if (require_constexpr && fn->eval_mode == FunctionEvalMode::RuntimeOnly) continue;
-            if (fn->params.size() != 2) continue;
-            const Type& param_type = fn->params[1].type;
+            const Function& fn = program_.functions[fn_index];
+            if (!fn.body) continue;
+            if (require_constexpr && fn.eval_mode == FunctionEvalMode::RuntimeOnly) continue;
+            if (fn.params.size() != 2) continue;
+            const Type& param_type = fn.params[1].type;
             const Type& arg_type = arg->type;
             if (param_type.kind == TypeKind::Reference) {
-                if (param_type.pointee && types_equal(*param_type.pointee, arg_type)) return fn;
+                if (param_type.pointee && types_equal(*param_type.pointee, arg_type)) {
+                    return make_function_ref(fn);
+                }
             } else if (types_equal(param_type, arg_type)) {
-                return fn;
+                return make_function_ref(fn);
             }
         }
-        return nullptr;
+        return {};
     }
 
     [[nodiscard]] bool is_same_or_base_class_type(const Type& expected, const Type& actual) const {
@@ -1553,27 +1602,27 @@ private:
         }
         if (is_same_or_base_class_type(param_type, arg_type)) return true;
         if (param_type.kind == TypeKind::Named && is_class_name(param_type.name)) {
-            return find_single_argument_converting_constructor(param_type.name, arg, require_constexpr) != nullptr;
+            return find_single_argument_converting_constructor(param_type.name, arg, require_constexpr).has_value();
         }
         return false;
     }
 
-    [[nodiscard]] const Function* find_constructor(std::string_view class_name,
+    [[nodiscard]] OptionalFunctionRef find_constructor(std::string_view class_name,
                                                    const std::vector<std::shared_ptr<Cell>>& args,
                                                    bool require_constexpr) {
         std::string constructor_name{};
         constructor_name += std::string(class_name);
         constructor_name += "_new";
         auto it = functions_by_name_.find(constructor_name);
-        if (it == functions_by_name_.end()) return nullptr;
+        if (it == functions_by_name_.end()) return {};
         for (std::size_t fn_index : it->second) {
-            const Function* fn = &program_.functions[fn_index];
-            if (!fn->body) continue;
-            if (require_constexpr && fn->eval_mode == FunctionEvalMode::RuntimeOnly) continue;
-            if (fn->params.size() != args.size() + 1) continue;
+            const Function& fn = program_.functions[fn_index];
+            if (!fn.body) continue;
+            if (require_constexpr && fn.eval_mode == FunctionEvalMode::RuntimeOnly) continue;
+            if (fn.params.size() != args.size() + 1) continue;
             bool params_match = true;
             for (std::size_t i = 0; i < args.size(); ++i) {
-                const Type& param_type = fn->params[i + 1].type;
+                const Type& param_type = fn.params[i + 1].type;
                 const Type& arg_type = args[i]->type;
                 if (param_type.kind == TypeKind::Reference) {
                     if (!param_type.pointee) {
@@ -1595,20 +1644,20 @@ private:
                     break;
                 }
             }
-            if (params_match) return fn;
+            if (params_match) return make_function_ref(fn);
         }
-        return nullptr;
+        return {};
     }
 
     [[nodiscard]] bool has_runtime_only_match(std::string_view name, const std::vector<std::shared_ptr<Cell>>& args) {
         auto it = functions_by_name_.find(std::string(name));
         if (it == functions_by_name_.end()) return false;
         for (std::size_t fn_index : it->second) {
-            const Function* fn = &program_.functions[fn_index];
-            if (!fn->body || fn->eval_mode != FunctionEvalMode::RuntimeOnly || fn->params.size() != args.size()) continue;
+            const Function& fn = program_.functions[fn_index];
+            if (!fn.body || fn.eval_mode != FunctionEvalMode::RuntimeOnly || fn.params.size() != args.size()) continue;
             bool params_match = true;
             for (std::size_t i = 0; i < args.size(); ++i) {
-                if (!constexpr_argument_matches_parameter(fn->params[i].type, args[i], /*require_constexpr=*/false)) {
+                if (!constexpr_argument_matches_parameter(fn.params[i].type, args[i], /*require_constexpr=*/false)) {
                     params_match = false;
                     break;
                 }
@@ -1663,16 +1712,17 @@ private:
     [[nodiscard]] std::expected<void, ConstexprError> apply_initializer_to_field(std::shared_ptr<Cell>& field_cell, const Type& field_type, const Initializer& init,
                                     const SourceLocation& loc) {
         if (field_type.kind == TypeKind::Reference) {
-            const Expr* ref_expr = init.expr.get();
+            OptionalExprRef ref_expr = optional_expr_ref(init.expr);
             if (init.has_brace_args) {
                 if (init.brace_args.size() != 1) {
                     return std::unexpected(ConstexprError(loc, "a reference member must be initialized with exactly one expression"));
                 }
-                ref_expr = init.brace_args[0].get();
+                ref_expr = optional_expr_ref(init.brace_args[0]);
             }
-            if (ref_expr == nullptr) return std::unexpected(ConstexprError(loc, "a reference member must be initialized"));
+            if (!ref_expr.has_value()) return std::unexpected(ConstexprError(loc, "a reference member must be initialized"));
+            const Expr& ref_init = ref_expr->get();
             if (field_type.is_mutable_ref) {
-                auto lvalue_result = resolve_lvalue(*ref_expr);
+                auto lvalue_result = resolve_lvalue(ref_init);
                 if (!lvalue_result.has_value()) return std::unexpected(std::move(lvalue_result).error());
                 field_cell = lvalue_result.value().cell;
             } else {
@@ -1680,11 +1730,11 @@ private:
                 // lvalue's real storage; a non-lvalue initializer (e.g. a
                 // temporary) falls back to plain evaluation, exactly like
                 // the original try/catch(const ConstexprError&) fallback.
-                auto lvalue_result = resolve_lvalue(*ref_expr);
+                auto lvalue_result = resolve_lvalue(ref_init);
                 if (lvalue_result.has_value()) {
                     field_cell = lvalue_result.value().cell;
                 } else {
-                    auto value_result = evaluate_expr(*ref_expr);
+                    auto value_result = evaluate_expr(ref_init);
                     if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                     field_cell = std::move(value_result).value();
                 }
@@ -1692,15 +1742,15 @@ private:
             return {};
         }
         if (field_type.kind == TypeKind::Span) {
-            const Expr* span_expr = init.expr.get();
+            OptionalExprRef span_expr = optional_expr_ref(init.expr);
             if (init.has_brace_args) {
                 if (init.brace_args.size() != 1) {
                     return std::unexpected(ConstexprError(loc, "a span member must be initialized with exactly one array expression"));
                 }
-                span_expr = init.brace_args[0].get();
+                span_expr = optional_expr_ref(init.brace_args[0]);
             }
-            if (span_expr == nullptr) return std::unexpected(ConstexprError(loc, "a span member must be initialized"));
-            auto span_result = bind_read_only_span(field_type, *span_expr, loc);
+            if (!span_expr.has_value()) return std::unexpected(ConstexprError(loc, "a span member must be initialized"));
+            auto span_result = bind_read_only_span(field_type, span_expr->get(), loc);
             if (!span_result.has_value()) return std::unexpected(std::move(span_result).error());
             field_cell = std::move(span_result).value();
             return {};
@@ -1714,12 +1764,14 @@ private:
                 if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
                 arg_values.push_back(std::move(arg_result).value());
             }
-            if (const Function* ctor = find_constructor(field_type.name, arg_values, /*require_constexpr=*/true); ctor != nullptr) {
+            if (OptionalFunctionRef ctor_ref = find_constructor(field_type.name, arg_values, /*require_constexpr=*/true);
+                ctor_ref.has_value()) {
+                const Function& ctor = ctor_ref->get();
                 std::vector<Binding> bindings{};
-                bindings.reserve(ctor->params.size());
+                bindings.reserve(ctor.params.size());
                 bindings.push_back(Binding{field_cell, false});
-                for (std::size_t i = 1; i < ctor->params.size(); ++i) {
-                    const Param& param = ctor->params[i];
+                for (std::size_t i = 1; i < ctor.params.size(); ++i) {
+                    const Param& param = ctor.params[i];
                     const Expr& arg_expr = *init.brace_args[i - 1];
                     if (param.type.kind == TypeKind::Reference) {
                         if (param.type.is_rvalue_ref) {
@@ -1746,7 +1798,7 @@ private:
                         bindings.push_back(Binding{std::move(value_result).value(), false});
                     }
                 }
-                auto call_result = call_function(*ctor, std::move(bindings), loc);
+                auto call_result = call_function(ctor, std::move(bindings), loc);
                 if (!call_result.has_value()) return std::unexpected(std::move(call_result).error());
                 return {};
             }
@@ -1782,15 +1834,17 @@ private:
         ObjectValue& object = this_binding.cell->data.object;
         if (auto struct_it = structs_by_name_.find(fn.member_owner_class); struct_it != structs_by_name_.end()) {
             for (const StructField& field : struct_it->second->fields) {
-                const Initializer* selected = nullptr;
+                OptionalInitializerRef selected{};
                 for (const MemberInitializer& init : fn.member_initializers) {
                     if (init.member_name == field.name) {
-                        selected = &init.initializer;
+                        selected = make_initializer_ref(init.initializer);
                         break;
                     }
                 }
-                if (selected == nullptr && field.default_initializer) selected = &*field.default_initializer;
-                if (selected == nullptr) continue;
+                if (!selected.has_value() && field.default_initializer) {
+                    selected = make_initializer_ref(*field.default_initializer);
+                }
+                if (!selected.has_value()) continue;
                 std::int64_t field_slot = object.field_index(field.name);
                 if (field_slot < 0) {
                     std::string message{};
@@ -1800,7 +1854,7 @@ private:
                     return std::unexpected(ConstexprError(fn.loc, message));
                 }
                 if (auto result = apply_initializer_to_field(object.fields[static_cast<std::size_t>(field_slot)].cell,
-                                                            field.type, *selected, fn.loc);
+                                                            field.type, selected->get(), fn.loc);
                     !result.has_value()) {
                     return result;
                 }
@@ -1816,15 +1870,17 @@ private:
             return std::unexpected(ConstexprError(fn.loc, message));
         }
         for (const ClassField& field : class_it->second->fields) {
-            const Initializer* selected = nullptr;
+            OptionalInitializerRef selected{};
             for (const MemberInitializer& init : fn.member_initializers) {
                 if (init.member_name == field.name) {
-                    selected = &init.initializer;
+                    selected = make_initializer_ref(init.initializer);
                     break;
                 }
             }
-            if (selected == nullptr && field.default_initializer) selected = &*field.default_initializer;
-            if (selected == nullptr) continue;
+            if (!selected.has_value() && field.default_initializer) {
+                selected = make_initializer_ref(*field.default_initializer);
+            }
+            if (!selected.has_value()) continue;
             std::int64_t field_slot = object.field_index(field.name);
             if (field_slot < 0) {
                 std::string message{};
@@ -1834,7 +1890,7 @@ private:
                 return std::unexpected(ConstexprError(fn.loc, message));
             }
             if (auto result = apply_initializer_to_field(object.fields[static_cast<std::size_t>(field_slot)].cell,
-                                                         field.type, *selected, fn.loc);
+                                                         field.type, selected->get(), fn.loc);
                 !result.has_value()) {
                 return result;
             }
@@ -2084,9 +2140,9 @@ private:
                     bindings.push_back(Binding{std::move(cloned).value(), false});
                 } else if (!types_equal(param.type, value->type) &&
                            param.type.kind == TypeKind::Named && is_class_name(param.type.name)) {
-                    const Function* ctor =
+                    OptionalFunctionRef ctor_ref =
                         find_single_argument_converting_constructor(param.type.name, value, /*require_constexpr=*/true);
-                    if (ctor == nullptr) {
+                    if (!ctor_ref.has_value()) {
                         std::string message{};
                         message += "constexpr call has no viable converting constructor for parameter '";
                         message += param.name;
@@ -2099,7 +2155,7 @@ private:
                     std::vector<Binding> ctor_bindings{};
                     ctor_bindings.push_back(Binding{object, false});
                     ctor_bindings.push_back(Binding{value, false});
-                    auto ctor_call_result = call_function(*ctor, std::move(ctor_bindings), loc);
+                    auto ctor_call_result = call_function(ctor_ref->get(), std::move(ctor_bindings), loc);
                     if (!ctor_call_result.has_value()) return std::unexpected(std::move(ctor_call_result).error());
                     bindings.push_back(Binding{object, false});
                 } else {
@@ -2118,7 +2174,7 @@ private:
         return call_with_expr_arg_views(fn, arg_views, loc);
     }
 
-    [[nodiscard]] std::expected<const Function*, ConstexprError> find_method_callable(const Expr& receiver_expr, std::string_view method_name,
+    [[nodiscard]] std::expected<OptionalFunctionRef, ConstexprError> find_method_callable(const Expr& receiver_expr, std::string_view method_name,
                                                        const std::vector<std::shared_ptr<Cell>>& arg_values,
                                                        bool require_constexpr) {
         std::shared_ptr<Cell> receiver_value{};
@@ -2141,21 +2197,21 @@ private:
             if (!receiver_value_result.has_value()) return std::unexpected(std::move(receiver_value_result).error());
             receiver_value = std::move(receiver_value_result).value();
         }
-        if (receiver_value->type.kind != TypeKind::Named || !is_class_name(receiver_value->type.name)) return nullptr;
+        if (receiver_value->type.kind != TypeKind::Named || !is_class_name(receiver_value->type.name)) return {};
 
         std::string full_name{};
         full_name += receiver_value->type.name;
         full_name += "_";
         full_name += std::string(method_name);
         auto it = functions_by_name_.find(full_name);
-        if (it == functions_by_name_.end()) return nullptr;
+        if (it == functions_by_name_.end()) return {};
         for (std::size_t fn_index : it->second) {
-            const Function* fn = &program_.functions[fn_index];
-            if (!fn->body) continue;
-            if (require_constexpr && fn->eval_mode == FunctionEvalMode::RuntimeOnly) continue;
-            if (fn->params.size() != arg_values.size() + 1 || fn->params.empty()) continue;
+            const Function& fn = program_.functions[fn_index];
+            if (!fn.body) continue;
+            if (require_constexpr && fn.eval_mode == FunctionEvalMode::RuntimeOnly) continue;
+            if (fn.params.size() != arg_values.size() + 1 || fn.params.empty()) continue;
 
-            const Type& this_type = fn->params[0].type;
+            const Type& this_type = fn.params[0].type;
             if (this_type.kind == TypeKind::Reference) {
                 if (!this_type.pointee) continue;
                 Type receiver_expected = *this_type.pointee;
@@ -2168,14 +2224,14 @@ private:
 
             bool params_match = true;
             for (std::size_t i = 0; i < arg_values.size(); ++i) {
-                if (!constexpr_argument_matches_parameter(fn->params[i + 1].type, arg_values[i], require_constexpr)) {
+                if (!constexpr_argument_matches_parameter(fn.params[i + 1].type, arg_values[i], require_constexpr)) {
                     params_match = false;
                     break;
                 }
             }
-            if (params_match) return fn;
+            if (params_match) return make_function_ref(fn);
         }
-        return nullptr;
+        return {};
     }
 
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_constructor_expr(const Expr& expr) {
@@ -2190,8 +2246,8 @@ private:
             if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
             arg_values.push_back(std::move(arg_result).value());
         }
-        const Function* ctor = find_constructor(expr.name, arg_values, /*require_constexpr=*/true);
-        if (!ctor) {
+        OptionalFunctionRef ctor_ref = find_constructor(expr.name, arg_values, /*require_constexpr=*/true);
+        if (!ctor_ref.has_value()) {
             if (expr.args.empty() &&
                 (classes_by_name_.contains(expr.name) || structs_by_name_.contains(expr.name))) {
                 if (auto result = apply_default_initializers_to_named_object(object, object_type, expr.loc); !result.has_value()) {
@@ -2211,11 +2267,12 @@ private:
             message += "'";
             return std::unexpected(ConstexprError(expr.loc, message));
         }
+        const Function& ctor = ctor_ref->get();
         std::vector<Binding> bindings{};
-        bindings.reserve(ctor->params.size());
+        bindings.reserve(ctor.params.size());
         bindings.push_back(Binding{object, false});
-        for (std::size_t i = 1; i < ctor->params.size(); ++i) {
-            const Param& param = ctor->params[i];
+        for (std::size_t i = 1; i < ctor.params.size(); ++i) {
+            const Param& param = ctor.params[i];
             const Expr& arg_expr = *expr.args[i - 1];
             if (param.type.kind == TypeKind::Reference) {
                 if (param.type.is_rvalue_ref) {
@@ -2248,7 +2305,7 @@ private:
                 bindings.push_back(Binding{std::move(value_result).value(), false});
             }
         }
-        auto call_result = call_function(*ctor, std::move(bindings), expr.loc);
+        auto call_result = call_function(ctor, std::move(bindings), expr.loc);
         if (!call_result.has_value()) return std::unexpected(std::move(call_result).error());
         return object;
     }
@@ -2264,8 +2321,8 @@ private:
             }
             auto fn_result = find_method_callable(*expr.lhs, expr.name, arg_values, /*require_constexpr=*/true);
             if (!fn_result.has_value()) return std::unexpected(std::move(fn_result).error());
-            const Function* fn = fn_result.value();
-            if (!fn) {
+            OptionalFunctionRef method_ref = fn_result.value();
+            if (!method_ref.has_value()) {
                 std::string message{};
                 message += "no constexpr/consteval overload of method '";
                 message += expr.name;
@@ -2276,7 +2333,7 @@ private:
             all_args.reserve(expr.args.size() + 1);
             all_args.push_back(expr.lhs.get());
             for (const ExprPtr& arg : expr.args) all_args.push_back(arg.get());
-            return call_with_expr_arg_views(*fn, all_args, expr.loc);
+            return call_with_expr_arg_views(method_ref->get(), all_args, expr.loc);
         }
         if (is_class_name(expr.name)) return evaluate_constructor_expr(expr);
         std::vector<std::shared_ptr<Cell>> arg_values{};
@@ -2286,8 +2343,8 @@ private:
             if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
             arg_values.push_back(std::move(arg_result).value());
         }
-        const Function* fn = find_callable(expr.name, arg_values, /*require_constexpr=*/true);
-        if (!fn) {
+        OptionalFunctionRef callee_ref = find_callable(expr.name, arg_values, /*require_constexpr=*/true);
+        if (!callee_ref.has_value()) {
             if (has_runtime_only_match(expr.name, arg_values)) {
                 return std::unexpected(ConstexprError(expr.loc, "immediate evaluation may only call constexpr/consteval functions"));
             }
@@ -2297,16 +2354,18 @@ private:
             message += "' matches this immediate call";
             return std::unexpected(ConstexprError(expr.loc, message));
         }
-        return call_with_expr_args(*fn, expr.args, expr.loc);
+        return call_with_expr_args(callee_ref->get(), expr.args, expr.loc);
     }
 
-    [[nodiscard]] const EnumDef* find_enum_for_variant(std::string_view variant_name) const {
+    [[nodiscard]] std::optional<std::reference_wrapper<const EnumDef>> find_enum_for_variant(std::string_view variant_name) const {
         for (const EnumDef& def : program_.enums) {
             for (const EnumVariant& variant : def.variants) {
-                if (variant.name == variant_name) return &def;
+                if (variant.name == variant_name) {
+                    return std::optional<std::reference_wrapper<const EnumDef>>{std::reference_wrapper<const EnumDef>{def}};
+                }
             }
         }
-        return nullptr;
+        return {};
     }
 
     [[nodiscard]] std::optional<Type> infer_unevaluated_expr_type(const Expr& expr) {
@@ -2331,7 +2390,10 @@ private:
                 // ConstexprError&) fallback.
                 auto binding_result = lookup_binding(expr.name, expr.loc);
                 if (binding_result.has_value()) return binding_result.value().cell->type;
-                if (const EnumDef* def = find_enum_for_variant(expr.name); def != nullptr) return named_type(def->name);
+                if (std::optional<std::reference_wrapper<const EnumDef>> enum_def = find_enum_for_variant(expr.name);
+                    enum_def.has_value()) {
+                    return named_type(enum_def->get().name);
+                }
                 return std::nullopt;
             }
             case ExprKind::Move:
@@ -2359,8 +2421,8 @@ private:
             case ExprKind::Member: {
                 std::optional<Type> base = infer_unevaluated_expr_type(*expr.lhs);
                 if (!base.has_value()) return std::nullopt;
-                Type* span_pointee = base->kind == TypeKind::Span ? base->pointee.get() : nullptr;
-                if (span_pointee != nullptr && expr.name == "size") {
+                bool base_is_sized_span = base->kind == TypeKind::Span && base->pointee != nullptr;
+                if (base_is_sized_span && expr.name == "size") {
                     return named_type("size_t");
                 }
                 const Type& base_named = base->kind == TypeKind::Reference ? *base->pointee : *base;
@@ -2762,8 +2824,8 @@ private:
                     std::string constructor_name{};
                     constructor_name += stmt.type.name;
                     constructor_name += "_new";
-                    const Function* ctor = find_callable(constructor_name, arg_values, /*require_constexpr=*/true);
-                    if (!ctor) {
+                    OptionalFunctionRef ctor_ref = find_callable(constructor_name, arg_values, /*require_constexpr=*/true);
+                    if (!ctor_ref.has_value()) {
                         if (stmt.ctor_args.empty() &&
                             (classes_by_name_.contains(stmt.type.name) || structs_by_name_.contains(stmt.type.name))) {
                             if (auto result = apply_default_initializers_to_named_object(cell, stmt.type, stmt.loc);
@@ -2779,8 +2841,9 @@ private:
                         message += "'";
                         return std::unexpected(ConstexprError(stmt.loc, message));
                     }
-                    for (std::size_t i = 1; i < ctor->params.size(); ++i) {
-                        const Param& param = ctor->params[i];
+                    const Function& ctor = ctor_ref->get();
+                    for (std::size_t i = 1; i < ctor.params.size(); ++i) {
+                        const Param& param = ctor.params[i];
                         const Expr& arg_expr = *stmt.ctor_args[i - 1];
                         if (param.type.kind == TypeKind::Reference && !param.type.is_rvalue_ref && param.type.is_mutable_ref) {
                             auto arg_result = resolve_lvalue(arg_expr);
@@ -2794,7 +2857,7 @@ private:
                                         param.type.kind == TypeKind::Reference && !param.type.is_mutable_ref});
                         }
                     }
-                    auto call_result = call_function(*ctor, std::move(ctor_bindings), stmt.loc);
+                    auto call_result = call_function(ctor, std::move(ctor_bindings), stmt.loc);
                     if (!call_result.has_value()) return std::unexpected(std::move(call_result).error());
                 } else if (stmt.init) {
                     auto value_result = evaluate_expr(*stmt.init);
@@ -2957,19 +3020,16 @@ private:
     }
 };
 
-[[nodiscard]] const Function* find_consteval_function(const Program& program, const Expr& expr) {
-    if (expr.kind != ExprKind::Call || expr.lhs) return nullptr;
-    const Function* only_match = nullptr;
+[[nodiscard]] bool has_unique_consteval_function(const Program& program, const Expr& expr) {
+    if (expr.kind != ExprKind::Call || expr.lhs) return false;
+    bool found_one = false;
     for (const Function& fn : program.functions) {
         if (fn.name != expr.name || fn.eval_mode != FunctionEvalMode::Consteval) continue;
         if (fn.params.size() != expr.args.size()) continue;
-        if (!only_match) {
-            only_match = &fn;
-        } else {
-            return nullptr;
-        }
+        if (found_one) return false;
+        found_one = true;
     }
-    return only_match;
+    return found_one;
 }
 
 [[nodiscard]] bool expr_depends_on_runtime_bindings(const Expr& expr) {
@@ -3087,7 +3147,12 @@ private:
         const PointerValue& pointer = value->data.pointer;
         const ArrayValue& array = pointer.storage->data.array;
         snapshot.kind = ConstexprValueKind::StringLiteralPointer;
-        for (std::size_t i = static_cast<std::size_t>(std::max(pointer.index, static_cast<std::int64_t>(0))); i < array.elements.size(); ++i) {
+        // std::max takes both operands by const reference, and scpp will
+        // not let a reference borrow a temporary, so the zero has to be a
+        // named local.
+        std::int64_t zero_index = 0;
+        std::size_t first_index = static_cast<std::size_t>(std::max(pointer.index, zero_index));
+        for (std::size_t i = first_index; i < array.elements.size(); ++i) {
             std::int64_t ch = array.elements[i]->data.int_value;
             if (ch == 0) break;
             snapshot.string_value.push_back(static_cast<char>(ch));
@@ -3104,8 +3169,12 @@ private:
         for (const ObjectField& field : value->data.object.fields) {
             auto field_result = snapshot_constexpr_value(field.cell, loc);
             if (!field_result.has_value()) return std::unexpected(std::move(field_result).error());
-            snapshot.object_fields.emplace_back(field.name,
-                                                std::make_shared<ConstexprValue>(std::move(field_result).value()));
+            // scpp's overload resolution is exact-match only, so the
+            // element is constructed explicitly rather than forwarded
+            // through emplace_back's argument pack.
+            ConstexprField snapshot_field{field.name,
+                                          std::make_shared<ConstexprValue>(std::move(field_result).value())};
+            snapshot.object_fields.push_back(std::move(snapshot_field));
         }
         return snapshot;
     }
@@ -3123,28 +3192,28 @@ private:
 
 [[nodiscard]] std::expected<void, ConstexprError> collect_runtime_expr_rewrites(const Program& program, Expr& expr, ConstexprEngine& engine,
                                    std::vector<ExprRewrite>& expr_rewrites,
-                                   std::vector<Stmt*>& consteval_if_rewrites);
+                                   std::vector<std::reference_wrapper<Stmt>>& consteval_if_rewrites);
 [[nodiscard]] std::expected<void, ConstexprError> collect_runtime_stmt_rewrites(const Program& program, Stmt& stmt, ConstexprEngine& engine,
                                    std::vector<ExprRewrite>& expr_rewrites,
-                                   std::vector<Stmt*>& consteval_if_rewrites);
+                                   std::vector<std::reference_wrapper<Stmt>>& consteval_if_rewrites);
 
 [[nodiscard]] std::expected<void, ConstexprError> collect_runtime_stmt_rewrites(const Program& program, Stmt& stmt, ConstexprEngine& engine,
                                    std::vector<ExprRewrite>& expr_rewrites,
-                                   std::vector<Stmt*>& consteval_if_rewrites) {
+                                   std::vector<std::reference_wrapper<Stmt>>& consteval_if_rewrites) {
     if (stmt.kind == StmtKind::If && stmt.if_mode != IfMode::Runtime) {
-        Stmt* runtime_branch = nullptr;
+        std::optional<std::reference_wrapper<Stmt>> runtime_branch{};
         if (stmt.if_mode == IfMode::ConstevalFalse) {
-            runtime_branch = stmt.then_branch.get();
+            if (stmt.then_branch) runtime_branch = std::optional<std::reference_wrapper<Stmt>>{std::reference_wrapper<Stmt>{*stmt.then_branch}};
         } else if (stmt.else_branch) {
-            runtime_branch = stmt.else_branch.get();
+            runtime_branch = std::optional<std::reference_wrapper<Stmt>>{std::reference_wrapper<Stmt>{*stmt.else_branch}};
         }
-        if (runtime_branch) {
-            if (auto result = collect_runtime_stmt_rewrites(program, *runtime_branch, engine, expr_rewrites, consteval_if_rewrites);
+        if (runtime_branch.has_value()) {
+            if (auto result = collect_runtime_stmt_rewrites(program, runtime_branch->get(), engine, expr_rewrites, consteval_if_rewrites);
                 !result.has_value()) {
                 return result;
             }
         }
-        consteval_if_rewrites.push_back(&stmt);
+        consteval_if_rewrites.push_back(std::reference_wrapper<Stmt>{stmt});
         return {};
     }
 
@@ -3195,11 +3264,11 @@ private:
 
 [[nodiscard]] std::expected<void, ConstexprError> collect_runtime_expr_rewrites(const Program& program, Expr& expr, ConstexprEngine& engine,
                                    std::vector<ExprRewrite>& expr_rewrites,
-                                   std::vector<Stmt*>& consteval_if_rewrites) {
-    if (find_consteval_function(program, expr) != nullptr && !expr_depends_on_runtime_bindings(expr)) {
+                                   std::vector<std::reference_wrapper<Stmt>>& consteval_if_rewrites) {
+    if (has_unique_consteval_function(program, expr) && !expr_depends_on_runtime_bindings(expr)) {
         auto value_result = engine.evaluate_root_expr(expr);
         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
-        expr_rewrites.push_back(ExprRewrite{&expr, std::move(value_result).value()});
+        expr_rewrites.push_back(ExprRewrite{expr, std::move(value_result).value()});
         return {};
     }
     if (expr.lhs) {
@@ -3397,10 +3466,10 @@ private:
     [[nodiscard]] std::expected<void, ConstexprError> resolve_array_bounds_type_dependencies(Type& type) {
         switch (type.kind) {
             case TypeKind::Named:
-                if (StructDef* def = find_struct_mut(type.name); def != nullptr) {
-                    return resolve_struct_array_bounds(def->name);
-                } else if (ClassDef* def = find_class_mut(type.name); def != nullptr) {
-                    return resolve_class_array_bounds(def->name);
+                if (OptionalStructDefRef bounds_struct = find_struct_mut(type.name); bounds_struct.has_value()) {
+                    return resolve_struct_array_bounds(bounds_struct->get().name);
+                } else if (OptionalClassDefRef bounds_class = find_class_mut(type.name); bounds_class.has_value()) {
+                    return resolve_class_array_bounds(bounds_class->get().name);
                 }
                 return {};
             case TypeKind::Pointer:
@@ -3563,15 +3632,16 @@ private:
     [[nodiscard]] std::expected<void, ConstexprError> resolve_struct_array_bounds(const std::string& name) {
         if (array_bounds_resolved_structs_.contains(name)) return {};
         if (!array_bounds_resolving_structs_.insert(name).second) return {};
-        StructDef* def = find_struct_mut(name);
-        if (!def) return {};
-        if (!def->template_params.empty()) {
+        OptionalStructDefRef struct_ref = find_struct_mut(name);
+        if (!struct_ref.has_value()) return {};
+        StructDef& def = struct_ref->get();
+        if (!def.template_params.empty()) {
             array_bounds_resolving_structs_.erase(name);
             array_bounds_resolved_structs_.insert(name);
             return {};
         }
         engine_.mark_type_incomplete(name);
-        for (StructField& field : def->fields) {
+        for (StructField& field : def.fields) {
             if (auto result = resolve_array_bounds_type_dependencies(field.type); !result.has_value()) return result;
         }
         engine_.mark_type_complete(name);
@@ -3583,9 +3653,10 @@ private:
     [[nodiscard]] std::expected<void, ConstexprError> resolve_class_array_bounds(const std::string& name) {
         if (array_bounds_resolved_classes_.contains(name)) return {};
         if (!array_bounds_resolving_classes_.insert(name).second) return {};
-        ClassDef* def = find_class_mut(name);
-        if (!def) return {};
-        if (!def->template_params.empty()) {
+        OptionalClassDefRef class_ref = find_class_mut(name);
+        if (!class_ref.has_value()) return {};
+        ClassDef& def = class_ref->get();
+        if (!def.template_params.empty()) {
             array_bounds_resolving_classes_.erase(name);
             array_bounds_resolved_classes_.insert(name);
             return {};
@@ -3604,17 +3675,17 @@ private:
         // concrete type for T (see also codegen/orchestration.cppm's own
         // `if (def.is_synthetic_check_only) continue;`, the established
         // precedent for skipping these synthetic classes entirely).
-        if (def->is_synthetic_check_only) {
+        if (def.is_synthetic_check_only) {
             array_bounds_resolving_classes_.erase(name);
             array_bounds_resolved_classes_.insert(name);
             return {};
         }
         engine_.mark_type_incomplete(name);
-        if (auto base = def->direct_ordinary_base(); base.has_value()) {
+        if (auto base = def.direct_ordinary_base(); base.has_value()) {
             Type base_type = base->get().base_type;
             if (auto result = resolve_array_bounds_type_dependencies(base_type); !result.has_value()) return result;
         }
-        for (ClassField& field : def->fields) {
+        for (ClassField& field : def.fields) {
             if (auto result = resolve_array_bounds_type_dependencies(field.type); !result.has_value()) return result;
         }
         engine_.mark_type_complete(name);
@@ -3623,27 +3694,27 @@ private:
         return {};
     }
 
-    [[nodiscard]] StructDef* find_struct_mut(std::string_view name) {
+    [[nodiscard]] OptionalStructDefRef find_struct_mut(std::string_view name) {
         for (StructDef& def : program_.structs) {
-            if (def.name == name) return &def;
+            if (def.name == name) return make_struct_def_ref(def);
         }
-        return nullptr;
+        return {};
     }
 
-    [[nodiscard]] ClassDef* find_class_mut(std::string_view name) {
+    [[nodiscard]] OptionalClassDefRef find_class_mut(std::string_view name) {
         for (ClassDef& def : program_.classes) {
-            if (def.name == name) return &def;
+            if (def.name == name) return make_class_def_ref(def);
         }
-        return nullptr;
+        return {};
     }
 
     [[nodiscard]] std::expected<void, ConstexprError> resolve_type_dependencies(Type& type) {
         switch (type.kind) {
             case TypeKind::Named:
-                if (StructDef* def = find_struct_mut(type.name); def != nullptr) {
-                    return resolve_struct(def->name);
-                } else if (ClassDef* def = find_class_mut(type.name); def != nullptr) {
-                    return resolve_class(def->name);
+                if (OptionalStructDefRef dep_struct = find_struct_mut(type.name); dep_struct.has_value()) {
+                    return resolve_struct(dep_struct->get().name);
+                } else if (OptionalClassDefRef dep_class = find_class_mut(type.name); dep_class.has_value()) {
+                    return resolve_class(dep_class->get().name);
                 }
                 return {};
             case TypeKind::Pointer:
@@ -3684,8 +3755,12 @@ private:
     [[nodiscard]] bool type_has_strengthened_record_alignment(const Type& type) {
         if (type.kind == TypeKind::Array && type.element) return type_has_strengthened_record_alignment(*type.element);
         if (type.kind != TypeKind::Named) return false;
-        if (StructDef* def = find_struct_mut(type.name); def != nullptr) return def->resolved_alignment != 0;
-        if (ClassDef* def = find_class_mut(type.name); def != nullptr) return def->resolved_alignment != 0;
+        if (OptionalStructDefRef aligned_struct = find_struct_mut(type.name); aligned_struct.has_value()) {
+            return aligned_struct->get().resolved_alignment != 0;
+        }
+        if (OptionalClassDefRef aligned_class = find_class_mut(type.name); aligned_class.has_value()) {
+            return aligned_class->get().resolved_alignment != 0;
+        }
         return false;
     }
 
@@ -3729,9 +3804,10 @@ private:
     [[nodiscard]] std::expected<void, ConstexprError> resolve_struct(const std::string& name) {
         if (resolved_structs_.contains(name)) return {};
         if (!resolving_structs_.insert(name).second) return {};
-        StructDef* def = find_struct_mut(name);
-        if (!def) return {};
-        if (!def->template_params.empty()) {
+        OptionalStructDefRef struct_ref = find_struct_mut(name);
+        if (!struct_ref.has_value()) return {};
+        StructDef& def = struct_ref->get();
+        if (!def.template_params.empty()) {
             // ch05 §9.4(7)/§9.3: this is the primary template
             // definition itself, not a concrete instantiation -- its
             // fields may freely reference the template's own,
@@ -3748,18 +3824,18 @@ private:
             return {};
         }
         engine_.mark_type_incomplete(name);
-        for (StructField& field : def->fields) {
+        for (StructField& field : def.fields) {
             if (auto result = resolve_type_dependencies(field.type); !result.has_value()) return result;
         }
-        if (def->is_packed && !def->alignment_specs.empty()) {
+        if (def.is_packed && !def.alignment_specs.empty()) {
             std::string message{};
             message += "'[[scpp::packed]]' cannot be combined with 'alignas' on '";
-            message += def->name;
+            message += def.name;
             message += "'";
-            return std::unexpected(ConstexprError(def->alignment_specs.front().loc, message));
+            return std::unexpected(ConstexprError(def.alignment_specs.front().loc, message));
         }
-        for (StructField& field : def->fields) {
-            if (def->is_packed && !field.alignment_specs.empty()) {
+        for (StructField& field : def.fields) {
+            if (def.is_packed && !field.alignment_specs.empty()) {
                 std::string message{};
                 message += "'[[scpp::packed]]' cannot be combined with 'alignas' on member '";
                 message += field.name;
@@ -3780,7 +3856,7 @@ private:
                                                      alignment_context);
             if (!alignment_result.has_value()) return std::unexpected(std::move(alignment_result).error());
             field.resolved_alignment = alignment_result.value();
-            if (def->is_packed && type_has_strengthened_record_alignment(field.type)) {
+            if (def.is_packed && type_has_strengthened_record_alignment(field.type)) {
                 std::string message{};
                 message += "'[[scpp::packed]]' member '";
                 message += field.name;
@@ -3788,16 +3864,16 @@ private:
                 return std::unexpected(ConstexprError(field.loc, message));
             }
         }
-        std::uint64_t natural_align = natural_struct_alignment(*def);
+        std::uint64_t natural_align = natural_struct_alignment(def);
         std::string def_alignment_context{};
-        def_alignment_context += std::string(def->is_union ? "union '" : "struct '");
-        def_alignment_context += def->name;
+        def_alignment_context += std::string(def.is_union ? "union '" : "struct '");
+        def_alignment_context += def.name;
         def_alignment_context += "'";
         auto def_alignment_result =
-            engine_.resolve_root_alignment_specs(def->alignment_specs, natural_align, def->loc,
+            engine_.resolve_root_alignment_specs(def.alignment_specs, natural_align, def.loc,
                                                  def_alignment_context);
         if (!def_alignment_result.has_value()) return std::unexpected(std::move(def_alignment_result).error());
-        def->resolved_alignment = def_alignment_result.value();
+        def.resolved_alignment = def_alignment_result.value();
         engine_.mark_type_complete(name);
         resolving_structs_.erase(name);
         resolved_structs_.insert(name);
@@ -3807,9 +3883,10 @@ private:
     [[nodiscard]] std::expected<void, ConstexprError> resolve_class(const std::string& name) {
         if (resolved_classes_.contains(name)) return {};
         if (!resolving_classes_.insert(name).second) return {};
-        ClassDef* def = find_class_mut(name);
-        if (!def) return {};
-        if (!def->template_params.empty()) {
+        OptionalClassDefRef class_ref = find_class_mut(name);
+        if (!class_ref.has_value()) return {};
+        ClassDef& def = class_ref->get();
+        if (!def.template_params.empty()) {
             // See the identical comment in resolve_struct above.
             resolving_classes_.erase(name);
             resolved_classes_.insert(name);
@@ -3825,20 +3902,20 @@ private:
         // substituted field type (e.g. `sizeof(T)` with T replaced by the
         // zero-field bare-witness struct) that was never a real bound to
         // begin with.
-        if (def->is_synthetic_check_only) {
+        if (def.is_synthetic_check_only) {
             resolving_classes_.erase(name);
             resolved_classes_.insert(name);
             return {};
         }
         engine_.mark_type_incomplete(name);
-        if (auto base = def->direct_ordinary_base(); base.has_value()) {
+        if (auto base = def.direct_ordinary_base(); base.has_value()) {
             Type base_type = base->get().base_type;
             if (auto result = resolve_type_dependencies(base_type); !result.has_value()) return result;
         }
-        for (ClassField& field : def->fields) {
+        for (ClassField& field : def.fields) {
             if (auto result = resolve_type_dependencies(field.type); !result.has_value()) return result;
         }
-        for (ClassField& field : def->fields) {
+        for (ClassField& field : def.fields) {
             std::optional<TypeLayoutInfo> layout = layout_of_type(program_, field.type);
             if (!layout.has_value()) {
                 field.resolved_alignment = 0;
@@ -3854,15 +3931,15 @@ private:
             if (!alignment_result.has_value()) return std::unexpected(std::move(alignment_result).error());
             field.resolved_alignment = alignment_result.value();
         }
-        std::uint64_t natural_align = natural_class_alignment(*def);
+        std::uint64_t natural_align = natural_class_alignment(def);
         std::string def_alignment_context{};
         def_alignment_context += "class '";
-        def_alignment_context += def->name;
+        def_alignment_context += def.name;
         def_alignment_context += "'";
         auto def_alignment_result =
-            engine_.resolve_root_alignment_specs(def->alignment_specs, natural_align, def->loc, def_alignment_context);
+            engine_.resolve_root_alignment_specs(def.alignment_specs, natural_align, def.loc, def_alignment_context);
         if (!def_alignment_result.has_value()) return std::unexpected(std::move(def_alignment_result).error());
-        def->resolved_alignment = def_alignment_result.value();
+        def.resolved_alignment = def_alignment_result.value();
         engine_.mark_type_complete(name);
         resolving_classes_.erase(name);
         resolved_classes_.insert(name);
@@ -3881,7 +3958,7 @@ private:
     // resolve_array_bounds()'s own comment for the full rationale.
     if (auto result = aligner.resolve_array_bounds(); !result.has_value()) return result;
     std::vector<ExprRewrite> expr_rewrites{};
-    std::vector<Stmt*> consteval_if_rewrites{};
+    std::vector<std::reference_wrapper<Stmt>> consteval_if_rewrites{};
     for (Function& fn : program.functions) {
         if (!fn.body) continue;
         if (auto result = collect_runtime_stmt_rewrites(program, *fn.body, engine, expr_rewrites, consteval_if_rewrites);
@@ -3890,7 +3967,13 @@ private:
         }
     }
     for (ExprRewrite& rewrite : expr_rewrites) {
-        if (auto result = rewrite_expr_as_constant(*rewrite.target, rewrite.value); !result.has_value()) return result;
+        // The target Expr lives in `program`, not in `rewrite`, but the
+        // borrow checker can only see that both arguments are reached
+        // through `rewrite`; copying the (shared) value out first gives it
+        // two provably distinct operands.
+        std::shared_ptr<Cell> rewrite_value = rewrite.value;
+        Expr& rewrite_target = rewrite.target.get();
+        if (auto result = rewrite_expr_as_constant(rewrite_target, rewrite_value); !result.has_value()) return result;
     }
     // Validate required-constant-expression contexts *before* stripping
     // `if consteval` / `if !consteval` down to their runtime-selected
@@ -3899,7 +3982,7 @@ private:
     // only the runtime branch, because the callee's AST has already been
     // destructively rewritten for the later runtime pipeline.
     if (auto result = aligner.run(); !result.has_value()) return result;
-    for (Stmt* stmt : consteval_if_rewrites) rewrite_consteval_if_for_runtime(*stmt);
+    for (std::reference_wrapper<Stmt> stmt : consteval_if_rewrites) rewrite_consteval_if_for_runtime(stmt.get());
     for (Function& fn : program.functions) {
         if (fn.eval_mode == FunctionEvalMode::Consteval && !fn.name.ends_with("_new")) fn.body.reset();
     }
