@@ -24,6 +24,21 @@ struct ConstexprLimits {
     int max_loop_iterations = 262144;
 };
 
+// A base-class mem-initializer cannot bind a temporary, so the "line:column: "
+// prefix cannot be built inline; scpp does accept the by-value result of a
+// free function there, which is what this exists for. (A static member
+// function does *not* work in that position.) The body uses `+=` rather than
+// chained `+` because scpp has no `operator+` on strings.
+[[nodiscard]] std::string format_constexpr_error_message(const SourceLocation& loc, const std::string& message) {
+    std::string formatted{};
+    formatted += std::to_string(static_cast<std::int64_t>(loc.line));
+    formatted += ":";
+    formatted += std::to_string(static_cast<std::int64_t>(loc.column));
+    formatted += ": ";
+    formatted += message;
+    return formatted;
+}
+
 // `class`, not `struct`: scpp only lets a `struct` hold scalars, pointers,
 // trivial structs/unions and fixed-size arrays of those (spec ch04), and
 // `struct X : Base` is not spellable at all -- a base clause requires
@@ -32,7 +47,7 @@ struct ConstexprLimits {
 class ConstexprError : public std::runtime_error {
 public:
     ConstexprError(const SourceLocation& loc, const std::string& message)
-        : runtime_error{std::to_string(loc.line) + ":" + std::to_string(loc.column) + ": " + message}, loc{loc} {}
+        : runtime_error{format_constexpr_error_message(loc, message)}, loc{loc} {}
 
     // Explicit copy constructor, mirroring ParseError's: scpp's
     // std::runtime_error (std_stdexcept.scpp) declares no copy constructor
@@ -573,7 +588,11 @@ public:
         if (!raw_result.has_value()) return std::unexpected(std::move(raw_result).error());
         std::int64_t raw = raw_result.value();
         if (raw <= 0) {
-            return std::unexpected(ConstexprError(expr.loc, "array bound must be greater than zero (got " + std::to_string(raw) + ")"));
+            std::string message{};
+            message += "array bound must be greater than zero (got ";
+            message += std::to_string(raw);
+            message += ")";
+            return std::unexpected(ConstexprError(expr.loc, message));
         }
         return raw;
     }
@@ -733,8 +752,13 @@ private:
     // definition (see mark_type_incomplete/mark_type_complete above).
     [[nodiscard]] std::expected<void, ConstexprError> reject_if_incomplete(const Type& queried_type, const SourceLocation& loc, std::string_view op) const {
         if (queried_type.kind == TypeKind::Named && incomplete_type_names_.contains(queried_type.name)) {
-            return std::unexpected(ConstexprError(loc, "cannot apply '" + std::string(op) + "' to '" + queried_type.name +
-                                          "': it is still an incomplete type at this point"));
+            std::string message{};
+            message += "cannot apply '";
+            message += std::string(op);
+            message += "' to '";
+            message += queried_type.name;
+            message += "': it is still an incomplete type at this point";
+            return std::unexpected(ConstexprError(loc, message));
         }
         return {};
     }
@@ -742,7 +766,10 @@ private:
     [[nodiscard]] std::expected<void, ConstexprError> tick(const SourceLocation& loc, std::string_view what) {
         ++steps_;
         if (steps_ > limits_.max_steps) {
-            return std::unexpected(ConstexprError(loc, "constexpr evaluation exceeded step budget while " + std::string(what)));
+            std::string message{};
+            message += "constexpr evaluation exceeded step budget while ";
+            message += std::string(what);
+            return std::unexpected(ConstexprError(loc, message));
         }
         return {};
     }
@@ -798,10 +825,14 @@ private:
                 return std::unexpected(ConstexprError(spec.loc, "'alignas' requires a positive power-of-two alignment"));
             }
             if (requested < natural_alignment) {
-                return std::unexpected(ConstexprError(spec.loc,
-                                     "'alignas' requests alignment " + std::to_string(requested) +
-                                         ", which is less strict than the natural alignment " +
-                                         std::to_string(natural_alignment) + " of " + std::string(what)));
+                std::string message{};
+                message += "'alignas' requests alignment ";
+                message += std::to_string(requested);
+                message += ", which is less strict than the natural alignment ";
+                message += std::to_string(natural_alignment);
+                message += " of ";
+                message += std::string(what);
+                return std::unexpected(ConstexprError(spec.loc, message));
             }
             strictest = std::max(strictest, requested);
         }
@@ -824,9 +855,13 @@ private:
                     if (!layout.has_value()) {
                         return std::unexpected(ConstexprError(stmt.loc, "cannot apply 'alignas' to this variable type in this version"));
                     }
+                    std::string alignment_context{};
+                    alignment_context += "variable '";
+                    alignment_context += stmt.var_name;
+                    alignment_context += "'";
                     auto alignment_result =
                         resolve_alignment_specs(stmt.alignment_specs, layout->abi_align_bytes, stmt.loc,
-                                                "variable '" + stmt.var_name + "'");
+                                                alignment_context);
                     if (!alignment_result.has_value()) return std::unexpected(std::move(alignment_result).error());
                     stmt.resolved_alignment = alignment_result.value();
                 }
@@ -969,7 +1004,11 @@ private:
         if (auto base = def.direct_ordinary_base(); base.has_value()) {
             auto base_it = classes_by_name_.find(base->get().base_type.name);
             if (base_it == classes_by_name_.end()) {
-                return std::unexpected(ConstexprError(SourceLocation{}, "missing constexpr class definition for base class '" + base->get().base_type.name + "'"));
+                std::string message{};
+                message += "missing constexpr class definition for base class '";
+                message += base->get().base_type.name;
+                message += "'";
+                return std::unexpected(ConstexprError(SourceLocation{}, message));
             }
             auto base_fields_result = collect_class_fields(*base_it->second);
             if (!base_fields_result.has_value()) return std::unexpected(std::move(base_fields_result).error());
@@ -984,7 +1023,7 @@ private:
         auto cell = std::make_shared<Cell>();
         cell->type = type;
         switch (type.kind) {
-            case TypeKind::Named:
+            case TypeKind::Named: {
                 if (is_integral_named_type(type.name) && type.name != "bool") {
                     cell->data.set_integer(0);
                     return cell;
@@ -1031,7 +1070,12 @@ private:
                     cell->data.set_object(std::move(object));
                     return cell;
                 }
-                return std::unexpected(ConstexprError(loc, "type '" + type.name + "' is not constexpr-compatible in Phase D1"));
+                std::string message{};
+                message += "type '";
+                message += type.name;
+                message += "' is not constexpr-compatible in Phase D1";
+                return std::unexpected(ConstexprError(loc, message));
+            }
             case TypeKind::Pointer:
                 cell->data.set_pointer(PointerValue{});
                 return cell;
@@ -1074,7 +1118,11 @@ private:
         if (std::shared_ptr<Cell> global_value = std::move(global_result).value(); global_value != nullptr) {
             return Binding{global_value, /*read_only=*/true};
         }
-        return std::unexpected(ConstexprError(loc, "expression is not a constant expression: identifier '" + name + "' is not available"));
+        std::string message{};
+        message += "expression is not a constant expression: identifier '";
+        message += name;
+        message += "' is not available";
+        return std::unexpected(ConstexprError(loc, message));
     }
 
     // ch05 §9.4(8): a required constant expression may name a global
@@ -1097,7 +1145,11 @@ private:
         const GlobalVar& global = *global_it->second;
         if (global.decl == nullptr || !global.decl->is_constexpr || !global.decl->init) return nullptr;
         if (globals_resolving_.contains(name)) {
-            return std::unexpected(ConstexprError(loc, "constant expression circularly depends on global constexpr variable '" + name + "'"));
+            std::string message{};
+            message += "constant expression circularly depends on global constexpr variable '";
+            message += name;
+            message += "'";
+            return std::unexpected(ConstexprError(loc, message));
         }
         globals_resolving_.insert(name);
         std::vector<std::unordered_map<std::string, Binding>> saved_frames = std::move(frames_);
@@ -1253,7 +1305,8 @@ private:
         }
         span.pointer.storage = source.cell;
         span.pointer.index = 0;
-        span.pointer.storage_id = "span#" + std::to_string(string_storage_counter_ + 1);
+        span.pointer.storage_id = "span#";
+        span.pointer.storage_id += std::to_string(string_storage_counter_ + 1);
         span.size = static_cast<std::int64_t>(array.elements.size());
         result->data.set_span(std::move(span));
         return result;
@@ -1278,7 +1331,11 @@ private:
                 const ObjectValue& object = base.cell->data.object;
                 std::int64_t field_slot = object.field_index(expr.name);
                 if (field_slot < 0) {
-                    return std::unexpected(ConstexprError(expr.loc, "unknown constexpr field '" + expr.name + "'"));
+                    std::string message{};
+                    message += "unknown constexpr field '";
+                    message += expr.name;
+                    message += "'";
+                    return std::unexpected(ConstexprError(expr.loc, message));
                 }
                 return LValue{object.fields[static_cast<std::size_t>(field_slot)].cell, base.read_only};
             }
@@ -1384,7 +1441,8 @@ private:
         result->type = make_const_char_pointer_type();
         PointerValue pointer{};
         pointer.storage = storage;
-        pointer.storage_id = "string#" + std::to_string(++string_storage_counter_);
+        pointer.storage_id = "string#";
+        pointer.storage_id += std::to_string(++string_storage_counter_);
         result->data.set_pointer(std::move(pointer));
         return result;
     }
@@ -1413,7 +1471,10 @@ private:
     [[nodiscard]] const Function* find_single_argument_converting_constructor(std::string_view class_name,
                                                                               const std::shared_ptr<Cell>& arg,
                                                                               bool require_constexpr) {
-        auto it = functions_by_name_.find(std::string(class_name) + "_new");
+        std::string constructor_name{};
+        constructor_name += std::string(class_name);
+        constructor_name += "_new";
+        auto it = functions_by_name_.find(constructor_name);
         if (it == functions_by_name_.end()) return nullptr;
         for (std::size_t fn_index : it->second) {
             const Function* fn = &program_.functions[fn_index];
@@ -1500,7 +1561,10 @@ private:
     [[nodiscard]] const Function* find_constructor(std::string_view class_name,
                                                    const std::vector<std::shared_ptr<Cell>>& args,
                                                    bool require_constexpr) {
-        auto it = functions_by_name_.find(std::string(class_name) + "_new");
+        std::string constructor_name{};
+        constructor_name += std::string(class_name);
+        constructor_name += "_new";
+        auto it = functions_by_name_.find(constructor_name);
         if (it == functions_by_name_.end()) return nullptr;
         for (std::size_t fn_index : it->second) {
             const Function* fn = &program_.functions[fn_index];
@@ -1729,7 +1793,11 @@ private:
                 if (selected == nullptr) continue;
                 std::int64_t field_slot = object.field_index(field.name);
                 if (field_slot < 0) {
-                    return std::unexpected(ConstexprError(fn.loc, "missing constexpr storage for field '" + field.name + "'"));
+                    std::string message{};
+                    message += "missing constexpr storage for field '";
+                    message += field.name;
+                    message += "'";
+                    return std::unexpected(ConstexprError(fn.loc, message));
                 }
                 if (auto result = apply_initializer_to_field(object.fields[static_cast<std::size_t>(field_slot)].cell,
                                                             field.type, *selected, fn.loc);
@@ -1741,7 +1809,11 @@ private:
         }
         auto class_it = classes_by_name_.find(fn.member_owner_class);
         if (class_it == classes_by_name_.end()) {
-            return std::unexpected(ConstexprError(fn.loc, "missing constexpr class definition for '" + fn.member_owner_class + "'"));
+            std::string message{};
+            message += "missing constexpr class definition for '";
+            message += fn.member_owner_class;
+            message += "'";
+            return std::unexpected(ConstexprError(fn.loc, message));
         }
         for (const ClassField& field : class_it->second->fields) {
             const Initializer* selected = nullptr;
@@ -1755,7 +1827,11 @@ private:
             if (selected == nullptr) continue;
             std::int64_t field_slot = object.field_index(field.name);
             if (field_slot < 0) {
-                return std::unexpected(ConstexprError(fn.loc, "missing constexpr storage for field '" + field.name + "'"));
+                std::string message{};
+                message += "missing constexpr storage for field '";
+                message += field.name;
+                message += "'";
+                return std::unexpected(ConstexprError(fn.loc, message));
             }
             if (auto result = apply_initializer_to_field(object.fields[static_cast<std::size_t>(field_slot)].cell,
                                                          field.type, *selected, fn.loc);
@@ -1771,7 +1847,10 @@ private:
     }
 
     [[nodiscard]] bool has_user_defined_destructor(std::string_view class_name) const {
-        auto it = functions_by_name_.find(std::string(class_name) + "_delete");
+        std::string destructor_name{};
+        destructor_name += std::string(class_name);
+        destructor_name += "_delete";
+        auto it = functions_by_name_.find(destructor_name);
         if (it == functions_by_name_.end()) return false;
         for (std::size_t fn_index : it->second) {
             if (program_.functions[fn_index].body) return true;
@@ -1781,8 +1860,11 @@ private:
 
     [[nodiscard]] std::expected<void, ConstexprError> reject_user_defined_destructor_execution(const Type& type, const SourceLocation& loc) const {
         if (type.kind != TypeKind::Named || !is_class_name(type.name) || !has_user_defined_destructor(type.name)) return {};
-        return std::unexpected(ConstexprError(loc, "required constant evaluation cannot execute user-defined destructor of '" + type.name +
-                                      "'"));
+        std::string message{};
+        message += "required constant evaluation cannot execute user-defined destructor of '";
+        message += type.name;
+        message += "'";
+        return std::unexpected(ConstexprError(loc, message));
     }
 
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> cast_value(const Type& target_type, const std::shared_ptr<Cell>& operand,
@@ -1939,8 +2021,11 @@ private:
                     if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
                     LValue arg = std::move(arg_result).value();
                     if (arg.read_only) {
-                        return std::unexpected(ConstexprError(loc, "cannot bind a const/constexpr value to mutable reference parameter '" +
-                                                      param.name + "'"));
+                        std::string message{};
+                        message += "cannot bind a const/constexpr value to mutable reference parameter '";
+                        message += param.name;
+                        message += "'";
+                        return std::unexpected(ConstexprError(loc, message));
                     }
                     if (param.type.pointee && is_same_or_base_class_type(*param.type.pointee, arg.cell->type) &&
                         !types_equal(*param.type.pointee, arg.cell->type)) {
@@ -2002,8 +2087,11 @@ private:
                     const Function* ctor =
                         find_single_argument_converting_constructor(param.type.name, value, /*require_constexpr=*/true);
                     if (ctor == nullptr) {
-                        return std::unexpected(ConstexprError(loc, "constexpr call has no viable converting constructor for parameter '" +
-                                                      param.name + "'"));
+                        std::string message{};
+                        message += "constexpr call has no viable converting constructor for parameter '";
+                        message += param.name;
+                        message += "'";
+                        return std::unexpected(ConstexprError(loc, message));
                     }
                     auto object_result = make_default_cell(param.type, loc);
                     if (!object_result.has_value()) return std::unexpected(std::move(object_result).error());
@@ -2055,7 +2143,10 @@ private:
         }
         if (receiver_value->type.kind != TypeKind::Named || !is_class_name(receiver_value->type.name)) return nullptr;
 
-        std::string full_name = receiver_value->type.name + "_" + std::string(method_name);
+        std::string full_name{};
+        full_name += receiver_value->type.name;
+        full_name += "_";
+        full_name += std::string(method_name);
         auto it = functions_by_name_.find(full_name);
         if (it == functions_by_name_.end()) return nullptr;
         for (std::size_t fn_index : it->second) {
@@ -2108,10 +2199,17 @@ private:
                 }
                 return object;
             }
-            if (has_runtime_only_match(expr.name + "_new", arg_values)) {
+            std::string constructor_name{};
+            constructor_name += expr.name;
+            constructor_name += "_new";
+            if (has_runtime_only_match(constructor_name, arg_values)) {
                 return std::unexpected(ConstexprError(expr.loc, "immediate evaluation may only call constexpr/consteval constructors"));
             }
-            return std::unexpected(ConstexprError(expr.loc, "no constexpr/consteval constructor matches for type '" + expr.name + "'"));
+            std::string message{};
+            message += "no constexpr/consteval constructor matches for type '";
+            message += expr.name;
+            message += "'";
+            return std::unexpected(ConstexprError(expr.loc, message));
         }
         std::vector<Binding> bindings{};
         bindings.reserve(ctor->params.size());
@@ -2168,8 +2266,11 @@ private:
             if (!fn_result.has_value()) return std::unexpected(std::move(fn_result).error());
             const Function* fn = fn_result.value();
             if (!fn) {
-                return std::unexpected(ConstexprError(expr.loc,
-                                     "no constexpr/consteval overload of method '" + expr.name + "' matches this immediate call"));
+                std::string message{};
+                message += "no constexpr/consteval overload of method '";
+                message += expr.name;
+                message += "' matches this immediate call";
+                return std::unexpected(ConstexprError(expr.loc, message));
             }
             std::vector<const Expr*> all_args{};
             all_args.reserve(expr.args.size() + 1);
@@ -2190,7 +2291,11 @@ private:
             if (has_runtime_only_match(expr.name, arg_values)) {
                 return std::unexpected(ConstexprError(expr.loc, "immediate evaluation may only call constexpr/consteval functions"));
             }
-            return std::unexpected(ConstexprError(expr.loc, "no constexpr/consteval overload of '" + expr.name + "' matches this immediate call"));
+            std::string message{};
+            message += "no constexpr/consteval overload of '";
+            message += expr.name;
+            message += "' matches this immediate call";
+            return std::unexpected(ConstexprError(expr.loc, message));
         }
         return call_with_expr_args(*fn, expr.args, expr.loc);
     }
@@ -2341,7 +2446,10 @@ private:
                     const Type& receiver_named = receiver.has_value() && receiver->kind == TypeKind::Reference ? *receiver->pointee
                                                                                                                  : *receiver;
                     if (!receiver.has_value() || receiver_named.kind != TypeKind::Named) return std::nullopt;
-                    std::string full_name = receiver_named.name + "_" + expr.name;
+                    std::string full_name{};
+                    full_name += receiver_named.name;
+                    full_name += "_";
+                    full_name += expr.name;
                     auto it = functions_by_name_.find(full_name);
                     if (it == functions_by_name_.end()) return std::nullopt;
                     for (std::size_t fn_index : it->second) {
@@ -2651,7 +2759,10 @@ private:
                         if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
                         arg_values.push_back(std::move(arg_result).value());
                     }
-                    const Function* ctor = find_callable(stmt.type.name + "_new", arg_values, /*require_constexpr=*/true);
+                    std::string constructor_name{};
+                    constructor_name += stmt.type.name;
+                    constructor_name += "_new";
+                    const Function* ctor = find_callable(constructor_name, arg_values, /*require_constexpr=*/true);
                     if (!ctor) {
                         if (stmt.ctor_args.empty() &&
                             (classes_by_name_.contains(stmt.type.name) || structs_by_name_.contains(stmt.type.name))) {
@@ -2662,7 +2773,11 @@ private:
                             frames_.back()[stmt.var_name] = Binding{cell, stmt.is_const || stmt.is_constexpr};
                             return ExecOutcome{};
                         }
-                        return std::unexpected(ConstexprError(stmt.loc, "no constexpr/consteval constructor matches for type '" + stmt.type.name + "'"));
+                        std::string message{};
+                        message += "no constexpr/consteval constructor matches for type '";
+                        message += stmt.type.name;
+                        message += "'";
+                        return std::unexpected(ConstexprError(stmt.loc, message));
                     }
                     for (std::size_t i = 1; i < ctor->params.size(); ++i) {
                         const Param& param = ctor->params[i];
@@ -3233,9 +3348,13 @@ public:
                 global.decl->resolved_alignment = 0;
                 continue;
             }
+            std::string alignment_context{};
+            alignment_context += "variable '";
+            alignment_context += global.decl->var_name;
+            alignment_context += "'";
             auto alignment_result =
                 engine_.resolve_root_alignment_specs(global.decl->alignment_specs, layout->abi_align_bytes, global.decl->loc,
-                                                     "variable '" + global.decl->var_name + "'");
+                                                     alignment_context);
             if (!alignment_result.has_value()) return std::unexpected(std::move(alignment_result).error());
             global.decl->resolved_alignment = alignment_result.value();
         }
@@ -3633,34 +3752,50 @@ private:
             if (auto result = resolve_type_dependencies(field.type); !result.has_value()) return result;
         }
         if (def->is_packed && !def->alignment_specs.empty()) {
-            return std::unexpected(ConstexprError(def->alignment_specs.front().loc,
-                                 "'[[scpp::packed]]' cannot be combined with 'alignas' on '" + def->name + "'"));
+            std::string message{};
+            message += "'[[scpp::packed]]' cannot be combined with 'alignas' on '";
+            message += def->name;
+            message += "'";
+            return std::unexpected(ConstexprError(def->alignment_specs.front().loc, message));
         }
         for (StructField& field : def->fields) {
             if (def->is_packed && !field.alignment_specs.empty()) {
-                return std::unexpected(ConstexprError(field.alignment_specs.front().loc,
-                                     "'[[scpp::packed]]' cannot be combined with 'alignas' on member '" + field.name + "'"));
+                std::string message{};
+                message += "'[[scpp::packed]]' cannot be combined with 'alignas' on member '";
+                message += field.name;
+                message += "'";
+                return std::unexpected(ConstexprError(field.alignment_specs.front().loc, message));
             }
             std::optional<TypeLayoutInfo> layout = layout_of_type(program_, field.type);
             if (!layout.has_value()) {
                 field.resolved_alignment = 0;
                 continue;
             }
+            std::string alignment_context{};
+            alignment_context += "member '";
+            alignment_context += field.name;
+            alignment_context += "'";
             auto alignment_result =
                 engine_.resolve_root_alignment_specs(field.alignment_specs, layout->abi_align_bytes, field.loc,
-                                                     "member '" + field.name + "'");
+                                                     alignment_context);
             if (!alignment_result.has_value()) return std::unexpected(std::move(alignment_result).error());
             field.resolved_alignment = alignment_result.value();
             if (def->is_packed && type_has_strengthened_record_alignment(field.type)) {
-                return std::unexpected(ConstexprError(field.loc,
-                                     "'[[scpp::packed]]' member '" + field.name +
-                                         "' cannot have a class/struct/union type whose alignment was strengthened by 'alignas'"));
+                std::string message{};
+                message += "'[[scpp::packed]]' member '";
+                message += field.name;
+                message += "' cannot have a class/struct/union type whose alignment was strengthened by 'alignas'";
+                return std::unexpected(ConstexprError(field.loc, message));
             }
         }
         std::uint64_t natural_align = natural_struct_alignment(*def);
+        std::string def_alignment_context{};
+        def_alignment_context += std::string(def->is_union ? "union '" : "struct '");
+        def_alignment_context += def->name;
+        def_alignment_context += "'";
         auto def_alignment_result =
             engine_.resolve_root_alignment_specs(def->alignment_specs, natural_align, def->loc,
-                                                 std::string(def->is_union ? "union '" : "struct '") + def->name + "'");
+                                                 def_alignment_context);
         if (!def_alignment_result.has_value()) return std::unexpected(std::move(def_alignment_result).error());
         def->resolved_alignment = def_alignment_result.value();
         engine_.mark_type_complete(name);
@@ -3709,15 +3844,23 @@ private:
                 field.resolved_alignment = 0;
                 continue;
             }
+            std::string alignment_context{};
+            alignment_context += "member '";
+            alignment_context += field.name;
+            alignment_context += "'";
             auto alignment_result =
                 engine_.resolve_root_alignment_specs(field.alignment_specs, layout->abi_align_bytes, field.loc,
-                                                     "member '" + field.name + "'");
+                                                     alignment_context);
             if (!alignment_result.has_value()) return std::unexpected(std::move(alignment_result).error());
             field.resolved_alignment = alignment_result.value();
         }
         std::uint64_t natural_align = natural_class_alignment(*def);
+        std::string def_alignment_context{};
+        def_alignment_context += "class '";
+        def_alignment_context += def->name;
+        def_alignment_context += "'";
         auto def_alignment_result =
-            engine_.resolve_root_alignment_specs(def->alignment_specs, natural_align, def->loc, "class '" + def->name + "'");
+            engine_.resolve_root_alignment_specs(def->alignment_specs, natural_align, def->loc, def_alignment_context);
         if (!def_alignment_result.has_value()) return std::unexpected(std::move(def_alignment_result).error());
         def->resolved_alignment = def_alignment_result.value();
         engine_.mark_type_complete(name);

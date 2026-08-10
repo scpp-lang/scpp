@@ -788,6 +788,91 @@ void run_constexpr_string_literal_byte_tests() {
     }
 }
 
+// Every diagnostic in constexpression.cppm is now assembled with `+=` onto a
+// named std::string rather than a chain of `+`, because scpp has no
+// `operator+` on strings. Message text is user-visible, so the point of these
+// cases is that the reassembly kept every message byte-identical -- including
+// the "line:column: " prefix, which had to move into a free function since a
+// base-class mem-initializer cannot bind a temporary.
+void run_constexpr_diagnostic_text_tests() {
+    struct DiagnosticCase {
+        std::string case_name;
+        std::string source;
+        std::string expected_message;
+    };
+    const std::vector<DiagnosticCase> diagnostic_cases = {
+        {"diagnostic_unknown_constexpr_field",
+         "struct Point { int x = 1; };\n"
+         "consteval int bad() { Point p{}; return p.missing; }\n"
+         "int main() { return bad(); }\n",
+         "unknown constexpr field 'missing'"},
+        {"diagnostic_no_overload_matches_immediate_call",
+         "consteval int f(int a) { return a; }\n"
+         "consteval int bad() { return f(1, 2); }\n"
+         "int main() { return bad(); }\n",
+         "no constexpr/consteval overload of 'f' matches this immediate call"},
+        {"diagnostic_no_method_overload_matches_immediate_call",
+         "class C {\n  public:\n    consteval int m(int a) { return a; }\n};\n"
+         "consteval int bad() { C c{}; return c.m(1, 2); }\n"
+         "int main() { return bad(); }\n",
+         "no constexpr/consteval overload of method 'm' matches this immediate call"},
+        {"diagnostic_no_constructor_matches_for_type",
+         "class Holder {\n"
+         "  public:\n"
+         "    consteval Holder(int a, int b) { this->v = a + b; }\n"
+         "    int v = 0;\n"
+         "};\n"
+         "consteval int bad() { Holder h{1}; return h.v; }\n"
+         "int main() { return bad(); }\n",
+         "no constexpr/consteval constructor matches for type 'Holder'"},
+    };
+
+    for (const DiagnosticCase& diagnostic_case : diagnostic_cases) {
+        cases_run++;
+        auto parsed = try_parse_with_std_imports(diagnostic_case.source);
+        expect(parsed.has_value(), diagnostic_case.case_name + ": expected the source to parse, got " +
+                                       (parsed.has_value() ? std::string() : parsed.error().what()));
+        if (!parsed.has_value()) continue;
+        scpp::Program program = std::move(parsed).value();
+        auto result = scpp::fold_immediate_calls(program);
+        expect(!result.has_value(), diagnostic_case.case_name + ": expected an error");
+        if (result.has_value()) continue;
+
+        const scpp::ConstexprError& error = result.error();
+        const std::string what = error.what();
+        // ConstexprError prefixes "line:column: "; assert both halves exactly.
+        std::string expected_prefix;
+        expected_prefix += std::to_string(error.loc.line);
+        expected_prefix += ":";
+        expected_prefix += std::to_string(error.loc.column);
+        expected_prefix += ": ";
+        expect(what == expected_prefix + diagnostic_case.expected_message,
+               diagnostic_case.case_name + ": expected '" + expected_prefix + diagnostic_case.expected_message +
+                   "' but got '" + what + "'");
+    }
+
+    {
+        // The step-budget message is the only one whose tail comes from a
+        // std::string_view operand, so it exercises a different `+=` overload.
+        std::string case_name = "diagnostic_step_budget_exhausted";
+        cases_run++;
+        scpp::Program program = parse_with_std_imports(
+            "consteval int count(int n) { if (n <= 0) { return 0; } return count(n - 1) + 1; }\n"
+            "int main() { return count(50); }\n");
+        scpp::ConstexprLimits limits{};
+        limits.max_steps = 32;
+        auto result = scpp::fold_immediate_calls(program, limits);
+        expect(!result.has_value(), case_name + ": expected the step budget to be exceeded");
+        if (result.has_value()) return;
+        const std::string what = result.error().what();
+        const std::string expected_fragment = "constexpr evaluation exceeded step budget while ";
+        expect(what.find(expected_fragment) != std::string::npos,
+               case_name + ": expected the message to contain '" + expected_fragment + "' but got '" + what + "'");
+        expect(what.size() > what.find(expected_fragment) + expected_fragment.size(),
+               case_name + ": expected a non-empty 'while ...' tail in '" + what + "'");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -802,6 +887,7 @@ int main() {
     run_constexpr_cell_data_kind_tests();
     run_constexpr_object_field_order_tests();
     run_constexpr_string_literal_byte_tests();
+    run_constexpr_diagnostic_text_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
