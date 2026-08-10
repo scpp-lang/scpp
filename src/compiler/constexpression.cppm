@@ -518,11 +518,20 @@ public:
     return result;
 }
 
-[[nodiscard]] bool is_named_type(const Type& type, std::string_view name) {
+// The `name` parameters below are `const char*`, not std::string_view:
+// scpp's overload resolution is exact-type-match only and its std::string
+// has `operator==(const char*)` but no string_view overload, and every
+// caller of these three passes a string literal, so `const char*` is both
+// what the callers already have and what the comparison needs.
+[[nodiscard]] bool is_named_type(const Type& type, const char* name) {
     return type.kind == TypeKind::Named && type.name == name && type.template_args.empty();
 }
 
-[[nodiscard]] bool is_integral_named_type(std::string_view name) {
+// Conversely, every caller of the lookups below already holds a
+// std::string (a Type::name, an Expr::name, or a locally built name), so
+// taking one by reference removes both the view conversion and the
+// std::string round-trip several of these bodies used to do.
+[[nodiscard]] bool is_integral_named_type(const std::string& name) {
     return name == "int" || name == "bool" || name == "char" || name == "long" || name == "unsigned int" ||
            name == "unsigned long" || name == "size_t" || name == "ptrdiff_t" || name == "int8_t" ||
            name == "int16_t" || name == "int32_t" || name == "int64_t" || name == "uint8_t" ||
@@ -605,7 +614,7 @@ public:
     }
 
     [[nodiscard]] std::expected<std::uint64_t, ConstexprError> resolve_root_alignment_specs(const std::vector<AlignmentSpecifier>& specs, std::uint64_t natural_alignment,
-                                               const SourceLocation& loc, std::string_view what) {
+                                               const SourceLocation& loc, const std::string& what) {
         frames_.clear();
         steps_ = 0;
         call_depth_ = 0;
@@ -797,11 +806,11 @@ private:
     // incomplete at this point, so evaluating its size/alignment must be
     // rejected rather than silently computed from a partially-resolved
     // definition (see mark_type_incomplete/mark_type_complete above).
-    [[nodiscard]] std::expected<void, ConstexprError> reject_if_incomplete(const Type& queried_type, const SourceLocation& loc, std::string_view op) const {
+    [[nodiscard]] std::expected<void, ConstexprError> reject_if_incomplete(const Type& queried_type, const SourceLocation& loc, const char* op) const {
         if (queried_type.kind == TypeKind::Named && incomplete_type_names_.contains(queried_type.name)) {
             std::string message{};
             message += "cannot apply '";
-            message += std::string(op);
+            message += op;
             message += "' to '";
             message += queried_type.name;
             message += "': it is still an incomplete type at this point";
@@ -810,12 +819,12 @@ private:
         return {};
     }
 
-    [[nodiscard]] std::expected<void, ConstexprError> tick(const SourceLocation& loc, std::string_view what) {
+    [[nodiscard]] std::expected<void, ConstexprError> tick(const SourceLocation& loc, const char* what) {
         ++steps_;
         if (steps_ > limits_.max_steps) {
             std::string message{};
             message += "constexpr evaluation exceeded step budget while ";
-            message += std::string(what);
+            message += what;
             return std::unexpected(ConstexprError(loc, message));
         }
         return {};
@@ -861,7 +870,7 @@ private:
 
     [[nodiscard]] std::expected<std::uint64_t, ConstexprError> resolve_alignment_specs(const std::vector<AlignmentSpecifier>& specs,
                                                         std::uint64_t natural_alignment, const SourceLocation& loc,
-                                                        std::string_view what) {
+                                                        const std::string& what) {
         std::uint64_t strictest = 0;
         for (const AlignmentSpecifier& spec : specs) {
             auto requested_result = evaluate_alignment_operand(spec);
@@ -878,7 +887,7 @@ private:
                 message += ", which is less strict than the natural alignment ";
                 message += std::to_string(natural_alignment);
                 message += " of ";
-                message += std::string(what);
+                message += what;
                 return std::unexpected(ConstexprError(spec.loc, message));
             }
             strictest = std::max(strictest, requested);
@@ -1494,9 +1503,9 @@ private:
         return result;
     }
 
-    [[nodiscard]] OptionalFunctionRef find_callable(std::string_view name, const std::vector<std::shared_ptr<Cell>>& args,
+    [[nodiscard]] OptionalFunctionRef find_callable(const std::string& name, const std::vector<std::shared_ptr<Cell>>& args,
                                                 bool require_constexpr) {
-        auto it = functions_by_name_.find(std::string(name));
+        auto it = functions_by_name_.find(name);
         if (it == functions_by_name_.end()) return {};
         for (std::size_t fn_index : it->second) {
             const Function& fn = program_.functions[fn_index];
@@ -1515,11 +1524,11 @@ private:
         return {};
     }
 
-    [[nodiscard]] OptionalFunctionRef find_single_argument_converting_constructor(std::string_view class_name,
+    [[nodiscard]] OptionalFunctionRef find_single_argument_converting_constructor(const std::string& class_name,
                                                                               const std::shared_ptr<Cell>& arg,
                                                                               bool require_constexpr) {
         std::string constructor_name{};
-        constructor_name += std::string(class_name);
+        constructor_name += class_name;
         constructor_name += "_new";
         auto it = functions_by_name_.find(constructor_name);
         if (it == functions_by_name_.end()) return {};
@@ -1607,11 +1616,11 @@ private:
         return false;
     }
 
-    [[nodiscard]] OptionalFunctionRef find_constructor(std::string_view class_name,
+    [[nodiscard]] OptionalFunctionRef find_constructor(const std::string& class_name,
                                                    const std::vector<std::shared_ptr<Cell>>& args,
                                                    bool require_constexpr) {
         std::string constructor_name{};
-        constructor_name += std::string(class_name);
+        constructor_name += class_name;
         constructor_name += "_new";
         auto it = functions_by_name_.find(constructor_name);
         if (it == functions_by_name_.end()) return {};
@@ -1649,8 +1658,8 @@ private:
         return {};
     }
 
-    [[nodiscard]] bool has_runtime_only_match(std::string_view name, const std::vector<std::shared_ptr<Cell>>& args) {
-        auto it = functions_by_name_.find(std::string(name));
+    [[nodiscard]] bool has_runtime_only_match(const std::string& name, const std::vector<std::shared_ptr<Cell>>& args) {
+        auto it = functions_by_name_.find(name);
         if (it == functions_by_name_.end()) return false;
         for (std::size_t fn_index : it->second) {
             const Function& fn = program_.functions[fn_index];
@@ -1898,13 +1907,13 @@ private:
         return {};
     }
 
-    [[nodiscard]] bool is_class_name(std::string_view name) const {
-        return classes_by_name_.contains(std::string(name));
+    [[nodiscard]] bool is_class_name(const std::string& name) const {
+        return classes_by_name_.contains(name);
     }
 
-    [[nodiscard]] bool has_user_defined_destructor(std::string_view class_name) const {
+    [[nodiscard]] bool has_user_defined_destructor(const std::string& class_name) const {
         std::string destructor_name{};
-        destructor_name += std::string(class_name);
+        destructor_name += class_name;
         destructor_name += "_delete";
         auto it = functions_by_name_.find(destructor_name);
         if (it == functions_by_name_.end()) return false;
@@ -2174,7 +2183,7 @@ private:
         return call_with_expr_arg_views(fn, arg_views, loc);
     }
 
-    [[nodiscard]] std::expected<OptionalFunctionRef, ConstexprError> find_method_callable(const Expr& receiver_expr, std::string_view method_name,
+    [[nodiscard]] std::expected<OptionalFunctionRef, ConstexprError> find_method_callable(const Expr& receiver_expr, const std::string& method_name,
                                                        const std::vector<std::shared_ptr<Cell>>& arg_values,
                                                        bool require_constexpr) {
         std::shared_ptr<Cell> receiver_value{};
@@ -2202,7 +2211,7 @@ private:
         std::string full_name{};
         full_name += receiver_value->type.name;
         full_name += "_";
-        full_name += std::string(method_name);
+        full_name += method_name;
         auto it = functions_by_name_.find(full_name);
         if (it == functions_by_name_.end()) return {};
         for (std::size_t fn_index : it->second) {
@@ -2357,7 +2366,7 @@ private:
         return call_with_expr_args(callee_ref->get(), expr.args, expr.loc);
     }
 
-    [[nodiscard]] std::optional<std::reference_wrapper<const EnumDef>> find_enum_for_variant(std::string_view variant_name) const {
+    [[nodiscard]] std::optional<std::reference_wrapper<const EnumDef>> find_enum_for_variant(const std::string& variant_name) const {
         for (const EnumDef& def : program_.enums) {
             for (const EnumVariant& variant : def.variants) {
                 if (variant.name == variant_name) {
@@ -3694,14 +3703,14 @@ private:
         return {};
     }
 
-    [[nodiscard]] OptionalStructDefRef find_struct_mut(std::string_view name) {
+    [[nodiscard]] OptionalStructDefRef find_struct_mut(const std::string& name) {
         for (StructDef& def : program_.structs) {
             if (def.name == name) return make_struct_def_ref(def);
         }
         return {};
     }
 
-    [[nodiscard]] OptionalClassDefRef find_class_mut(std::string_view name) {
+    [[nodiscard]] OptionalClassDefRef find_class_mut(const std::string& name) {
         for (ClassDef& def : program_.classes) {
             if (def.name == name) return make_class_def_ref(def);
         }
