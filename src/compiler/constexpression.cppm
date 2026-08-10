@@ -910,16 +910,22 @@ private:
             if (requested < natural_alignment) {
                 std::string message{};
                 message += "'alignas' requests alignment ";
-                message += std::to_string(requested);
+                message += std::to_string(static_cast<std::size_t>(requested));
                 message += ", which is less strict than the natural alignment ";
-                message += std::to_string(natural_alignment);
+                message += std::to_string(static_cast<std::size_t>(natural_alignment));
                 message += " of ";
                 message += what;
                 return std::unexpected(ConstexprError(spec.loc, message));
             }
             strictest = std::max(strictest, requested);
         }
-        return strictest > natural_alignment ? strictest : 0;
+        // An alignment no stricter than the natural one needs no explicit
+        // resolved alignment, which this reports as zero. The zero is a
+        // named local because scpp does not unify an untyped literal with
+        // the other arm's type across a conditional expression.
+        std::uint64_t resolved = 0;
+        if (strictest > natural_alignment) resolved = strictest;
+        return resolved;
     }
 
     [[nodiscard]] std::expected<void, ConstexprError> validate_constexpr_stmt_tree(Stmt& stmt) {
@@ -1390,7 +1396,7 @@ private:
         span.pointer.storage = source.cell;
         span.pointer.index = 0;
         span.pointer.storage_id = "span#";
-        span.pointer.storage_id += std::to_string(string_storage_counter_ + 1);
+        span.pointer.storage_id += std::to_string(static_cast<std::int64_t>(string_storage_counter_ + 1));
         span.size = static_cast<std::int64_t>(array.elements.size());
         result->data.set_span(std::move(span));
         return result;
@@ -1526,7 +1532,7 @@ private:
         PointerValue pointer{};
         pointer.storage = storage;
         pointer.storage_id = "string#";
-        pointer.storage_id += std::to_string(++string_storage_counter_);
+        pointer.storage_id += std::to_string(static_cast<std::int64_t>(++string_storage_counter_));
         result->data.set_pointer(std::move(pointer));
         return result;
     }

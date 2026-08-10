@@ -653,6 +653,15 @@ const scpp::Expr* find_first_var_decl_init(const scpp::Stmt& stmt) {
     return nullptr;
 }
 
+const scpp::Stmt* find_var_decl_by_name(const scpp::Stmt& stmt, const std::string& var_name) {
+    if (stmt.kind == scpp::StmtKind::VarDecl && stmt.var_name == var_name) return &stmt;
+    for (const scpp::StmtPtr& nested : stmt.statements) {
+        if (nested == nullptr) continue;
+        if (const scpp::Stmt* found = find_var_decl_by_name(*nested, var_name)) return found;
+    }
+    return nullptr;
+}
+
 const scpp::Expr* find_initializer_in_function(const scpp::Program& program, const std::string& function_name) {
     for (const scpp::Function& fn : program.functions) {
         if (fn.name != function_name || fn.body == nullptr) continue;
@@ -1033,6 +1042,58 @@ void run_constexpr_best_effort_const_local_tests() {
 
 
 
+
+// resolve_alignment_specs reports "no explicit alignment needed" as zero, and
+// only reports a real alignment when the request is *stricter* than the type's
+// natural alignment. Nothing else pins that: dropping the comparison entirely
+// (always reporting the requested value) leaves codegen_test and every alignas
+// blackbox case passing, because over-aligning to the natural alignment is a
+// no-op at runtime. So check the resolved value directly.
+void run_constexpr_resolved_alignment_tests() {
+    struct AlignmentCase {
+        std::string case_name;
+        std::string alignas_argument;
+        std::uint64_t expected_resolved;
+    };
+    // `int` has a natural alignment of 4, so 4 is not stricter and must
+    // resolve to 0, while 16 is stricter and must resolve to 16.
+    const std::vector<AlignmentCase> alignment_cases = {
+        {"alignas_stricter_than_natural_resolves_to_the_request", "16", 16},
+        {"alignas_equal_to_natural_resolves_to_zero", "4", 0},
+    };
+
+    for (const AlignmentCase& alignment_case : alignment_cases) {
+        cases_run++;
+        std::string source{};
+        source += "int main() {\n";
+        source += "    alignas(";
+        source += alignment_case.alignas_argument;
+        source += ") int aligned_local = 0;\n";
+        source += "    return aligned_local;\n";
+        source += "}\n";
+
+        scpp::Program program = parse_with_std_imports(source);
+        auto fold_result = scpp::fold_immediate_calls(program);
+        expect(fold_result.has_value(),
+               alignment_case.case_name + ": expected the program to fold, got " +
+                   (fold_result.has_value() ? std::string() : fold_result.error().what()));
+        if (!fold_result.has_value()) continue;
+
+        const scpp::Stmt* declaration = nullptr;
+        for (const scpp::Function& fn : program.functions) {
+            if (fn.name != "main" || fn.body == nullptr) continue;
+            declaration = find_var_decl_by_name(*fn.body, "aligned_local");
+        }
+        expect(declaration != nullptr, alignment_case.case_name + ": expected to find `aligned_local`");
+        if (declaration == nullptr) continue;
+
+        expect(declaration->resolved_alignment == alignment_case.expected_resolved,
+               alignment_case.case_name + ": expected resolved_alignment " +
+                   std::to_string(alignment_case.expected_resolved) + " but got " +
+                   std::to_string(declaration->resolved_alignment));
+    }
+}
+
 int main() {
     run_test_case_files();
     test_generate_returns_engaged_expected_on_success();
@@ -1048,6 +1109,7 @@ int main() {
     run_constexpr_diagnostic_text_tests();
     run_constexpr_name_index_tests();
     run_constexpr_best_effort_const_local_tests();
+    run_constexpr_resolved_alignment_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
