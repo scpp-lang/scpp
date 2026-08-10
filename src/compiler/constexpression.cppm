@@ -470,6 +470,23 @@ public:
     std::shared_ptr<Cell> return_value{};
 };
 
+// Spells out a deliberately discarded [[nodiscard]] result. The three call
+// sites below are the ones the pre-std::expected code wrote as an explicit
+// `try { ... } catch (const ConstexprError&) {}`; each has a comment saying
+// why its error cannot matter. They used to be written `(void)call()`, which
+// scpp rejects: it allows casts only between builtin scalar types (and `void`
+// is not one), so neither `(void)x` nor `static_cast<void>(x)` is available.
+//
+// The shape is forced from both sides. The parameter is by value because
+// scpp's borrow rule cannot bind a reference to a call's temporary result,
+// and it is named and read because scpp has neither unnamed parameters nor
+// [[maybe_unused]] while C++ has -Wextra's -Wunused-parameter. Returning
+// whether the call succeeded satisfies both; the result is intentionally not
+// [[nodiscard]], since dropping it is the entire point.
+bool ignore_result(std::expected<ExecOutcome, ConstexprError> result) { return result.has_value(); }
+
+bool ignore_result(std::expected<void, ConstexprError> result) { return result.has_value(); }
+
 [[nodiscard]] bool types_equal(const Type& a, const Type& b) {
     if (a.kind != b.kind) return false;
     if (a.is_const_qualified != b.is_const_qualified) return false;
@@ -624,12 +641,12 @@ public:
     }
 
     [[nodiscard]] std::expected<std::uint64_t, ConstexprError> resolve_root_alignment_specs(const std::vector<AlignmentSpecifier>& specs, std::uint64_t natural_alignment,
-                                               const SourceLocation& loc, const std::string& what) {
+                                               const std::string& what) {
         frames_.clear();
         steps_ = 0;
         call_depth_ = 0;
         string_storage_counter_ = 0;
-        return resolve_alignment_specs(specs, natural_alignment, loc, what);
+        return resolve_alignment_specs(specs, natural_alignment, what);
     }
 
     // ch05 §9.4: evaluates and validates a single array-bound
@@ -770,7 +787,7 @@ public:
             // Best-effort: a failing local `const` initializer is not (yet)
             // usable as an array bound, but that's fine here -- silently
             // tolerated exactly like the original catch(const ConstexprError&) {}.
-            (void)execute_stmt(stmt, named_type("void"));
+            ignore_result(execute_stmt(stmt, named_type("void")));
         }
         return {};
     }
@@ -879,7 +896,7 @@ private:
     }
 
     [[nodiscard]] std::expected<std::uint64_t, ConstexprError> resolve_alignment_specs(const std::vector<AlignmentSpecifier>& specs,
-                                                        std::uint64_t natural_alignment, const SourceLocation& loc,
+                                                        std::uint64_t natural_alignment,
                                                         const std::string& what) {
         std::uint64_t strictest = 0;
         for (const AlignmentSpecifier& spec : specs) {
@@ -902,7 +919,6 @@ private:
             }
             strictest = std::max(strictest, requested);
         }
-        static_cast<void>(loc);
         return strictest > natural_alignment ? strictest : 0;
     }
 
@@ -926,8 +942,7 @@ private:
                     alignment_context += stmt.var_name;
                     alignment_context += "'";
                     auto alignment_result =
-                        resolve_alignment_specs(stmt.alignment_specs, layout->abi_align_bytes, stmt.loc,
-                                                alignment_context);
+                        resolve_alignment_specs(stmt.alignment_specs, layout->abi_align_bytes, alignment_context);
                     if (!alignment_result.has_value()) return std::unexpected(std::move(alignment_result).error());
                     stmt.resolved_alignment = alignment_result.value();
                 }
@@ -943,10 +958,15 @@ private:
                         // back into source-form AST here. Validation has
                         // already succeeded, so keep the original
                         // initializer in those cases.
-                        (void)rewrite_expr_as_constant(*stmt.init, binding_result.value().cell);
+                        ignore_result(rewrite_expr_as_constant(*stmt.init, binding_result.value().cell));
                     }
                 } else if (stmt.is_const && (stmt.init || stmt.has_ctor_args)) {
-                    (void)execute_stmt(stmt, named_type("void"));
+                    // Best-effort, matching bind_local_constant_for_array_bounds
+                    // above and the original catch(const ConstexprError&) {}: a
+                    // local `const` whose initializer is not a constant
+                    // expression simply does not become one, which is not an
+                    // error here.
+                    ignore_result(execute_stmt(stmt, named_type("void")));
                 }
                 return {};
             }
@@ -3437,8 +3457,7 @@ public:
             alignment_context += global.decl->var_name;
             alignment_context += "'";
             auto alignment_result =
-                engine_.resolve_root_alignment_specs(global.decl->alignment_specs, layout->abi_align_bytes, global.decl->loc,
-                                                     alignment_context);
+                engine_.resolve_root_alignment_specs(global.decl->alignment_specs, layout->abi_align_bytes, alignment_context);
             if (!alignment_result.has_value()) return std::unexpected(std::move(alignment_result).error());
             global.decl->resolved_alignment = alignment_result.value();
         }
@@ -3867,8 +3886,7 @@ private:
             alignment_context += field.name;
             alignment_context += "'";
             auto alignment_result =
-                engine_.resolve_root_alignment_specs(field.alignment_specs, layout->abi_align_bytes, field.loc,
-                                                     alignment_context);
+                engine_.resolve_root_alignment_specs(field.alignment_specs, layout->abi_align_bytes, alignment_context);
             if (!alignment_result.has_value()) return std::unexpected(std::move(alignment_result).error());
             field.resolved_alignment = alignment_result.value();
             if (def.is_packed && type_has_strengthened_record_alignment(field.type)) {
@@ -3885,8 +3903,7 @@ private:
         def_alignment_context += def.name;
         def_alignment_context += "'";
         auto def_alignment_result =
-            engine_.resolve_root_alignment_specs(def.alignment_specs, natural_align, def.loc,
-                                                 def_alignment_context);
+            engine_.resolve_root_alignment_specs(def.alignment_specs, natural_align, def_alignment_context);
         if (!def_alignment_result.has_value()) return std::unexpected(std::move(def_alignment_result).error());
         def.resolved_alignment = def_alignment_result.value();
         engine_.mark_type_complete(name);
@@ -3941,8 +3958,7 @@ private:
             alignment_context += field.name;
             alignment_context += "'";
             auto alignment_result =
-                engine_.resolve_root_alignment_specs(field.alignment_specs, layout->abi_align_bytes, field.loc,
-                                                     alignment_context);
+                engine_.resolve_root_alignment_specs(field.alignment_specs, layout->abi_align_bytes, alignment_context);
             if (!alignment_result.has_value()) return std::unexpected(std::move(alignment_result).error());
             field.resolved_alignment = alignment_result.value();
         }
@@ -3952,7 +3968,7 @@ private:
         def_alignment_context += def.name;
         def_alignment_context += "'";
         auto def_alignment_result =
-            engine_.resolve_root_alignment_specs(def.alignment_specs, natural_align, def.loc, def_alignment_context);
+            engine_.resolve_root_alignment_specs(def.alignment_specs, natural_align, def_alignment_context);
         if (!def_alignment_result.has_value()) return std::unexpected(std::move(def_alignment_result).error());
         def.resolved_alignment = def_alignment_result.value();
         engine_.mark_type_complete(name);

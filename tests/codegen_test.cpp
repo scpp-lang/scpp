@@ -976,6 +976,63 @@ void run_constexpr_name_index_tests() {
     }
 }
 
+
+// constexpression.cppm deliberately discards three [[nodiscard]] results,
+// each replacing an explicit `catch (const ConstexprError&) {}` from the
+// pre-std::expected code: a local `const` whose initializer is not a
+// constant expression simply does not become one, which is not an error.
+// That is easy to mistake for a dropped error and "fix" into a propagation,
+// which would reject ordinary runtime code, so pin that they stay swallowed.
+void run_constexpr_best_effort_const_local_tests() {
+    struct ToleratedCase {
+        std::string case_name;
+        std::string source;
+    };
+    const std::vector<ToleratedCase> tolerated_cases = {
+        // validate_constexpr_stmt_tree's VarDecl `is_const` branch.
+        {"const_local_with_runtime_initializer_is_tolerated",
+         "int runtime(int n) {\n"
+         "    const int c = n + 1;\n"
+         "    return c;\n"
+         "}\n"
+         "int main() { return runtime(2); }\n"},
+        // bind_local_constant_for_array_bounds' own `is_const` branch: the
+        // same statement shape, reached while resolving a later local array
+        // bound in the same function.
+        {"const_local_with_runtime_initializer_beside_array_bound_is_tolerated",
+         "int runtime(int n) {\n"
+         "    const int c = n + 1;\n"
+         "    int arr[4];\n"
+         "    return arr[0] + c;\n"
+         "}\n"
+         "int main() { return runtime(2); }\n"},
+        // validate_constexpr_stmt_tree's `is_constexpr` branch: the value is a
+        // perfectly valid constant, but an object result cannot be lowered
+        // back into a source-form AST literal, so the rewrite is skipped and
+        // the original initializer is kept.
+        {"constexpr_object_local_that_cannot_be_lowered_is_tolerated",
+         "struct Point { int x{}; int y{}; };\n"
+         "constexpr Point make_point() { Point p{}; p.x = 1; p.y = 2; return p; }\n"
+         "int runtime() {\n"
+         "    constexpr Point p = make_point();\n"
+         "    return p.x;\n"
+         "}\n"
+         "int main() { return runtime(); }\n"},
+    };
+
+    for (const ToleratedCase& tolerated_case : tolerated_cases) {
+        cases_run++;
+        scpp::Program program = parse_with_std_imports(tolerated_case.source);
+        auto result = scpp::fold_immediate_calls(program);
+        expect(result.has_value(),
+               tolerated_case.case_name +
+                   ": a const local whose initializer is not a constant expression must stay tolerated, got " +
+                   (result.has_value() ? std::string() : result.error().what()));
+    }
+}
+
+
+
 int main() {
     run_test_case_files();
     test_generate_returns_engaged_expected_on_success();
@@ -990,6 +1047,7 @@ int main() {
     run_constexpr_string_literal_byte_tests();
     run_constexpr_diagnostic_text_tests();
     run_constexpr_name_index_tests();
+    run_constexpr_best_effort_const_local_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
