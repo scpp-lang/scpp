@@ -825,6 +825,23 @@ void run_constexpr_diagnostic_text_tests() {
          "consteval int bad() { Holder h{1}; return h.v; }\n"
          "int main() { return bad(); }\n",
          "no constexpr/consteval constructor matches for type 'Holder'"},
+        // The two cases below are the ones whose message tail is appended from
+        // a parameter rather than a literal: 'sizeof' arrives as a `const
+        // char*` and "variable 'x'" as a `const std::string&`, so together
+        // they pin both `+=` overloads used to splice a caller-supplied
+        // fragment into a diagnostic.
+        {"diagnostic_incomplete_type_sizeof",
+         "struct S {\n"
+         "    alignas(sizeof(S)) int a = 0;\n"
+         "};\n",
+         "cannot apply 'sizeof' to 'S': it is still an incomplete type at this point"},
+        {"diagnostic_alignas_less_strict_than_natural",
+         "consteval int bad() {\n"
+         "    alignas(1) int x = 0;\n"
+         "    return x;\n"
+         "}\n"
+         "int main() { return bad(); }\n",
+         "'alignas' requests alignment 1, which is less strict than the natural alignment 4 of variable 'x'"},
     };
 
     for (const DiagnosticCase& diagnostic_case : diagnostic_cases) {
@@ -852,8 +869,9 @@ void run_constexpr_diagnostic_text_tests() {
     }
 
     {
-        // The step-budget message is the only one whose tail comes from a
-        // std::string_view operand, so it exercises a different `+=` overload.
+        // The step-budget tail is built from the same `const char*` parameter
+        // path as the 'sizeof' case above, but reached through the evaluator's
+        // recursion guard rather than a layout check.
         std::string case_name = "diagnostic_step_budget_exhausted";
         cases_run++;
         scpp::Program program = parse_with_std_imports(
