@@ -116,6 +116,11 @@ namespace {
 {
         auto clone = std::make_unique<Expr>();
         clone->kind = expr.kind;
+        // Resolution is part of what this expression *is* -- a copy that
+        // dropped it would silently read as "not a local" (see
+        // Expr::resolved_local), and codegen would then fail to find the
+        // storage the original names.
+        clone->resolved_local = expr.resolved_local;
         clone->loc = expr.loc;
         clone->int_value = expr.int_value;
         clone->float_value = expr.float_value;
@@ -152,6 +157,7 @@ namespace {
             LambdaCapture cloned_capture;
             cloned_capture.name = capture.name;
             cloned_capture.by_reference = capture.by_reference;
+            cloned_capture.resolved_local = capture.resolved_local;
             if (capture.init) cloned_capture.init = clone_expr(*capture.init);
             clone->lambda_captures.push_back(std::move(cloned_capture));
         }
@@ -194,8 +200,7 @@ namespace {
             }
 
             case ExprKind::Identifier: {
-                auto it = expr.explicit_global_qualification ? locals_.end() : locals_.find(expr.name);
-                if (it != locals_.end()) return it->second.type;
+                if (const LocalSlot* local = find_local(expr)) return local->type;
                 if (const GlobalSlot* global = find_visible_global_slot(expr.name, expr.explicit_global_qualification)) {
                     return global->type;
                 }
@@ -211,14 +216,15 @@ namespace {
 
             case ExprKind::Move: {
                 if (expr.lhs->kind != ExprKind::Identifier) return std::nullopt;
-                auto it = locals_.find(expr.lhs->name);
-                if (it == locals_.end()) {
+                const LocalSlot* local = find_local(*expr.lhs);
+                if (local == nullptr) {
                     if (const GlobalSlot* global =
                             find_visible_global_slot(expr.lhs->name, expr.lhs->explicit_global_qualification)) {
                         return global->type;
                     }
+                    return std::nullopt;
                 }
-                return it == locals_.end() ? std::nullopt : std::optional<Type>(it->second.type);
+                return std::optional<Type>(local->type);
             }
 
             case ExprKind::New: {
@@ -422,21 +428,23 @@ namespace {
                     }
                     return std::nullopt;
                 }
-                if (expr.lhs == nullptr && !expr.explicit_global_qualification && locals_.contains(expr.name) &&
-                    locals_.at(expr.name).type.kind == TypeKind::FunctionPointer) {
-                    return *locals_.at(expr.name).type.function_return;
+                if (expr.lhs == nullptr) {
+                    if (const LocalSlot* callee_local = find_local(expr);
+                        callee_local != nullptr && callee_local->type.kind == TypeKind::FunctionPointer) {
+                        return *callee_local->type.function_return;
+                    }
                 }
                 auto inferred_call_argument_type = [&](const Expr& arg, const Type& param_type) -> std::optional<Type> {
                     std::optional<Type> inferred = infer_type(arg);
                     if (inferred.has_value()) return inferred;
                     if (arg.kind == ExprKind::Identifier && param_type.kind == TypeKind::Reference &&
                         !param_type.is_mutable_ref && !param_type.is_rvalue_ref && param_type.pointee != nullptr) {
-                        auto it = locals_.find(arg.name);
-                        if (it != locals_.end() && it->second.type.kind == TypeKind::Reference &&
-                            it->second.type.is_rvalue_ref && it->second.type.pointee != nullptr &&
-                            types_equal(*it->second.type.pointee, *param_type.pointee)) {
-                            Type fallback = it->second.type;
-                            fallback.name = it->second.type.pointee->name;
+                        const LocalSlot* arg_local = find_local(arg);
+                        if (arg_local != nullptr && arg_local->type.kind == TypeKind::Reference &&
+                            arg_local->type.is_rvalue_ref && arg_local->type.pointee != nullptr &&
+                            types_equal(*arg_local->type.pointee, *param_type.pointee)) {
+                            Type fallback = arg_local->type;
+                            fallback.name = arg_local->type.pointee->name;
                             return fallback;
                         }
                     }
@@ -604,9 +612,9 @@ namespace {
 
     [[nodiscard]] bool Codegen::is_implicit_move_return_source(const Expr& expr, const Type& target_type)
 {
-        if (expr.kind != ExprKind::Identifier || expr.explicit_global_qualification) return false;
-        auto it = locals_.find(expr.name);
-        return it != locals_.end() && types_equal(it->second.type, target_type);
+        if (expr.kind != ExprKind::Identifier) return false;
+        const LocalSlot* local = find_local(expr);
+        return local != nullptr && types_equal(local->type, target_type);
     }
 
 
@@ -753,10 +761,10 @@ namespace {
             std::optional<Type> inferred = infer_type(arg);
             if (inferred.has_value()) return inferred;
             if (arg.kind == ExprKind::Identifier) {
-                auto it = locals_.find(arg.name);
-                if (it != locals_.end() && it->second.type.kind == TypeKind::Reference && it->second.type.is_rvalue_ref &&
-                    it->second.type.pointee != nullptr) {
-                    return *it->second.type.pointee;
+                const LocalSlot* local = find_local(arg);
+                if (local != nullptr && local->type.kind == TypeKind::Reference && local->type.is_rvalue_ref &&
+                    local->type.pointee != nullptr) {
+                    return *local->type.pointee;
                 }
             }
             return std::nullopt;
@@ -797,9 +805,9 @@ namespace {
 {
         switch (expr.kind) {
             case ExprKind::Identifier: {
-                auto it = locals_.find(expr.name);
-                if (it == locals_.end()) return false;
-                return it->second.is_const || (it->second.type.kind == TypeKind::Reference && !it->second.type.is_mutable_ref);
+                const LocalSlot* local = find_local(expr);
+                if (local == nullptr) return false;
+                return local->is_const || (local->type.kind == TypeKind::Reference && !local->type.is_mutable_ref);
             }
             case ExprKind::Member:
             case ExprKind::Subscript:
@@ -810,9 +818,8 @@ namespace {
                 }
                 if (expr.unary_op != UnaryOp::Deref || expr.lhs->kind != ExprKind::Identifier) return false;
                 {
-                    auto it = locals_.find(expr.lhs->name);
-                    return it != locals_.end() && it->second.type.kind == TypeKind::Pointer &&
-                           !it->second.type.is_mutable_pointee;
+                    const LocalSlot* local = find_local(*expr.lhs);
+                    return local != nullptr && local->type.kind == TypeKind::Pointer && !local->type.is_mutable_pointee;
                 }
             case ExprKind::Call: {
                 std::optional<Type> t = infer_type(expr);
@@ -1078,15 +1085,11 @@ namespace {
             std::size_t fixed_param_count = fn->params.size() - param_offset;
             for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
                 const Type& param_type = fn->params[i + param_offset].type;
+                const LocalSlot* arg_local = find_local(*args[i]);
                 bool arg_is_bare_name = args[i]->kind == ExprKind::Identifier &&
-                                        !args[i]->explicit_global_qualification &&
-                                        !locals_.contains(args[i]->name);
-                bool arg_is_local_rvalue_ref = false;
-                if (args[i]->kind == ExprKind::Identifier && !args[i]->explicit_global_qualification) {
-                    auto it = locals_.find(args[i]->name);
-                    arg_is_local_rvalue_ref =
-                        it != locals_.end() && it->second.type.kind == TypeKind::Reference && it->second.type.is_rvalue_ref;
-                }
+                                        !args[i]->explicit_global_qualification && arg_local == nullptr;
+                bool arg_is_local_rvalue_ref =
+                    arg_local != nullptr && arg_local->type.kind == TypeKind::Reference && arg_local->type.is_rvalue_ref;
                 bool arg_is_lvalue_like = args[i]->kind == ExprKind::Identifier || args[i]->kind == ExprKind::Member ||
                                           args[i]->kind == ExprKind::Subscript;
                 bool arg_is_prvalue_like = args[i]->kind == ExprKind::Move || args[i]->kind == ExprKind::New ||

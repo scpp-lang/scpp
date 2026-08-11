@@ -422,8 +422,7 @@ namespace scpp {
 {
         const Expr* source = &expr;
         if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::AddressOf && expr.lhs) source = expr.lhs.get();
-        if (source->kind != ExprKind::Identifier ||
-            (!source->explicit_global_qualification && locals_.contains(source->name))) {
+        if (source->kind != ExprKind::Identifier || find_local(*source) != nullptr) {
             return std::nullopt;
         }
         std::optional<Type> result;

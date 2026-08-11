@@ -19,6 +19,13 @@ import std;
 import llvm;
 import scpp.ast;
 import scpp.constexpression;
+// For LocalId and the resolved_local_of/declared_local_of accessors.
+// Name resolution is a property of the source program, decided once (see
+// resolve_locals, scpp.mir) and recorded on the AST nodes themselves;
+// codegen reads that answer rather than computing a second one of its
+// own, so it can never disagree with the checker about which declaration
+// a name refers to.
+import scpp.mir;
 import :errors;
 
 export namespace scpp {
@@ -197,7 +204,14 @@ private:
     llvm::LLVMMetadataRef current_subprogram_ = nullptr;
     std::string source_path_;
     bool emit_debug_info_ = false;
-    std::map<std::string, LocalSlot> locals_;
+    // Storage for each of the current function's locals, keyed by the
+    // declaration that introduced it -- never by its source name. Two
+    // declarations may share a spelling (sibling scopes, or an inner
+    // scope shadowing an outer one), so a name does not identify storage;
+    // keying by name aliased both onto one slot and, on scope exit,
+    // erased the survivor's along with the shadow's -- silently dropping
+    // the outer object's destructor.
+    std::unordered_map<LocalId, LocalSlot> locals_;
     std::unordered_map<std::string, GlobalSlot> globals_;
     std::unordered_map<std::string, StructInfo> structs_;
     std::unordered_set<std::string> declaring_aggregates_;
@@ -213,7 +227,7 @@ private:
     // that's exactly the one-to-many relationship this map exists to
     // resolve).
     std::unordered_map<const Function*, std::string> overload_names_;
-    // A stack of block scopes, each holding the names declared directly in
+    // A stack of block scopes, each holding the locals declared directly in
     // that block (in declaration order). Pushed/popped around every Block,
     // and around the (possibly brace-less) branches of if/while, so a
     // unique_ptr local is dropped at the end of *its own* scope rather
@@ -222,7 +236,7 @@ private:
     // previous iteration's allocation. Function parameters are not part
     // of any pushed scope; they live for the whole function and are only
     // freed at Return, same as before.
-    std::vector<std::vector<std::string>> scope_stack_;
+    std::vector<std::vector<LocalId>> scope_stack_;
     struct ControlFlowFrame {
         std::optional<llvm::LLVMBasicBlockRef> continue_block;
         llvm::LLVMBasicBlockRef end_block;
@@ -762,6 +776,38 @@ private:
     [[nodiscard]] std::expected<void, CodegenError> emit_complete_object_interface_initializers(const ClassDef& most_derived_def, const Function* ctor_def,
                                                      llvm::LLVMValueRef object_ptr);
 
+    // spec §11.3(6): a virtual interface base is constructed exactly once,
+    // by the most-derived object -- so codegen emits those base
+    // constructions at the *construction site*, not inside the
+    // constructor. The initializer expressions being emitted there,
+    // however, were written inside the constructor's own
+    // member-initializer list and name the constructor's parameters, which
+    // do not exist in the construction site's frame at all. Evaluating
+    // arguments first and binding them to the constructor's parameters for
+    // exactly as long as those base initializers are emitted reconstructs
+    // the frame those expressions belong to -- and matches real C++'s
+    // ordering, which evaluates the arguments and initializes the
+    // parameters before the member-initializer list runs. Returns the
+    // evaluated arguments so the caller passes the very same values on to
+    // the constructor rather than evaluating them a second time.
+    [[nodiscard]] std::expected<std::vector<llvm::LLVMValueRef>, CodegenError>
+    emit_constructor_arguments_and_virtual_bases(const std::string& class_name, const Function* ctor_def,
+                                                 const std::vector<ExprPtr>& args, llvm::LLVMValueRef object_ptr);
+
+    // One saved `locals_` entry, so a binding that shadows a construction
+    // site's own local (parameter ids and local ids are both numbered per
+    // function, so they collide freely) can be put back afterwards.
+    struct SavedLocalSlot {
+        LocalId id;
+        bool was_bound = false;
+        LocalSlot slot;
+    };
+
+    [[nodiscard]] std::expected<std::vector<SavedLocalSlot>, CodegenError>
+    bind_constructor_parameters(const Function& ctor_def, const std::vector<llvm::LLVMValueRef>& args);
+
+    void restore_bound_locals(const std::vector<SavedLocalSlot>& saved);
+
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> load_this_object_ptr();
 
     [[nodiscard]] std::expected<LValue, CodegenError> codegen_raw_member_storage(llvm::LLVMValueRef object_ptr, const std::string& class_name,
@@ -1086,15 +1132,43 @@ private:
     // locals, so it's destroyed after all of them).
     void free_unique_ptr_locals();
 
+    // The storage bound to `expr`, or null if it names no local of the
+    // function being lowered (a global, a function, an enum constant, a
+    // `::`-qualified name, a field access). Which declaration a name
+    // refers to was decided once by resolve_locals and recorded on the
+    // node; this only looks up the slot that declaration was given, so
+    // codegen can never pick a different declaration than the checker
+    // did.
+    [[nodiscard]] const LocalSlot* find_local(const Expr& expr) const {
+        if (!has_resolved_local(expr)) return nullptr;
+        auto it = locals_.find(resolved_local_of(expr));
+        return it == locals_.end() ? nullptr : &it->second;
+    }
+
+    // The receiver parameter's local, for the few places that need `this`
+    // without an expression naming it (a constructor's member
+    // initializers, a defaulted operator's body). `this` is a parameter
+    // like any other and is always the first one when present, so its
+    // declaration -- and therefore its storage -- is identified without
+    // any lookup by spelling.
+    [[nodiscard]] std::optional<LocalId> this_param_local() const {
+        if (current_function_def_ == nullptr || current_function_def_->params.empty()) return std::nullopt;
+        const Param& first = current_function_def_->params.front();
+        if (first.name != "this" || !has_param_local(first)) return std::nullopt;
+        return param_local(first);
+    }
+
     void push_scope();
 
     // Drops every unique_ptr declared directly in the scope being popped,
     // and runs the destructor of every class-typed local declared
     // directly in it that has one (in reverse declaration order, matching
-    // C++/Rust destruction order), then removes all of that scope's names
-    // from `locals_` so they're correctly treated as out-of-scope
-    // afterward (e.g. a variable declared only inside an `if` branch can
-    // no longer be referenced once that branch ends). If the current
+    // C++/Rust destruction order), then removes exactly that scope's own
+    // declarations from `locals_` so they're correctly treated as
+    // out-of-scope afterward (e.g. a variable declared only inside an
+    // `if` branch can no longer be referenced once that branch ends).
+    // Because the removal is by declaration, an inner scope that shadows
+    // an outer local takes only its own slot with it. If the current
     // block already has a terminator (e.g. the scope ended in `return`,
     // which already freed/destructed everything via
     // free_unique_ptr_locals), no drop instructions are emitted here --

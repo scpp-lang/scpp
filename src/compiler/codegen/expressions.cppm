@@ -199,11 +199,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 if (ctor == nullptr) {
                     return std::unexpected(CodegenError("class '" + class_name + "' has no constructor matching this call", current_loc_));
                 }
-                if (const ClassDef* class_def = find_class_def(class_name)) {
-                    if (auto r = emit_complete_object_interface_initializers(*class_def, ctor_def, target.ptr); !r.has_value())
-                        return std::unexpected(std::move(r).error());
-                }
-                auto ctor_args_result = codegen_call_args(args, ctor_def, /*param_offset=*/1);
+                auto ctor_args_result =
+                    emit_constructor_arguments_and_virtual_bases(class_name, ctor_def, args, target.ptr);
                 if (!ctor_args_result.has_value()) return std::unexpected(std::move(ctor_args_result).error());
                 std::vector<llvm::LLVMValueRef> ctor_args = std::move(ctor_args_result).value();
                 ctor_args.insert(ctor_args.begin(), target.ptr);
@@ -388,23 +385,23 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                 return CallResult{std::move(value_result).value(), nullptr};
             }
-            auto local_it = expr.explicit_global_qualification ? locals_.end() : locals_.find(expr.name);
-            if (local_it != locals_.end() && local_it->second.type.kind == TypeKind::FunctionPointer) {
-                auto local_llvm_type_result = to_llvm_type(local_it->second.type);
+            const LocalSlot* callee_local = find_local(expr);
+            if (callee_local != nullptr && callee_local->type.kind == TypeKind::FunctionPointer) {
+                auto local_llvm_type_result = to_llvm_type(callee_local->type);
                 if (!local_llvm_type_result.has_value()) return std::unexpected(std::move(local_llvm_type_result).error());
-                llvm::LLVMValueRef callee_value = llvm::LLVMBuildLoad2(builder_, std::move(local_llvm_type_result).value(), local_it->second.alloca,
+                llvm::LLVMValueRef callee_value = llvm::LLVMBuildLoad2(builder_, std::move(local_llvm_type_result).value(), callee_local->alloca,
                                                            (expr.name + ".fnptr").c_str());
-                auto args_result = codegen_call_args_for_types(expr.args, local_it->second.type.function_params);
+                auto args_result = codegen_call_args_for_types(expr.args, callee_local->type.function_params);
                 if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
                 std::vector<llvm::LLVMValueRef> args = std::move(args_result).value();
                 std::vector<llvm::LLVMTypeRef> params;
-                params.reserve(local_it->second.type.function_params.size());
-                for (const Type& param : local_it->second.type.function_params) {
+                params.reserve(callee_local->type.function_params.size());
+                for (const Type& param : callee_local->type.function_params) {
                     auto param_type_result = to_llvm_type(param);
                     if (!param_type_result.has_value()) return std::unexpected(std::move(param_type_result).error());
                     params.push_back(std::move(param_type_result).value());
                 }
-                auto return_type_result = to_llvm_type(*local_it->second.type.function_return);
+                auto return_type_result = to_llvm_type(*callee_local->type.function_return);
                 if (!return_type_result.has_value()) return std::unexpected(std::move(return_type_result).error());
                 llvm::LLVMTypeRef fn_type = llvm::LLVMFunctionType(std::move(return_type_result).value(), params.data(),
                                                        static_cast<unsigned>(params.size()), /*IsVarArg=*/0);
@@ -452,10 +449,10 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     if (expr.args[i]->kind == ExprKind::Identifier &&
                         param_type.kind == TypeKind::Reference && !param_type.is_mutable_ref &&
                         !param_type.is_rvalue_ref && param_type.pointee != nullptr) {
-                        auto it = locals_.find(expr.args[i]->name);
-                        all_match = it != locals_.end() && it->second.type.kind == TypeKind::Reference &&
-                                    it->second.type.is_rvalue_ref && it->second.type.pointee != nullptr &&
-                                    types_equal(*it->second.type.pointee, *param_type.pointee);
+                        const LocalSlot* arg_local = find_local(*expr.args[i]);
+                        all_match = arg_local != nullptr && arg_local->type.kind == TypeKind::Reference &&
+                                    arg_local->type.is_rvalue_ref && arg_local->type.pointee != nullptr &&
+                                    types_equal(*arg_local->type.pointee, *param_type.pointee);
                     } else if (param_type.kind == TypeKind::Reference && !param_type.is_mutable_ref &&
                                !param_type.is_rvalue_ref && param_type.pointee != nullptr) {
                         std::optional<Type> arg_type = infer_type(*expr.args[i]);
@@ -594,10 +591,10 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             if (auto r = zero_initialize_storage(*moved_src_ptr, target.type, std::nullopt); !r.has_value())
                 return std::unexpected(std::move(r).error());
             if (args[0]->lhs != nullptr && args[0]->lhs->kind == ExprKind::Identifier) {
-                auto local_it = locals_.find(args[0]->lhs->name);
-                if (local_it != locals_.end() && local_it->second.moved_flag != nullptr) {
+                const LocalSlot* source_local = find_local(*args[0]->lhs);
+                if (source_local != nullptr && source_local->moved_flag != nullptr) {
                     llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 1, 0),
-                                         local_it->second.moved_flag);
+                                         source_local->moved_flag);
                 }
             }
             if (class_has_ordinary_vtable(target.type.name)) {
@@ -705,11 +702,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             if (ctor == nullptr) {
                 return std::unexpected(CodegenError("class '" + target.type.name + "' has no constructor matching this call", current_loc_));
             }
-            if (const ClassDef* class_def = find_class_def(target.type.name)) {
-                if (auto r = emit_complete_object_interface_initializers(*class_def, ctor_def, target.ptr); !r.has_value())
-                    return std::unexpected(std::move(r).error());
-            }
-            auto ctor_args_result = codegen_call_args(args, ctor_def, /*param_offset=*/1);
+            auto ctor_args_result =
+                emit_constructor_arguments_and_virtual_bases(target.type.name, ctor_def, args, target.ptr);
             if (!ctor_args_result.has_value()) return std::unexpected(std::move(ctor_args_result).error());
             std::vector<llvm::LLVMValueRef> ctor_args = std::move(ctor_args_result).value();
             ctor_args.insert(ctor_args.begin(), target.ptr);
@@ -1476,7 +1470,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             }
 
             case ExprKind::Identifier: {
-                if (expr.explicit_global_qualification || !locals_.contains(expr.name)) {
+                if (find_local(expr) == nullptr) {
                     if (find_visible_global_slot(expr.name, expr.explicit_global_qualification) != nullptr) {
                         auto lv_result = codegen_lvalue(expr);
                         if (!lv_result.has_value()) return std::unexpected(std::move(lv_result).error());
@@ -1723,9 +1717,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 llvm::LLVMValueRef old_value = create_load(llvm_type, lv.ptr, lv.alignment, "movetmp");
                 if (auto r = zero_initialize_storage(lv.ptr, lv.type, lv.alignment); !r.has_value()) return std::unexpected(std::move(r).error());
                 if (expr.lhs->kind == ExprKind::Identifier) {
-                    auto local_it = locals_.find(expr.lhs->name);
-                    if (local_it != locals_.end() && local_it->second.moved_flag != nullptr) {
-                        llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 1, 0), local_it->second.moved_flag);
+                    const LocalSlot* source_local = find_local(*expr.lhs);
+                    if (source_local != nullptr && source_local->moved_flag != nullptr) {
+                        llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 1, 0), source_local->moved_flag);
                     }
                 }
                 return old_value;
@@ -1771,6 +1765,10 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 ident.kind = ExprKind::Identifier;
                 ident.loc = expr.loc;
                 ident.name = capture.name;
+                // A plain `[&name]` capture reads the *enclosing* function's
+                // local, so the synthesized node has to carry that
+                // declaration's id -- a bare name would not resolve.
+                ident.resolved_local = capture.resolved_local;
                 auto ident_lv_result = codegen_lvalue(ident);
                 if (!ident_lv_result.has_value()) return std::unexpected(std::move(ident_lv_result).error());
                 llvm::LLVMValueRef address = std::move(ident_lv_result).value().ptr;
@@ -1781,6 +1779,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             ident.kind = ExprKind::Identifier;
             ident.loc = expr.loc;
             ident.name = capture.name;
+            ident.resolved_local = capture.resolved_local;
             const Expr& source = capture.init ? *capture.init : ident;
             if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name) &&
                 is_bare_same_type_copy_source(source, field_type) && is_copy_constructible(field_type.name)) {
@@ -1851,11 +1850,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     return std::unexpected(CodegenError("class '" + expr.type.name + "' has no constructor matching this call",
                         current_loc_));
                 }
-                if (const ClassDef* class_def = find_class_def(expr.type.name)) {
-                    if (auto r = emit_complete_object_interface_initializers(*class_def, ctor_def, target.ptr);
-                        !r.has_value()) return std::unexpected(std::move(r).error());
-                }
-                auto args_result = codegen_call_args(expr.args, ctor_def, /*param_offset=*/1);
+                auto args_result =
+                    emit_constructor_arguments_and_virtual_bases(expr.type.name, ctor_def, expr.args, target.ptr);
                 if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
                 std::vector<llvm::LLVMValueRef> args = std::move(args_result).value();
                 args.insert(args.begin(), target.ptr);
@@ -2258,8 +2254,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         refresh_debug_location(expr.loc);
         switch (expr.kind) {
             case ExprKind::Identifier: {
-                auto it = locals_.find(expr.name);
-                if (it == locals_.end()) {
+                const LocalSlot* local = find_local(expr);
+                if (local == nullptr) {
                     if (const GlobalSlot* global = find_visible_global_slot(expr.name, expr.explicit_global_qualification)) {
                         unsigned raw_alignment = llvm::LLVMGetAlignment(global->global);
                         std::optional<unsigned> explicit_alignment =
@@ -2270,9 +2266,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     return std::unexpected(CodegenError("use of undeclared variable '" + expr.name + "'",
                         current_loc_));
                 }
-                if (it->second.type.kind == TypeKind::Reference) {
-                    if (is_interface_reference_type(it->second.type)) {
-                        return LValue{it->second.alloca, it->second.type, alignment_for_type(it->second.type)};
+                if (local->type.kind == TypeKind::Reference) {
+                    if (is_interface_reference_type(local->type)) {
+                        return LValue{local->alloca, local->type, alignment_for_type(local->type)};
                     }
                     // A reference-typed local's own alloca just holds the
                     // address it's bound to (see the VarDecl case below,
@@ -2282,10 +2278,10 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     // base resolution) transparently operates on the
                     // referent, exactly like a real C++ reference.
                     llvm::LLVMValueRef referent_ptr =
-                        create_load(llvm::LLVMPointerTypeInContext(context_, 0), it->second.alloca, std::nullopt, "deref");
-                    return LValue{referent_ptr, *it->second.type.pointee, alignment_for_type(*it->second.type.pointee)};
+                        create_load(llvm::LLVMPointerTypeInContext(context_, 0), local->alloca, std::nullopt, "deref");
+                    return LValue{referent_ptr, *local->type.pointee, alignment_for_type(*local->type.pointee)};
                 }
-                return LValue{it->second.alloca, it->second.type, alignment_for_type(it->second.type)};
+                return LValue{local->alloca, local->type, alignment_for_type(local->type)};
             }
 
             case ExprKind::Member: {
@@ -2781,10 +2777,10 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     // comment below for why this reset is needed
                     // (covers reassigning a previously-moved-out
                     // variable via a copy this time).
-                    auto target_it = locals_.find(expr.lhs->name);
-                    if (target_it != locals_.end() && target_it->second.moved_flag != nullptr) {
+                    const LocalSlot* target_local = find_local(*expr.lhs);
+                    if (target_local != nullptr && target_local->moved_flag != nullptr) {
                         llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, 0),
-                                             target_it->second.moved_flag);
+                                             target_local->moved_flag);
                     }
                 }
                 return lv.ptr;
@@ -2814,8 +2810,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 // identical reasoning (codegen_stmt's VarDecl case).
                 llvm::LLVMValueRef target_moved_flag = nullptr;
                 if (expr.lhs->kind == ExprKind::Identifier) {
-                    auto target_it = locals_.find(expr.lhs->name);
-                    if (target_it != locals_.end()) target_moved_flag = target_it->second.moved_flag;
+                    const LocalSlot* target_local = find_local(*expr.lhs);
+                    if (target_local != nullptr) target_moved_flag = target_local->moved_flag;
                 }
                 codegen_destroy_old_class_state_for_move_assign(lv.ptr, lv.type.name, target_moved_flag);
             }
@@ -2837,9 +2833,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 // (its moved_flag would otherwise still read true from
                 // that earlier move, despite this assignment giving it a
                 // brand new value).
-                auto target_it = locals_.find(expr.lhs->name);
-                if (target_it != locals_.end() && target_it->second.moved_flag != nullptr) {
-                    llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, 0), target_it->second.moved_flag);
+                const LocalSlot* target_local = find_local(*expr.lhs);
+                if (target_local != nullptr && target_local->moved_flag != nullptr) {
+                    llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, 0), target_local->moved_flag);
                 }
             }
             return value;
@@ -2927,10 +2923,10 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             }
             create_store(value, lv.ptr, lv.alignment);
             if (lv.type.kind == TypeKind::Named && expr.lhs->kind == ExprKind::Identifier) {
-                auto target_it = locals_.find(expr.lhs->name);
-                if (target_it != locals_.end() && target_it->second.moved_flag != nullptr) {
+                const LocalSlot* target_local = find_local(*expr.lhs);
+                if (target_local != nullptr && target_local->moved_flag != nullptr) {
                     llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, 0),
-                                         target_it->second.moved_flag);
+                                         target_local->moved_flag);
                 }
             }
             return value;

@@ -25,4 +25,4 @@ target_compile_definitions(scpp_codegen PUBLIC ${LLVM_DEFINITIONS_LIST})
 # `llvm` target is linked here explicitly, alongside ${LLVM_LIBS} for the
 # real LLVM-C symbols every partition's own declarations ultimately
 # resolve to.
-target_link_libraries(scpp_codegen PUBLIC scpp_ast scpp_constexpr llvm ${LLVM_LIBS})
+target_link_libraries(scpp_codegen PUBLIC scpp_ast scpp_mir scpp_constexpr llvm ${LLVM_LIBS})
