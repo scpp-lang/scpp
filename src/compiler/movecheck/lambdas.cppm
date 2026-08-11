@@ -17,10 +17,14 @@ namespace scpp {
                            const Body& body, const Signatures& signatures, bool report_errors,
                            std::vector<ClosureCaptureBorrow>* out_closure_capture_borrows = nullptr);
 void collect_locally_declared_names(const Stmt& stmt, std::unordered_set<std::string>& out);
+
+// Each free name a blanket capture list must turn into a real capture,
+// paired with the encoded binding (Expr::resolved_local) of a use of it.
+using FreeIdentifierMap = std::unordered_map<std::string, std::size_t>;
 void collect_free_identifiers(const Expr& expr, const std::unordered_set<std::string>& excluded,
-                              std::unordered_set<std::string>& out);
+                              FreeIdentifierMap& out);
 void collect_free_identifiers(const Stmt& stmt, const std::unordered_set<std::string>& excluded,
-                              std::unordered_set<std::string>& out);
+                              FreeIdentifierMap& out);
 void rewrite_captured_identifiers_as_field_access(Stmt& stmt,
                                                   const std::unordered_set<std::string>& captured_names);
 void rewrite_captured_identifiers_as_field_access(Expr& expr,
@@ -127,32 +131,41 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
             }
             continue;
         }
-        if (!capture.by_reference) {
-            auto type_it = body.local_types.find(capture.name);
-            if (type_it != body.local_types.end()) {
-                Expr capture_ident;
-                capture_ident.kind = ExprKind::Identifier;
-                capture_ident.loc = expr.loc;
-                capture_ident.name = capture.name;
-                if (auto _r = reject_lifetime_group_state_embedding(capture_ident, state, body, signatures, report_errors, "a closure capture", nullptr);
-                    !_r.has_value()) {
-                    return std::unexpected(std::move(_r).error());
-                }
-                if (auto _r = apply_by_value_capture_source(capture_ident, type_it->second, capture.name); !_r.has_value()) {
-                    return std::unexpected(std::move(_r).error());
-                }
-                continue;
-            }
-            LocalState current = lookup(state.locals, capture.name);
-            if (report_errors && current != LocalState::Initialized) {
-                return std::unexpected(DataflowError(describe_bad_state(capture.name, current), state.current_loc));
-            }
-            continue;
-        }
+        // A capture list is written outside the closure, so `captured`
+        // is the enclosing declaration the capture names -- resolved
+        // once by resolve_locals and carried on the capture itself, not
+        // re-looked-up by spelling here.
+        std::optional<LocalId> captured = body.local_of(capture);
+        // The rest of this function reuses the ordinary place-checking
+        // paths, which all expect an Expr; this stands in for the
+        // capture as it would have been written as an identifier, and so
+        // must carry the same resolution the capture itself does.
         Expr capture_ident;
         capture_ident.kind = ExprKind::Identifier;
         capture_ident.loc = expr.loc;
         capture_ident.name = capture.name;
+        if (captured.has_value()) set_resolved_local(capture_ident, *captured);
+        if (!capture.by_reference) {
+            if (!captured.has_value()) {
+                if (report_errors) {
+                    return std::unexpected(DataflowError("lambda captures '" + capture.name +
+                                           "', which is not a local variable or parameter in this scope (ch05 §5.12)",
+                        state.current_loc));
+                }
+                continue;
+            }
+            {
+                if (auto _r = reject_lifetime_group_state_embedding(capture_ident, state, body, signatures, report_errors, "a closure capture", nullptr);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                if (auto _r = apply_by_value_capture_source(capture_ident, body.type_of(*captured), capture.name); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                continue;
+            }
+            continue;
+        }
         if (auto _r = reject_lifetime_group_state_embedding(capture_ident, state, body, signatures, report_errors, "a closure capture", nullptr);
             !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
@@ -160,8 +173,7 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
         auto roots_result = resolve_borrow_source_root(capture_ident, state, body, signatures, report_errors);
         if (!roots_result.has_value()) return std::unexpected(std::move(roots_result).error());
         RootSet roots = std::move(roots_result).value();
-        auto type_it = body.local_types.find(capture.name);
-        if (type_it == body.local_types.end()) {
+        if (!captured.has_value()) {
             if (report_errors) {
                 return std::unexpected(DataflowError("lambda captures '" + capture.name +
                                        "', which is not a local variable or parameter in this scope (ch05 §5.12)",
@@ -169,13 +181,13 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
             }
             continue;
         }
-        Type ref_type = by_reference_capture_type(capture.name, type_it->second, body);
+        Type ref_type = by_reference_capture_type(body.type_of(*captured), body.decl(*captured).is_const);
         if (auto _r = apply_reference_argument(capture_ident, ref_type, state, reference_capture_borrows, body, signatures,
                                   report_errors); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
         if (out_closure_capture_borrows != nullptr) {
-            for (const std::string& root : roots) {
+            for (LocalId root : roots) {
                 out_closure_capture_borrows->push_back(ClosureCaptureBorrow{root, ref_type.is_mutable_ref});
             }
         }
@@ -183,8 +195,9 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
     return {};
 }
 // ch05 §5.12: collects every VarDecl's own name inside `stmt`
-// (recursively, ignoring lexical scope -- same "whole-body, flat"
-// pragmatism as mir.cppm's own Body::local_types) into `out` -- used to
+// (recursively, ignoring lexical scope -- a name declared anywhere in
+// the closure is the closure's own, whichever branch it sits in) into
+// `out` -- used to
 // exclude a lambda's own locally-declared variables from blanket-
 // capture free-variable resolution (they're the lambda's own locals,
 // never a capture).
@@ -218,9 +231,9 @@ void collect_locally_declared_names(const Stmt& stmt, std::unordered_set<std::st
 // own sub-expressions/sub-statements; a Lambda expression recurses into
 // its own body statement).
 void collect_free_identifiers(const Expr& expr, const std::unordered_set<std::string>& excluded,
-                                std::unordered_set<std::string>& out);
+                                FreeIdentifierMap& out);
 void collect_free_identifiers(const Stmt& stmt, const std::unordered_set<std::string>& excluded,
-                                std::unordered_set<std::string>& out);
+                                FreeIdentifierMap& out);
 
 // ch05 §5.12: collects every free Identifier reference inside `expr`
 // (skipping any name in `excluded` -- a lambda's own params/locals,
@@ -245,25 +258,40 @@ void collect_free_identifiers(const Stmt& stmt, const std::unordered_set<std::st
 // this codebase's general "pragmatic over exhaustive" style
 // elsewhere).
 void collect_free_identifiers(const Expr& expr, const std::unordered_set<std::string>& excluded,
-                                std::unordered_set<std::string>& out) {
-    if (expr.kind == ExprKind::Identifier) {
-        if (!excluded.contains(expr.name)) out.insert(expr.name);
-        return;
+                                FreeIdentifierMap& out) {
+    // The use's own binding is recorded alongside the name: an implicit
+    // capture has to know *which* declaration it captures, and only the
+    // use site knows that. `resolved_local` is already this identifier's
+    // binding in the enclosing function (mir.cppm's LocalResolver walks
+    // straight through a lambda body for exactly this reason), so no
+    // name-keyed re-lookup is needed -- or possible, since two locals
+    // can share a spelling.
+    if (names_a_local_use(expr) && !excluded.contains(expr.name)) {
+        out.emplace(expr.name, expr.resolved_local);
     }
-    if (expr.kind == ExprKind::Call && expr.lhs == nullptr && !expr.explicit_global_qualification) {
-        if (!excluded.contains(expr.name)) out.insert(expr.name);
-    }
+    if (expr.kind == ExprKind::Identifier) return;
     if (expr.lhs) collect_free_identifiers(*expr.lhs, excluded, out);
     if (expr.rhs) collect_free_identifiers(*expr.rhs, excluded, out);
     if (expr.third) collect_free_identifiers(*expr.third, excluded, out);
     for (const ExprPtr& arg : expr.args) collect_free_identifiers(*arg, excluded, out);
     if (expr.kind == ExprKind::Lambda && expr.lambda_body) {
-        collect_free_identifiers(*expr.lambda_body, excluded, out);
+        // A nested closure's own parameters and locals are *its*
+        // declarations, not free variables of the enclosing one, so they
+        // are excluded before descending -- otherwise a nested parameter
+        // that happens to share a spelling with an enclosing local would
+        // be reported as a use of that local.
+        std::unordered_set<std::string> nested_excluded = excluded;
+        for (const Param& param : expr.lambda_params) nested_excluded.insert(param.name);
+        for (const LambdaCapture& capture : expr.lambda_captures) {
+            if (capture.init != nullptr) nested_excluded.insert(capture.name);
+        }
+        collect_locally_declared_names(*expr.lambda_body, nested_excluded);
+        collect_free_identifiers(*expr.lambda_body, nested_excluded, out);
     }
 }
 
 void collect_free_identifiers(const Stmt& stmt, const std::unordered_set<std::string>& excluded,
-                                std::unordered_set<std::string>& out) {
+                                FreeIdentifierMap& out) {
     switch (stmt.kind) {
         case StmtKind::VarDecl:
             if (stmt.init) collect_free_identifiers(*stmt.init, excluded, out);

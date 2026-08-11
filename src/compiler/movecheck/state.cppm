@@ -10,8 +10,13 @@ namespace scpp {
 
 enum class LocalState { Bottom, Initialized, MovedOut, Conflict };
 
-using StateMap = std::unordered_map<std::string, LocalState>;
-using RootSet = std::vector<std::string>;
+// Every one of these maps is keyed by *declaration* (LocalId), not by
+// name. Two same-named locals in sibling scopes are two different keys,
+// so one's state can never be read or clobbered as the other's -- and an
+// inner shadow's ScopeExit can no longer reset the outer local it hides.
+// Diagnostics recover the source spelling with Body::name_of.
+using StateMap = std::unordered_map<LocalId, LocalState>;
+using RootSet = std::vector<LocalId>;
 
 struct BorrowState {
     int shared_count = 0;
@@ -20,31 +25,27 @@ struct BorrowState {
     bool operator==(const BorrowState&) const = default;
 };
 
-using BorrowMap = std::unordered_map<std::string, BorrowState>;
+using BorrowMap = std::unordered_map<LocalId, BorrowState>;
 
 struct RefTarget {
     RootSet roots;
-    // Non-empty only when this reference was tracked by suspending a
+    // Set only when this reference was tracked by suspending a
     // mutable-reborrow lender rather than by incrementing root borrows.
-    std::string lender;
+    std::optional<LocalId> lender;
     // Whether *this* binding itself was mutable, captured once at bind
-    // time (see apply_reference_binding). release_reference_borrow relies
-    // on this rather than re-deriving it from Body::local_types[name] at
-    // release time, since local_types is a flat, whole-function map keyed
-    // only by name (by design -- see Body's own comment) and so no longer
-    // reflects this specific binding's own constness once the same name
-    // has been re-declared elsewhere in the function with a different
-    // mutability (e.g. two sibling loops each reusing the same loop-
-    // variable name, one by const reference and the other by mutable
-    // reference).
+    // time (see apply_reference_binding). Now that local_decls is keyed
+    // by declaration this could equally be re-derived at release time --
+    // it is kept because it records the mutability the binding was
+    // *tracked* with, which is what release must undo, and reading it
+    // costs nothing.
     bool is_mutable = false;
 
-    [[nodiscard]] bool is_reborrow() const { return !lender.empty(); }
+    [[nodiscard]] bool is_reborrow() const { return lender.has_value(); }
 
     bool operator==(const RefTarget&) const = default;
 };
 
-using RefTargetMap = std::unordered_map<std::string, RefTarget>;
+using RefTargetMap = std::unordered_map<LocalId, RefTarget>;
 
 // Mirrors BorrowState's own shared/mutable split exactly: a lender can
 // simultaneously back any number of *shared* (const) reborrows -- e.g.
@@ -61,19 +62,25 @@ struct ReborrowSuspension {
     bool operator==(const ReborrowSuspension&) const = default;
 };
 
-using ReborrowSuspensionMap = std::unordered_map<std::string, ReborrowSuspension>;
-using LocalLifetimeSourceMap = std::unordered_map<std::string, RootSet>;
+using ReborrowSuspensionMap = std::unordered_map<LocalId, ReborrowSuspension>;
+using LocalLifetimeSourceMap = std::unordered_map<LocalId, RootSet>;
 using ParameterLifetimeMap = std::unordered_map<std::string, LifetimeAnnotation>;
-inline constexpr std::string_view kProgramLifetimeRoot = "<program-lifetime>";
+// A root that outlives every local: the storage behind a `static` local
+// or a string literal. It is deliberately *not* an index into
+// local_decls -- Body::is_valid_local rejects it -- so any attempt to ask
+// for its type or its declaration fails loudly instead of aliasing a real
+// local. format_roots spells it out for diagnostics.
+inline constexpr LocalId kProgramLifetimeRoot = static_cast<LocalId>(static_cast<std::size_t>(-1));
+inline constexpr std::string_view kProgramLifetimeRootName = "<program-lifetime>";
 
 struct ClosureCaptureBorrow {
-    std::string root;
+    LocalId root{};
     bool is_mutable = false;
 
     bool operator==(const ClosureCaptureBorrow&) const = default;
 };
 
-using ClosureCaptureBorrowMap = std::unordered_map<std::string, std::vector<ClosureCaptureBorrow>>;
+using ClosureCaptureBorrowMap = std::unordered_map<LocalId, std::vector<ClosureCaptureBorrow>>;
 using ClassFieldTypes = std::unordered_map<std::string, std::unordered_map<std::string, Type>>;
 using ClassFieldAccess = std::unordered_map<std::string, std::unordered_map<std::string, AccessSpecifier>>;
 
@@ -120,12 +127,13 @@ DataflowState join_states(const DataflowState& a, const DataflowState& b);
 
 [[nodiscard]] std::string describe_bad_state(const std::string& name, LocalState state);
 RootSet canonicalize_roots(RootSet roots);
-[[nodiscard]] RootSet single_root(std::string root);
+[[nodiscard]] RootSet single_root(LocalId root);
 RootSet union_roots(RootSet lhs, const RootSet& rhs);
-[[nodiscard]] std::string format_roots(const RootSet& roots);
-[[nodiscard]] LocalState lookup(const StateMap& state, const std::string& name);
+[[nodiscard]] std::string format_root(const Body& body, LocalId root);
+[[nodiscard]] std::string format_roots(const Body& body, const RootSet& roots);
+[[nodiscard]] LocalState lookup(const StateMap& state, LocalId local);
 [[nodiscard]] RootSet program_lifetime_root();
-[[nodiscard]] bool is_program_lifetime_root(std::string_view root);
+[[nodiscard]] bool is_program_lifetime_root(LocalId root);
 
 bool DataflowState::operator==(const DataflowState& other) const {
     if (parameter_lifetimes.size() != other.parameter_lifetimes.size()) return false;
@@ -299,29 +307,37 @@ RootSet canonicalize_roots(RootSet roots) {
     return roots;
 }
 
-[[nodiscard]] RootSet single_root(std::string root) { return RootSet{std::move(root)}; }
+[[nodiscard]] RootSet single_root(LocalId root) { return RootSet{root}; }
 
-[[nodiscard]] RootSet program_lifetime_root() { return single_root(std::string(kProgramLifetimeRoot)); }
+[[nodiscard]] RootSet program_lifetime_root() { return single_root(kProgramLifetimeRoot); }
 
-[[nodiscard]] bool is_program_lifetime_root(std::string_view root) { return root == kProgramLifetimeRoot; }
+[[nodiscard]] bool is_program_lifetime_root(LocalId root) { return root == kProgramLifetimeRoot; }
 
 RootSet union_roots(RootSet lhs, const RootSet& rhs) {
     lhs.insert(lhs.end(), rhs.begin(), rhs.end());
     return canonicalize_roots(std::move(lhs));
 }
 
-[[nodiscard]] std::string format_roots(const RootSet& roots) {
+// Roots are LocalIds internally but must never be printed as such: this
+// is the single place a root becomes user-visible text, and it always
+// goes through Body::name_of (or spells out the synthetic
+// program-lifetime root, which names no declaration at all).
+[[nodiscard]] std::string format_root(const Body& body, LocalId root) {
+    if (is_program_lifetime_root(root)) return "'" + std::string(kProgramLifetimeRootName) + "'";
+    return "'" + body.name_of(root) + "'";
+}
+
+[[nodiscard]] std::string format_roots(const Body& body, const RootSet& roots) {
     if (roots.empty()) return "<unknown>";
-    if (roots.size() == 1) return "'" + roots.front() + "'";
     std::string joined;
     for (std::size_t i = 0; i < roots.size(); i++) {
         if (i != 0) joined += ", ";
-        joined += "'" + roots[i] + "'";
+        joined += format_root(body, roots[i]);
     }
     return joined;
 }
-[[nodiscard]] LocalState lookup(const StateMap& state, const std::string& name) {
-    auto it = state.find(name);
+[[nodiscard]] LocalState lookup(const StateMap& state, LocalId local) {
+    auto it = state.find(local);
     return it == state.end() ? LocalState::Bottom : it->second;
 }
 

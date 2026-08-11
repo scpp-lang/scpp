@@ -193,6 +193,11 @@ public:
             }
             rewrite_implicit_member_field_access(program_.functions[i]);
             rewrite_implicit_member_method_calls(program_.functions[i]);
+            // Re-bind after the two rewrites above: they turn bare names
+            // into `this.field` accesses, and the walk below reads a
+            // local's type through the binding, so the two have to
+            // describe the same tree.
+            resolve_locals(program_.functions[i]);
             // build_mir's own Body holds raw (const Expr*) pointers into
             // this Function's *own* Stmt/Expr tree (see mir.cppm's
             // Terminator) -- safe to keep using after program_.functions
@@ -467,6 +472,9 @@ private:
         if (fn.body == nullptr || !fn.template_params.empty()) return {};
         rewrite_implicit_member_field_access(fn);
         rewrite_implicit_member_method_calls(fn);
+        // A concrete clone is created during this pass, after the
+        // program-wide resolution ran, so it is bound here.
+        resolve_locals(fn);
         {
             auto _r = build_signatures(program_);
             if (!_r.has_value()) return std::unexpected(std::move(_r).error());
@@ -5017,8 +5025,8 @@ private:
                 // own synthesized class) initializer. Must overwrite
                 // *both* the AST's own `stmt.type` (so check_moves/
                 // codegen's later, fresh `build_mir` call sees a
-                // concrete type) and this pass's own `body.local_types`
-                // entry in place (so a *later* statement in this same
+                // concrete type) and this pass's own `body`'s matching
+                // LocalDecl in place (so a *later* statement in this same
                 // function -- e.g. `f(x)`'s bare-call-redirect just
                 // below, or another lambda capturing `f` by reference --
                 // resolves this variable's real type too, not the stale
@@ -5070,10 +5078,10 @@ private:
                             inferred_ref.is_mutable_ref = true;
                         }
                         stmt.type = inferred_ref;
-                        body.local_types[stmt.var_name] = inferred_ref;
+                        refine_declared_type(stmt, body, inferred_ref);
                     } else {
                         stmt.type = *inferred;
-                        body.local_types[stmt.var_name] = *inferred;
+                        refine_declared_type(stmt, body, *inferred);
                     }
                 } else if (stmt.type.kind == TypeKind::Reference && stmt.type.pointee != nullptr &&
                            stmt.type.pointee->kind == TypeKind::Named && stmt.type.pointee->name == "auto") {
@@ -5086,7 +5094,7 @@ private:
                             "cannot infer 'auto' variable '" + stmt.var_name + "'s type from its initializer", stmt.loc));
                     }
                     stmt.type.pointee = std::make_shared<Type>(*inferred);
-                    body.local_types[stmt.var_name] = stmt.type;
+                    refine_declared_type(stmt, body, stmt.type);
                 }
                 return {};
             case StmtKind::Return:
@@ -5246,15 +5254,20 @@ private:
         // template's own name (checked further below) is never itself
         // registered as a local.
         if (expr.kind == ExprKind::Call && expr.lhs == nullptr && !expr.explicit_global_qualification) {
-            auto local_it = body.local_types.find(expr.name);
-            if (local_it != body.local_types.end()) {
-                const Type& local_type = local_it->second;
+            if (std::optional<LocalId> callee_local = body.local_of(expr); callee_local.has_value()) {
+                const Type& local_type = body.type_of(*callee_local);
                 const Type& underlying = local_type.kind == TypeKind::Reference ? *local_type.pointee : local_type;
                 if (underlying.kind == TypeKind::Named) {
                     auto receiver = std::make_unique<Expr>();
                     receiver->kind = ExprKind::Identifier;
                     receiver->loc = expr.loc;
                     receiver->name = expr.name;
+                    // The receiver stands in for the very local this
+                    // call named, so it inherits its binding: a
+                    // synthesized node the resolver never walked reads
+                    // as "not a local" otherwise, and the closure's own
+                    // type would then be unknown to every later lookup.
+                    set_resolved_local(*receiver, *callee_local);
                     expr.lhs = std::move(receiver);
                     expr.name = "call";
                 }
@@ -5517,10 +5530,10 @@ private:
             excluded.insert(known_function_names_.begin(), known_function_names_.end());
             excluded.insert(known_type_names_.begin(), known_type_names_.end());
 
-            std::unordered_set<std::string> free_names;
+            FreeIdentifierMap free_names;
             if (expr.lambda_body) collect_free_identifiers(*expr.lambda_body, excluded, free_names);
             bool by_reference = expr.lambda_blanket_mode == LambdaCaptureMode::ByReference;
-            for (const std::string& name : free_names) {
+            for (const auto& [name, resolved] : free_names) {
                 // ch05 §5.12's own hard rule: `this` is never implicitly
                 // captured by a bare `[=]`/`[&]`, even though it would
                 // otherwise look like just another free identifier here
@@ -5530,9 +5543,14 @@ private:
                 // Not a real local in the enclosing scope -- leave for
                 // the usual "use of undeclared variable" error rather
                 // than guessing.
-                if (!enclosing_body.local_types.contains(name)) continue;
+                if (resolved == 0) continue;
                 LambdaCapture capture;
                 capture.name = name;
+                // The synthesized capture inherits the binding of the use
+                // that produced it, so it captures the declaration that
+                // use actually reads -- an explicitly written capture gets
+                // the same thing from LocalResolver.
+                capture.resolved_local = resolved;
                 capture.by_reference = by_reference;
                 expr.lambda_captures.push_back(std::move(capture));
             }
@@ -5556,6 +5574,11 @@ private:
         for (LambdaCapture& capture : expr.lambda_captures) {
             captured_names.insert(capture.name);
             Type captured_type;
+            // Only a plain `[x]`/`[&x]` capture of a genuinely `const`
+            // local yields a read-only reference field; `this` and an
+            // init-capture both name something that is never a `const`
+            // local of this function.
+            bool captured_is_const = false;
             if (capture.name == "this") {
                 if (!enclosing_this_type.has_value()) {
                     return std::unexpected(DataflowError(
@@ -5572,17 +5595,18 @@ private:
                 }
                 captured_type = std::move(*t);
             } else {
-                auto it = enclosing_body.local_types.find(capture.name);
-                if (it == enclosing_body.local_types.end()) {
+                std::optional<LocalId> captured = enclosing_body.local_of(capture);
+                if (!captured.has_value()) {
                     return std::unexpected(DataflowError("lambda captures '" + capture.name +
                                              "', which is not a local variable or parameter in this scope (ch05 "
                                              "§5.12)",
                         expr.loc));
                 }
-                captured_type = it->second;
+                captured_type = enclosing_body.type_of(*captured);
+                captured_is_const = enclosing_body.decl(*captured).is_const;
             }
             if (capture.by_reference) {
-                field_types.push_back(by_reference_capture_type(capture.name, captured_type, enclosing_body));
+                field_types.push_back(by_reference_capture_type(captured_type, captured_is_const));
             } else {
                 if (capture.name != "this") by_value_names.insert(capture.name);
                 field_types.push_back(std::move(captured_type));
@@ -5805,12 +5829,16 @@ private:
         // calls / nested lambdas) using its own freshly-built Body --
         // capture fields are reached via `this.field` (a Member
         // expression, resolved structurally like any other class field,
-        // never through body.local_types), so nothing about this
+        // never as a local at all), so nothing about this
         // recursive walk needs to know about them specially. A
         // synthesized closure's own "call" method is never itself a
         // generic template, so generic-call-monomorphization stays
         // enabled here.
         if (synthesized.body) {
+            // The closure's `call` method is synthesized here, from a
+            // clone of the lambda body numbered against the *enclosing*
+            // function; it needs its own numbering before its own walk.
+            resolve_locals(synthesized);
             Body synthesized_body = build_mir(synthesized);
             synthesized_body.program = &program_;
             current_walk_return_type_ = synthesized.return_type;
@@ -5849,14 +5877,28 @@ private:
     [[nodiscard]] Type infer_lambda_return_type(const Stmt& body, const std::vector<Param>& call_params,
                                                  const std::unordered_map<std::string, Type>& capture_types) {
         if (body.kind != StmtKind::Block) return named_type("void");
+        // No Function exists yet to build_mir from, so the body is
+        // resolved directly against a synthetic parameter list: the
+        // closure's own parameters, followed by one stand-in parameter
+        // per captured name (sorted, so the numbering is deterministic).
+        // The resolution is written onto a throwaway clone -- the real
+        // body is `const` here and gets its own, final resolution when
+        // the synthesized "call" method is walked.
+        std::vector<Param> resolved_params = call_params;
+        std::vector<std::string> capture_names;
+        capture_names.reserve(capture_types.size());
+        for (const auto& [name, type] : capture_types) capture_names.push_back(name);
+        std::sort(capture_names.begin(), capture_names.end());
+        for (const std::string& name : capture_names) {
+            Param p;
+            p.name = name;
+            p.type = capture_types.at(name);
+            resolved_params.push_back(std::move(p));
+        }
+        StmtPtr resolved_body = deep_clone_stmt(body);
         Body param_only_body;
-        for (const Param& p : call_params) {
-            param_only_body.local_types[p.name] = p.type;
-        }
-        for (const auto& [name, type] : capture_types) {
-            param_only_body.local_types[name] = type;
-        }
-        for (const StmtPtr& stmt : body.statements) {
+        param_only_body.local_decls = resolve_locals_in(resolved_params, *resolved_body);
+        for (const StmtPtr& stmt : resolved_body->statements) {
             if (stmt->kind != StmtKind::Return || !stmt->expr) continue;
             // `[this]() { return this->value; }` (ch05 §5.12): a
             // `this`-capture's own field access -- infer_expr_type's
@@ -5865,9 +5907,8 @@ private:
             // `program_` directly -- special-cased here rather than
             // widening infer_expr_type's own general contract.
             if (stmt->expr->kind == ExprKind::Member && stmt->expr->lhs->kind == ExprKind::Identifier) {
-                auto base_it = param_only_body.local_types.find(stmt->expr->lhs->name);
-                if (base_it != param_only_body.local_types.end()) {
-                    const Type& base_type = base_it->second;
+                if (const Type* base = param_only_body.type_if_local(*stmt->expr->lhs); base != nullptr) {
+                    const Type& base_type = *base;
                     const std::string& class_name =
                         (base_type.kind == TypeKind::Reference ? *base_type.pointee : base_type).name;
                     if (std::optional<Type> field_type = resolve_field_type(class_name, stmt->expr->name)) {
@@ -6626,8 +6667,16 @@ private:
 
 
 [[nodiscard]] std::expected<void, DataflowError> monomorphize_generics_impl(Program& program) {
+    // Bind every name-use to its declaration before anything reads a
+    // local's type, and again afterwards so the functions this pass
+    // synthesizes (generic clones, closure `call` methods) are resolved
+    // too -- check_moves takes the Program by const reference and cannot
+    // do it itself.
+    resolve_program_locals(program);
     Monomorphizer monomorphizer(program);
-    return monomorphizer.run();
+    auto result = monomorphizer.run();
+    resolve_program_locals(program);
+    return result;
 }
 
 } // namespace scpp

@@ -7,13 +7,105 @@ import scpp.ast;
 
 export namespace scpp {
 
+// A local variable's identity within a single function body: an index
+// into Body::local_decls. This is the key the whole move checker uses to
+// talk about a local -- deliberately *not* its source name, because a
+// name is not unique within a function (two sibling scopes may each
+// declare `r`, and an inner scope may shadow an outer one). Keying by
+// name conflated all of those into one entity, which let a borrow of one
+// go untracked because a namesake declared elsewhere had a different
+// type.
+//
+// A distinct enum type rather than a bare std::size_t alias so it cannot
+// be silently confused with the other size_t-shaped index in this file,
+// a basic-block number.
+enum class LocalId : std::size_t {};
+
+[[nodiscard]] inline std::size_t local_index(LocalId id) { return static_cast<std::size_t>(id); }
+
+// Whether this expression is a name reference that could denote a local:
+// a plain identifier, or a bare `f(...)` whose callee is written as a
+// name (which may be a callable local -- see monomorphize's bare-call
+// redirect). Anything else names a field, a qualified global, or nothing
+// at all.
+[[nodiscard]] inline bool names_a_local_use(const Expr& expr) {
+    if (expr.kind == ExprKind::Identifier) return true;
+    return expr.kind == ExprKind::Call && expr.lhs == nullptr && !expr.explicit_global_qualification;
+}
+
+// Whether name resolution bound this expression to a local, and which
+// one. See Expr::resolved_local (ast.cppm) for the `+ 1` encoding these
+// hide; nothing outside these two helpers should do that arithmetic.
+[[nodiscard]] inline bool has_resolved_local(const Expr& expr) {
+    // Guarding on the shape matters as much as the zero check:
+    // monomorphize rewrites some Identifier nodes *in place* into Member
+    // accesses (`x` -> `this.x` for a captured or implicit-member name),
+    // reusing the same node. Such a node keeps whatever resolution it had
+    // as an Identifier, so consulting it without this guard would report a
+    // member access as a use of a local.
+    return names_a_local_use(expr) && expr.resolved_local != 0;
+}
+
+[[nodiscard]] inline LocalId resolved_local_of(const Expr& expr) {
+    return static_cast<LocalId>(expr.resolved_local - 1);
+}
+
+[[nodiscard]] inline bool has_declared_local(const Stmt& stmt) { return stmt.declared_local != 0; }
+
+[[nodiscard]] inline LocalId declared_local_of(const Stmt& stmt) {
+    return static_cast<LocalId>(stmt.declared_local - 1);
+}
+
+[[nodiscard]] inline bool has_resolved_local(const LambdaCapture& capture) { return capture.resolved_local != 0; }
+
+[[nodiscard]] inline LocalId resolved_local_of(const LambdaCapture& capture) {
+    return static_cast<LocalId>(capture.resolved_local - 1);
+}
+
+// Everything the checker needs to know about one declaration. One of
+// these per *declaration*, not per name.
+// Marks a *synthesized* Identifier node as naming `id`. Movecheck builds
+// a handful of such nodes on the fly (a lambda capture rendered as an
+// identifier, an implicit `this` receiver) purely to reuse the ordinary
+// place-resolution paths. They were never part of the tree
+// resolve_locals walked, so nothing else can have bound them, and an
+// unbound node would silently read as "not a local" -- which skips
+// checks rather than failing loudly.
+inline void set_resolved_local(Expr& expr, LocalId id) { expr.resolved_local = local_index(id) + 1; }
+
+struct LocalDecl {
+    Type type;
+    // The name this local was written with in the source. Diagnostics
+    // must print this -- a LocalId is an internal index and must never
+    // reach a user-visible message.
+    std::string source_name;
+    // Where it was declared, so a diagnostic can distinguish two
+    // same-named locals ("the `r` declared at line 12").
+    SourceLocation decl_loc;
+    // Block-scope `static`: participates in ordinary name lookup and
+    // borrow tracking like any other local, but its storage duration is
+    // program-long rather than stack-scoped.
+    bool is_static_lifetime = false;
+    // Declared `const`/`constexpr` (Stmt::is_const, ch05/ch06) -- an
+    // immutable local, not a parameter: those don't support `const` yet
+    // (see parse_param_type). Consulted by movecheck's Assign case to
+    // reject reassignment after the single initializing Assign/Declare a
+    // const local's own VarDecl lowers to.
+    bool is_const = false;
+    // ch05 §5.12: initialized with a lambda that has at least one
+    // by-reference capture. Such a closure keeps those borrows alive
+    // until its own last use / ScopeExit, so reference-liveness treats
+    // reads of the closure local itself as reference-like uses.
+    bool is_borrow_holding_closure = false;
+};
+
 // A place is a storage location a MIR statement can read from or write to.
 // For this iteration, places are whole local variables only (no field/
 // index projections): struct and array locals are always fully
 // zero-initialized at declaration (see codegen's zero-init handling), so
 // sub-object initialization tracking isn't needed for soundness yet.
 struct Place {
-    std::string local;
+    LocalId local{};
 };
 
 enum class MirStatementKind {
@@ -79,7 +171,18 @@ enum class MirStatementKind {
 
 struct MirStatement {
     MirStatementKind kind;
-    std::string local;          // Declare / Assign (target) / Drop / ScopeExit / BindReference (the reference)
+    // Declare / Assign (target) / Drop / ScopeExit / BindReference (the
+    // reference). Unset (left default) for Eval/UnsafeEnter/UnsafeExit,
+    // and for an Assign whose target expression did not resolve to a
+    // local; `has_local` says which.
+    LocalId local{};
+    bool has_local = false;
+    // Assign only: the target place as it was written. Set even when the
+    // target is *not* a local (a global variable), which is exactly the
+    // case `local`/`has_local` cannot describe -- a global has no
+    // declaration in this body to be keyed by, but the checks that apply
+    // to assigning one still need its name.
+    const Expr* target = nullptr;
     const Expr* expr = nullptr; // Assign (rhs) / Eval / BindReference (the place being borrowed)
     Type type;                  // Declare: the declared type; BindReference: the reference's own type
     // The originating Stmt's position (see SourceLocation, ast.cppm) --
@@ -132,43 +235,41 @@ struct BasicBlock {
     Terminator terminator;
 };
 
-// The MIR for a single function: a CFG of basic blocks, plus the declared
-// type of every tracked local (parameters and every VarDecl encountered,
-// in declaration order). `local_types`/`locals_in_order` span the whole
-// function regardless of lexical scope -- a name stays "known" for type-
-// lookup purposes (so the checker can still describe a bad read with a
-// type-aware message) even after its scope has ended. *Liveness* is what's
-// actually scoped: each local's tracked dataflow state is reset by a
-// `ScopeExit` statement at the end of its enclosing block/if-branch/
-// while-body, mirroring codegen's own scope_stack_ (see push_scope/
-// pop_scope in codegen.cppm).
+// The MIR for a single function: a CFG of basic blocks, plus one entry
+// per local *declaration* (parameters first, then every VarDecl, in
+// declaration order).
+//
+// `local_decls` is flat and spans the whole function, and that is
+// correct: it is keyed by declaration identity (LocalId), which is
+// unique, not by source name, which is not. A name stays "known" for
+// type-lookup purposes even after its scope has ended -- so the checker
+// can still describe a bad read with a type-aware message -- and now
+// reports *its own* type rather than that of a later namesake.
+//
+// Which declaration a given use refers to is decided once, by
+// resolve_locals, and recorded on the AST node (Expr::resolved_local);
+// this file never resolves a name at lookup time. That split is
+// deliberate: lexical scope is a property of the syntax, and by the time
+// the checker walks this CFG there is no well-defined "current scope" to
+// consult -- the move checker is a worklist fixed-point that revisits
+// blocks in convergence order, not source order.
+//
+// *Liveness* is still what's scoped: each local's tracked dataflow state
+// is reset by a `ScopeExit` statement at the end of its enclosing
+// block/if-branch/while-body, mirroring codegen's own scope_stack_ (see
+// push_scope/pop_scope in codegen.cppm). Because those statements now
+// name a LocalId rather than a name, an inner shadow going out of scope
+// no longer resets the outer local it shadowed.
 struct Body {
     std::vector<BasicBlock> blocks;
     StmtPtr owned_body;
-    std::unordered_map<std::string, Type> local_types;
-    std::vector<std::string> locals_in_order;
-    // Block-scope `static` locals: their names still participate in
-    // ordinary name lookup and borrow tracking like other locals, but
-    // their storage duration is program-long rather than stack-scoped.
-    std::unordered_set<std::string> static_lifetime_locals;
+    // Indexed by LocalId.
+    std::vector<LocalDecl> local_decls;
     // The owning program this MIR came from, so later movecheck passes can
     // answer whole-program questions (e.g. whether a Named type is really a
     // class, and whether that class is copy-constructible) while walking just
     // this function body.
     const Program* program = nullptr;
-    // Every local declared `const` (Stmt::is_const, ch05/ch06 -- an
-    // immutable local, not a parameter: those don't support `const` yet,
-    // see parse_param_type) -- consulted by movecheck's own
-    // MirStatementKind::Assign case to reject any reassignment after the
-    // single, initializing Assign/Declare a const local's own VarDecl
-    // itself lowers to.
-    std::unordered_set<std::string> const_locals;
-    // ch05 §5.12: every local whose initializer is a lambda with at least
-    // one by-reference capture. Such a closure value itself keeps those
-    // borrows alive until its own last use / ScopeExit, so movecheck's
-    // reference-liveness pass treats reads of the closure local itself as
-    // "reference-like" uses too.
-    std::unordered_set<std::string> borrow_holding_closure_locals;
     // Copied from the source Function so later passes can enforce
     // compile-time-dependency visibility without storing a raw pointer into
     // Program::functions (which may reallocate while new clones are appended).
@@ -181,7 +282,71 @@ struct Body {
     std::string function_access_context_class;
     std::string function_source_path;
     std::vector<std::string> function_namespace_path;
+
+    [[nodiscard]] const LocalDecl& decl(LocalId id) const { return local_decls[local_index(id)]; }
+    [[nodiscard]] LocalDecl& decl(LocalId id) { return local_decls[local_index(id)]; }
+    [[nodiscard]] const Type& type_of(LocalId id) const { return local_decls[local_index(id)].type; }
+    // The name to print for this local in a diagnostic.
+    [[nodiscard]] const std::string& name_of(LocalId id) const { return local_decls[local_index(id)].source_name; }
+    [[nodiscard]] bool is_valid_local(LocalId id) const { return local_index(id) < local_decls.size(); }
+
+    // The local a use refers to, or nullopt when it isn't a use of a
+    // local at all (a global, a function name, an enum constant, or an
+    // expression that isn't an Identifier).
+    [[nodiscard]] std::optional<LocalId> local_of(const Expr& expr) const {
+        if (!has_resolved_local(expr)) return std::nullopt;
+        LocalId id = resolved_local_of(expr);
+        if (!is_valid_local(id)) return std::nullopt;
+        return id;
+    }
+
+    [[nodiscard]] std::optional<LocalId> local_of(const LambdaCapture& capture) const {
+        if (!has_resolved_local(capture)) return std::nullopt;
+        LocalId id = resolved_local_of(capture);
+        if (!is_valid_local(id)) return std::nullopt;
+        return id;
+    }
+
+    // The declared type of the local this expression names, or nullptr
+    // when it names something that isn't a local at all (a global, a
+    // function, an enum constant, a field access). The overwhelmingly
+    // common shape at every consumer, and the one that used to be
+    // `local_types.find(expr.name)` -- which found *a* declaration with
+    // that spelling rather than *this* expression's declaration.
+    [[nodiscard]] const Type* type_if_local(const Expr& expr) const {
+        std::optional<LocalId> id = local_of(expr);
+        return id.has_value() ? &type_of(*id) : nullptr;
+    }
+
+    // The implicit `this` parameter of a member function, if any. Kept as
+    // a lookup of its own so no caller has to search by name: `this` is
+    // always the first parameter and can never be shadowed or redeclared.
+    [[nodiscard]] std::optional<LocalId> this_local() const {
+        if (local_decls.empty() || local_decls[0].source_name != "this") return std::nullopt;
+        return static_cast<LocalId>(0);
+    }
 };
+
+// Assigns every local declaration in `fn` its identity, and binds every
+// identifier use in `fn`'s body to the declaration it refers to under
+// ordinary lexical scoping. Idempotent and deterministic: ids are handed
+// out in declaration order (parameters first), so re-running it -- or
+// running it on a deep clone -- reproduces exactly the same numbering,
+// which is what lets a Body built from one copy of a body describe uses
+// found in another.
+void resolve_locals(Function& fn);
+
+// The same walk, for a body that has no Function of its own yet: binds
+// `body`'s uses against `params` and returns the declaration table they
+// index into. `resolve_locals` is this plus the Function unwrapping.
+[[nodiscard]] std::vector<LocalDecl> resolve_locals_in(const std::vector<Param>& params, Stmt& body);
+
+// Runs resolve_locals over every function in `program`. Every later pass
+// assumes a use already knows its declaration, so this must run before
+// any of them and again after any pass that synthesizes new functions
+// (monomorphization does both). Re-running is free of consequence:
+// resolution is idempotent and depends only on the body's own syntax.
+void resolve_program_locals(Program& program);
 
 Body build_mir(const Function& fn);
 
@@ -189,6 +354,235 @@ Body build_mir(const Function& fn);
 
 namespace scpp {
 namespace {
+
+// The single authority on which declaration a name refers to. Binds every name-use in a function body to the declaration it actually
+// refers to, following ordinary lexical scope, and builds the matching
+// table of declarations. Both jobs are done by this one walk on purpose:
+// the id a use is bound to *is* the index of the LocalDecl created for
+// its declaration, so a second, separately-maintained walk could drift
+// out of step with this one and silently mis-index the table.
+//
+// The walk covers the whole body -- including code the CFG lowering
+// skips as unreachable -- so that an id can never index past the end of
+// local_decls whatever the control flow looks like.
+class LocalResolver {
+public:
+    LocalResolver(const std::vector<Param>& params, Stmt& body) : params_(params), body_(body) {}
+
+    // `member_initializers` is a constructor's own `: base{...},
+    // field{...}` list. Those expressions are outside the body but are
+    // evaluated in the constructor's scope, so they see its parameters
+    // -- and, like anything else that reads a local, they only know
+    // which one they read once they are resolved here.
+    void run(std::vector<MemberInitializer>* member_initializers = nullptr) {
+        // Parameters live for the whole function, so they are declared
+        // before any scope frame exists and are never popped -- matching
+        // both MirBuilder and codegen.
+        for (const Param& param : params_) {
+            LocalDecl decl;
+            decl.type = param.type;
+            decl.source_name = param.name;
+            declare(param.name, std::move(decl));
+        }
+        if (member_initializers != nullptr) {
+            for (MemberInitializer& member_initializer : *member_initializers) {
+                resolve_initializer(member_initializer.initializer);
+            }
+        }
+        resolve_stmt(body_);
+    }
+
+    [[nodiscard]] std::vector<LocalDecl> take_decls() { return std::move(decls_); }
+
+private:
+    // One declaration of a given spelling, and whether its lexical scope
+    // is still open. Entries are never removed: a name that has gone out
+    // of scope is still *known*, which is what lets the checker answer a
+    // use of it with "out of scope here" (and a type-aware message)
+    // rather than the far vaguer "undeclared".
+    struct Binding {
+        std::size_t id = 0;
+        bool in_scope = true;
+    };
+
+    const std::vector<Param>& params_;
+    Stmt& body_;
+    std::vector<LocalDecl> decls_;
+    std::unordered_map<std::string, std::vector<Binding>> bindings_;
+    std::vector<std::vector<std::string>> scope_stack_;
+
+    std::size_t declare(const std::string& name, LocalDecl decl) {
+        std::size_t id = decls_.size();
+        decls_.push_back(std::move(decl));
+        bindings_[name].push_back(Binding{id, true});
+        if (!scope_stack_.empty()) scope_stack_.back().push_back(name);
+        return id;
+    }
+
+    void push_scope() { scope_stack_.emplace_back(); }
+
+    void pop_scope() {
+        for (const std::string& name : scope_stack_.back()) {
+            auto it = bindings_.find(name);
+            if (it == bindings_.end()) continue;
+            for (auto binding = it->second.rbegin(); binding != it->second.rend(); ++binding) {
+                if (!binding->in_scope) continue;
+                binding->in_scope = false;
+                break;
+            }
+        }
+        scope_stack_.pop_back();
+    }
+
+    // Returns the encoded `id + 1` of the declaration this name refers
+    // to, or 0 when it names no local at all (a global, a function, an
+    // enum constant, ...).
+    //
+    // An in-scope declaration always wins, innermost first -- that is
+    // ordinary lexical scope, and it is what makes a shadowed outer
+    // local unreachable while the shadow is live. Only when none is in
+    // scope does the most recent already-closed declaration answer, so
+    // that a use after the end of a block still knows *which* variable
+    // was meant.
+    [[nodiscard]] std::size_t lookup(const std::string& name) const {
+        auto it = bindings_.find(name);
+        if (it == bindings_.end() || it->second.empty()) return 0;
+        for (auto binding = it->second.rbegin(); binding != it->second.rend(); ++binding) {
+            if (binding->in_scope) return binding->id + 1;
+        }
+        return it->second.back().id + 1;
+    }
+
+    void resolve_expr(Expr& expr) {
+        // Always written, never only-on-match: a node that no longer
+        // names a local (because monomorphize rewrote an Identifier into
+        // a Member in place) must lose its old resolution rather than
+        // keep a stale one.
+        expr.resolved_local = names_a_local_use(expr) ? lookup(expr.name) : 0;
+        if (expr.lhs != nullptr) resolve_expr(*expr.lhs);
+        if (expr.rhs != nullptr) resolve_expr(*expr.rhs);
+        if (expr.third != nullptr) resolve_expr(*expr.third);
+        for (const ExprPtr& arg : expr.args) resolve_expr(*arg);
+        for (LambdaCapture& capture : expr.lambda_captures) {
+            if (capture.init != nullptr) resolve_expr(*capture.init);
+            // A capture list is written *outside* the closure, so a plain
+            // `[x]`/`[&x]` names an enclosing local; an init-capture
+            // introduces a new name inside the closure instead and so
+            // binds to nothing out here.
+            capture.resolved_local = capture.init == nullptr ? lookup(capture.name) : 0;
+        }
+        if (expr.lambda_body != nullptr) resolve_lambda_body(expr);
+    }
+
+    // A closure body is lexically nested inside the function that writes
+    // it, and movecheck analyses it as part of that function's body (see
+    // interfaces.cppm's walk, which descends straight through a Lambda),
+    // so its uses have to resolve here too -- leaving them unbound would
+    // silently demote reads of a captured local to "not a local", which
+    // is precisely the direction that skips checks.
+    //
+    // Its parameters and its own declarations are therefore declared in a
+    // nested scope: without that, a lambda parameter named like an
+    // enclosing local would bind uses in the closure to the *enclosing*
+    // declaration -- the same mis-binding this whole model exists to
+    // eliminate, just one nesting level down.
+    //
+    // Captured names are deliberately *not* redeclared inside that scope.
+    // A capture is not a fresh declaration at this stage: lambdas.cppm
+    // later rewrites captured identifiers into member accesses on the
+    // closure object, at which point they stop naming locals at all.
+    void resolve_lambda_body(Expr& expr) {
+        push_scope();
+        for (const Param& param : expr.lambda_params) {
+            LocalDecl decl;
+            decl.type = param.type;
+            decl.source_name = param.name;
+            declare(param.name, std::move(decl));
+        }
+        resolve_stmt(*expr.lambda_body);
+        pop_scope();
+    }
+
+    void resolve_initializer(Initializer& initializer) {
+        if (initializer.expr != nullptr) resolve_expr(*initializer.expr);
+        for (const ExprPtr& arg : initializer.brace_args) resolve_expr(*arg);
+    }
+
+    void resolve_stmt(Stmt& stmt) {
+        switch (stmt.kind) {
+            case StmtKind::Block:
+                push_scope();
+                for (const StmtPtr& child : stmt.statements) resolve_stmt(*child);
+                pop_scope();
+                return;
+
+            case StmtKind::VarDecl: {
+                // The initializer is resolved *after* the declaration, so
+                // `int x = x;` binds to the new `x` exactly as in C++
+                // (and a shadowing declaration shadows from its own
+                // initializer onward).
+                LocalDecl decl;
+                decl.type = stmt.type;
+                decl.source_name = stmt.var_name;
+                decl.decl_loc = stmt.loc;
+                decl.is_static_lifetime = stmt.is_static_local;
+                decl.is_const = stmt.is_const || stmt.is_constexpr;
+                if (stmt.init != nullptr && stmt.init->kind == ExprKind::Lambda) {
+                    for (const LambdaCapture& capture : stmt.init->lambda_captures) {
+                        if (capture.by_reference) {
+                            decl.is_borrow_holding_closure = true;
+                            break;
+                        }
+                    }
+                }
+                stmt.declared_local = declare(stmt.var_name, std::move(decl)) + 1;
+                if (stmt.init != nullptr) resolve_expr(*stmt.init);
+                for (const ExprPtr& arg : stmt.ctor_args) resolve_expr(*arg);
+                return;
+            }
+
+            case StmtKind::Return:
+            case StmtKind::ExprStmt:
+                if (stmt.expr != nullptr) resolve_expr(*stmt.expr);
+                return;
+
+            case StmtKind::If:
+                if (stmt.condition != nullptr) resolve_expr(*stmt.condition);
+                push_scope();
+                if (stmt.then_branch != nullptr) resolve_stmt(*stmt.then_branch);
+                pop_scope();
+                push_scope();
+                if (stmt.else_branch != nullptr) resolve_stmt(*stmt.else_branch);
+                pop_scope();
+                return;
+
+            case StmtKind::While:
+                if (stmt.condition != nullptr) resolve_expr(*stmt.condition);
+                push_scope();
+                if (stmt.then_branch != nullptr) resolve_stmt(*stmt.then_branch);
+                pop_scope();
+                return;
+
+            case StmtKind::Switch:
+                if (stmt.condition != nullptr) resolve_expr(*stmt.condition);
+                // One scope per case, braced or not -- matching both
+                // MirBuilder's lowering and codegen's push_scope, which
+                // is what lets sibling cases reuse a name.
+                for (SwitchCase& switch_case : stmt.switch_cases) {
+                    if (switch_case.value != nullptr) resolve_expr(*switch_case.value);
+                    push_scope();
+                    for (const StmtPtr& child : switch_case.statements) resolve_stmt(*child);
+                    pop_scope();
+                }
+                return;
+
+            case StmtKind::Break:
+            case StmtKind::Continue:
+            case StmtKind::Fallthrough:
+                return;
+        }
+    }
+};
 
 class MirBuilder {
 public:
@@ -203,9 +597,14 @@ public:
         body_.function_access_context_class = fn_.access_context_class;
         body_.function_source_path = fn_.loc.source_path_text();
         body_.function_namespace_path = fn_.namespace_path;
-        for (const Param& param : fn_.params) {
-            declare_local(param.name, param.type);
-        }
+        // Resolving this Body's own copy is what makes build_mir correct
+        // on its own, whether or not the caller has already resolved the
+        // Function it came from. Both runs assign the same ids (the
+        // numbering depends only on declaration order), so a use found in
+        // any other copy of this body still names the same entry here.
+        LocalResolver resolver{fn_.params, *body_.owned_body};
+        resolver.run();
+        body_.local_decls = resolver.take_decls();
         current_block_ = new_block();
         lower_stmt(*body_.owned_body);
         insert_drops_before_returns();
@@ -217,11 +616,11 @@ private:
     Body body_;
     std::size_t current_block_ = 0;
     // One frame per lexically-enclosing block/if-branch/while-body,
-    // holding the names declared directly within it -- mirrors codegen's
+    // holding the locals declared directly within it -- mirrors codegen's
     // scope_stack_. Parameters are declared before any frame is pushed
     // (see build()), so they're never captured here: they live for the
     // whole function, same as in codegen.
-    std::vector<std::vector<std::string>> scope_stack_;
+    std::vector<std::vector<LocalId>> scope_stack_;
     struct ControlFlowFrame {
         std::optional<std::size_t> continue_block;
         std::size_t end_block;
@@ -229,42 +628,75 @@ private:
     };
     std::vector<ControlFlowFrame> control_flow_stack_;
 
-    void declare_local(const std::string& name, const Type& type) {
-        if (!body_.local_types.contains(name)) {
-            body_.locals_in_order.push_back(name);
-        }
-        body_.local_types[name] = type;
+    // Records that `id` was declared in the innermost open scope, so that
+    // scope's exit resets exactly this local's liveness -- and, crucially,
+    // not that of some other declaration that merely shares its name.
+    void note_declared_in_scope(LocalId id) {
         if (!scope_stack_.empty()) {
-            scope_stack_.back().push_back(name);
+            scope_stack_.back().push_back(id);
         }
     }
 
     void push_scope() { scope_stack_.emplace_back(); }
 
     // Emits a ScopeExit statement (in reverse declaration order, matching
-    // codegen's drop order) for every name declared directly in the scope
+    // codegen's drop order) for every local declared directly in the scope
     // being popped -- unless the current block already ended in a
     // terminator (e.g. a `return` already exited this scope; no further
     // statements can be appended to that block anyway), matching
     // codegen's identical pop_scope() guard.
     void pop_scope() {
-        std::vector<std::string> names = std::move(scope_stack_.back());
+        std::vector<LocalId> locals = std::move(scope_stack_.back());
         scope_stack_.pop_back();
         if (current_has_terminator()) return;
-        for (auto it = names.rbegin(); it != names.rend(); ++it) {
-            current().statements.push_back(MirStatement{MirStatementKind::ScopeExit, *it, nullptr, Type{},
-                                                        SourceLocation{}});
+        for (auto it = locals.rbegin(); it != locals.rend(); ++it) {
+            current().statements.push_back(local_stmt(MirStatementKind::ScopeExit, *it, nullptr, Type{}, SourceLocation{}));
         }
     }
 
     void emit_scope_exits_to_depth(std::size_t target_depth) {
         for (std::size_t depth = scope_stack_.size(); depth > target_depth; depth--) {
-            const std::vector<std::string>& names = scope_stack_[depth - 1];
-            for (auto it = names.rbegin(); it != names.rend(); ++it) {
-                current().statements.push_back(MirStatement{MirStatementKind::ScopeExit, *it, nullptr, Type{},
-                                                            SourceLocation{}});
+            const std::vector<LocalId>& locals = scope_stack_[depth - 1];
+            for (auto it = locals.rbegin(); it != locals.rend(); ++it) {
+                current().statements.push_back(local_stmt(MirStatementKind::ScopeExit, *it, nullptr, Type{}, SourceLocation{}));
             }
         }
+    }
+
+    [[nodiscard]] static MirStatement local_stmt(MirStatementKind kind, LocalId id, const Expr* expr, const Type& type,
+                                                 const SourceLocation& loc) {
+        MirStatement stmt;
+        stmt.kind = kind;
+        stmt.local = id;
+        stmt.has_local = true;
+        stmt.expr = expr;
+        stmt.type = type;
+        stmt.loc = loc;
+        return stmt;
+    }
+
+    // An assignment whose target is written as a bare name. `has_local`
+    // tells the checker apart the two cases it must handle differently:
+    // a local (keyed by its declaration) and a global (which has none).
+    [[nodiscard]] MirStatement assign_stmt(const Expr& target, const Expr* rhs, const SourceLocation& loc) const {
+        MirStatement stmt;
+        stmt.kind = MirStatementKind::Assign;
+        if (std::optional<LocalId> id = body_.local_of(target); id.has_value()) {
+            stmt.local = *id;
+            stmt.has_local = true;
+        }
+        stmt.target = &target;
+        stmt.expr = rhs;
+        stmt.loc = loc;
+        return stmt;
+    }
+
+    [[nodiscard]] static MirStatement plain_stmt(MirStatementKind kind, const Expr* expr, const SourceLocation& loc) {
+        MirStatement stmt;
+        stmt.kind = kind;
+        stmt.expr = expr;
+        stmt.loc = loc;
+        return stmt;
     }
 
     std::size_t new_block() {
@@ -284,7 +716,7 @@ private:
                 push_scope();
                 if (stmt.is_unsafe) {
                     current().statements.push_back(
-                        MirStatement{MirStatementKind::UnsafeEnter, "", nullptr, Type{}, stmt.loc});
+                        plain_stmt(MirStatementKind::UnsafeEnter, nullptr, stmt.loc));
                 }
                 for (const auto& s : stmt.statements) {
                     // Dead code after a return/unreachable terminator
@@ -299,23 +731,17 @@ private:
                 // its terminator.
                 if (stmt.is_unsafe && !current_has_terminator()) {
                     current().statements.push_back(
-                        MirStatement{MirStatementKind::UnsafeExit, "", nullptr, Type{}, stmt.loc});
+                        plain_stmt(MirStatementKind::UnsafeExit, nullptr, stmt.loc));
                 }
                 pop_scope();
                 return;
 
             case StmtKind::VarDecl: {
-                declare_local(stmt.var_name, stmt.type);
-                if (stmt.is_const || stmt.is_constexpr) body_.const_locals.insert(stmt.var_name);
-                if (stmt.is_static_local) body_.static_lifetime_locals.insert(stmt.var_name);
-                if (stmt.init && stmt.init->kind == ExprKind::Lambda) {
-                    for (const LambdaCapture& capture : stmt.init->lambda_captures) {
-                        if (capture.by_reference) {
-                            body_.borrow_holding_closure_locals.insert(stmt.var_name);
-                            break;
-                        }
-                    }
-                }
+                // Identity comes from resolution, not from the name: two
+                // sibling `r`s are two different locals here.
+                if (!has_declared_local(stmt)) return;
+                LocalId id = declared_local_of(stmt);
+                note_declared_in_scope(id);
                 if (stmt.type.kind == TypeKind::Reference || stmt.type.kind == TypeKind::Span) {
                     // `expr` is null when the source omitted an
                     // initializer (`int& r;` / `std::span<int> s;`,
@@ -323,11 +749,11 @@ private:
                     // left for movecheck to reject with a clear
                     // diagnostic rather than validated here, keeping this
                     // builder a straightforward, non-throwing translation.
-                    current().statements.push_back(MirStatement{
-                        MirStatementKind::BindReference, stmt.var_name, stmt.init.get(), stmt.type, stmt.loc});
+                    current().statements.push_back(
+                        local_stmt(MirStatementKind::BindReference, id, stmt.init.get(), stmt.type, stmt.loc));
                 } else if (stmt.init) {
                     current().statements.push_back(
-                        MirStatement{MirStatementKind::Assign, stmt.var_name, stmt.init.get(), stmt.type, stmt.loc});
+                        local_stmt(MirStatementKind::Assign, id, stmt.init.get(), stmt.type, stmt.loc));
                 } else if (stmt.has_ctor_args) {
                     // ch04 §4.2 / spec §6.1: `ClassName name{args};` --
                     // see
@@ -335,12 +761,12 @@ private:
                     // needs to carry the argument list (rather than
                     // falling into the plain, argument-blind Declare case
                     // just below).
-                    MirStatement mir_stmt{MirStatementKind::Declare, stmt.var_name, nullptr, stmt.type, stmt.loc};
+                    MirStatement mir_stmt = local_stmt(MirStatementKind::Declare, id, nullptr, stmt.type, stmt.loc);
                     mir_stmt.ctor_args = &stmt.ctor_args;
                     current().statements.push_back(std::move(mir_stmt));
                 } else {
                     current().statements.push_back(
-                        MirStatement{MirStatementKind::Declare, stmt.var_name, nullptr, stmt.type, stmt.loc});
+                        local_stmt(MirStatementKind::Declare, id, nullptr, stmt.type, stmt.loc));
                 }
                 return;
             }
@@ -366,10 +792,9 @@ private:
                 // state.
                 if (e.kind == ExprKind::Binary && e.binary_op == BinaryOp::Assign &&
                     e.lhs->kind == ExprKind::Identifier) {
-                    current().statements.push_back(
-                        MirStatement{MirStatementKind::Assign, e.lhs->name, e.rhs.get(), Type{}, stmt.loc});
+                    current().statements.push_back(assign_stmt(*e.lhs, e.rhs.get(), stmt.loc));
                 } else {
-                    current().statements.push_back(MirStatement{MirStatementKind::Eval, "", &e, Type{}, stmt.loc});
+                    current().statements.push_back(plain_stmt(MirStatementKind::Eval, &e, stmt.loc));
                 }
                 return;
             }
@@ -547,12 +972,12 @@ private:
     // effect (see apply_statement in movecheck.cppm), so a marker for an
     // already-out-of-scope local is simply never acted on by anything.
     void insert_drops_before_returns() {
-        std::vector<std::string> unique_ptr_locals;
-        for (const std::string& name : body_.locals_in_order) {
-            const Type& type = body_.local_types.at(name);
+        std::vector<LocalId> unique_ptr_locals;
+        for (std::size_t i = 0; i < body_.local_decls.size(); i++) {
+            const Type& type = body_.local_decls[i].type;
             if (type.kind == TypeKind::Named &&
                 (type.name == "std::unique_ptr" || type.name.rfind("std::unique_ptr.", 0) == 0)) {
-                unique_ptr_locals.push_back(name);
+                unique_ptr_locals.push_back(static_cast<LocalId>(i));
             }
         }
         if (unique_ptr_locals.empty()) return;
@@ -560,14 +985,29 @@ private:
         for (BasicBlock& block : body_.blocks) {
             if (block.terminator.kind != TerminatorKind::Return) continue;
             for (auto it = unique_ptr_locals.rbegin(); it != unique_ptr_locals.rend(); ++it) {
-                block.statements.push_back(MirStatement{MirStatementKind::Drop, *it, nullptr, Type{},
-                                                        SourceLocation{}});
+                block.statements.push_back(local_stmt(MirStatementKind::Drop, *it, nullptr, Type{}, SourceLocation{}));
             }
         }
     }
 };
 
 } // namespace
+
+[[nodiscard]] std::vector<LocalDecl> resolve_locals_in(const std::vector<Param>& params, Stmt& body) {
+    LocalResolver resolver{params, body};
+    resolver.run();
+    return resolver.take_decls();
+}
+
+void resolve_locals(Function& fn) {
+    if (fn.body == nullptr) return;
+    LocalResolver resolver{fn.params, *fn.body};
+    resolver.run(&fn.member_initializers);
+}
+
+void resolve_program_locals(Program& program) {
+    for (Function& fn : program.functions) resolve_locals(fn);
+}
 
 Body build_mir(const Function& fn) {
     MirBuilder builder(fn);

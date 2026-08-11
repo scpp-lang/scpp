@@ -355,6 +355,9 @@ class LambdaCapture {
     // `[&name]` capture (whose value/binding comes directly from the
     // enclosing scope's own same-named local).
     ExprPtr init;
+    // Name resolution's result for the *enclosing* function's local this
+    // capture names -- see Expr::resolved_local for the encoding.
+    std::size_t resolved_local = 0;
 };
 
 enum class LambdaCaptureMode {
@@ -518,6 +521,26 @@ class Expr {
     Expr& operator=(Expr&&) = default;
 
     ExprKind kind;
+
+    // Name resolution's result for an `Identifier` naming a local
+    // variable (or parameter) of the enclosing function: `id + 1`, where
+    // `id` indexes that function's Body::local_decls (see mir.cppm).
+    // Zero means "not resolved to a local" -- either this isn't an
+    // Identifier at all, or the name refers to something that isn't a
+    // local (a global, a function, an enum constant), or resolution
+    // hasn't run yet. The `+ 1` bias exists so the default-constructed
+    // value is the "none" case without needing a cast to form a
+    // sentinel; use mir.cppm's has_resolved_local/resolved_local_of
+    // rather than doing the arithmetic by hand.
+    //
+    // This lives on the AST node (rather than in a side table keyed by
+    // node address) because a single source-level function body exists
+    // as several physically distinct trees at once: build_mir lowers a
+    // deep clone, while monomorphize walks a *second* clone and
+    // dataflow/interfaces walk the original. A resolution carried by the
+    // node itself survives deep_clone_expr and so stays correct in every
+    // copy; an address-keyed map would resolve in only one of them.
+    std::size_t resolved_local = 0;
 
     // Where this expression begins in the source file (see
     // SourceLocation) -- stamped by the parser, used only for diagnostics
@@ -700,6 +723,14 @@ class Stmt {
     // VarDecl
     Type type;
     std::string var_name;
+    // Name resolution's result for a VarDecl: the identity of the local
+    // this declaration introduces, encoded exactly like
+    // Expr::resolved_local (`id + 1`, zero meaning unresolved). Two
+    // VarDecls that share a `var_name` in different scopes get *different*
+    // ids -- that distinction is the whole point, and is what lets a later
+    // pass refine one declaration's type (monomorphize's `auto`
+    // resolution) without disturbing its namesakes.
+    std::size_t declared_local = 0;
     ExprPtr init; // optional
     std::vector<AlignmentSpecifier> alignment_specs;
     std::uint64_t resolved_alignment = 0;
@@ -854,6 +885,7 @@ inline ExplicitTemplateArg& ExplicitTemplateArg::operator=(const ExplicitTemplat
 [[nodiscard]] inline ExprPtr deep_clone_expr(const Expr& expr) {
     auto clone = std::make_unique<Expr>();
     clone->kind = expr.kind;
+    clone->resolved_local = expr.resolved_local;
     clone->loc = expr.loc;
     clone->int_value = expr.int_value;
     clone->float_value = expr.float_value;
@@ -889,6 +921,7 @@ inline ExplicitTemplateArg& ExplicitTemplateArg::operator=(const ExplicitTemplat
         LambdaCapture cloned_capture{};
         cloned_capture.name = capture.name;
         cloned_capture.by_reference = capture.by_reference;
+        cloned_capture.resolved_local = capture.resolved_local;
         if (capture.init != nullptr) cloned_capture.init = deep_clone_expr(*capture.init);
         clone->lambda_captures.push_back(std::move(cloned_capture));
     }
@@ -906,6 +939,7 @@ inline ExplicitTemplateArg& ExplicitTemplateArg::operator=(const ExplicitTemplat
     clone->loc = stmt.loc;
     clone->type = stmt.type;
     clone->var_name = stmt.var_name;
+    clone->declared_local = stmt.declared_local;
     if (stmt.init != nullptr) clone->init = deep_clone_expr(*stmt.init);
     clone->alignment_specs = stmt.alignment_specs;
     clone->resolved_alignment = stmt.resolved_alignment;
@@ -1044,6 +1078,7 @@ inline Type& Type::operator=(const Type& other) {
 [[nodiscard]] inline ExprPtr clone_initializer_expr(const Expr& expr) {
     auto clone = std::make_unique<Expr>();
     clone->kind = expr.kind;
+    clone->resolved_local = expr.resolved_local;
     clone->loc = expr.loc;
     clone->int_value = expr.int_value;
     clone->float_value = expr.float_value;
@@ -1146,7 +1181,7 @@ inline GlobalVar& GlobalVar::operator=(const GlobalVar& other) {
 }
 
 inline LambdaCapture::LambdaCapture(const LambdaCapture& other)
-    : name{other.name}, by_reference{other.by_reference}, init{} {
+    : name{other.name}, by_reference{other.by_reference}, init{}, resolved_local{other.resolved_local} {
     if (other.init != nullptr) init = clone_initializer_expr(*other.init);
 }
 
@@ -1180,6 +1215,7 @@ inline SwitchCase& SwitchCase::operator=(const SwitchCase& other) {
 
 inline Expr::Expr(const Expr& other)
     : kind{other.kind},
+      resolved_local{other.resolved_local},
       loc{other.loc},
       int_value{other.int_value},
       float_value{other.float_value},
@@ -1238,6 +1274,7 @@ inline Stmt::Stmt(const Stmt& other)
       loc{other.loc},
       type{other.type},
       var_name{other.var_name},
+      declared_local{other.declared_local},
       init{},
       alignment_specs{other.alignment_specs},
       resolved_alignment{other.resolved_alignment},

@@ -471,6 +471,288 @@ void test_check_moves_returns_disengaged_expected_on_failure_without_throwing() 
            "message");
 }
 
+// --- keying locals by declaration (mir.cppm's LocalId) ----------------
+//
+// Every case below has two declarations that share a spelling. Before
+// locals were keyed by their own declaration, a single name-keyed entry
+// held whichever type was lowered *last*, so the first declaration's
+// region was analysed with the second's type. The must-reject cases
+// pin the consequence that matters: losing reference-ness skips the
+// borrow tracking entirely, so a genuine violation was accepted.
+
+// The control: the same borrow violation with no namesake anywhere. If
+// this ever stops being rejected, the paired cases below prove nothing.
+void test_borrow_violation_without_a_namesake_is_rejected() {
+    cases_run++;
+    expect(throws_move_error(
+               "import std;\n"
+               "void f() {\n"
+               "    {\n"
+               "        std::string s{\"hello\"};\n"
+               "        std::string& r = s;\n"
+               "        std::string t = std::move(s);\n"
+               "        std::size_t n = r.size() + t.size();\n"
+               "        n = n + 1;\n"
+               "    }\n"
+               "}\n"),
+           "borrow_violation_without_a_namesake_is_rejected: expected the move of a borrowed value to be rejected");
+}
+
+// The same program plus a later sibling scope that reuses `r` for an
+// `int`. That later declaration used to overwrite the reference's type,
+// and a non-reference is not tracked as a borrow at all -- so the move
+// above was let through.
+void test_sibling_scope_namesake_does_not_hide_a_borrow() {
+    cases_run++;
+    expect(throws_move_error(
+               "import std;\n"
+               "void f() {\n"
+               "    {\n"
+               "        std::string s{\"hello\"};\n"
+               "        std::string& r = s;\n"
+               "        std::string t = std::move(s);\n"
+               "        std::size_t n = r.size() + t.size();\n"
+               "        n = n + 1;\n"
+               "    }\n"
+               "    {\n"
+               "        int r = 0;\n"
+               "        r = r + 1;\n"
+               "    }\n"
+               "}\n"),
+           "sibling_scope_namesake_does_not_hide_a_borrow: expected the move of a borrowed value to still be "
+           "rejected when a later sibling scope reuses the reference's name");
+}
+
+void test_if_else_branch_namesake_does_not_hide_a_borrow() {
+    cases_run++;
+    expect(throws_move_error(
+               "import std;\n"
+               "void f(bool flag) {\n"
+               "    if (flag) {\n"
+               "        std::string s{\"hello\"};\n"
+               "        std::string& r = s;\n"
+               "        std::string t = std::move(s);\n"
+               "        std::size_t n = r.size() + t.size();\n"
+               "        n = n + 1;\n"
+               "    } else {\n"
+               "        int r = 0;\n"
+               "        r = r + 1;\n"
+               "    }\n"
+               "}\n"),
+           "if_else_branch_namesake_does_not_hide_a_borrow: expected the move of a borrowed value in the `if` "
+           "branch to still be rejected when the `else` branch reuses the reference's name");
+}
+
+void test_switch_case_namesake_does_not_hide_a_borrow() {
+    cases_run++;
+    expect(throws_move_error(
+               "import std;\n"
+               "void f(int selector) {\n"
+               "    switch (selector) {\n"
+               "        case 0: {\n"
+               "            std::string s{\"hello\"};\n"
+               "            std::string& r = s;\n"
+               "            std::string t = std::move(s);\n"
+               "            std::size_t n = r.size() + t.size();\n"
+               "            n = n + 1;\n"
+               "            break;\n"
+               "        }\n"
+               "        default: {\n"
+               "            int r = 0;\n"
+               "            r = r + 1;\n"
+               "            break;\n"
+               "        }\n"
+               "    }\n"
+               "}\n"),
+           "switch_case_namesake_does_not_hide_a_borrow: expected the move of a borrowed value in one case to "
+           "still be rejected when a sibling case reuses the reference's name");
+}
+
+void test_loop_body_namesake_does_not_hide_a_borrow() {
+    cases_run++;
+    expect(throws_move_error(
+               "import std;\n"
+               "void f() {\n"
+               "    int i = 0;\n"
+               "    while (i < 1) {\n"
+               "        std::string s{\"hello\"};\n"
+               "        std::string& r = s;\n"
+               "        std::string t = std::move(s);\n"
+               "        std::size_t n = r.size() + t.size();\n"
+               "        n = n + 1;\n"
+               "        i = i + 1;\n"
+               "    }\n"
+               "    {\n"
+               "        int r = 0;\n"
+               "        r = r + 1;\n"
+               "    }\n"
+               "}\n"),
+           "loop_body_namesake_does_not_hide_a_borrow: expected the move of a borrowed value inside the loop "
+           "body to still be rejected when a later scope reuses the reference's name");
+}
+
+// A shadowing inner declaration used to overwrite the outer local's type
+// outright, so the member access below was checked against the *other*
+// class -- reported as a private-member violation naming a class the
+// expression never mentions.
+void test_shadowing_namesake_does_not_retype_an_outer_member_access() {
+    cases_run++;
+    std::optional<std::string> message = move_error_message(
+        "class Small {\n"
+        "    int b = 0;\n"
+        "public:\n"
+        "    int a = 0;\n"
+        "    Small() {}\n"
+        "    virtual ~Small() {}\n"
+        "};\n"
+        "class Big {\n"
+        "public:\n"
+        "    int b = 0;\n"
+        "    Big() {}\n"
+        "    virtual ~Big() {}\n"
+        "};\n"
+        "int f() {\n"
+        "    {\n"
+        "        Big v{};\n"
+        "        int n = v.b;\n"
+        "        n = n + 1;\n"
+        "    }\n"
+        "    {\n"
+        "        Small v{};\n"
+        "        int m = v.a;\n"
+        "        m = m + 1;\n"
+        "    }\n"
+        "    return 0;\n"
+        "}\n");
+    expect(!message.has_value(),
+           "shadowing_namesake_does_not_retype_an_outer_member_access: expected a public field read on 'Big' to "
+           "be accepted, got " +
+               message.value_or(std::string()));
+}
+
+// The liveness axis. An inner shadow's scope exit used to reset the
+// *outer* local's tracked state, because both shared one name-keyed
+// entry -- so the outer read after the inner block was rejected as
+// out-of-scope. Distinct declarations now have distinct ids, so the
+// inner one's ScopeExit cannot touch the outer one.
+void test_inner_shadow_scope_exit_keeps_the_outer_local_live() {
+    cases_run++;
+    expect(!throws_move_error(
+               "int f() {\n"
+               "    int x = 1;\n"
+               "    {\n"
+               "        int x = 2;\n"
+               "        x = 3;\n"
+               "    }\n"
+               "    return x;\n"
+               "}\n"),
+           "inner_shadow_scope_exit_keeps_the_outer_local_live: expected the outer local to still be readable "
+           "after the shadowing inner scope ends");
+}
+
+void test_inner_shadow_of_a_different_type_is_accepted() {
+    cases_run++;
+    expect(!throws_move_error(
+               "import std;\n"
+               "int f() {\n"
+               "    int x = 1;\n"
+               "    {\n"
+               "        std::string x{\"inner\"};\n"
+               "        std::size_t n = x.size();\n"
+               "        n = n + 1;\n"
+               "    }\n"
+               "    return x;\n"
+               "}\n"),
+           "inner_shadow_of_a_different_type_is_accepted: expected an inner shadow of an unrelated type to be "
+           "accepted and to leave the outer local's own type intact");
+}
+
+// A capture names an enclosing local, and two enclosing declarations can
+// share a spelling; the capture must take the one visible at the lambda,
+// not the last one declared anywhere in the function.
+void test_lambda_capture_binds_to_the_visible_declaration() {
+    cases_run++;
+    expect(!throws_move_error(
+               "import std;\n"
+               "int f() {\n"
+               "    int captured = 1;\n"
+               "    auto closure = [captured]() { return captured; };\n"
+               "    {\n"
+               "        std::string captured{\"other\"};\n"
+               "        std::size_t n = captured.size();\n"
+               "        n = n + 1;\n"
+               "    }\n"
+               "    return closure();\n"
+               "}\n"),
+           "lambda_capture_binds_to_the_visible_declaration: expected the capture to take the 'int' declaration "
+           "visible at the lambda, not a later same-named one");
+}
+
+// `auto` is refined after lowering, by writing the inferred type back
+// onto the declaration. Two `auto` namesakes must therefore refine
+// independently; a name-keyed write made the second overwrite the first.
+void test_auto_namesakes_infer_independently() {
+    cases_run++;
+    expect(!throws_move_error(
+               "import std;\n"
+               "int f() {\n"
+               "    {\n"
+               "        auto value = 1;\n"
+               "        value = value + 1;\n"
+               "    }\n"
+               "    {\n"
+               "        auto value = std::string{\"text\"};\n"
+               "        std::size_t n = value.size();\n"
+               "        n = n + 1;\n"
+               "    }\n"
+               "    return 0;\n"
+               "}\n"),
+           "auto_namesakes_infer_independently: expected each 'auto' declaration to keep its own inferred type");
+}
+
+// Diagnostics are written for humans: a local is always printed by the
+// name it was declared with, never by the LocalId it is keyed by.
+void test_diagnostics_print_the_declared_name() {
+    cases_run++;
+    std::optional<std::string> message = move_error_message(
+        "import std;\n"
+        "void f() {\n"
+        "    {\n"
+        "        std::string s{\"hello\"};\n"
+        "        std::string& r = s;\n"
+        "        std::string t = std::move(s);\n"
+        "        std::size_t n = r.size() + t.size();\n"
+        "        n = n + 1;\n"
+        "    }\n"
+        "    {\n"
+        "        int r = 0;\n"
+        "        r = r + 1;\n"
+        "    }\n"
+        "}\n");
+    expect(message.has_value(), "diagnostics_print_the_declared_name: expected the program to be rejected");
+    if (!message.has_value()) return;
+    expect(message->find("'s'") != std::string::npos,
+           "diagnostics_print_the_declared_name: expected the moved local's declared name in " + *message);
+}
+
+// The out-of-scope diagnostic reconstructs a name rather than passing one
+// through, so it gets its own pin.
+void test_out_of_scope_diagnostic_prints_the_declared_name() {
+    cases_run++;
+    std::optional<std::string> message = move_error_message(
+        "int f() {\n"
+        "    {\n"
+        "        int inner_only = 1;\n"
+        "        inner_only = inner_only + 1;\n"
+        "    }\n"
+        "    return inner_only;\n"
+        "}\n");
+    expect(message.has_value(), "out_of_scope_diagnostic_prints_the_declared_name: expected the program to be rejected");
+    if (!message.has_value()) return;
+    expect(message->find("'inner_only'") != std::string::npos,
+           "out_of_scope_diagnostic_prints_the_declared_name: expected the local's declared name in " + *message);
+}
+
 } // namespace
 
 
@@ -493,6 +775,19 @@ int main() {
     test_lambda_by_reference_capture_still_rejects_mutation_through_const_reference();
     test_check_moves_returns_engaged_expected_on_success();
     test_check_moves_returns_disengaged_expected_on_failure_without_throwing();
+
+    test_borrow_violation_without_a_namesake_is_rejected();
+    test_sibling_scope_namesake_does_not_hide_a_borrow();
+    test_if_else_branch_namesake_does_not_hide_a_borrow();
+    test_switch_case_namesake_does_not_hide_a_borrow();
+    test_loop_body_namesake_does_not_hide_a_borrow();
+    test_shadowing_namesake_does_not_retype_an_outer_member_access();
+    test_inner_shadow_scope_exit_keeps_the_outer_local_live();
+    test_inner_shadow_of_a_different_type_is_accepted();
+    test_lambda_capture_binds_to_the_visible_declaration();
+    test_auto_namesakes_infer_independently();
+    test_diagnostics_print_the_declared_name();
+    test_out_of_scope_diagnostic_prints_the_declared_name();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
