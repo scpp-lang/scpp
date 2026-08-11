@@ -1430,7 +1430,7 @@ private:
                 return LValue{object.fields[static_cast<std::size_t>(field_slot)].cell, base.read_only};
             }
             case ExprKind::Subscript: {
-                std::shared_ptr<Cell> subscript_base{};
+                std::shared_ptr<Cell> base{};
                 bool base_read_only = false;
                 // Speculatively try lvalue resolution first (needed so
                 // that e.g. `arr[i] = 1` assigns through the real
@@ -1440,39 +1440,39 @@ private:
                 // try/catch(const ConstexprError&) fallback exactly.
                 auto base_lvalue_result = resolve_lvalue(*expr.lhs);
                 if (base_lvalue_result.has_value()) {
-                    subscript_base = base_lvalue_result.value().cell;
+                    base = base_lvalue_result.value().cell;
                     base_read_only = base_lvalue_result.value().read_only;
                 } else {
                     auto base_value_result = evaluate_expr(*expr.lhs);
                     if (!base_value_result.has_value()) return std::unexpected(std::move(base_value_result).error());
-                    subscript_base = std::move(base_value_result).value();
+                    base = std::move(base_value_result).value();
                 }
                 auto index_value_result = evaluate_expr(*expr.rhs);
                 if (!index_value_result.has_value()) return std::unexpected(std::move(index_value_result).error());
                 auto index_result = as_integer(index_value_result.value(), expr.loc);
                 if (!index_result.has_value()) return std::unexpected(std::move(index_result).error());
                 std::int64_t index = index_result.value();
-                if (subscript_base->data.is_array()) {
-                    const ArrayValue& array = subscript_base->data.array;
+                if (base->data.is_array()) {
+                    const ArrayValue& array = base->data.array;
                     if (index < 0 || static_cast<std::size_t>(index) >= array.elements.size()) {
                         return std::unexpected(ConstexprError(expr.loc, "constexpr subscript out of bounds"));
                     }
                     return LValue{array.elements[static_cast<std::size_t>(index)], base_read_only};
                 }
-                if (subscript_base->data.is_span()) {
-                    const SpanValue& span = subscript_base->data.span;
+                if (base->data.is_span()) {
+                    const SpanValue& span = base->data.span;
                     if (index < 0 || index >= span.size) {
                         return std::unexpected(ConstexprError(expr.loc, "constexpr span subscript out of bounds"));
                     }
                     PointerValue element_ptr = span.pointer;
                     element_ptr.index += index;
-                    auto dereferenced = dereference_pointer(element_ptr, make_pointer_type_to(*subscript_base->type.pointee, false), expr.loc);
+                    auto dereferenced = dereference_pointer(element_ptr, make_pointer_type_to(*base->type.pointee, false), expr.loc);
                     if (!dereferenced.has_value()) return std::unexpected(std::move(dereferenced).error());
                     return LValue{std::move(dereferenced).value(), true};
                 }
-                if (subscript_base->data.is_pointer()) {
-                    if (!subscript_base->type.pointee) return std::unexpected(ConstexprError(expr.loc, "malformed constexpr pointer type"));
-                    PointerValue shifted = subscript_base->data.pointer;
+                if (base->data.is_pointer()) {
+                    if (!base->type.pointee) return std::unexpected(ConstexprError(expr.loc, "malformed constexpr pointer type"));
+                    PointerValue shifted = base->data.pointer;
                     shifted.index += index;
                     if (!shifted.storage || !shifted.storage->data.is_array()) {
                         return std::unexpected(ConstexprError(expr.loc, "constexpr pointer does not point to indexable storage"));
@@ -1480,7 +1480,7 @@ private:
                     if (shifted.index < 0 || static_cast<std::size_t>(shifted.index) >= shifted.storage->data.array.elements.size()) {
                         return std::unexpected(ConstexprError(expr.loc, "constexpr subscript out of bounds"));
                     }
-                    auto dereferenced = dereference_pointer(shifted, subscript_base->type, expr.loc);
+                    auto dereferenced = dereference_pointer(shifted, base->type, expr.loc);
                     if (!dereferenced.has_value()) return std::unexpected(std::move(dereferenced).error());
                     return LValue{std::move(dereferenced).value(), true};
                 }
@@ -1995,19 +1995,19 @@ private:
             if (!left_result.has_value()) return std::unexpected(std::move(left_result).error());
             auto right_result = as_double(rhs, expr.loc);
             if (!right_result.has_value()) return std::unexpected(std::move(right_result).error());
-            double left_double = left_result.value();
-            double right_double = right_result.value();
+            double left = left_result.value();
+            double right = right_result.value();
             switch (expr.binary_op) {
-                case BinaryOp::Add: return make_double_cell(left_double + right_double);
-                case BinaryOp::Sub: return make_double_cell(left_double - right_double);
-                case BinaryOp::Mul: return make_double_cell(left_double * right_double);
-                case BinaryOp::Div: return make_double_cell(left_double / right_double);
-                case BinaryOp::Eq: return make_bool_cell(left_double == right_double);
-                case BinaryOp::Ne: return make_bool_cell(left_double != right_double);
-                case BinaryOp::Lt: return make_bool_cell(left_double < right_double);
-                case BinaryOp::Gt: return make_bool_cell(left_double > right_double);
-                case BinaryOp::Le: return make_bool_cell(left_double <= right_double);
-                case BinaryOp::Ge: return make_bool_cell(left_double >= right_double);
+                case BinaryOp::Add: return make_double_cell(left + right);
+                case BinaryOp::Sub: return make_double_cell(left - right);
+                case BinaryOp::Mul: return make_double_cell(left * right);
+                case BinaryOp::Div: return make_double_cell(left / right);
+                case BinaryOp::Eq: return make_bool_cell(left == right);
+                case BinaryOp::Ne: return make_bool_cell(left != right);
+                case BinaryOp::Lt: return make_bool_cell(left < right);
+                case BinaryOp::Gt: return make_bool_cell(left > right);
+                case BinaryOp::Le: return make_bool_cell(left <= right);
+                case BinaryOp::Ge: return make_bool_cell(left >= right);
                 default: break;
             }
         } else {
@@ -2741,11 +2741,11 @@ private:
                         }
                         auto integer_result = as_integer(operand, expr.loc);
                         if (!integer_result.has_value()) return std::unexpected(std::move(integer_result).error());
-                        std::int64_t negated_value = integer_result.value();
-                        if (negated_value == int64_min_value) {
+                        std::int64_t value = integer_result.value();
+                        if (value == int64_min_value) {
                             return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
                         }
-                        return make_checked_int_cell(-negated_value, expr.loc);
+                        return make_checked_int_cell(-value, expr.loc);
                     }
                     case UnaryOp::Not: {
                         auto operand_result = evaluate_expr(*expr.lhs);
@@ -2925,8 +2925,8 @@ private:
             }
             case StmtKind::ExprStmt:
                 if (stmt.expr) {
-                    auto expr_stmt_result = evaluate_expr(*stmt.expr);
-                    if (!expr_stmt_result.has_value()) return std::unexpected(std::move(expr_stmt_result).error());
+                    auto result = evaluate_expr(*stmt.expr);
+                    if (!result.has_value()) return std::unexpected(std::move(result).error());
                 }
                 return ExecOutcome{};
             case StmtKind::If:
