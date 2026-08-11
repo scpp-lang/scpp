@@ -17,11 +17,18 @@ namespace scpp {
 [[nodiscard]] bool is_function_pointer(const Type& type);
 [[nodiscard]] bool is_for_range_size_builtin(const Expr& expr);
 [[nodiscard]] bool is_synthesized_for_range_storage(std::string_view name);
+// Writes an `auto` declaration's now-concrete type back onto the
+// declaration it belongs to, so later statements in the same function
+// see the real type instead of the "auto" placeholder build_mir first
+// recorded. Addressed by declaration, not by name -- two `auto` locals
+// in sibling scopes can share a spelling and must not overwrite each
+// other.
+void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred);
 [[nodiscard]] bool is_reborrowable_local_type(const Type& type);
 [[nodiscard]] bool local_is_suspended_for_reborrow(std::string_view name, const DataflowState& state);
 [[nodiscard]] bool local_has_mutable_reborrow_suspended(std::string_view name, const DataflowState& state);
 [[nodiscard]] bool is_explicit_star_this(const Expr& expr);
-[[nodiscard]] Type by_reference_capture_type(std::string_view local_name, const Type& local_type, const Body& body);
+[[nodiscard]] Type by_reference_capture_type(const Type& captured_type, bool source_is_const);
 
 [[nodiscard]] bool is_scalar_type_name(const std::string& name);
 [[nodiscard]] bool is_integral_scalar_type_name(const std::string& name);
@@ -78,39 +85,46 @@ namespace {
     return expr.kind == ExprKind::Call && expr.lhs == nullptr && expr.name == "$for_range_size" && expr.args.size() == 1;
 }
 [[nodiscard]] bool is_synthesized_for_range_storage(std::string_view name) { return name.rfind("$for_range_", 0) == 0; }
+
+void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
+    if (!has_declared_local(stmt)) return;
+    LocalId id = declared_local_of(stmt);
+    if (!body.is_valid_local(id)) return;
+    body.decl(id).type = inferred;
+}
 [[nodiscard]] bool is_reborrowable_local_type(const Type& type) { return is_reference(type) || is_span(type); }
 // "Is *any* reborrow (shared or mutable) currently outstanding from
-// `name`?" -- used where *every* kind of outstanding reborrow must
+// `local`?" -- used where *every* kind of outstanding reborrow must
 // block (writing directly through the lender while any reference
 // derived from it is still alive would be unsound, regardless of
 // whether that reference is shared or mutable). Forming a *new shared*
 // reborrow is less strict than this -- see local_has_mutable_reborrow_
 // suspended below, which only the mutable case actually needs.
-[[nodiscard]] bool local_is_suspended_for_reborrow(std::string_view name, const DataflowState& state) {
-    auto it = state.suspended_reborrows.find(std::string(name));
+[[nodiscard]] bool local_is_suspended_for_reborrow(LocalId local, const DataflowState& state) {
+    auto it = state.suspended_reborrows.find(local);
     return it != state.suspended_reborrows.end() &&
            (it->second.shared_count > 0 || it->second.mutable_suspended);
 }
-// "Is a *mutable* reborrow currently outstanding from `name`?" -- the
+// "Is a *mutable* reborrow currently outstanding from `local`?" -- the
 // narrower check a *new shared* reborrow attempt needs: any number of
 // simultaneous shared reborrows of the same lender coexist safely (see
 // ReborrowSuspension's own comment), so only an existing *mutable* one
 // (which by construction excludes every other reborrow, shared or
 // mutable, while it's alive) can conflict with forming another.
-[[nodiscard]] bool local_has_mutable_reborrow_suspended(std::string_view name, const DataflowState& state) {
-    auto it = state.suspended_reborrows.find(std::string(name));
+[[nodiscard]] bool local_has_mutable_reborrow_suspended(LocalId local, const DataflowState& state) {
+    auto it = state.suspended_reborrows.find(local);
     return it != state.suspended_reborrows.end() && it->second.mutable_suspended;
 }
 [[nodiscard]] bool is_explicit_star_this(const Expr& expr) {
     return expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Deref && expr.lhs != nullptr &&
            expr.lhs->kind == ExprKind::Identifier && expr.lhs->name == "this";
 }
-[[nodiscard]] Type by_reference_capture_type(std::string_view local_name, const Type& local_type, const Body& body) {
-    if (is_reference(local_type)) return local_type;
+[[nodiscard]] Type by_reference_capture_type(const Type& captured_type, bool source_is_const) {
+    if (is_reference(captured_type)) return captured_type;
     Type capture_type;
     capture_type.kind = TypeKind::Reference;
-    capture_type.pointee = std::make_shared<Type>(local_type);
-    capture_type.is_mutable_ref = !body.const_locals.contains(std::string(local_name));
+    capture_type.pointee = std::make_shared<Type>(captured_type);
+    capture_type.is_mutable_ref = !source_is_const;
     return capture_type;
 }
 
@@ -369,9 +383,9 @@ namespace {
     return literal_compatible_with_type(then_arm, else_value) || literal_compatible_with_type(else_arm, then_value);
 }
 [[nodiscard]] std::string enclosing_class_name(const Body& body) {
-    auto it = body.local_types.find("this");
-    if (it == body.local_types.end()) return "";
-    return named_type_name(it->second);
+    std::optional<LocalId> self = body.this_local();
+    if (!self) return "";
+    return named_type_name(body.type_of(*self));
 }
 
 [[nodiscard]] bool type_names_interface(const Program& program, const std::string& name) {

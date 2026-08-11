@@ -3492,13 +3492,10 @@ private:
             scopes.emplace_back();
             for (const Param& param : expr.lambda_params) scopes.back().insert(param.name);
             // Named distinctly from the mutable `capture` loop variable
-            // above (same function, sibling scope): movecheck's
-            // Body::local_types is a flat, whole-function map keyed only
-            // by name (by design -- see mir.cppm's Body comment), so
-            // reusing the same name here with different constness would
-            // make movecheck's read-only-reachability checks answer
-            // based on whichever declaration happens to be lowered last,
-            // rather than the one actually in scope at each use.
+            // above purely for readability -- the two are different
+            // declarations in sibling scopes, and movecheck keys each
+            // local by its own declaration (mir.cppm's LocalId), so
+            // reusing the spelling would be correct too.
             for (const LambdaCapture& scope_capture : expr.lambda_captures) scopes.back().insert(scope_capture.name);
             qualify_same_namespace_function_calls_in_stmt(*expr.lambda_body, namespace_prefix, known_function_names,
                                                           scopes);
@@ -10457,11 +10454,11 @@ private:
             // -- so a user can never accidentally shadow it with a
             // same-named parameter/local), but behaves exactly like an
             // Identifier expression bound to the name "this" everywhere
-            // downstream: it resolves through the exact same
-            // `body.local_types`/`locals_` lookup as any other reference-
-            // typed local, since parse_class_def's make_this_param
-            // already registered it as an ordinary params[0] named
-            // "this".
+            // downstream: it is resolved to a declaration by mir.cppm's
+            // resolve_locals, and looked up through codegen's `locals_`,
+            // exactly like any other reference-typed local, since
+            // parse_class_def's make_this_param already registered it as
+            // an ordinary params[0] named "this".
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::Identifier;
             node->loc = loc;

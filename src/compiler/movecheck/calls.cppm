@@ -196,7 +196,7 @@ struct NodiscardInfo {
 [[nodiscard]] std::expected<void, DataflowError> validate_sizeof_operand(const Expr& expr, const Body& body, const Signatures& signatures,
                                     const SourceLocation& loc);
 [[nodiscard]] std::expected<void, DataflowError> validate_alignof_operand(const Expr& expr, const Body& body, const SourceLocation& loc);
-        [[nodiscard]] std::optional<std::string> direct_write_root(const Expr& expr, const Body& body);
+[[nodiscard]] std::optional<LocalId> direct_write_root(const Expr& expr, const Body& body);
 [[nodiscard]] bool produces_rvalue_of_type(const Expr& expr, const Type& expected_type, const Body& body,
                                            const Signatures& signatures);
 
@@ -310,16 +310,15 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
             callee_expr = callee_expr->lhs.get();
         }
         if (callee_expr->kind == ExprKind::Identifier) {
-            auto type_it = body.local_types.find(callee_expr->name);
-            if (type_it != body.local_types.end() && is_function_pointer(type_it->second)) {
-                return CalleeSignature{"", 0, function_pointer_signature(type_it->second)};
+            const Type* callee_type = body.type_if_local(*callee_expr);
+            if (callee_type != nullptr && is_function_pointer(*callee_type)) {
+                return CalleeSignature{"", 0, function_pointer_signature(*callee_type)};
             }
         } else if (class_field_types != nullptr && callee_expr->kind == ExprKind::Member && callee_expr->lhs &&
                    callee_expr->lhs->kind == ExprKind::Identifier) {
-            auto base_it = body.local_types.find(callee_expr->lhs->name);
-            if (base_it != body.local_types.end()) {
-                const Type& base_type =
-                    base_it->second.kind == TypeKind::Reference ? *base_it->second.pointee : base_it->second;
+            const Type* base = body.type_if_local(*callee_expr->lhs);
+            if (base != nullptr) {
+                const Type& base_type = base->kind == TypeKind::Reference ? *base->pointee : *base;
                 if (base_type.kind == TypeKind::Named) {
                     auto fields_it = class_field_types->find(base_type.name);
                     if (fields_it != class_field_types->end()) {
@@ -334,10 +333,9 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
     }
     if (call_expr.lhs && !call_expr.name.empty() && class_field_types != nullptr &&
         call_expr.lhs->kind == ExprKind::Identifier) {
-        auto base_it = body.local_types.find(call_expr.lhs->name);
-        if (base_it != body.local_types.end()) {
-            const Type& base_type =
-                base_it->second.kind == TypeKind::Reference ? *base_it->second.pointee : base_it->second;
+        const Type* base = body.type_if_local(*call_expr.lhs);
+        if (base != nullptr) {
+            const Type& base_type = base->kind == TypeKind::Reference ? *base->pointee : *base;
             if (base_type.kind == TypeKind::Named) {
                 auto fields_it = class_field_types->find(base_type.name);
                 if (fields_it != class_field_types->end()) {
@@ -349,8 +347,8 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
             }
         }
     }
-    if (!call_expr.lhs && !call_expr.explicit_global_qualification && body.local_types.contains(call_expr.name)) {
-        const Type& local_type = body.local_types.at(call_expr.name);
+    if (const Type* bare_local_type = body.type_if_local(call_expr); bare_local_type != nullptr) {
+        const Type& local_type = *bare_local_type;
         const Type& callee_type =
             local_type.kind == TypeKind::Reference && local_type.pointee != nullptr ? *local_type.pointee : local_type;
         if (is_function_pointer(callee_type)) {
@@ -378,11 +376,11 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
     if (call_expr.lhs) {
         std::string class_name;
         if (call_expr.lhs->kind == ExprKind::Identifier) {
-            auto type_it = body.local_types.find(call_expr.lhs->name);
-            if (type_it != body.local_types.end()) class_name = named_type_name(type_it->second);
+            const Type* receiver = body.type_if_local(*call_expr.lhs);
+            if (receiver != nullptr) class_name = named_type_name(*receiver);
         } else if (is_explicit_star_this(*call_expr.lhs)) {
-            auto type_it = body.local_types.find("this");
-            if (type_it != body.local_types.end()) class_name = named_type_name(type_it->second);
+            std::optional<LocalId> self = body.this_local();
+            if (self.has_value()) class_name = named_type_name(body.type_of(*self));
         } else if (call_expr.lhs->kind == ExprKind::Lambda && !call_expr.lhs->name.empty()) {
             class_name = call_expr.lhs->name;
         } else if (class_field_types != nullptr && call_expr.lhs->kind == ExprKind::Member &&
@@ -400,10 +398,10 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
             // codegen -- which never runs at all for a synthetic,
             // check-only function (ClassDef::is_synthetic_check_only),
             // the exact gap this closes.
-            auto base_it = body.local_types.find(call_expr.lhs->lhs->name);
-            if (base_it != body.local_types.end()) {
+            const Type* member_base = body.type_if_local(*call_expr.lhs->lhs);
+            if (member_base != nullptr) {
                 const Type& base_type =
-                    base_it->second.kind == TypeKind::Reference ? *base_it->second.pointee : base_it->second;
+                    member_base->kind == TypeKind::Reference ? *member_base->pointee : *member_base;
                 if (base_type.kind == TypeKind::Named) {
                     auto fields_it = class_field_types->find(base_type.name);
                     if (fields_it != class_field_types->end()) {
@@ -562,8 +560,8 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 
 [[nodiscard]] bool is_implicit_move_return_source(const Expr& expr, const Type& target_type, const Body& body) {
     if (expr.kind != ExprKind::Identifier || expr.explicit_global_qualification) return false;
-    auto it = body.local_types.find(expr.name);
-    return it != body.local_types.end() && types_equal(it->second, target_type);
+    const Type* type = body.type_if_local(expr);
+    return type != nullptr && types_equal(*type, target_type);
 }
 
 // Whether `arg` is a legitimate argument for a candidate overload's
@@ -967,7 +965,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
     };
     const Expr* source = &expr;
     if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::AddressOf && expr.lhs) source = expr.lhs.get();
-    if (source->kind != ExprKind::Identifier || body.local_types.contains(source->name)) return std::nullopt;
+    if (source->kind != ExprKind::Identifier || body.local_of(*source).has_value()) return std::nullopt;
     const GlobalVar* visible_global = nullptr;
     if (body.program != nullptr) {
         std::reference_wrapper<const Program> program_ref{*body.program};
@@ -1113,10 +1111,10 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
 [[nodiscard]] bool assignment_target_is_read_only(const Expr& expr, const Body& body, const Signatures& signatures) {
     switch (expr.kind) {
         case ExprKind::Identifier: {
-            auto it = body.local_types.find(expr.name);
-            if (it != body.local_types.end()) {
-                return body.const_locals.contains(expr.name) ||
-                       ((is_reference(it->second) || is_span(it->second)) && !it->second.is_mutable_ref);
+            if (std::optional<LocalId> local = body.local_of(expr); local.has_value()) {
+                const Type& type = body.type_of(*local);
+                return body.decl(*local).is_const ||
+                       ((is_reference(type) || is_span(type)) && !type.is_mutable_ref);
             }
             if (const GlobalVar* global = find_visible_global_for_expr(expr, body); global != nullptr && global->decl != nullptr) {
                 const Type& type = global->decl->type;
@@ -1213,9 +1211,9 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
     if (expr.lhs == nullptr || expr.name.empty() || expr.lhs->kind != ExprKind::Identifier || body.program == nullptr) {
         return std::nullopt;
     }
-    auto base_it = body.local_types.find(expr.lhs->name);
-    if (base_it == body.local_types.end()) return std::nullopt;
-    std::string class_name = named_type_name(base_it->second);
+    const Type* base = body.type_if_local(*expr.lhs);
+    if (base == nullptr) return std::nullopt;
+    std::string class_name = named_type_name(*base);
     if (class_name.empty()) return std::nullopt;
     const ClassDef* def = find_class_def(*body.program, class_name);
     if (def == nullptr) return std::nullopt;
@@ -1418,7 +1416,7 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
 // e.g. produces_rvalue_of_type's similarly-scoped Call handling just
 // above). Covers every expression shape that can legally appear as a
 // call argument in this version: literals, a plain local (via
-// body.local_types), std::move/std::make_unique, a nested call's own
+// body.local_decls), std::move/std::make_unique, a nested call's own
 // (resolved) return type, and the common unary/binary operators.
 // Returns nullopt for anything it can't determine -- notably Member/
 // Subscript chains, since movecheck has no access to Program's struct/
@@ -1448,8 +1446,7 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
         }
 
         case ExprKind::Identifier: {
-            auto it = expr.explicit_global_qualification ? body.local_types.end() : body.local_types.find(expr.name);
-            if (it != body.local_types.end()) return it->second;
+            if (const Type* local_type = body.type_if_local(expr); local_type != nullptr) return *local_type;
             if (const GlobalVar* global = find_visible_global_for_expr(expr, body); global != nullptr && global->decl != nullptr) {
                 return global->decl->type;
             }
@@ -1478,14 +1475,15 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             // std::move doesn't change the static type -- still whatever
             // std::unique_ptr<T> the moved-from local was declared as.
             if (expr.lhs->kind == ExprKind::Identifier) {
-                auto it = body.local_types.find(expr.lhs->name);
-                if (it == body.local_types.end()) {
+                const Type* moved_type = body.type_if_local(*expr.lhs);
+                if (moved_type == nullptr) {
                     if (const GlobalVar* global = find_visible_global_for_expr(*expr.lhs, body);
                         global != nullptr && global->decl != nullptr) {
                         return global->decl->type;
                     }
+                    return std::nullopt;
                 }
-                return it == body.local_types.end() ? std::nullopt : std::optional<Type>(it->second);
+                return std::optional<Type>(*moved_type);
             }
             // std::move(v.back())/std::move(v.front()) (relocating a
             // container element elsewhere, e.g. `std::string x =
@@ -1548,7 +1546,7 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
                 case UnaryOp::PostDec:
                     return infer_expr_type(*expr.lhs, body, signatures);
                 case UnaryOp::AddressOf: {
-                    if (expr.lhs->kind == ExprKind::Identifier && !body.local_types.contains(expr.lhs->name) &&
+                    if (expr.lhs->kind == ExprKind::Identifier && !body.local_of(*expr.lhs).has_value() &&
                         find_visible_global_for_expr(*expr.lhs, body) == nullptr) {
                         auto it = signatures.find(expr.lhs->name);
                         if (it != signatures.end() && it->second.size() == 1) {

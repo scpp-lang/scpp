@@ -136,9 +136,9 @@ namespace scpp {
     return op == BinaryOp::AddAssign || op == BinaryOp::SubAssign || op == BinaryOp::MulAssign || op == BinaryOp::DivAssign;
 }
 
-[[nodiscard]] bool return_roots_are_proven_to_outlive_call(const RootSet& returned_roots, std::string_view expected_root) {
+[[nodiscard]] bool return_roots_are_proven_to_outlive_call(const RootSet& returned_roots, LocalId expected_root) {
     if (returned_roots.empty()) return false;
-    for (const std::string& root : returned_roots) {
+    for (LocalId root : returned_roots) {
         if (root == expected_root) continue;
         if (is_program_lifetime_root(root)) continue;
         return false;
@@ -148,7 +148,7 @@ namespace scpp {
 
 [[nodiscard]] bool roots_are_program_lifetime_only(const RootSet& roots) {
     if (roots.empty()) return false;
-    for (const std::string& root : roots) {
+    for (LocalId root : roots) {
         if (!is_program_lifetime_root(root)) return false;
     }
     return true;
@@ -157,9 +157,9 @@ namespace scpp {
 [[nodiscard]] bool expr_is_definitely_null_pointer(const Expr& expr, const DataflowState& state, const Body& body) {
     if (is_nullptr_literal_expr(expr)) return true;
     if (expr.kind != ExprKind::Identifier || expr.explicit_global_qualification) return false;
-    auto type_it = body.local_types.find(expr.name);
-    if (type_it == body.local_types.end() || type_it->second.kind != TypeKind::Pointer) return false;
-    auto source_it = state.local_lifetime_sources.find(expr.name);
+    std::optional<LocalId> local = body.local_of(expr);
+    if (!local.has_value() || body.type_of(*local).kind != TypeKind::Pointer) return false;
+    auto source_it = state.local_lifetime_sources.find(*local);
     return source_it != state.local_lifetime_sources.end() && source_it->second.empty();
 }
 
@@ -221,25 +221,25 @@ namespace scpp {
                                 "' to this place: it is reached through a read-only (const) reference",
                             expr.loc));
     }
-    if (std::optional<std::string> lender = resolve_reborrow_lender(*expr.lhs, body, signatures); lender.has_value()) {
-        if (auto _r = validate_reborrow_lender_write(*lender, state, report_errors); !_r.has_value()) {
+    if (std::optional<LocalId> lender = resolve_reborrow_lender(*expr.lhs, body, signatures); lender.has_value()) {
+        if (auto _r = validate_reborrow_lender_write(*lender, state, body, report_errors); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
     }
     if (!write_is_licensed_by_mutable_reborrow_lender(*expr.lhs, state, body, signatures)) {
-        for (const std::string& root : write_roots) {
+        for (LocalId root : write_roots) {
             auto borrow_it = state.borrows.find(root);
             if (borrow_it != state.borrows.end() &&
                 (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
                 return std::unexpected(DataflowError("cannot apply '" +
                                         std::string(expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PostInc ? "++" : "--") +
-                                        "' to this place: '" + root + "' is currently borrowed",
+                                        "' to this place: " + format_root(body, root) + " is currently borrowed",
                                     expr.loc));
             }
         }
     }
-    if (expr.lhs->kind == ExprKind::Identifier) {
-        state.locals[expr.lhs->name] = LocalState::Initialized;
+    if (std::optional<LocalId> target = body.local_of(*expr.lhs); target.has_value()) {
+        state.locals[*target] = LocalState::Initialized;
     }
     return {};
 }
@@ -270,10 +270,10 @@ namespace scpp {
 
 [[nodiscard]] bool write_is_licensed_by_mutable_reborrow_lender(const Expr& target, const DataflowState& state,
                                                                 const Body& body, const Signatures& signatures) {
-    std::optional<std::string> lender = resolve_reborrow_lender(target, body, signatures);
+    std::optional<LocalId> lender = resolve_reborrow_lender(target, body, signatures);
     if (!lender.has_value()) return false;
-    auto type_it = body.local_types.find(*lender);
-    if (type_it == body.local_types.end() || !is_reborrowable_local_type(type_it->second) || !type_it->second.is_mutable_ref) {
+    const Type& lender_type = body.type_of(*lender);
+    if (!is_reborrowable_local_type(lender_type) || !lender_type.is_mutable_ref) {
         return false;
     }
     return lookup(state.locals, *lender) == LocalState::Initialized;
@@ -309,14 +309,14 @@ namespace scpp {
         return std::unexpected(DataflowError("cannot assign to this place: it is reached through a read-only (const) reference",
                             state.current_loc));
     }
-    if (std::optional<std::string> lender = resolve_reborrow_lender(*expr.lhs, body, signatures); lender.has_value()) {
-        if (auto _r = validate_reborrow_lender_write(*lender, state, report_errors); !_r.has_value()) {
+    if (std::optional<LocalId> lender = resolve_reborrow_lender(*expr.lhs, body, signatures); lender.has_value()) {
+        if (auto _r = validate_reborrow_lender_write(*lender, state, body, report_errors); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
     }
     bool write_through_mutable_reborrow = write_is_licensed_by_mutable_reborrow_lender(*expr.lhs, state, body, signatures);
     RootSet write_roots;
-    if (std::optional<std::string> root = direct_write_root(*expr.lhs, body)) {
+    if (std::optional<LocalId> root = direct_write_root(*expr.lhs, body)) {
         write_roots = single_root(*root);
     } else {
         auto write_roots_result = resolve_borrow_source_root(*expr.lhs, state, body, signatures, /*report_errors=*/false);
@@ -329,15 +329,18 @@ namespace scpp {
                             expr.loc));
     }
     if (!write_through_mutable_reborrow) {
-        for (const std::string& root : write_roots) {
+        for (LocalId root : write_roots) {
             auto borrow_it = state.borrows.find(root);
             if (borrow_it != state.borrows.end() &&
                 (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-                return std::unexpected(DataflowError("cannot assign to this place: '" + root + "' is currently borrowed", state.current_loc));
+                return std::unexpected(DataflowError("cannot assign to this place: " + format_root(body, root) +
+                                                         " is currently borrowed", state.current_loc));
             }
         }
     }
-    if (expr.lhs->kind == ExprKind::Identifier) state.locals[expr.lhs->name] = LocalState::Initialized;
+    if (std::optional<LocalId> target = body.local_of(*expr.lhs); target.has_value()) {
+        state.locals[*target] = LocalState::Initialized;
+    }
     return {};
 }
 
@@ -430,8 +433,7 @@ namespace scpp {
     std::optional<Type> resolved =
         operand.kind == ExprKind::Member ? resolve_member_field_type(operand, body, state, signatures)
                                          : [&]() -> std::optional<Type> {
-            auto it = body.local_types.find(operand.name);
-            if (it != body.local_types.end()) return it->second;
+            if (const Type* local_type = body.type_if_local(operand); local_type != nullptr) return *local_type;
             return find_visible_global_type(operand.name, operand.explicit_global_qualification, body);
         }();
     if (!resolved.has_value() && operand.kind != ExprKind::Identifier && operand.kind != ExprKind::Member) {
@@ -468,11 +470,12 @@ namespace scpp {
         // relying on the type-only checks already done above.
         return {};
     }
-    LocalState current = body.local_types.contains(operand.name)
-                             ? lookup(state.locals, operand.name)
-                             : (find_visible_global_for_name(operand.name, operand.explicit_global_qualification, body) != nullptr
-                                    ? LocalState::Initialized
-                                    : lookup(state.locals, operand.name));
+    std::optional<LocalId> operand_local = body.local_of(operand);
+    if (!operand_local.has_value() &&
+        find_visible_global_for_name(operand.name, operand.explicit_global_qualification, body) != nullptr) {
+        return {};
+    }
+    LocalState current = operand_local.has_value() ? lookup(state.locals, *operand_local) : LocalState::Bottom;
     if (current != LocalState::Initialized) {
         return std::unexpected(DataflowError(describe_bad_state(operand.name, current),
             state.current_loc));
@@ -518,8 +521,10 @@ namespace scpp {
     if (!report_errors) return {}; // purely diagnostic: doesn't move p or change any tracked state
     if (auto _r = validate_deref_expr(expr, state, body, signatures); !_r.has_value()) return std::unexpected(std::move(_r).error());
     if (!is_plain_identifier) return {}; // no separate borrow-tracking key for a field -- see the comment above
+    std::optional<LocalId> pointer_local = body.local_of(*expr.lhs);
+    if (!pointer_local.has_value()) return {};
     const std::string& name = expr.lhs->name;
-    auto borrow_it = state.borrows.find(name);
+    auto borrow_it = state.borrows.find(*pointer_local);
     if (borrow_it != state.borrows.end() && borrow_it->second.mutable_borrow) {
         // `expr.lhs->loc` (the identifier `name` itself), not
         // `state.current_loc` (the enclosing `*`/Deref's own position,
@@ -601,9 +606,9 @@ namespace scpp {
     // satisfy a `T&` parameter (that would manufacture a mutable alias
     // out of a shared one), but a mutable reference may always be lent
     // out as either mutable or shared.
-    std::optional<std::string> lender = resolve_reborrow_lender(arg, body, signatures);
-    bool lender_is_mutable =
-        lender.has_value() && is_reborrowable_local_type(body.local_types.at(*lender)) && body.local_types.at(*lender).is_mutable_ref;
+    std::optional<LocalId> lender = resolve_reborrow_lender(arg, body, signatures);
+    bool lender_is_mutable = lender.has_value() && is_reborrowable_local_type(body.type_of(*lender)) &&
+                             body.type_of(*lender).is_mutable_ref;
     if (lender.has_value() && lender_is_mutable) {
         if (auto _r = validate_reborrow_lender(*lender, is_mutable, state, body, report_errors); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
@@ -620,32 +625,32 @@ namespace scpp {
         // reference out of a read-only one (spec ch05 §5.7's "projection
         // chain's const-reachability").
         if (is_mutable && is_read_only_reachable(arg, body, signatures)) {
-            return std::unexpected(DataflowError("cannot pass " + format_roots(roots) + " by mutable reference: it is only reachable "
+            return std::unexpected(DataflowError("cannot pass " + format_roots(body, roots) + " by mutable reference: it is only reachable "
                                                           "through a read-only (const) reference",
                 state.current_loc));
         }
-        for (const std::string& root : roots) {
+        for (LocalId root : roots) {
             auto persistent_it = state.borrows.find(root);
             bool persistent_conflict =
                 persistent_it != state.borrows.end() &&
                 (is_mutable ? (persistent_it->second.mutable_borrow || persistent_it->second.shared_count > 0)
                             : persistent_it->second.mutable_borrow);
             if (persistent_conflict) {
-                return std::unexpected(DataflowError("cannot pass '" + root + "' by " + std::string(is_mutable ? "mutable " : "") +
+                return std::unexpected(DataflowError("cannot pass " + format_root(body, root) + " by " + std::string(is_mutable ? "mutable " : "") +
                                         "reference: it is already borrowed",
                                     state.current_loc));
             }
         }
     }
 
-    for (const std::string& root : roots) {
+    for (LocalId root : roots) {
         auto in_call_it = in_call_borrows.find(root);
         bool in_call_conflict =
             in_call_it != in_call_borrows.end() &&
             (is_mutable ? (in_call_it->second.mutable_borrow || in_call_it->second.shared_count > 0)
                         : in_call_it->second.mutable_borrow);
         if (in_call_conflict) {
-            return std::unexpected(DataflowError("cannot pass '" + root + "' by " + std::string(is_mutable ? "mutable " : "") +
+            return std::unexpected(DataflowError("cannot pass " + format_root(body, root) + " by " + std::string(is_mutable ? "mutable " : "") +
                                     "reference more than once in the same call",
                                 state.current_loc));
         }
@@ -1308,12 +1313,11 @@ namespace scpp {
 
         case ExprKind::Identifier: {
             if (!report_errors) return {};
-            auto type_it = expr.explicit_global_qualification ? body.local_types.end() : body.local_types.find(expr.name);
-            if (type_it == body.local_types.end() &&
-                find_visible_global_for_name(expr.name, expr.explicit_global_qualification, body) == nullptr) {
-                return {}; // unknown name: left to codegen's own check
+            std::optional<LocalId> local = body.local_of(expr);
+            if (!local.has_value()) {
+                return {}; // a global, or an unknown name left to codegen's own check
             }
-            LocalState current = type_it != body.local_types.end() ? lookup(state.locals, expr.name) : LocalState::Initialized;
+            LocalState current = lookup(state.locals, *local);
             if (current != LocalState::Initialized) {
                 return std::unexpected(DataflowError(describe_bad_state(expr.name, current),
                     state.current_loc));
@@ -1330,7 +1334,7 @@ namespace scpp {
             // blocked by this check -- only reading the aliased root
             // directly (`a`, or an opaque reference parameter that some
             // other local reference borrows from) is.
-            auto borrow_it = state.borrows.find(expr.name);
+            auto borrow_it = state.borrows.find(*local);
             if (borrow_it != state.borrows.end() && borrow_it->second.mutable_borrow) {
                 return std::unexpected(DataflowError("cannot use '" + expr.name + "' while it is mutably borrowed",
                     state.current_loc));
@@ -1348,14 +1352,14 @@ namespace scpp {
                 return {};
             }
             const std::string& name = expr.lhs->name;
-            auto type_it = body.local_types.find(name);
             // spec §6.2(3): `std::move(E)` is a syntactic ownership-state
             // transition on any named object `E`, not just on class types.
             // The same named-object rule already covers an rvalue-
             // reference local/parameter (`Inner&& i`, ch03/ch05 §5.11):
             // `i` itself is still a name, and moving from it marks that
             // local/parameter moved-out exactly like any other local name.
-            if (type_it == body.local_types.end()) {
+            std::optional<LocalId> moved = body.local_of(*expr.lhs);
+            if (!moved.has_value()) {
                 if (find_visible_global_for_name(name, expr.lhs->explicit_global_qualification, body) != nullptr) {
                     return {};
                 }
@@ -1365,20 +1369,20 @@ namespace scpp {
                 }
                 return {};
             }
-            LocalState current = lookup(state.locals, name);
+            LocalState current = lookup(state.locals, *moved);
             if (report_errors && current != LocalState::Initialized) {
                 return std::unexpected(DataflowError(describe_bad_state(name, current),
                     state.current_loc));
             }
             if (report_errors) {
-                auto borrow_it = state.borrows.find(name);
+                auto borrow_it = state.borrows.find(*moved);
                 if (borrow_it != state.borrows.end() &&
                     (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
                     return std::unexpected(DataflowError("cannot move '" + name + "' while it is borrowed",
                         state.current_loc));
                 }
             }
-            state.locals[name] = LocalState::MovedOut;
+            state.locals[*moved] = LocalState::MovedOut;
             if (report_errors && !is_move_target_context) {
                 return std::unexpected(DataflowError("std::move(" + name + ") must be used to initialize, assign into, return, "
                                                             "pass, or capture a value",
@@ -1609,11 +1613,11 @@ namespace scpp {
                 bool target_is_movable_class = false;
                 std::optional<Type> target_class_type;
                 if (expr.lhs->kind == ExprKind::Identifier) {
-                    auto it = body.local_types.find(expr.lhs->name);
-                    if (it != body.local_types.end() && it->second.kind == TypeKind::Named &&
-                        state.class_names != nullptr && state.class_names->contains(it->second.name)) {
+                    const Type* target_type = body.type_if_local(*expr.lhs);
+                    if (target_type != nullptr && target_type->kind == TypeKind::Named &&
+                        state.class_names != nullptr && state.class_names->contains(target_type->name)) {
                         target_is_movable_class = true;
-                        target_class_type = it->second;
+                        target_class_type = *target_type;
                     }
                 } else if (expr.lhs->kind == ExprKind::Member) {
                     // ch04 §4.2/spec §6.4/§6.5: `this.field = std::move(x);`
@@ -1678,15 +1682,14 @@ namespace scpp {
                     }
                 }
                 if (expr.lhs->kind == ExprKind::Identifier) {
-                    auto it = body.local_types.find(expr.lhs->name);
-                    if (it != body.local_types.end()) {
-                        if (auto _r = check_function_pointer_assignment(it->second, *expr.rhs, body, signatures, state.current_loc,
+                    if (const Type* target_type = body.type_if_local(*expr.lhs); target_type != nullptr) {
+                        if (auto _r = check_function_pointer_assignment(*target_type, *expr.rhs, body, signatures, state.current_loc,
                                                           expr.lhs->name, report_errors);
                             !_r.has_value()) {
                             return std::unexpected(std::move(_r).error());
                         }
                         if (report_errors) {
-                            if (auto _r = check_enum_conversion_compatibility(it->second, *expr.rhs, body, signatures,
+                            if (auto _r = check_enum_conversion_compatibility(*target_type, *expr.rhs, body, signatures,
                                                                 state.current_loc);
                                 !_r.has_value()) {
                                 return std::unexpected(std::move(_r).error());
@@ -1710,12 +1713,12 @@ namespace scpp {
                         }
                     }
                 }
-                if (expr.lhs->kind == ExprKind::Identifier) {
+                if (std::optional<LocalId> target = body.local_of(*expr.lhs); target.has_value()) {
                     // The assignment target is never a "read": whatever
                     // its previous state, assigning any value returns it
                     // to Initialized (spec ch05.1).
-                    state.locals[expr.lhs->name] = LocalState::Initialized;
-                } else {
+                    state.locals[*target] = LocalState::Initialized;
+                } else if (expr.lhs->kind != ExprKind::Identifier) {
                     // e.g. `p.x = 1;` or `arr[i] = 1;`: the base
                     // object/index are evaluated (as addresses / an
                     // index value), not read as "the assignment target",
@@ -1729,16 +1732,16 @@ namespace scpp {
                                                  "read-only (const) reference",
                                 state.current_loc));
                         }
-                        if (std::optional<std::string> lender = resolve_reborrow_lender(*expr.lhs, body, signatures);
+                        if (std::optional<LocalId> lender = resolve_reborrow_lender(*expr.lhs, body, signatures);
                             lender.has_value()) {
-                            if (auto _r = validate_reborrow_lender_write(*lender, state, report_errors); !_r.has_value()) {
+                            if (auto _r = validate_reborrow_lender_write(*lender, state, body, report_errors); !_r.has_value()) {
                                 return std::unexpected(std::move(_r).error());
                             }
                         }
                         bool write_through_mutable_reborrow =
                             write_is_licensed_by_mutable_reborrow_lender(*expr.lhs, state, body, signatures);
                         RootSet write_roots;
-                        if (std::optional<std::string> root = direct_write_root(*expr.lhs, body)) {
+                        if (std::optional<LocalId> root = direct_write_root(*expr.lhs, body)) {
                             write_roots = single_root(*root);
                         } else {
                             auto write_roots_result = resolve_borrow_source_root(*expr.lhs, state, body, signatures, /*report_errors=*/false);
@@ -1746,12 +1749,12 @@ namespace scpp {
                             write_roots = std::move(write_roots_result).value();
                         }
                         if (!write_through_mutable_reborrow) {
-                            for (const std::string& root : write_roots) {
+                            for (LocalId root : write_roots) {
                                 auto borrow_it = state.borrows.find(root);
                                 if (borrow_it != state.borrows.end() &&
                                     (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-                                    return std::unexpected(DataflowError("cannot assign to this place: '" + root +
-                                                            "' is currently borrowed",
+                                    return std::unexpected(DataflowError("cannot assign to this place: " + format_root(body, root) +
+                                                            " is currently borrowed",
                                                         state.current_loc));
                                 }
                             }
@@ -1863,9 +1866,8 @@ namespace scpp {
             // `a.b` is itself class-typed) isn't covered by this check
             // yet, a known, narrow scope limitation.
             if (report_errors && expr.lhs->kind == ExprKind::Identifier && state.class_names != nullptr) {
-                auto type_it = body.local_types.find(expr.lhs->name);
-                if (type_it != body.local_types.end()) {
-                    std::string class_name = named_type_name(type_it->second);
+                if (const Type* base_type = body.type_if_local(*expr.lhs); base_type != nullptr) {
+                    std::string class_name = named_type_name(*base_type);
                     if (!class_name.empty() && state.class_names->contains(class_name) &&
                         !grants_private_access(state, class_name)) {
                         AccessSpecifier access = AccessSpecifier::Private;
@@ -1943,7 +1945,7 @@ namespace scpp {
         // either).
         if (report_errors) {
             const char* kind_name = is_span(stmt.type) ? "span" : "reference";
-            return std::unexpected(DataflowError(std::string(kind_name) + " '" + stmt.local +
+            return std::unexpected(DataflowError(std::string(kind_name) + " '" + body.name_of(stmt.local) +
                                  "' must be initialized (bound to a variable) at declaration",
                 state.current_loc));
         }
@@ -1988,7 +1990,7 @@ namespace scpp {
             }
         }
         if (!reference_binding_compatible) {
-            return std::unexpected(DataflowError("cannot bind reference '" + stmt.local +
+            return std::unexpected(DataflowError("cannot bind reference '" + body.name_of(stmt.local) +
                                  "' from an incompatible source type",
                                 state.current_loc));
         }
@@ -2010,9 +2012,9 @@ namespace scpp {
     }
 
     bool is_mutable = stmt.type.is_mutable_ref;
-    std::optional<std::string> lender = resolve_reborrow_lender(*stmt.expr, body, signatures);
-    bool lender_is_mutable =
-        lender.has_value() && is_reborrowable_local_type(body.local_types.at(*lender)) && body.local_types.at(*lender).is_mutable_ref;
+    std::optional<LocalId> lender = resolve_reborrow_lender(*stmt.expr, body, signatures);
+    bool lender_is_mutable = lender.has_value() && is_reborrowable_local_type(body.type_of(*lender)) &&
+                             body.type_of(*lender).is_mutable_ref;
     bool uses_lender_suspension = lender.has_value() && lender_is_mutable;
     if (uses_lender_suspension) {
         if (auto _r = validate_reborrow_lender(*lender, is_mutable, state, body, report_errors); !_r.has_value()) {
@@ -2029,21 +2031,21 @@ namespace scpp {
     // regardless (read-only never needs to widen).
     if (report_errors && is_mutable && is_read_only_reachable(*stmt.expr, body, signatures)) {
         const char* kind_name = is_span(stmt.type) ? "span" : "reference";
-        return std::unexpected(DataflowError(std::string("cannot bind a mutable ") + kind_name + " '" + stmt.local +
+        return std::unexpected(DataflowError(std::string("cannot bind a mutable ") + kind_name + " '" + body.name_of(stmt.local) +
                              "': its source is only reachable through a read-only (const) reference",
             state.current_loc));
     }
 
     if (!uses_lender_suspension) {
-        for (const std::string& root : roots) {
+        for (LocalId root : roots) {
             BorrowState& borrow = state.borrows[root];
             if (report_errors) {
                 if (is_mutable && (borrow.mutable_borrow || borrow.shared_count > 0)) {
-                    return std::unexpected(DataflowError("cannot mutably borrow '" + root + "': it is already borrowed",
+                    return std::unexpected(DataflowError("cannot mutably borrow " + format_root(body, root) + ": it is already borrowed",
                                         state.current_loc));
                 }
                 if (!is_mutable && borrow.mutable_borrow) {
-                    return std::unexpected(DataflowError("cannot borrow '" + root + "': it is already mutably borrowed",
+                    return std::unexpected(DataflowError("cannot borrow " + format_root(body, root) + ": it is already mutably borrowed",
                                         state.current_loc));
                 }
             }
@@ -2058,7 +2060,8 @@ namespace scpp {
     } else {
         state.suspended_reborrows[*lender].shared_count++;
     }
-    state.ref_targets[stmt.local] = RefTarget{roots, uses_lender_suspension ? *lender : "", is_mutable};
+    state.ref_targets[stmt.local] =
+        RefTarget{roots, uses_lender_suspension ? lender : std::optional<LocalId>{}, is_mutable};
     state.local_lifetime_sources[stmt.local] = roots;
     state.locals[stmt.local] = LocalState::Initialized;
     return {};
@@ -2075,19 +2078,19 @@ namespace scpp {
 // apply_expr for the symmetric read-side reasoning).
 [[nodiscard]] std::expected<void, DataflowError> apply_reference_write_through(const MirStatement& stmt, DataflowState& state, const Body& body,
                                     const Signatures& signatures, bool report_errors) {
-    const Type& ref_type = body.local_types.at(stmt.local);
+    const Type& ref_type = body.type_of(stmt.local);
     if (report_errors) {
-        if (auto _r = validate_reborrow_lender_write(stmt.local, state, report_errors); !_r.has_value()) {
+        if (auto _r = validate_reborrow_lender_write(stmt.local, state, body, report_errors); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
         if (!ref_type.is_mutable_ref) {
-            return std::unexpected(DataflowError("cannot assign through '" + stmt.local +
+            return std::unexpected(DataflowError("cannot assign through '" + body.name_of(stmt.local) +
                                  "': it is a read-only (const) reference",
                 state.current_loc));
         }
         LocalState current = lookup(state.locals, stmt.local);
         if (current != LocalState::Initialized) {
-            return std::unexpected(DataflowError(describe_bad_state(stmt.local, current),
+            return std::unexpected(DataflowError(describe_bad_state(body.name_of(stmt.local), current),
                 state.current_loc));
         }
     }
@@ -2112,8 +2115,8 @@ namespace scpp {
     if (ctor_args.size() != 1) return false;
     const Expr& arg = *ctor_args[0];
     if (arg.kind != ExprKind::Move || arg.lhs->kind != ExprKind::Identifier) return false;
-    auto type_it = body.local_types.find(arg.lhs->name);
-    return type_it != body.local_types.end() && types_equal(type_it->second, constructed_type);
+    const Type* source_type = body.type_if_local(*arg.lhs);
+    return source_type != nullptr && types_equal(*source_type, constructed_type);
 }
 
 [[nodiscard]] bool is_lvalue_copy_source_shape(const Expr& expr) {
@@ -2238,9 +2241,16 @@ namespace scpp {
             return apply_reference_binding(stmt, state, body, signatures, report_errors);
 
         case MirStatementKind::Assign: {
-            auto type_it = body.local_types.find(stmt.local);
-            // ch05/ch06: a `const`-qualified local (Stmt::is_const,
-            // Body::const_locals) is initialized exactly once, by the
+            // The target is a local (keyed by its own declaration) or,
+            // when it has none, a global -- the one assignable place
+            // that has no declaration in this body. `target_name` is the
+            // source spelling of either, and is only ever used for
+            // diagnostics.
+            const Type* local_type = stmt.has_local ? &body.type_of(stmt.local) : nullptr;
+            std::string target_name = stmt.has_local ? body.name_of(stmt.local)
+                                                     : (stmt.target != nullptr ? stmt.target->name : std::string{});
+            // ch05/ch06: a `const`-qualified local (LocalDecl::is_const)
+            // is initialized exactly once, by the
             // very same Assign statement its own VarDecl lowers to (see
             // mir.cppm's VarDecl case) -- distinguished from a genuine
             // later reassignment attempt by whether `stmt.local` already
@@ -2252,31 +2262,31 @@ namespace scpp {
             // uniformly covers all of them with one rule, rather than
             // needing to be threaded through each one separately.
             if (report_errors &&
-                ((body.const_locals.contains(stmt.local) && state.locals.contains(stmt.local)) ||
-                 is_visible_global_const(stmt.local, /*explicit_global_qualification=*/false, body))) {
-                return std::unexpected(DataflowError("cannot reassign 'const' variable '" + stmt.local + "' after initialization",
+                ((stmt.has_local && body.decl(stmt.local).is_const && state.locals.contains(stmt.local)) ||
+                 (!stmt.has_local && is_visible_global_const(target_name, /*explicit_global_qualification=*/false, body)))) {
+                return std::unexpected(DataflowError("cannot reassign 'const' variable '" + target_name + "' after initialization",
                     state.current_loc));
             }
-            if (type_it == body.local_types.end()) {
+            if (local_type == nullptr) {
                 std::optional<Type> global_type =
-                    find_visible_global_type(stmt.local, /*explicit_global_qualification=*/false, body);
+                    find_visible_global_type(target_name, /*explicit_global_qualification=*/false, body);
                 if (!global_type.has_value()) return {};
-                if (auto _r = check_function_pointer_assignment(*global_type, *stmt.expr, body, signatures, state.current_loc, stmt.local,
+                if (auto _r = check_function_pointer_assignment(*global_type, *stmt.expr, body, signatures, state.current_loc, target_name,
                                                   report_errors);
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
-                if (auto _r = check_raw_pointer_assignment(*global_type, *stmt.expr, body, signatures, state.current_loc, stmt.local,
+                if (auto _r = check_raw_pointer_assignment(*global_type, *stmt.expr, body, signatures, state.current_loc, target_name,
                                              report_errors);
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
                 return apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
             }
-            if (type_it != body.local_types.end() && is_reference(type_it->second)) {
+            if (is_reference((*local_type))) {
                 return apply_reference_write_through(stmt, state, body, signatures, report_errors);
             }
-            if (type_it != body.local_types.end() && is_span(type_it->second)) {
+            if (is_span((*local_type))) {
                 // Unlike real C++ (where std::span is an ordinary,
                 // freely-reassignable value), v0.1 conservatively treats
                 // it exactly like a reference: bound once at
@@ -2284,14 +2294,14 @@ namespace scpp {
                 // BindReference comment) -- lifting that is a follow-up,
                 // not a soundness requirement.
                 if (report_errors) {
-                    return std::unexpected(DataflowError("std::span '" + stmt.local +
+                    return std::unexpected(DataflowError("std::span '" + target_name +
                                          "' cannot be reassigned after initialization in this version",
                         state.current_loc));
                 }
                 return {};
             }
-            if (type_it != body.local_types.end() && state.class_names != nullptr &&
-                type_it->second.kind == TypeKind::Named && state.class_names->contains(type_it->second.name)) {
+            if (state.class_names != nullptr &&
+                (*local_type).kind == TypeKind::Named && state.class_names->contains((*local_type).name)) {
                 // ch04 §4.2: unlike a plain `struct` (an ordinary,
                 // freely-reassignable trivial value), a class-typed local
                 // is conservatively bound once at construction and never
@@ -2338,12 +2348,12 @@ namespace scpp {
                 // same-class rvalue source for a class *with* a reference
                 // member) falls through to the unconditional "no copy
                 // semantics" rejection just below, unchanged.
-                bool is_move_assignment = produces_rvalue_of_type(*stmt.expr, type_it->second, body, signatures);
+                bool is_move_assignment = produces_rvalue_of_type(*stmt.expr, (*local_type), body, signatures);
                 if (is_move_assignment && state.locals.contains(stmt.local)) {
                     if (report_errors) {
                         bool has_reference_member = false;
                         if (state.class_field_types != nullptr) {
-                            auto fields_it = state.class_field_types->find(type_it->second.name);
+                            auto fields_it = state.class_field_types->find((*local_type).name);
                             if (fields_it != state.class_field_types->end()) {
                                 for (const auto& [field_name, field_type] : fields_it->second) {
                                     if (is_reference(field_type)) {
@@ -2355,15 +2365,15 @@ namespace scpp {
                         }
                         if (has_reference_member) {
                             return std::unexpected(DataflowError(
-                                "class '" + type_it->second.name +
+                                "class '" + (*local_type).name +
                                     "' has a reference-typed member, so it has no move assignment operator "
-                                    "(spec §6.4(3)) -- '" + stmt.local + "' cannot be reassigned",
+                                    "(spec §6.4(3)) -- '" + target_name + "' cannot be reassigned",
                                 state.current_loc));
                         }
                         auto borrow_it = state.borrows.find(stmt.local);
                         if (borrow_it != state.borrows.end() &&
                             (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-                            return std::unexpected(DataflowError("cannot assign to class variable '" + stmt.local +
+                            return std::unexpected(DataflowError("cannot assign to class variable '" + target_name +
                                                  "': it is currently borrowed",
                                 state.current_loc));
                         }
@@ -2389,23 +2399,23 @@ namespace scpp {
                 // it, so apply_expr is called with is_move_target_context
                 // irrelevant here (there is no std::move to license).
                 bool freely_copyable_assign_source =
-                    is_freely_copyable_class_value_source(*stmt.expr, type_it->second, body, signatures);
-                if ((is_bare_same_type_copy_source(*stmt.expr, type_it->second, body, signatures) ||
+                    is_freely_copyable_class_value_source(*stmt.expr, (*local_type), body, signatures);
+                if ((is_bare_same_type_copy_source(*stmt.expr, (*local_type), body, signatures) ||
                      freely_copyable_assign_source) &&
                     state.locals.contains(stmt.local)) {
                     if (report_errors) {
                         if (!freely_copyable_assign_source &&
                             (state.classes_with_copy_assign == nullptr ||
-                             !state.classes_with_copy_assign->contains(type_it->second.name))) {
-                            return std::unexpected(DataflowError("class '" + type_it->second.name +
-                                                 "' is not copy-assignable (spec §6.5(3)) -- '" + stmt.local +
+                             !state.classes_with_copy_assign->contains((*local_type).name))) {
+                            return std::unexpected(DataflowError("class '" + (*local_type).name +
+                                                 "' is not copy-assignable (spec §6.5(3)) -- '" + target_name +
                                                  "' cannot be reassigned this way",
                                 state.current_loc));
                         }
                         auto borrow_it = state.borrows.find(stmt.local);
                         if (borrow_it != state.borrows.end() &&
                             (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-                            return std::unexpected(DataflowError("cannot assign to class variable '" + stmt.local +
+                            return std::unexpected(DataflowError("cannot assign to class variable '" + target_name +
                                                  "': it is currently borrowed",
                                 state.current_loc));
                         }
@@ -2418,7 +2428,7 @@ namespace scpp {
                     return {};
                 }
                 if (report_errors && state.locals.contains(stmt.local)) {
-                    return std::unexpected(DataflowError("class '" + type_it->second.name + "'-typed variable '" + stmt.local +
+                    return std::unexpected(DataflowError("class '" + (*local_type).name + "'-typed variable '" + target_name +
                                          "' cannot be reassigned after construction in this version (no copy "
                                          "semantics are defined yet -- see ch04 §4.2)",
                         state.current_loc));
@@ -2444,7 +2454,7 @@ namespace scpp {
                         state.closure_capture_borrows[stmt.local] = std::move(closure_capture_borrows);
                     }
                 } else {
-                    if (produces_rvalue_of_type(*stmt.expr, type_it->second, body, signatures)) {
+                    if (produces_rvalue_of_type(*stmt.expr, (*local_type), body, signatures)) {
                         if (auto _r = apply_expr(*stmt.expr, /*is_move_target_context=*/true, state, body, signatures,
                                    report_errors); !_r.has_value()) {
                             return std::unexpected(std::move(_r).error());
@@ -2468,23 +2478,23 @@ namespace scpp {
                     // as part of implementing this feature).
                     if (report_errors) {
                         bool freely_copyable_init_source =
-                            is_freely_copyable_class_value_source(*stmt.expr, type_it->second, body, signatures);
-                        if (!is_bare_same_type_copy_source(*stmt.expr, type_it->second, body, signatures) &&
+                            is_freely_copyable_class_value_source(*stmt.expr, (*local_type), body, signatures);
+                        if (!is_bare_same_type_copy_source(*stmt.expr, (*local_type), body, signatures) &&
                             !freely_copyable_init_source) {
                             return std::unexpected(DataflowError(
-                                "class '" + type_it->second.name + "'-typed variable '" + stmt.local +
+                                "class '" + (*local_type).name + "'-typed variable '" + target_name +
                                     "' can only be initialized via constructor-call syntax ('" +
-                                    type_it->second.name + " " + stmt.local +
+                                    (*local_type).name + " " + target_name +
                                     "(args);'), std::move of the same type, or (if the class is copy-"
                                     "constructible, spec §6.5) an implicitly copyable source of another '" +
-                                    type_it->second.name + "' value",
+                                    (*local_type).name + "' value",
                                 state.current_loc));
                         }
                         if (!freely_copyable_init_source &&
                             (state.classes_with_copy_ctor == nullptr ||
-                             !state.classes_with_copy_ctor->contains(type_it->second.name))) {
-                            return std::unexpected(DataflowError("class '" + type_it->second.name +
-                                                 "' is not copy-constructible (spec §6.5(2)) -- '" + stmt.local +
+                             !state.classes_with_copy_ctor->contains((*local_type).name))) {
+                            return std::unexpected(DataflowError("class '" + (*local_type).name +
+                                                 "' is not copy-constructible (spec §6.5(2)) -- '" + target_name +
                                                  "' cannot be initialized this way",
                                 state.current_loc));
                         }
@@ -2502,19 +2512,19 @@ namespace scpp {
                        signatures, report_errors); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
-            if (type_it != body.local_types.end()) {
-                if (auto _r = check_function_pointer_assignment(type_it->second, *stmt.expr, body, signatures, state.current_loc,
-                                                  stmt.local, report_errors);
+            if (local_type != nullptr) {
+                if (auto _r = check_function_pointer_assignment((*local_type), *stmt.expr, body, signatures, state.current_loc,
+                                                  target_name, report_errors);
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
-                if (auto _r = check_raw_pointer_assignment(type_it->second, *stmt.expr, body, signatures, state.current_loc,
-                                             stmt.local, report_errors);
+                if (auto _r = check_raw_pointer_assignment((*local_type), *stmt.expr, body, signatures, state.current_loc,
+                                             target_name, report_errors);
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
                 if (report_errors) {
-                    if (auto _r = check_enum_conversion_compatibility(type_it->second, *stmt.expr, body, signatures,
+                    if (auto _r = check_enum_conversion_compatibility((*local_type), *stmt.expr, body, signatures,
                                                         state.current_loc);
                         !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
@@ -2531,11 +2541,11 @@ namespace scpp {
             // mutable-pointee declaration here). Scoped to exactly this
             // direct syntactic shape, not a general type-checker -- see
             // check_call_arguments's identical comment for why.
-            if (report_errors && type_it != body.local_types.end() && type_it->second.kind == TypeKind::Pointer &&
-                type_it->second.is_mutable_pointee && stmt.expr->kind == ExprKind::Unary &&
+            if (report_errors && (*local_type).kind == TypeKind::Pointer &&
+                (*local_type).is_mutable_pointee && stmt.expr->kind == ExprKind::Unary &&
                 stmt.expr->unary_op == UnaryOp::AddressOf && is_read_only_reachable(*stmt.expr->lhs, body, signatures)) {
-                return std::unexpected(DataflowError("cannot assign '&' of a read-only-reachable place to '" + stmt.local +
-                                    "' (a mutable 'T*'): would need 'const T*', which '" + stmt.local +
+                return std::unexpected(DataflowError("cannot assign '&' of a read-only-reachable place to '" + target_name +
+                                    "' (a mutable 'T*'): would need 'const T*', which '" + target_name +
                                     "' isn't declared as",
                     state.current_loc));
             }
@@ -2544,12 +2554,12 @@ namespace scpp {
                 auto borrow_it = state.borrows.find(stmt.local);
                 if (borrow_it != state.borrows.end() &&
                     (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-                    return std::unexpected(DataflowError("cannot assign to '" + stmt.local + "' while it is borrowed",
+                    return std::unexpected(DataflowError("cannot assign to '" + target_name + "' while it is borrowed",
                         state.current_loc));
                 }
             }
             state.locals[stmt.local] = LocalState::Initialized;
-            if (type_it != body.local_types.end() && is_pointer(type_it->second)) {
+            if (is_pointer((*local_type))) {
                 state.local_lifetime_sources[stmt.local] =
                     resolve_lifetime_source_roots(*stmt.expr, state, body, signatures, report_errors);
             }
@@ -2768,7 +2778,7 @@ namespace scpp {
                 if (fn.return_lifetime.present()) {
                     if (!roots_satisfy_named_lifetime_group(returned_roots, fn, fn.return_lifetime.name)) {
                         return std::unexpected(DataflowError("function '" + fn.name + "' returns a value derived from " +
-                                                format_roots(returned_roots) + ", not from lifetime group '" +
+                                                format_roots(body, returned_roots) + ", not from lifetime group '" +
                                                 fn.return_lifetime.name + "'",
                                             state.current_loc));
                     }
@@ -2799,11 +2809,12 @@ namespace scpp {
                             state.current_loc));
                     }
                     if (!source_indices.empty() &&
-                        !return_roots_are_proven_to_outlive_call(returned_roots, fn.params[source_indices.front()].name)) {
+                        !return_roots_are_proven_to_outlive_call(returned_roots,
+                                                                 static_cast<LocalId>(source_indices.front()))) {
                         return std::unexpected(DataflowError(
                             "function '" + fn.name + "' returns " +
                                 std::string(is_reference(fn.return_type) ? "a reference" : "a raw pointer") +
-                                " derived from " + format_roots(returned_roots) +
+                                " derived from " + format_roots(body, returned_roots) +
                                 ", not from its sole eligible source parameter '" +
                                 fn.params[source_indices.front()].name +
                                 "'; scpp v0.1 can only prove the returned value doesn't dangle when it "
@@ -3080,14 +3091,16 @@ struct SwitchCaseKey {
     entry_state.class_field_access = &class_field_access;
     entry_state.classes_with_copy_ctor = &classes_with_copy_ctor;
     entry_state.classes_with_copy_assign = &classes_with_copy_assign;
-    for (const Param& param : fn.params) {
-        entry_state.locals[param.name] = LocalState::Initialized;
+    // Parameters are the first local_decls entries, in declaration order
+    // (LocalResolver::run declares them before walking the body), so a
+    // parameter's index *is* its LocalId.
+    for (std::size_t param_index = 0; param_index < fn.params.size(); ++param_index) {
+        const Param& param = fn.params[param_index];
+        LocalId param_local = static_cast<LocalId>(param_index);
+        entry_state.locals[param_local] = LocalState::Initialized;
         if (param.lifetime.present()) entry_state.parameter_lifetimes[param.name] = param.lifetime;
-        if (is_pointer_return_lifetime_source_type(param.type)) {
-            entry_state.local_lifetime_sources[param.name] = single_root(param.name);
-        }
-        if (is_reference(param.type)) {
-            entry_state.local_lifetime_sources[param.name] = single_root(param.name);
+        if (is_pointer_return_lifetime_source_type(param.type) || is_reference(param.type)) {
+            entry_state.local_lifetime_sources[param_local] = single_root(param_local);
         }
     }
 
