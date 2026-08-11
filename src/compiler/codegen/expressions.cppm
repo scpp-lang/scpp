@@ -369,17 +369,27 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 return codegen_enum_cast_store_builtin(expr, *builtin_callee);
             }
             if (find_class_def(expr.name) != nullptr) {
-                const Function* ctor_def = nullptr;
-                if (!expr.args.empty() || expr.has_paren_init) {
-                    ctor_def = resolve_constructor_overload_exact(expr.name, expr.args);
-                    if (ctor_def == nullptr) {
-                        if (expr.args.empty()) {
-                            auto value_result = codegen_constructed_class_value(expr.name, expr.args, nullptr, &expr);
-                            if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
-                            return CallResult{std::move(value_result).value(), nullptr};
-                        }
-                        return std::unexpected(CodegenError("class '" + expr.name + "' has no constructor matching this call", current_loc_));
-                    }
+                // `ClassName{args...}` / `ClassName(args...)` used as an
+                // expression selects a constructor by exactly the same
+                // rule as every other spelling of "construct a
+                // ClassName": the empty-braced VarDecl form
+                // (codegen_var_decl / codegen_local_var_decl), the bare
+                // `return {};` ValueInit form (codegen_expr's own
+                // ExprKind::ValueInit case), and the compile-time
+                // evaluator (constexpression.cppm's
+                // evaluate_constructor_expr) all resolve unconditionally
+                // from the argument list. Resolution must NOT be gated on
+                // the argument list being non-empty: `has_paren_init` is
+                // only ever set on ExprKind::New nodes (parser.cppm's
+                // `new T(...)` case -- the one place where a *missing*
+                // initializer is a real language distinction, since bare
+                // `new T` is unsafe-gated raw allocation), so gating here
+                // silently skipped the user-declared default constructor
+                // for every zero-argument `ClassName{}` temporary while
+                // still running its destructor at scope end.
+                const Function* ctor_def = resolve_constructor_overload_exact(expr.name, expr.args);
+                if (ctor_def == nullptr && !expr.args.empty()) {
+                    return std::unexpected(CodegenError("class '" + expr.name + "' has no constructor matching this call", current_loc_));
                 }
                 auto value_result = codegen_constructed_class_value(expr.name, expr.args, ctor_def, &expr);
                 if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
