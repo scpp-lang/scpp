@@ -853,6 +853,204 @@ void run_virtual_base_initializer_frame_tests() {
     }
 }
 
+// Compiler bug #6: codegen_call gated constructor resolution for a
+// class-construction expression on `!expr.args.empty() || expr.has_paren_init`.
+// `has_paren_init` is only ever set by the parser on ExprKind::New nodes, so
+// for a `ClassName{}` / `ClassName()` *expression* the guard was always false
+// and no constructor was ever resolved: the temporary was zero-initialized and
+// the user-declared default constructor never ran -- while its destructor still
+// ran at scope exit, leaving an unbalanced object lifetime. Every other
+// spelling of "construct a ClassName" already resolved unconditionally: the
+// `ClassName v{};` VarDecl form, the bare `return {};` ValueInit form, and the
+// compile-time evaluator (constexpression.cppm's evaluate_constructor_expr),
+// which is why a consteval evaluation of the very same expression produced the
+// right answer while codegen did not.
+//
+// Every case below fails against the pre-fix compiler.
+void run_value_initialized_temporary_constructor_tests() {
+    const std::string flagged_class =
+        "class Flagged {\n"
+        "  public:\n"
+        "    Flagged() { this->flag = 7; return; }\n"
+        "    virtual ~Flagged() = default;\n"
+        "    int flag = 0;\n"
+        "};\n";
+
+    {
+        // The reported shape: an empty-braced temporary bound to `auto`.
+        std::string case_name = "value_initialized_temporary_runs_the_default_constructor";
+        cases_run++;
+        auto ir = try_generate_ir(flagged_class + "int main() {\n"
+                                                  "    auto b = Flagged{};\n"
+                                                  "    return b.flag;\n"
+                                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::string main_ir = function_ir(ir.value(), "main");
+            expect(!main_ir.empty(), case_name + ": expected a definition of `main` in the module IR");
+            std::size_t constructions = count_occurrences(main_ir, "call void @Flagged_new(");
+            expect(constructions == 1, case_name + ": expected the empty-braced temporary to run the default "
+                                                   "constructor exactly once, got " +
+                                           std::to_string(constructions) + " constructor call(s)");
+        }
+    }
+
+    {
+        // The declaration form already worked; the point is that both
+        // spellings must now emit the same construction, not that either
+        // one emits *a* call.
+        std::string case_name = "declaration_and_expression_forms_construct_identically";
+        cases_run++;
+        auto ir = try_generate_ir(flagged_class + "int main() {\n"
+                                                  "    Flagged a{};\n"
+                                                  "    auto b = Flagged{};\n"
+                                                  "    return a.flag + b.flag;\n"
+                                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::string main_ir = function_ir(ir.value(), "main");
+            expect(!main_ir.empty(), case_name + ": expected a definition of `main` in the module IR");
+            std::size_t constructions = count_occurrences(main_ir, "call void @Flagged_new(");
+            expect(constructions == 2, case_name + ": expected the declaration form and the expression form to each "
+                                                   "run the default constructor, got " +
+                                           std::to_string(constructions) + " constructor call(s)");
+        }
+    }
+
+    {
+        // The empty-parenthesized spelling reaches the same Call node with
+        // an equally empty argument list.
+        std::string case_name = "empty_parenthesized_temporary_runs_the_default_constructor";
+        cases_run++;
+        auto ir = try_generate_ir(flagged_class + "int main() {\n"
+                                                  "    auto b = Flagged();\n"
+                                                  "    return b.flag;\n"
+                                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::string main_ir = function_ir(ir.value(), "main");
+            std::size_t constructions = count_occurrences(main_ir, "call void @Flagged_new(");
+            expect(constructions == 1, case_name + ": expected `Flagged()` to run the default constructor exactly "
+                                                   "once, got " +
+                                           std::to_string(constructions) + " constructor call(s)");
+        }
+    }
+
+    {
+        // Argument position and return position both materialize the same
+        // temporary through codegen_call, so both were equally broken.
+        std::string case_name = "value_initialized_temporary_in_argument_and_return_position";
+        cases_run++;
+        auto ir = try_generate_ir(flagged_class + "int take(Flagged f) { return f.flag; }\n"
+                                                  "Flagged produce() { return Flagged{}; }\n"
+                                                  "int main() {\n"
+                                                  "    Flagged p = produce();\n"
+                                                  "    return take(Flagged{}) + p.flag;\n"
+                                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::string produce_ir = function_ir(ir.value(), "produce");
+            expect(!produce_ir.empty(), case_name + ": expected a definition of `produce` in the module IR");
+            expect(count_occurrences(produce_ir, "call void @Flagged_new(") == 1,
+                   case_name + ": expected `return Flagged{};` to run the default constructor");
+            std::string main_ir = function_ir(ir.value(), "main");
+            expect(count_occurrences(main_ir, "call void @Flagged_new(") == 1,
+                   case_name + ": expected the argument-position temporary to run the default constructor");
+        }
+    }
+
+    {
+        // The worse half of the defect: the temporary skipped its
+        // constructor but still ran its destructor, so an object that
+        // acquires in its constructor and releases in its destructor would
+        // release something it never acquired. Construction and destruction
+        // must be balanced.
+        std::string case_name = "value_initialized_temporary_balances_construction_and_destruction";
+        cases_run++;
+        auto ir = try_generate_ir("class Tracked {\n"
+                                  "  public:\n"
+                                  "    Tracked() { this->tag = 7; return; }\n"
+                                  "    virtual ~Tracked() { this->tag = 0; }\n"
+                                  "    int tag = 0;\n"
+                                  "};\n"
+                                  "void use() {\n"
+                                  "    auto t = Tracked{};\n"
+                                  "    t.tag = 1;\n"
+                                  "}\n"
+                                  "int main() { use(); return 0; }\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::string use_ir = function_ir(ir.value(), "use");
+            expect(!use_ir.empty(), case_name + ": expected a definition of `use` in the module IR");
+            std::size_t constructions = count_occurrences(use_ir, "call void @Tracked_new(");
+            std::size_t destructions = count_occurrences(use_ir, "call void @Tracked_delete(");
+            expect(constructions == destructions,
+                   case_name + ": expected construction and destruction to be balanced, got " +
+                       std::to_string(constructions) + " constructor call(s) and " + std::to_string(destructions) +
+                       " destructor call(s)");
+            expect(constructions == 1, case_name + ": expected exactly one construction, got " +
+                                           std::to_string(constructions));
+        }
+    }
+
+    {
+        // A class with no constructors at all must still take the
+        // in-class field-initializer path rather than acquiring a
+        // constructor call it does not have.
+        std::string case_name = "constructorless_class_still_uses_its_in_class_field_initializers";
+        cases_run++;
+        auto ir = try_generate_ir("class Plain {\n"
+                                  "  public:\n"
+                                  "    virtual ~Plain() = default;\n"
+                                  "    int a = 5;\n"
+                                  "};\n"
+                                  "int main() {\n"
+                                  "    auto p = Plain{};\n"
+                                  "    return p.a;\n"
+                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::string main_ir = function_ir(ir.value(), "main");
+            expect(count_occurrences(main_ir, "@Plain_new(") == 0,
+                   case_name + ": a class with no constructors must not acquire a constructor call");
+            expect(main_ir.find("store i32 5") != std::string::npos,
+                   case_name + ": expected the in-class field initializer to still be emitted");
+        }
+    }
+
+    {
+        // The non-empty argument list already resolved before the fix and
+        // must keep resolving to the same overload.
+        std::string case_name = "argument_carrying_construction_expression_still_resolves";
+        cases_run++;
+        auto ir = try_generate_ir("class Two {\n"
+                                  "  public:\n"
+                                  "    Two() { this->a = 1; return; }\n"
+                                  "    Two(int x) { this->a = x + 100; return; }\n"
+                                  "    virtual ~Two() = default;\n"
+                                  "    int a = 0;\n"
+                                  "};\n"
+                                  "int main() {\n"
+                                  "    auto z = Two{};\n"
+                                  "    auto n = Two{5};\n"
+                                  "    return z.a + n.a;\n"
+                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::string main_ir = function_ir(ir.value(), "main");
+            expect(count_occurrences(main_ir, "@Two_new") == 2,
+                   case_name + ": expected both the zero-argument and the one-argument construction to resolve");
+        }
+    }
+}
+
 // PR #416: ConstexprError gained a hand-written copy constructor. Nearly
 // all of that PR is a mechanical struct -> class reshaping (adding
 // `public:`, virtual destructors and brace-init) with no behavior delta,
@@ -1467,6 +1665,7 @@ int main() {
     run_switch_end_block_reachability_tests();
     run_local_shadowing_tests();
     run_virtual_base_initializer_frame_tests();
+    run_value_initialized_temporary_constructor_tests();
 
     run_constexpr_error_copy_tests();
     run_constexpr_null_pointer_storage_tests();
