@@ -288,6 +288,16 @@ class Param {
 
     Type type;
     std::string name;
+    // Name resolution's result for a parameter: the identity of the local
+    // this parameter introduces, encoded exactly like
+    // Expr::resolved_local (`id + 1`, zero meaning unresolved). A
+    // parameter is a declaration like any other, so it carries its own
+    // id here rather than being reachable only through the declaration
+    // table -- that is what lets a consumer with no table in hand (most
+    // of codegen: `this`, a defaulted operator's `other`, the
+    // parameter-teardown pass) name the right storage without falling
+    // back to a lookup by spelling.
+    std::size_t resolved_local = 0;
     LifetimeAnnotation lifetime;
     std::shared_ptr<Expr> default_expr;
     // ch05 §5.11: empty for an ordinary parameter (the overwhelmingly
@@ -850,6 +860,7 @@ inline void rewrite_expr_locs(Expr& expr, const SourceLocation& loc) {
 inline Param::Param(const Param& other)
     : type{other.type},
       name{other.name},
+      resolved_local{other.resolved_local},
       lifetime{other.lifetime},
       default_expr{},
       generic_concept{other.generic_concept},
@@ -1114,6 +1125,7 @@ inline Type& Type::operator=(const Type& other) {
         LambdaCapture cloned{};
         cloned.name = capture.name;
         cloned.by_reference = capture.by_reference;
+        cloned.resolved_local = capture.resolved_local;
         if (capture.init != nullptr) cloned.init = clone_initializer_expr(*capture.init);
         clone->lambda_captures.push_back(std::move(cloned));
     }
@@ -1131,6 +1143,7 @@ inline Type& Type::operator=(const Type& other) {
     clone->loc = stmt.loc;
     clone->type = stmt.type;
     clone->var_name = stmt.var_name;
+    clone->declared_local = stmt.declared_local;
     if (stmt.init != nullptr) clone->init = clone_initializer_expr(*stmt.init);
     clone->alignment_specs = stmt.alignment_specs;
     clone->resolved_alignment = stmt.resolved_alignment;

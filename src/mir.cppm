@@ -28,9 +28,14 @@ enum class LocalId : std::size_t {};
 // name (which may be a callable local -- see monomorphize's bare-call
 // redirect). Anything else names a field, a qualified global, or nothing
 // at all.
+//
+// A leading `::` (Expr::explicit_global_qualification) forces lookup from
+// the global namespace, so `::x` never names a local however many locals
+// are spelled `x`.
 [[nodiscard]] inline bool names_a_local_use(const Expr& expr) {
+    if (expr.explicit_global_qualification) return false;
     if (expr.kind == ExprKind::Identifier) return true;
-    return expr.kind == ExprKind::Call && expr.lhs == nullptr && !expr.explicit_global_qualification;
+    return expr.kind == ExprKind::Call && expr.lhs == nullptr;
 }
 
 // Whether name resolution bound this expression to a local, and which
@@ -54,6 +59,12 @@ enum class LocalId : std::size_t {};
 
 [[nodiscard]] inline LocalId declared_local_of(const Stmt& stmt) {
     return static_cast<LocalId>(stmt.declared_local - 1);
+}
+
+[[nodiscard]] inline bool has_param_local(const Param& param) { return param.resolved_local != 0; }
+
+[[nodiscard]] inline LocalId param_local(const Param& param) {
+    return static_cast<LocalId>(param.resolved_local - 1);
 }
 
 [[nodiscard]] inline bool has_resolved_local(const LambdaCapture& capture) { return capture.resolved_local != 0; }
@@ -339,7 +350,7 @@ void resolve_locals(Function& fn);
 // The same walk, for a body that has no Function of its own yet: binds
 // `body`'s uses against `params` and returns the declaration table they
 // index into. `resolve_locals` is this plus the Function unwrapping.
-[[nodiscard]] std::vector<LocalDecl> resolve_locals_in(const std::vector<Param>& params, Stmt& body);
+[[nodiscard]] std::vector<LocalDecl> resolve_locals_in(std::vector<Param>& params, Stmt& body);
 
 // Runs resolve_locals over every function in `program`. Every later pass
 // assumes a use already knows its declaration, so this must run before
@@ -367,7 +378,14 @@ namespace {
 // local_decls whatever the control flow looks like.
 class LocalResolver {
 public:
-    LocalResolver(const std::vector<Param>& params, Stmt& body) : params_(params), body_(body) {}
+    // `params` is non-const because a parameter is a declaration and so
+    // records its own id, exactly as a VarDecl does (Param::resolved_local).
+    //
+    // `body` may be null: a defaulted or declaration-only function has no
+    // body but still has parameters, and codegen still gives those
+    // storage, so they are numbered here like any other declaration
+    // rather than by a second rule kept in step by hand.
+    LocalResolver(std::vector<Param>& params, Stmt* body) : params_(params), body_(body) {}
 
     // `member_initializers` is a constructor's own `: base{...},
     // field{...}` list. Those expressions are outside the body but are
@@ -378,18 +396,18 @@ public:
         // Parameters live for the whole function, so they are declared
         // before any scope frame exists and are never popped -- matching
         // both MirBuilder and codegen.
-        for (const Param& param : params_) {
+        for (Param& param : params_) {
             LocalDecl decl;
             decl.type = param.type;
             decl.source_name = param.name;
-            declare(param.name, std::move(decl));
+            param.resolved_local = declare(param.name, std::move(decl)) + 1;
         }
         if (member_initializers != nullptr) {
             for (MemberInitializer& member_initializer : *member_initializers) {
                 resolve_initializer(member_initializer.initializer);
             }
         }
-        resolve_stmt(body_);
+        if (body_ != nullptr) resolve_stmt(*body_);
     }
 
     [[nodiscard]] std::vector<LocalDecl> take_decls() { return std::move(decls_); }
@@ -405,8 +423,8 @@ private:
         bool in_scope = true;
     };
 
-    const std::vector<Param>& params_;
-    Stmt& body_;
+    std::vector<Param>& params_;
+    Stmt* body_;
     std::vector<LocalDecl> decls_;
     std::unordered_map<std::string, std::vector<Binding>> bindings_;
     std::vector<std::vector<std::string>> scope_stack_;
@@ -493,11 +511,11 @@ private:
     // closure object, at which point they stop naming locals at all.
     void resolve_lambda_body(Expr& expr) {
         push_scope();
-        for (const Param& param : expr.lambda_params) {
+        for (Param& param : expr.lambda_params) {
             LocalDecl decl;
             decl.type = param.type;
             decl.source_name = param.name;
-            declare(param.name, std::move(decl));
+            param.resolved_local = declare(param.name, std::move(decl)) + 1;
         }
         resolve_stmt(*expr.lambda_body);
         pop_scope();
@@ -586,7 +604,7 @@ private:
 
 class MirBuilder {
 public:
-    explicit MirBuilder(const Function& fn) : fn_(fn) {
+    explicit MirBuilder(const Function& fn) : fn_(fn), owned_params_(fn.params) {
         body_.owned_body = deep_clone_stmt(*fn.body);
     }
 
@@ -602,7 +620,7 @@ public:
         // Function it came from. Both runs assign the same ids (the
         // numbering depends only on declaration order), so a use found in
         // any other copy of this body still names the same entry here.
-        LocalResolver resolver{fn_.params, *body_.owned_body};
+        LocalResolver resolver{owned_params_, body_.owned_body.get()};
         resolver.run();
         body_.local_decls = resolver.take_decls();
         current_block_ = new_block();
@@ -613,6 +631,13 @@ public:
 
 private:
     const Function& fn_;
+    // The resolver records each declaration's id on the declaration
+    // itself, and a parameter is a declaration; `fn_` is const here (the
+    // Body is built from a clone), so it gets its own copy to write into,
+    // exactly as the body does. The ids match the ones the Function's own
+    // resolution assigns, since the numbering depends only on declaration
+    // order.
+    std::vector<Param> owned_params_;
     Body body_;
     std::size_t current_block_ = 0;
     // One frame per lexically-enclosing block/if-branch/while-body,
@@ -993,15 +1018,14 @@ private:
 
 } // namespace
 
-[[nodiscard]] std::vector<LocalDecl> resolve_locals_in(const std::vector<Param>& params, Stmt& body) {
-    LocalResolver resolver{params, body};
+[[nodiscard]] std::vector<LocalDecl> resolve_locals_in(std::vector<Param>& params, Stmt& body) {
+    LocalResolver resolver{params, &body};
     resolver.run();
     return resolver.take_decls();
 }
 
 void resolve_locals(Function& fn) {
-    if (fn.body == nullptr) return;
-    LocalResolver resolver{fn.params, *fn.body};
+    LocalResolver resolver{fn.params, fn.body.get()};
     resolver.run(&fn.member_initializers);
 }
 

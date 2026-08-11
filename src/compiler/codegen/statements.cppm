@@ -36,6 +36,16 @@ namespace scpp {
                 return {};
 
             case StmtKind::VarDecl: {
+                // Every declaration is resolved (resolve_program_locals runs
+                // over the whole program before this point, and again after
+                // monomorphization synthesizes new functions), so an
+                // unresolved one means resolution was skipped for this body
+                // -- fail here rather than silently binding storage to a
+                // nonsense id that no use will ever match.
+                if (!has_declared_local(stmt)) {
+                    return std::unexpected(CodegenError(
+                        "internal error: declaration of '" + stmt.var_name + "' was never resolved to a local", stmt.loc));
+                }
                 std::optional<unsigned> declared_alignment = alignment_for_type(stmt.type);
                 if (stmt.resolved_alignment != 0) {
                     unsigned explicit_align = stmt.resolved_alignment;
@@ -215,11 +225,8 @@ namespace scpp {
                                     return std::unexpected(CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
                                         current_loc_));
                                 }
-                                if (const ClassDef* class_def = find_class_def(stmt.type.name)) {
-                                    if (auto r = emit_complete_object_interface_initializers(*class_def, ctor_def, storage); !r.has_value()) return std::unexpected(std::move(r).error());
-                                }
-                                auto args_result =
-                                    codegen_call_args(stmt.ctor_args, ctor_def, /*param_offset=*/1);
+                                auto args_result = emit_constructor_arguments_and_virtual_bases(
+                                    stmt.type.name, ctor_def, stmt.ctor_args, storage);
                                 if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
                                 std::vector<llvm::LLVMValueRef> args = std::move(args_result).value();
                                 args.insert(args.begin(), storage);
@@ -263,9 +270,9 @@ namespace scpp {
                                 return std::unexpected(CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
                                     current_loc_));
                             }
-                            if (const ClassDef* concrete_def = find_class_def(stmt.type.name)) {
-                                if (auto r = emit_complete_object_interface_initializers(*concrete_def, ctor_def, storage); !r.has_value()) return std::unexpected(std::move(r).error());
-                            }
+                            if (auto r = emit_constructor_arguments_and_virtual_bases(stmt.type.name, ctor_def,
+                                                                                      no_args, storage);
+                                !r.has_value()) return std::unexpected(std::move(r).error());
                             build_call(ctor, {storage});
                         } else if (class_def != nullptr && !class_has_any_constructor(stmt.type.name)) {
                             if (auto r = emit_default_initializers_for_class_storage(
@@ -290,12 +297,12 @@ namespace scpp {
 
                     llvm::LLVMPositionBuilderAtEnd(builder_, cont_bb);
                     refresh_debug_location(stmt.loc);
-                    locals_[stmt.var_name] = LocalSlot{storage, stmt.type};
-                    locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
-                    locals_[stmt.var_name].is_static_storage = true;
-                    locals_[stmt.var_name].moved_flag = moved_flag;
+                    locals_[declared_local_of(stmt)] = LocalSlot{storage, stmt.type};
+                    locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
+                    locals_[declared_local_of(stmt)].is_static_storage = true;
+                    locals_[declared_local_of(stmt)].moved_flag = moved_flag;
                     if (!scope_stack_.empty()) {
-                        scope_stack_.back().push_back(stmt.var_name);
+                        scope_stack_.back().push_back(declared_local_of(stmt));
                     }
                     return {};
                 }
@@ -317,11 +324,11 @@ namespace scpp {
                         auto interface_value_result = codegen_interface_value_for_target(*stmt.init, stmt.type);
                         if (!interface_value_result.has_value()) return std::unexpected(std::move(interface_value_result).error());
                         create_store(std::move(interface_value_result).value(), slot, alignment_for_type(stmt.type));
-                        locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
-                        locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
+                        locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
+                        locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
                         if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                         if (!scope_stack_.empty()) {
-                            scope_stack_.back().push_back(stmt.var_name);
+                            scope_stack_.back().push_back(declared_local_of(stmt));
                         }
                         return {};
                     }
@@ -353,11 +360,11 @@ namespace scpp {
                     llvm::LLVMValueRef slot =
                         create_entry_block_alloca(llvm::LLVMPointerTypeInContext(context_, 0), stmt.var_name, declared_alignment);
                     llvm::LLVMBuildStore(builder_, referent_addr, slot);
-                    locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
-                    locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
+                    locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
+                    locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
                     if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                     if (!scope_stack_.empty()) {
-                        scope_stack_.back().push_back(stmt.var_name);
+                        scope_stack_.back().push_back(declared_local_of(stmt));
                     }
                     return {};
                 }
@@ -380,11 +387,11 @@ namespace scpp {
                     llvm::LLVMValueRef span_value = std::move(span_value_result).value();
                     llvm::LLVMValueRef slot = create_entry_block_alloca(span_type, stmt.var_name, declared_alignment);
                     llvm::LLVMBuildStore(builder_, span_value, slot);
-                    locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
-                    locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
+                    locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
+                    locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
                     if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                     if (!scope_stack_.empty()) {
-                        scope_stack_.back().push_back(stmt.var_name);
+                        scope_stack_.back().push_back(declared_local_of(stmt));
                     }
                     return {};
                 }
@@ -418,11 +425,11 @@ namespace scpp {
                     llvm::LLVMValueRef closure_ptr =
                         create_entry_block_alloca(std::move(closure_type_result).value(), stmt.var_name, declared_alignment);
                     if (auto r = codegen_construct_lambda(*stmt.init, closure_ptr); !r.has_value()) return std::unexpected(std::move(r).error());
-                    locals_[stmt.var_name] = LocalSlot{closure_ptr, stmt.type};
-                    locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
+                    locals_[declared_local_of(stmt)] = LocalSlot{closure_ptr, stmt.type};
+                    locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
                     if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, closure_ptr, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                     if (!scope_stack_.empty()) {
-                        scope_stack_.back().push_back(stmt.var_name);
+                        scope_stack_.back().push_back(declared_local_of(stmt));
                     }
                     return {};
                 }
@@ -445,14 +452,14 @@ namespace scpp {
                     // storage-layout logic beyond what every other
                     // Named-type VarDecl already does above.
                     if (auto r = zero_initialize_storage(slot, stmt.type, declared_alignment); !r.has_value()) return std::unexpected(std::move(r).error());
-                    locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
-                    locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
+                    locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
+                    locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
                     if (stmt.type.kind == TypeKind::Named) {
-                        locals_[stmt.var_name].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
+                        locals_[declared_local_of(stmt)].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
                     }
                     if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                     if (!scope_stack_.empty()) {
-                        scope_stack_.back().push_back(stmt.var_name);
+                        scope_stack_.back().push_back(declared_local_of(stmt));
                     }
                     if (stmt.type.kind != TypeKind::Named || !structs_.contains(stmt.type.name)) {
                         if (auto r = initialize_storage_from_brace_args(LValue{slot, stmt.type, declared_alignment}, stmt.ctor_args); !r.has_value()) return std::unexpected(std::move(r).error());
@@ -506,10 +513,8 @@ namespace scpp {
                         return std::unexpected(CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
                             current_loc_));
                     }
-                    if (const ClassDef* class_def = find_class_def(stmt.type.name)) {
-                        if (auto r = emit_complete_object_interface_initializers(*class_def, ctor_def, slot); !r.has_value()) return std::unexpected(std::move(r).error());
-                    }
-                    auto args_result = codegen_call_args(stmt.ctor_args, ctor_def, /*param_offset=*/1);
+                    auto args_result =
+                        emit_constructor_arguments_and_virtual_bases(stmt.type.name, ctor_def, stmt.ctor_args, slot);
                     if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
                     std::vector<llvm::LLVMValueRef> args = std::move(args_result).value();
                     args.insert(args.begin(), slot);
@@ -539,12 +544,12 @@ namespace scpp {
                         } else {
                             if (auto r = codegen_memberwise_copy_construct(slot, src.ptr, stmt.type.name); !r.has_value()) return std::unexpected(std::move(r).error());
                         }
-                        locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
-                        locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
-                        locals_[stmt.var_name].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
+                        locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
+                        locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
+                        locals_[declared_local_of(stmt)].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
                         if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                         if (!scope_stack_.empty()) {
-                            scope_stack_.back().push_back(stmt.var_name);
+                            scope_stack_.back().push_back(declared_local_of(stmt));
                         }
                         return {};
                     }
@@ -568,14 +573,14 @@ namespace scpp {
                     // included, not just struct/array/unique_ptr.
                     if (auto r = zero_initialize_storage(slot, stmt.type, declared_alignment); !r.has_value()) return std::unexpected(std::move(r).error());
                 }
-                locals_[stmt.var_name] = LocalSlot{slot, stmt.type};
-                locals_[stmt.var_name].is_const = stmt.is_const || stmt.is_constexpr;
+                locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
+                locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
                 if (stmt.type.kind == TypeKind::Named) {
-                    locals_[stmt.var_name].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
+                    locals_[declared_local_of(stmt)].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
                 }
                 if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                 if (!scope_stack_.empty()) {
-                    scope_stack_.back().push_back(stmt.var_name);
+                    scope_stack_.back().push_back(declared_local_of(stmt));
                 }
                 return {};
             }
@@ -890,7 +895,8 @@ namespace scpp {
         if (current_function_def_ != nullptr) {
             const std::vector<Param>& params = current_function_def_->params;
             for (auto it = params.rbegin(); it != params.rend(); ++it) {
-                auto slot_it = locals_.find(it->name);
+                if (it->resolved_local == 0) continue;
+                auto slot_it = locals_.find(param_local(*it));
                 if (slot_it == locals_.end()) continue;
                 if (slot_it->second.is_static_storage) continue;
                 if (slot_it->second.type.kind == TypeKind::Named) {
@@ -910,12 +916,12 @@ namespace scpp {
 
     void Codegen::pop_scope()
 {
-        std::vector<std::string> names = std::move(scope_stack_.back());
+        std::vector<LocalId> declared = std::move(scope_stack_.back());
         scope_stack_.pop_back();
 
         bool already_terminated = llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) != nullptr;
         if (!already_terminated) {
-            for (auto it = names.rbegin(); it != names.rend(); ++it) {
+            for (auto it = declared.rbegin(); it != declared.rend(); ++it) {
                 auto slot_it = locals_.find(*it);
                 if (slot_it == locals_.end()) continue;
                 if (slot_it->second.is_static_storage) continue;
@@ -927,8 +933,12 @@ namespace scpp {
                 }
             }
         }
-        for (const std::string& name : names) {
-            locals_.erase(name);
+        // By declaration, not by name: an inner scope that shadows an
+        // outer local has its own LocalId, so dropping it here leaves the
+        // outer declaration's slot -- and therefore its destructor at its
+        // own scope's end -- untouched.
+        for (LocalId id : declared) {
+            locals_.erase(id);
         }
     }
 
@@ -936,8 +946,8 @@ namespace scpp {
     void Codegen::emit_scope_cleanup_to_depth(std::size_t target_depth)
 {
         for (std::size_t depth = scope_stack_.size(); depth > target_depth; depth--) {
-            const std::vector<std::string>& names = scope_stack_[depth - 1];
-            for (auto it = names.rbegin(); it != names.rend(); ++it) {
+            const std::vector<LocalId>& declared = scope_stack_[depth - 1];
+            for (auto it = declared.rbegin(); it != declared.rend(); ++it) {
                 auto slot_it = locals_.find(*it);
                 if (slot_it == locals_.end()) continue;
                 if (slot_it->second.is_static_storage) continue;

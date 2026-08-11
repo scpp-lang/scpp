@@ -581,6 +581,69 @@ namespace scpp {
     }
 
 
+    std::expected<std::vector<Codegen::SavedLocalSlot>, CodegenError>
+    Codegen::bind_constructor_parameters(const Function& ctor_def, const std::vector<llvm::LLVMValueRef>& args)
+{
+        std::vector<SavedLocalSlot> saved;
+        // params[0] is the constructor's `this`, which the construction
+        // site does not supply as an argument.
+        for (std::size_t i = 0; i < args.size() && i + 1 < ctor_def.params.size(); i++) {
+            const Param& param = ctor_def.params[i + 1];
+            if (!has_param_local(param)) {
+                return std::unexpected(CodegenError(
+                    "internal error: parameter '" + param.name + "' was never resolved to a local", ctor_def.loc));
+            }
+            LocalId id = param_local(param);
+            SavedLocalSlot entry;
+            entry.id = id;
+            if (auto it = locals_.find(id); it != locals_.end()) {
+                entry.was_bound = true;
+                entry.slot = it->second;
+            }
+            saved.push_back(std::move(entry));
+            llvm::LLVMValueRef slot = create_entry_block_alloca(llvm::LLVMTypeOf(args[i]), param.name);
+            if (std::optional<unsigned> align = alignment_for_type(param.type)) llvm::LLVMSetAlignment(slot, *align);
+            llvm::LLVMBuildStore(builder_, args[i], slot);
+            locals_[id] = LocalSlot{slot, param.type};
+        }
+        return saved;
+    }
+
+    void Codegen::restore_bound_locals(const std::vector<SavedLocalSlot>& saved)
+{
+        for (std::size_t i = saved.size(); i > 0; i--) {
+            const SavedLocalSlot& entry = saved[i - 1];
+            if (entry.was_bound) {
+                locals_[entry.id] = entry.slot;
+            } else {
+                locals_.erase(entry.id);
+            }
+        }
+    }
+
+    std::expected<std::vector<llvm::LLVMValueRef>, CodegenError>
+    Codegen::emit_constructor_arguments_and_virtual_bases(const std::string& class_name, const Function* ctor_def,
+                                                          const std::vector<ExprPtr>& args,
+                                                          llvm::LLVMValueRef object_ptr)
+{
+        auto args_result = codegen_call_args(args, ctor_def, /*param_offset=*/1);
+        if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
+        std::vector<llvm::LLVMValueRef> arg_values = std::move(args_result).value();
+        const ClassDef* class_def = find_class_def(class_name);
+        if (class_def == nullptr) return arg_values;
+        std::vector<SavedLocalSlot> saved;
+        if (ctor_def != nullptr) {
+            auto saved_result = bind_constructor_parameters(*ctor_def, arg_values);
+            if (!saved_result.has_value()) return std::unexpected(std::move(saved_result).error());
+            saved = std::move(saved_result).value();
+        }
+        auto init_result = emit_complete_object_interface_initializers(*class_def, ctor_def, object_ptr);
+        restore_bound_locals(saved);
+        if (!init_result.has_value()) return std::unexpected(std::move(init_result).error());
+        return arg_values;
+    }
+
+
     [[nodiscard]] std::expected<void, CodegenError> Codegen::emit_complete_object_interface_initializers(const ClassDef& most_derived_def, const Function* ctor_def,
                                                      llvm::LLVMValueRef object_ptr)
 {
@@ -619,7 +682,8 @@ namespace scpp {
 
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::load_this_object_ptr()
 {
-        auto this_it = locals_.find("this");
+        std::optional<LocalId> this_local = this_param_local();
+        auto this_it = this_local.has_value() ? locals_.find(*this_local) : locals_.end();
         if (this_it == locals_.end()) {
             return std::unexpected(CodegenError("constructor/member initialization needs 'this' in scope", current_loc_));
         }

@@ -488,6 +488,371 @@ void run_switch_end_block_reachability_tests() {
     }
 }
 
+// Slices out one LLVM function definition, so a count assertion can be
+// scoped to the function under test rather than to the whole module
+// (where the same callee may also appear in a vtable or another
+// function). Returns an empty string if there is no such definition.
+std::string function_ir(const std::string& ir, const std::string& function_name) {
+    const std::string marker = "@" + function_name + "(";
+    std::size_t begin = ir.find("define ");
+    while (begin != std::string::npos) {
+        std::size_t signature_end = ir.find('\n', begin);
+        if (signature_end == std::string::npos) return {};
+        std::size_t name_at = ir.find(marker, begin);
+        if (name_at != std::string::npos && name_at < signature_end) {
+            std::size_t end = ir.find("\n}", begin);
+            return end == std::string::npos ? ir.substr(begin) : ir.substr(begin, end - begin);
+        }
+        begin = ir.find("define ", signature_end);
+    }
+    return {};
+}
+
+// Counts non-overlapping occurrences of `needle` in `haystack`.
+std::size_t count_occurrences(const std::string& haystack, const std::string& needle) {
+    std::size_t count = 0;
+    std::size_t pos = haystack.find(needle);
+    while (pos != std::string::npos) {
+        count++;
+        pos = haystack.find(needle, pos + needle.size());
+    }
+    return count;
+}
+
+// Compiler bug #4: Codegen::locals_ used to be a flat map keyed by the
+// *source name*, so an inner declaration overwrote the outer namesake's
+// slot and pop_scope's erase-by-name then deleted the outer declaration's
+// entry along with the inner one. Two distinct failures followed: a use of
+// the outer variable after the inner scope was rejected with "use of
+// undeclared variable", and -- worse -- the outer object's destructor and
+// unique_ptr teardown were silently dropped, because the scope-exit walk
+// could no longer find the storage to clean up. locals_ is now keyed by
+// LocalId (name resolution's declaration identity, the same model
+// movecheck adopted in #427), so each declaration owns its own slot.
+//
+// Every case below is rejected by the pre-fix compiler, so they all have
+// teeth. Note these programs only became reachable at all once bug #2 was
+// fixed -- before that, movecheck rejected them earlier in the pipeline.
+void run_local_shadowing_tests() {
+    {
+        // The base shape: the outer local must still be usable, for both
+        // reading and writing, after an inner shadow's scope has ended.
+        std::string case_name = "outer_local_is_usable_after_an_inner_shadow_scope_ends";
+        cases_run++;
+        auto ir = try_generate_ir("int main() {\n"
+                                  "    int x = 1;\n"
+                                  "    {\n"
+                                  "        int x = 10;\n"
+                                  "        x = x + 1;\n"
+                                  "    }\n"
+                                  "    x = x + 2;\n"
+                                  "    return x;\n"
+                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+    }
+
+    {
+        // Distinct declarations must get distinct storage, not one aliased
+        // slot -- a fix that resolved names correctly but reused the
+        // allocation would still be wrong. Differing types make that
+        // directly observable in the IR: an aliased slot could only have
+        // one of the two LLVM types.
+        std::string case_name = "shadow_with_a_different_type_gets_its_own_storage";
+        cases_run++;
+        auto ir = try_generate_ir("int main() {\n"
+                                  "    int x = 1;\n"
+                                  "    {\n"
+                                  "        double x = 2.5;\n"
+                                  "        x = x + 1.0;\n"
+                                  "    }\n"
+                                  "    x = x + 2;\n"
+                                  "    return x;\n"
+                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            expect(ir.value().find("alloca i32") != std::string::npos,
+                   case_name + ": expected the outer `int x` to keep its own i32 alloca");
+            expect(ir.value().find("alloca double") != std::string::npos,
+                   case_name + ": expected the inner `double x` to get its own separate double alloca");
+        }
+    }
+
+    {
+        // A shadow of a *parameter*, which lives in the function's own
+        // outermost binding rather than in a pushed block scope, so it
+        // exercises a different declaration path.
+        std::string case_name = "local_may_shadow_a_parameter_and_the_parameter_survives";
+        cases_run++;
+        auto ir = try_generate_ir("int scale(int v) {\n"
+                                  "    {\n"
+                                  "        double v = 0.5;\n"
+                                  "        v = v + 1.0;\n"
+                                  "    }\n"
+                                  "    return v * 2;\n"
+                                  "}\n"
+                                  "int main() { return scale(21); }\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            expect(ir.value().find("alloca double") != std::string::npos,
+                   case_name + ": expected the shadowing local to get storage of its own type");
+        }
+    }
+
+    {
+        // Nesting depth: erase-by-name lost one slot per level, so a chain
+        // of shadows failed at whichever level was popped first.
+        std::string case_name = "shadowing_works_at_multiple_nesting_depths";
+        cases_run++;
+        auto ir = try_generate_ir("int main() {\n"
+                                  "    int x = 1;\n"
+                                  "    {\n"
+                                  "        int x = 2;\n"
+                                  "        {\n"
+                                  "            int x = 3;\n"
+                                  "            {\n"
+                                  "                int x = 4;\n"
+                                  "                x = x + 1;\n"
+                                  "            }\n"
+                                  "            x = x + 1;\n"
+                                  "        }\n"
+                                  "        x = x + 1;\n"
+                                  "    }\n"
+                                  "    return x;\n"
+                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+    }
+
+    {
+        // if/else branches and loop bodies are pushed scopes too.
+        std::string case_name = "shadowing_inside_if_else_branches_and_a_loop_body";
+        cases_run++;
+        auto ir = try_generate_ir("int main() {\n"
+                                  "    int x = 1;\n"
+                                  "    if (x == 1) {\n"
+                                  "        long x = 5;\n"
+                                  "        x = x + 1;\n"
+                                  "    } else {\n"
+                                  "        double x = 6.0;\n"
+                                  "        x = x + 1.0;\n"
+                                  "    }\n"
+                                  "    for (int i = 0; i < 2; i++) {\n"
+                                  "        char x = 'a';\n"
+                                  "        x = x;\n"
+                                  "    }\n"
+                                  "    return x;\n"
+                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+    }
+
+    {
+        // The miscompile half of the bug, and the reason this was worse
+        // than a spurious rejection. Shadowing a class-typed local erased
+        // the outer object's slot, so the outer scope's exit could no
+        // longer find any storage to destroy and silently emitted *no*
+        // destructor call for it -- a broken RAII invariant with no
+        // diagnostic at all. Both objects must be destroyed.
+        std::string case_name = "shadowed_outer_object_destructor_is_still_emitted";
+        cases_run++;
+        auto ir = try_generate_ir("class Tracked {\n"
+                                  "  public:\n"
+                                  "    int tag = 0;\n"
+                                  "    virtual ~Tracked() { tag = 0; }\n"
+                                  "};\n"
+                                  "void shadowed() {\n"
+                                  "    Tracked a{};\n"
+                                  "    {\n"
+                                  "        Tracked a{};\n"
+                                  "        a.tag = 10;\n"
+                                  "    }\n"
+                                  "    a.tag = 1;\n"
+                                  "}\n"
+                                  "int main() { shadowed(); return 0; }\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::string shadowed_ir = function_ir(ir.value(), "shadowed");
+            expect(!shadowed_ir.empty(), case_name + ": expected a definition of `shadowed` in the module IR");
+            std::size_t destructor_calls = count_occurrences(shadowed_ir, "call void @Tracked_delete(");
+            expect(destructor_calls == 2, case_name + ": expected the shadowed outer object and the inner one to "
+                                                      "each be destroyed, got " +
+                                              std::to_string(destructor_calls) + " destructor call(s)");
+        }
+    }
+
+    {
+        // The same shape for unique_ptr's scope-exit free.
+        std::string case_name = "shadowed_outer_unique_ptr_is_still_freed_at_its_own_scope_exit";
+        cases_run++;
+        auto ir = try_generate_ir("import std;\n"
+                                  "int main() {\n"
+                                  "    std::unique_ptr<int> p = std::make_unique<int>(1);\n"
+                                  "    {\n"
+                                  "        std::unique_ptr<int> p = std::make_unique<int>(2);\n"
+                                  "    }\n"
+                                  "    return 0;\n"
+                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::string main_ir = function_ir(ir.value(), "main");
+            expect(!main_ir.empty(), case_name + ": expected a definition of `main` in the module IR");
+            std::size_t releases = count_occurrences(main_ir, "unique_ptr.int_delete");
+            expect(releases == 2, case_name + ": expected both the shadowed outer unique_ptr and the inner one to "
+                                              "be released at their own scope exits, got " +
+                                      std::to_string(releases) + " teardown call(s)");
+        }
+    }
+
+    {
+        // A `[&]` capture reads the *enclosing* declaration, and codegen
+        // synthesizes the identifier node for it rather than walking a
+        // parsed one, so that node has to carry the capture's own resolved
+        // declaration. When it did not, every blanket-capture lambda
+        // failed with "use of undeclared variable".
+        std::string case_name = "blanket_reference_capture_binds_the_enclosing_declaration";
+        cases_run++;
+        auto ir = try_generate_ir("int main() {\n"
+                                  "    int total = 0;\n"
+                                  "    int seed = 10;\n"
+                                  "    auto add = [&](int v) -> void { total = total + v + seed; };\n"
+                                  "    add(1);\n"
+                                  "    return total;\n"
+                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+    }
+
+    {
+        // A capture must bind the declaration in scope at the lambda, not
+        // the outer namesake.
+        std::string case_name = "capture_of_a_shadowing_local_binds_the_inner_declaration";
+        cases_run++;
+        auto ir = try_generate_ir("int main() {\n"
+                                  "    int total = 0;\n"
+                                  "    {\n"
+                                  "        double total = 1.5;\n"
+                                  "        auto f = [&]() -> double { return total + 1.0; };\n"
+                                  "        total = f();\n"
+                                  "    }\n"
+                                  "    return total;\n"
+                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            expect(ir.value().find("alloca double") != std::string::npos,
+                   case_name + ": expected the captured inner `double total` to keep its own storage");
+        }
+    }
+
+    {
+        // Keying by declaration must not weaken the existing rule that a
+        // name is unusable once its scope has ended -- only that
+        // declaration's slot goes away now, not its outer namesake's.
+        std::string case_name = "use_after_scope_end_is_still_rejected";
+        cases_run++;
+        auto ir = try_generate_ir("int main() {\n"
+                                  "    {\n"
+                                  "        int y = 1;\n"
+                                  "        y = y + 1;\n"
+                                  "    }\n"
+                                  "    return y;\n"
+                                  "}\n");
+        expect(!ir.has_value(), case_name + ": expected a use of an out-of-scope local to still be rejected");
+        if (!ir.has_value()) {
+            // Diagnostics are the one place a LocalId must never surface:
+            // they are written for a human reading their own source.
+            expect(ir.error().message.find("'y'") != std::string::npos,
+                   case_name + ": expected the diagnostic to name the source variable 'y', got: " + ir.error().message);
+        }
+    }
+
+    {
+        // The same pin for a name that was never declared at all, which
+        // takes the other reporting path.
+        std::string case_name = "undeclared_variable_diagnostic_names_the_source_identifier";
+        cases_run++;
+        auto ir = try_generate_ir("int main() { return nowhere; }\n");
+        expect(!ir.has_value(), case_name + ": expected an undeclared variable to be rejected");
+        if (!ir.has_value()) {
+            expect(ir.error().message.find("'nowhere'") != std::string::npos,
+                   case_name + ": expected the diagnostic to name 'nowhere', got: " + ir.error().message);
+        }
+    }
+}
+
+// Compiler bug #5, uncovered by the bug #4 fix above. A virtual interface
+// base is constructed exactly once, by the most-derived object, so codegen
+// emits those base constructions at the *construction site* rather than
+// inside the constructor. But the initializer expressions it emits there
+// were written in the constructor's own member-initializer list and name
+// the constructor's parameters -- which do not exist in the construction
+// site's frame. While locals_ was keyed by name this silently resolved
+// against whatever the construction site happened to have declared: it
+// worked only when the caller had a same-named local of a compatible type,
+// and otherwise picked up an unrelated variable. Codegen now evaluates the
+// arguments first and binds them to the constructor's parameters for the
+// duration, which is also real C++'s ordering.
+void run_virtual_base_initializer_frame_tests() {
+    const std::string diamond_source =
+        "int seen = 0;\n"
+        "int calls = 0;\n"
+        "int next_value() { calls = calls + 1; return 7; }\n"
+        "class [[scpp::interface]] IBase {\n"
+        "  public:\n"
+        "    IBase(int v) { seen = v; return; }\n"
+        "    IBase() { return; }\n"
+        "    virtual ~IBase() = default;\n"
+        "    virtual void ping() = 0;\n"
+        "};\n"
+        "class [[scpp::interface]] ILeft : public virtual IBase {\n"
+        "  public:\n"
+        "    ~ILeft() override = default;\n"
+        "};\n"
+        "class Derived : public virtual ILeft {\n"
+        "  public:\n"
+        "    Derived(int amount) : IBase{amount} { return; }\n"
+        "    ~Derived() override = default;\n"
+        "    void ping() override { return; }\n"
+        "};\n"
+        "int main() {\n"
+        "    Derived d{next_value()};\n"
+        "    return seen;\n"
+        "}\n";
+
+    {
+        // `amount` is Derived's parameter and nothing in `main` is spelled
+        // that way, so the initializer can only be resolved in the
+        // constructor's frame.
+        std::string case_name = "virtual_base_initializer_resolves_against_the_constructors_own_parameters";
+        cases_run++;
+        auto ir = try_generate_ir(diamond_source);
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+    }
+
+    {
+        // The construction site now emits each argument once and reuses
+        // the value for both the virtual base initializer and the
+        // constructor call, so a side-effecting argument must not run
+        // twice.
+        std::string case_name = "constructor_arguments_are_evaluated_once_for_virtual_base_initialization";
+        cases_run++;
+        auto ir = try_generate_ir(diamond_source);
+        if (ir.has_value()) {
+            std::string main_ir = function_ir(ir.value(), "main");
+            expect(!main_ir.empty(), case_name + ": expected a definition of `main` in the module IR");
+            std::size_t evaluations = count_occurrences(main_ir, "call i32 @next_value(");
+            expect(evaluations == 1, case_name + ": expected the argument to be evaluated exactly once, got " +
+                                         std::to_string(evaluations) + " evaluation(s)");
+        }
+    }
+}
+
 // PR #416: ConstexprError gained a hand-written copy constructor. Nearly
 // all of that PR is a mechanical struct -> class reshaping (adding
 // `public:`, virtual destructors and brace-init) with no behavior delta,
@@ -1100,6 +1465,8 @@ int main() {
     test_generate_returns_disengaged_expected_on_failure_without_throwing();
     run_constexpr_engine_direct_api_tests();
     run_switch_end_block_reachability_tests();
+    run_local_shadowing_tests();
+    run_virtual_base_initializer_frame_tests();
 
     run_constexpr_error_copy_tests();
     run_constexpr_null_pointer_storage_tests();

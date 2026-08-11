@@ -129,11 +129,15 @@ namespace scpp {
                 if (std::optional<unsigned> align = alignment_for_type(param.type)) llvm::LLVMSetAlignment(slot, *align);
                 llvm::LLVMBuildStore(builder_, arg, slot);
             }
-            locals_[param.name] = LocalSlot{slot, param.type};
+            if (!has_param_local(param)) {
+                return std::unexpected(CodegenError(
+                    "internal error: parameter '" + param.name + "' was never resolved to a local", fn.loc));
+            }
+            locals_[param_local(param)] = LocalSlot{slot, param.type};
             if (auto r = maybe_emit_parameter_debug_decl(param, slot, static_cast<unsigned>(index)); !r.has_value())
                 return std::unexpected(std::move(r).error());
             if (param.type.kind == TypeKind::Named && find_class_def(param.type.name) != nullptr) {
-                locals_[param.name].moved_flag = create_moved_flag_if_has_destructor(param.type.name);
+                locals_[param_local(param)].moved_flag = create_moved_flag_if_has_destructor(param.type.name);
             }
         }
 
@@ -221,11 +225,15 @@ namespace scpp {
                 if (std::optional<unsigned> align = alignment_for_type(param.type)) llvm::LLVMSetAlignment(slot, *align);
                 llvm::LLVMBuildStore(builder_, arg, slot);
             }
-            locals_[param.name] = LocalSlot{slot, param.type};
+            if (!has_param_local(param)) {
+                return std::unexpected(CodegenError(
+                    "internal error: parameter '" + param.name + "' was never resolved to a local", fn.loc));
+            }
+            locals_[param_local(param)] = LocalSlot{slot, param.type};
             if (auto r = maybe_emit_parameter_debug_decl(param, slot, static_cast<unsigned>(index)); !r.has_value())
                 return std::unexpected(std::move(r).error());
             if (param.type.kind == TypeKind::Named && find_class_def(param.type.name) != nullptr) {
-                locals_[param.name].moved_flag = create_moved_flag_if_has_destructor(param.type.name);
+                locals_[param_local(param)].moved_flag = create_moved_flag_if_has_destructor(param.type.name);
             }
         }
 
@@ -241,7 +249,8 @@ namespace scpp {
 
         auto this_llvm_type_result = to_llvm_type(fn.params[0].type);
         if (!this_llvm_type_result.has_value()) return std::unexpected(std::move(this_llvm_type_result).error());
-        llvm::LLVMValueRef this_ptr = llvm::LLVMBuildLoad2(builder_, std::move(this_llvm_type_result).value(), locals_.at("this").alloca, "thisptr");
+        llvm::LLVMValueRef this_ptr =
+            llvm::LLVMBuildLoad2(builder_, std::move(this_llvm_type_result).value(), locals_.at(param_local(fn.params[0])).alloca, "thisptr");
         const StructInfo& info = info_it->second;
 
         if (is_defaulted_default_constructor) {
@@ -264,7 +273,7 @@ namespace scpp {
             auto other_llvm_type_result = to_llvm_type(other_param.type);
             if (!other_llvm_type_result.has_value()) return std::unexpected(std::move(other_llvm_type_result).error());
             llvm::LLVMValueRef other_ptr =
-                llvm::LLVMBuildLoad2(builder_, std::move(other_llvm_type_result).value(), locals_.at(other_param.name).alloca, "otherptr");
+                llvm::LLVMBuildLoad2(builder_, std::move(other_llvm_type_result).value(), locals_.at(param_local(other_param)).alloca, "otherptr");
             if (is_defaulted_copy_constructor) {
                 if (auto r = codegen_memberwise_copy_construct(this_ptr, other_ptr, class_name); !r.has_value())
                     return std::unexpected(std::move(r).error());
@@ -376,7 +385,8 @@ namespace scpp {
 
         auto other_llvm_type_result = to_llvm_type(fn.params[1].type);
         if (!other_llvm_type_result.has_value()) return std::unexpected(std::move(other_llvm_type_result).error());
-        llvm::LLVMValueRef other_ptr = llvm::LLVMBuildLoad2(builder_, std::move(other_llvm_type_result).value(), locals_.at(fn.params[1].name).alloca, "otherptr");
+        llvm::LLVMValueRef other_ptr = llvm::LLVMBuildLoad2(builder_, std::move(other_llvm_type_result).value(),
+                                                            locals_.at(param_local(fn.params[1])).alloca, "otherptr");
         llvm::LLVMValueRef equal = llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 1, 0);
         for (std::size_t i = 0; i < info.field_types.size(); ++i) {
             llvm::LLVMValueRef lhs_field = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, this_ptr,

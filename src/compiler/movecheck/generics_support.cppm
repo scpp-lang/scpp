@@ -20,6 +20,7 @@ StmtPtr clone_stmt(const Stmt& stmt);
 ExprPtr clone_expr(const Expr& expr) {
     auto clone = std::make_unique<Expr>();
     clone->kind = expr.kind;
+    clone->resolved_local = expr.resolved_local;
     clone->loc = expr.loc;
     clone->int_value = expr.int_value;
     clone->float_value = expr.float_value;
@@ -54,6 +55,7 @@ ExprPtr clone_expr(const Expr& expr) {
         LambdaCapture cloned_capture;
         cloned_capture.name = capture.name;
         cloned_capture.by_reference = capture.by_reference;
+        cloned_capture.resolved_local = capture.resolved_local;
         if (capture.init) cloned_capture.init = clone_expr(*capture.init);
         clone->lambda_captures.push_back(std::move(cloned_capture));
     }
@@ -71,6 +73,7 @@ StmtPtr clone_stmt(const Stmt& stmt) {
     clone->loc = stmt.loc;
     clone->type = stmt.type;
     clone->var_name = stmt.var_name;
+    clone->declared_local = stmt.declared_local;
     if (stmt.init) clone->init = clone_expr(*stmt.init);
     clone->has_ctor_args = stmt.has_ctor_args;
     clone->ctor_args.reserve(stmt.ctor_args.size());
