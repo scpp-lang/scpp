@@ -9,93 +9,11 @@ import :signatures;
 
 namespace scpp {
 
-ExprPtr clone_expr(const Expr& expr);
-StmtPtr clone_stmt(const Stmt& stmt);
 [[nodiscard]] Function clone_function(const Function& fn);
 [[nodiscard]] bool type_satisfies_concept(const Type& type, const ConceptDef& concept_def,
                                           const Program& program);
 [[nodiscard]] std::string mangle_type_for_clone_name(const Type& type);
 [[nodiscard]] bool probe_lifetime_groups_match(const ConceptRequirement& req, const Function& fn);
-
-ExprPtr clone_expr(const Expr& expr) {
-    auto clone = std::make_unique<Expr>();
-    clone->kind = expr.kind;
-    clone->resolved_local = expr.resolved_local;
-    clone->loc = expr.loc;
-    clone->int_value = expr.int_value;
-    clone->float_value = expr.float_value;
-    clone->bool_value = expr.bool_value;
-    clone->name = expr.name;
-    clone->explicit_global_qualification = expr.explicit_global_qualification;
-    clone->binary_op = expr.binary_op;
-    if (expr.lhs) clone->lhs = clone_expr(*expr.lhs);
-    if (expr.rhs) clone->rhs = clone_expr(*expr.rhs);
-    if (expr.third) clone->third = clone_expr(*expr.third);
-    clone->unary_op = expr.unary_op;
-    clone->args.reserve(expr.args.size());
-    for (const ExprPtr& arg : expr.args) clone->args.push_back(clone_expr(*arg));
-    clone->explicit_template_args.reserve(expr.explicit_template_args.size());
-    for (const ExplicitTemplateArg& arg : expr.explicit_template_args) {
-        ExplicitTemplateArg cloned_arg;
-        cloned_arg.is_type = arg.is_type;
-        cloned_arg.type = arg.type;
-        if (arg.value) cloned_arg.value = std::shared_ptr<Expr>(clone_expr(*arg.value).release());
-        clone->explicit_template_args.push_back(std::move(cloned_arg));
-    }
-    clone->type = expr.type;
-    clone->sizeof_operand_is_type = expr.sizeof_operand_is_type;
-    clone->has_paren_init = expr.has_paren_init;
-    clone->destroy_through_pointer = expr.destroy_through_pointer;
-    clone->through_arrow = expr.through_arrow;
-    clone->implicit_arrow_deref = expr.implicit_arrow_deref;
-    clone->implicit_arrow_chain_safe = expr.implicit_arrow_chain_safe;
-    clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
-    clone->lambda_captures.reserve(expr.lambda_captures.size());
-    for (const LambdaCapture& capture : expr.lambda_captures) {
-        LambdaCapture cloned_capture;
-        cloned_capture.name = capture.name;
-        cloned_capture.by_reference = capture.by_reference;
-        cloned_capture.resolved_local = capture.resolved_local;
-        if (capture.init) cloned_capture.init = clone_expr(*capture.init);
-        clone->lambda_captures.push_back(std::move(cloned_capture));
-    }
-    clone->lambda_blanket_mode = expr.lambda_blanket_mode;
-    for (const Param& param : expr.lambda_params) clone->lambda_params.push_back(deep_clone_param(param));
-    clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
-    clone->lambda_is_mutable = expr.lambda_is_mutable;
-    if (expr.lambda_body) clone->lambda_body = clone_stmt(*expr.lambda_body);
-    return clone;
-}
-
-StmtPtr clone_stmt(const Stmt& stmt) {
-    auto clone = std::make_unique<Stmt>();
-    clone->kind = stmt.kind;
-    clone->loc = stmt.loc;
-    clone->type = stmt.type;
-    clone->var_name = stmt.var_name;
-    clone->declared_local = stmt.declared_local;
-    if (stmt.init) clone->init = clone_expr(*stmt.init);
-    clone->has_ctor_args = stmt.has_ctor_args;
-    clone->ctor_args.reserve(stmt.ctor_args.size());
-    for (const ExprPtr& arg : stmt.ctor_args) clone->ctor_args.push_back(clone_expr(*arg));
-    if (stmt.expr) clone->expr = clone_expr(*stmt.expr);
-    if (stmt.condition) clone->condition = clone_expr(*stmt.condition);
-    if (stmt.then_branch) clone->then_branch = clone_stmt(*stmt.then_branch);
-    if (stmt.else_branch) clone->else_branch = clone_stmt(*stmt.else_branch);
-    for (const SwitchCase& switch_case : stmt.switch_cases) {
-        SwitchCase cloned_case{};
-        cloned_case.loc = switch_case.loc;
-        if (switch_case.value) cloned_case.value = clone_expr(*switch_case.value);
-        for (const StmtPtr& s : switch_case.statements) cloned_case.statements.push_back(clone_stmt(*s));
-        clone->switch_cases.push_back(std::move(cloned_case));
-    }
-    clone->is_constexpr = stmt.is_constexpr;
-    clone->if_mode = stmt.if_mode;
-    clone->statements.reserve(stmt.statements.size());
-    for (const StmtPtr& s : stmt.statements) clone->statements.push_back(clone_stmt(*s));
-    clone->is_unsafe = stmt.is_unsafe;
-    return clone;
-}
 
 // ch05 §5.14: `Function` has no copy constructor at all (its `body` is
 // a move-only `StmtPtr`) -- this is the closest equivalent, deep-cloning
@@ -112,7 +30,7 @@ StmtPtr clone_stmt(const Stmt& stmt) {
     clone.name = fn.name;
     clone.loc = fn.loc;
     for (const Param& param : fn.params) clone.params.push_back(deep_clone_param(param));
-    clone.body = fn.body ? clone_stmt(*fn.body) : nullptr;
+    clone.body = fn.body ? deep_clone_stmt(*fn.body) : nullptr;
     clone.is_extern_c = fn.is_extern_c;
     clone.is_module_extern = fn.is_module_extern;
     clone.is_unsafe = fn.is_unsafe;

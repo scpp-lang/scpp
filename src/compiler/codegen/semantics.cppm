@@ -112,60 +112,6 @@ namespace {
     }
 
 
-    ExprPtr Codegen::clone_expr(const Expr& expr) const
-{
-        auto clone = std::make_unique<Expr>();
-        clone->kind = expr.kind;
-        // Resolution is part of what this expression *is* -- a copy that
-        // dropped it would silently read as "not a local" (see
-        // Expr::resolved_local), and codegen would then fail to find the
-        // storage the original names.
-        clone->resolved_local = expr.resolved_local;
-        clone->loc = expr.loc;
-        clone->int_value = expr.int_value;
-        clone->float_value = expr.float_value;
-        clone->bool_value = expr.bool_value;
-        clone->name = expr.name;
-        clone->explicit_global_qualification = expr.explicit_global_qualification;
-        clone->binary_op = expr.binary_op;
-        clone->unary_op = expr.unary_op;
-        clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
-        if (expr.lhs) clone->lhs = clone_expr(*expr.lhs);
-        if (expr.rhs) clone->rhs = clone_expr(*expr.rhs);
-        if (expr.third) clone->third = clone_expr(*expr.third);
-        for (const ExprPtr& arg : expr.args) clone->args.push_back(clone_expr(*arg));
-        clone->explicit_template_args.reserve(expr.explicit_template_args.size());
-        for (const ExplicitTemplateArg& arg : expr.explicit_template_args) {
-            ExplicitTemplateArg cloned_arg;
-            cloned_arg.is_type = arg.is_type;
-            cloned_arg.type = arg.type;
-            if (arg.value) cloned_arg.value = std::shared_ptr<Expr>(clone_expr(*arg.value).release());
-            clone->explicit_template_args.push_back(std::move(cloned_arg));
-        }
-        clone->type = expr.type;
-        clone->sizeof_operand_is_type = expr.sizeof_operand_is_type;
-        clone->lambda_blanket_mode = expr.lambda_blanket_mode;
-        for (const Param& param : expr.lambda_params) clone->lambda_params.push_back(deep_clone_param(param));
-        clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
-        clone->lambda_is_mutable = expr.lambda_is_mutable;
-        clone->has_paren_init = expr.has_paren_init;
-        clone->destroy_through_pointer = expr.destroy_through_pointer;
-        clone->through_arrow = expr.through_arrow;
-        clone->implicit_arrow_deref = expr.implicit_arrow_deref;
-        clone->implicit_arrow_chain_safe = expr.implicit_arrow_chain_safe;
-        for (const LambdaCapture& capture : expr.lambda_captures) {
-            LambdaCapture cloned_capture;
-            cloned_capture.name = capture.name;
-            cloned_capture.by_reference = capture.by_reference;
-            cloned_capture.resolved_local = capture.resolved_local;
-            if (capture.init) cloned_capture.init = clone_expr(*capture.init);
-            clone->lambda_captures.push_back(std::move(cloned_capture));
-        }
-        if (expr.lambda_body) clone->lambda_body = deep_clone_stmt(*expr.lambda_body);
-        return clone;
-    }
-
-
     [[nodiscard]] const Function* Codegen::resolve_converting_constructor_by_type(const std::string& class_name, const Expr& arg)
 {
         return find_single_argument_converting_constructor(class_name, arg);

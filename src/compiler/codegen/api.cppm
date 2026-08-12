@@ -330,7 +330,6 @@ private:
     [[nodiscard]] bool types_compatible_with_base_conversion(const Type& source_type, const Type& target_type,
                                                              std::string_view current_class) const;
 
-    ExprPtr clone_expr(const Expr& expr) const;
 
     [[nodiscard]] const Function* resolve_converting_constructor_by_type(const std::string& class_name, const Expr& arg);
 

@@ -625,7 +625,7 @@ namespace scpp {
                         Expr implicit_move;
                         implicit_move.kind = ExprKind::Move;
                         implicit_move.loc = stmt.expr->loc;
-                        implicit_move.lhs = clone_expr(*stmt.expr);
+                        implicit_move.lhs = deep_clone_expr(*stmt.expr);
                         auto value_result = codegen_expr(implicit_move);
                         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                         value = std::move(value_result).value();

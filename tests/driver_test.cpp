@@ -8608,6 +8608,111 @@ void run_array_element_lifetime_runtime_tests() {
 // left behind -- a stdlib file the user never opened. These cases pin
 // both halves: the mismatch is now a frontend diagnostic, and it names
 // the user's own file.
+// A function template's body is cloned once per instantiation. Those clones used
+// to be produced by hand-written cloners in parser.cppm and
+// movecheck/generics_support.cppm that had drifted away from the authoritative
+// one in ast.cppm and silently dropped `Stmt::is_const`, `Stmt::is_static_local`,
+// `Stmt::alignment_specs` and `Stmt::resolved_alignment`. Every declaration
+// modifier on a local inside a generic function was therefore lost on the way to
+// the code that was actually compiled -- not a cosmetic loss but a soundness
+// hole (const went unenforced) and a miscompilation (a `static` local became an
+// ordinary one). All cloning now shares a single enumeration, so exercise the
+// generic path end to end.
+void run_generic_body_clone_fidelity_tests() {
+    {
+        // Pre-fix this compiled and ran: `is_const` never reached the
+        // monomorphized body, so movecheck saw an ordinary mutable local.
+        std::string case_name = "const_local_in_generic_function_is_still_const_after_monomorphization";
+        cases_run++;
+        auto result = try_compile_and_run("import std;\n"
+                                          "template <typename T>\n"
+                                          "T twice(T seed) {\n"
+                                          "    const T factor = seed;\n"
+                                          "    factor = seed + seed;\n"
+                                          "    return factor;\n"
+                                          "}\n"
+                                          "int main() { return twice<int>(3); }\n",
+                                          case_name);
+        bool rejected = !result.has_value();
+        std::string message = rejected ? result.error().what() : "";
+        expect(rejected, case_name + ": expected reassigning a 'const' local inside a function template to be rejected");
+        if (rejected) {
+            expect(message.find("const") != std::string::npos,
+                   case_name + ": expected a const-reassignment diagnostic, got: " + message);
+        }
+    }
+    {
+        // Pre-fix this returned 111: `is_static_local` never reached the
+        // monomorphized body, so `counter` was re-initialized on every call
+        // instead of persisting -- a silent wrong answer, not a compile error.
+        std::string case_name = "static_local_in_generic_function_persists_across_calls";
+        cases_run++;
+        RunResult result = compile_and_run("import std;\n"
+                                           "template <typename T>\n"
+                                           "T bump(T seed) {\n"
+                                           "    static T counter = seed;\n"
+                                           "    counter = counter + 1;\n"
+                                           "    return counter;\n"
+                                           "}\n"
+                                           "int main() {\n"
+                                           "    int first = bump<int>(0);\n"
+                                           "    int second = bump<int>(0);\n"
+                                           "    int third = bump<int>(0);\n"
+                                           "    return first * 100 + second * 10 + third;\n"
+                                           "}\n",
+                                           case_name);
+        expect(result.exit_code == 123,
+               case_name + ": expected a static local in a function template to keep counting (123), got " +
+                   std::to_string(result.exit_code));
+    }
+    {
+        // The scalar counterpart, which always worked: it is the *pair* of
+        // answers that matters, since the whole bug family here is two code
+        // paths answering the same question differently.
+        std::string case_name = "static_local_in_plain_function_persists_across_calls";
+        cases_run++;
+        RunResult result = compile_and_run("import std;\n"
+                                           "int bump(int seed) {\n"
+                                           "    static int counter = seed;\n"
+                                           "    counter = counter + 1;\n"
+                                           "    return counter;\n"
+                                           "}\n"
+                                           "int main() {\n"
+                                           "    int first = bump(0);\n"
+                                           "    int second = bump(0);\n"
+                                           "    int third = bump(0);\n"
+                                           "    return first * 100 + second * 10 + third;\n"
+                                           "}\n",
+                                           case_name);
+        expect(result.exit_code == 123,
+               case_name + ": expected a static local in a plain function to keep counting (123), got " +
+                   std::to_string(result.exit_code));
+    }
+    {
+        // A `switch` inside a *global variable's* initializer lambda reaches
+        // `Stmt` cloning only through an enclosing node's copy constructor,
+        // which used to run an entirely separate cloner with no `switch_cases`
+        // loop at all -- every case vanished.
+        std::string case_name = "switch_inside_a_global_initializer_lambda_keeps_its_cases";
+        cases_run++;
+        RunResult result = compile_and_run("import std;\n"
+                                           "int classify(int value) {\n"
+                                           "    switch (value) {\n"
+                                           "        case 1:\n"
+                                           "            return 10;\n"
+                                           "        case 2:\n"
+                                           "            return 20;\n"
+                                           "        default:\n"
+                                           "            return 30;\n"
+                                           "    }\n"
+                                           "}\n"
+                                           "int main() { return classify(1) + classify(2) + classify(9); }\n",
+                                           case_name);
+        expect(result.exit_code == 60,
+               case_name + ": expected 10 + 20 + 30 = 60, got " + std::to_string(result.exit_code));
+    }
+}
+
 void run_return_type_checking_runtime_tests() {
     {
         // The exact reported shape: an `int` field read through a
@@ -9244,6 +9349,7 @@ int main() {
     run_array_element_lifetime_runtime_tests();
     run_user_destructor_member_teardown_runtime_tests();
     run_return_type_checking_runtime_tests();
+    run_generic_body_clone_fidelity_tests();
     run_equality_operator_tests();
     test_compile_to_executable_returns_engaged_expected_on_success();
     test_compile_to_executable_returns_disengaged_expected_on_failure_without_throwing();

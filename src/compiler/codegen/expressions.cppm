@@ -175,14 +175,14 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
                 ExprPtr ctor_expr;
                 if (original_expr != nullptr) {
-                    ctor_expr = clone_expr(*original_expr);
+                    ctor_expr = deep_clone_expr(*original_expr);
                 } else {
                     ctor_expr = std::make_unique<Expr>();
                     ctor_expr->kind = ExprKind::Call;
                     ctor_expr->loc = current_loc_;
                     ctor_expr->name = class_name;
                     ctor_expr->has_paren_init = true;
-                    for (const ExprPtr& arg : args) ctor_expr->args.push_back(clone_expr(*arg));
+                    for (const ExprPtr& arg : args) ctor_expr->args.push_back(deep_clone_expr(*arg));
                 }
                 auto value_result = evaluate_immediate_expr(*program_, *ctor_expr);
                 if (!value_result.has_value()) {
@@ -800,7 +800,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             if (const Function* converting_ctor = resolve_converting_constructor_by_type(target_type.name, expr);
                 converting_ctor != nullptr) {
                 std::vector<ExprPtr> ctor_args;
-                ctor_args.push_back(clone_expr(expr));
+                ctor_args.push_back(deep_clone_expr(expr));
                 return codegen_constructed_class_value(target_type.name, ctor_args, converting_ctor);
             }
         }
@@ -1730,7 +1730,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         auto size_expr = std::make_unique<Expr>();
                         size_expr->kind = ExprKind::Member;
                         size_expr->loc = expr.loc;
-                        size_expr->lhs = clone_expr(*expr.args[0]);
+                        size_expr->lhs = deep_clone_expr(*expr.args[0]);
                         size_expr->name = "size";
                         return codegen_expr(*size_expr);
                     }
@@ -1747,7 +1747,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         size_call->kind = ExprKind::Call;
                         size_call->loc = expr.loc;
                         size_call->name = "size";
-                        size_call->lhs = clone_expr(*expr.args[0]);
+                        size_call->lhs = deep_clone_expr(*expr.args[0]);
                         auto vector_size_result = codegen_expr(*size_call);
                         if (!vector_size_result.has_value()) return std::unexpected(std::move(vector_size_result).error());
                         return llvm::LLVMBuildTrunc(builder_, std::move(vector_size_result).value(), llvm::LLVMInt32TypeInContext(context_), "vecsize");
@@ -1842,25 +1842,14 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             llvm::LLVMValueRef field_ptr =
                 llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, closure, info.physical_field_index(i), capture.name.c_str());
             if (capture.by_reference) {
-                Expr ident;
-                ident.kind = ExprKind::Identifier;
-                ident.loc = expr.loc;
-                ident.name = capture.name;
-                // A plain `[&name]` capture reads the *enclosing* function's
-                // local, so the synthesized node has to carry that
-                // declaration's id -- a bare name would not resolve.
-                ident.resolved_local = capture.resolved_local;
+                Expr ident = make_capture_identifier(capture, expr.loc);
                 auto ident_lv_result = codegen_lvalue(ident);
                 if (!ident_lv_result.has_value()) return std::unexpected(std::move(ident_lv_result).error());
                 llvm::LLVMValueRef address = std::move(ident_lv_result).value().ptr;
                 create_store(address, field_ptr, std::nullopt);
                 continue;
             }
-            Expr ident;
-            ident.kind = ExprKind::Identifier;
-            ident.loc = expr.loc;
-            ident.name = capture.name;
-            ident.resolved_local = capture.resolved_local;
+            Expr ident = make_capture_identifier(capture, expr.loc);
             const Expr& source = capture.init ? *capture.init : ident;
             if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name) &&
                 is_bare_same_type_copy_source(source, field_type) && is_copy_constructible(field_type.name)) {
@@ -2934,7 +2923,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 if (is_string_named_type(lhs_operand) &&
                     (is_string_named_type(rhs_operand) || is_const_char_pointer_type(rhs_operand))) {
                     std::vector<ExprPtr> append_args;
-                    append_args.push_back(clone_expr(*expr.rhs));
+                    append_args.push_back(deep_clone_expr(*expr.rhs));
                     const Function* callee =
                         resolve_overload_by_type(lhs_operand.name + "_append", append_args, /*param_offset=*/1,
                                                  !is_read_only_place(*expr.lhs), expr.lhs.get());

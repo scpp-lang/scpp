@@ -843,74 +843,6 @@ private:
         return specs;
     }
 
-    ExprPtr clone_expr_tree(const Expr& expr) {
-        auto clone = std::make_unique<Expr>();
-        clone->kind = expr.kind;
-        clone->resolved_local = expr.resolved_local;
-        clone->loc = expr.loc;
-        clone->int_value = expr.int_value;
-        clone->float_value = expr.float_value;
-        clone->bool_value = expr.bool_value;
-        clone->name = expr.name;
-        clone->explicit_global_qualification = expr.explicit_global_qualification;
-        clone->binary_op = expr.binary_op;
-        clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
-        clone->unary_op = expr.unary_op;
-        clone->type = expr.type;
-        clone->sizeof_operand_is_type = expr.sizeof_operand_is_type;
-        clone->has_paren_init = expr.has_paren_init;
-        clone->destroy_through_pointer = expr.destroy_through_pointer;
-        clone->through_arrow = expr.through_arrow;
-        clone->implicit_arrow_deref = expr.implicit_arrow_deref;
-        clone->implicit_arrow_chain_safe = expr.implicit_arrow_chain_safe;
-        clone->lambda_blanket_mode = expr.lambda_blanket_mode;
-        clone->lambda_params.clear();
-        for (const Param& param : expr.lambda_params) clone->lambda_params.push_back(deep_clone_param(param));
-        clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
-        clone->lambda_is_mutable = expr.lambda_is_mutable;
-        if (expr.lhs != nullptr) clone->lhs = clone_expr_tree(*expr.lhs);
-        if (expr.rhs != nullptr) clone->rhs = clone_expr_tree(*expr.rhs);
-        if (expr.third != nullptr) clone->third = clone_expr_tree(*expr.third);
-        clone->args.clear();
-        for (const ExprPtr& arg : expr.args) clone->args.push_back(clone_expr_tree(*arg));
-        clone->explicit_template_args.clear();
-        for (const ExplicitTemplateArg& tmpl_arg : expr.explicit_template_args) {
-            ExplicitTemplateArg cloned = tmpl_arg;
-            if (tmpl_arg.value != nullptr) cloned.value = std::shared_ptr<Expr>(clone_expr_tree(*tmpl_arg.value).release());
-            clone->explicit_template_args.push_back(std::move(cloned));
-        }
-        clone->lambda_captures.clear();
-        for (const LambdaCapture& capture : expr.lambda_captures) {
-            LambdaCapture cloned_capture{};
-
-            cloned_capture.name = capture.name;
-            cloned_capture.by_reference = capture.by_reference;
-            cloned_capture.resolved_local = capture.resolved_local;
-            if (capture.init != nullptr) cloned_capture.init = clone_expr_tree(*capture.init);
-            clone->lambda_captures.push_back(std::move(cloned_capture));
-        }
-        if (expr.lambda_body != nullptr) clone->lambda_body = clone_stmt(*expr.lambda_body);
-        return clone;
-    }
-
-    Type clone_type_tree(const Type& type) {
-        Type clone = type;
-        if (type.pointee != nullptr) clone.pointee = std::make_shared<Type>(clone_type_tree(*type.pointee));
-        if (type.element != nullptr) clone.element = std::make_shared<Type>(clone_type_tree(*type.element));
-        if (type.function_return != nullptr) clone.function_return = std::make_shared<Type>(clone_type_tree(*type.function_return));
-        clone.function_params.clear();
-        for (const Type& param : type.function_params) clone.function_params.push_back(clone_type_tree(param));
-        clone.template_args.clear();
-        for (const Type& arg : type.template_args) clone.template_args.push_back(clone_type_tree(arg));
-        clone.non_type_args.clear();
-        for (const std::shared_ptr<Expr>& non_type_arg : type.non_type_args) {
-            std::shared_ptr<Expr> cloned_non_type_arg{};
-            if (non_type_arg != nullptr) cloned_non_type_arg = std::shared_ptr<Expr>(clone_expr_tree(*non_type_arg).release());
-            clone.non_type_args.push_back(cloned_non_type_arg);
-        }
-        return clone;
-    }
-
     ClassDef clone_class_def(const ClassDef& def) {
         ClassDef clone{};
 
@@ -929,7 +861,7 @@ private:
         clone.base_specifiers.clear();
         for (const BaseSpecifier& base : def.base_specifiers) {
             BaseSpecifier cloned = base;
-            cloned.base_type = clone_type_tree(base.base_type);
+            cloned.base_type = Type{base.base_type};
             clone.base_specifiers.push_back(std::move(cloned));
         }
         clone.using_declarations = def.using_declarations;
@@ -942,10 +874,10 @@ private:
         clone.is_nodiscard = def.is_nodiscard;
         clone.nodiscard_reason = def.nodiscard_reason;
         if (def.thread_movable_if_movable_expr != nullptr) {
-            clone.thread_movable_if_movable_expr = clone_expr_tree(*def.thread_movable_if_movable_expr);
+            clone.thread_movable_if_movable_expr = deep_clone_expr(*def.thread_movable_if_movable_expr);
         }
         if (def.thread_movable_if_shareable_expr != nullptr) {
-            clone.thread_movable_if_shareable_expr = clone_expr_tree(*def.thread_movable_if_shareable_expr);
+            clone.thread_movable_if_shareable_expr = deep_clone_expr(*def.thread_movable_if_shareable_expr);
         }
         return clone;
     }
@@ -1568,7 +1500,7 @@ private:
     // statement).
     [[nodiscard]] StmtPtr make_continue_with_epilogue_block(SourceLocation loc, const Expr& epilogue) {
         auto block = make_block_stmt(loc);
-        block->statements.push_back(make_expr_stmt(epilogue.loc, clone_initializer_expr(epilogue)));
+        block->statements.push_back(make_expr_stmt(epilogue.loc, deep_clone_expr(epilogue)));
         block->statements.push_back(make_continue_stmt(loc));
         return block;
     }
@@ -1970,81 +1902,6 @@ private:
         result += ">::";
         result += member_name;
         return std::move(result);
-    }
-
-    ExprPtr clone_expr(const Expr& expr) {
-        auto clone = std::make_unique<Expr>();
-        clone->kind = expr.kind;
-        clone->resolved_local = expr.resolved_local;
-        clone->loc = expr.loc;
-        clone->int_value = expr.int_value;
-        clone->float_value = expr.float_value;
-        clone->bool_value = expr.bool_value;
-        clone->name = expr.name;
-        clone->explicit_global_qualification = expr.explicit_global_qualification;
-        clone->binary_op = expr.binary_op;
-        if (expr.lhs != nullptr) clone->lhs = clone_expr(*expr.lhs);
-        if (expr.rhs != nullptr) clone->rhs = clone_expr(*expr.rhs);
-        if (expr.third != nullptr) clone->third = clone_expr(*expr.third);
-        clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
-        clone->unary_op = expr.unary_op;
-        clone->args.clear();
-        for (const ExprPtr& arg : expr.args) clone->args.push_back(clone_expr(*arg));
-        clone->explicit_template_args.clear();
-        for (const ExplicitTemplateArg& template_arg : expr.explicit_template_args) {
-            ExplicitTemplateArg cloned_arg = template_arg;
-            if (template_arg.value != nullptr) cloned_arg.value = std::shared_ptr<Expr>(clone_expr(*template_arg.value).release());
-            clone->explicit_template_args.push_back(std::move(cloned_arg));
-        }
-        clone->lambda_captures.clear();
-        for (const LambdaCapture& capture : expr.lambda_captures) {
-            LambdaCapture cloned_capture{};
-
-            cloned_capture.name = capture.name;
-            cloned_capture.by_reference = capture.by_reference;
-            cloned_capture.resolved_local = capture.resolved_local;
-            if (capture.init != nullptr) cloned_capture.init = clone_expr(*capture.init);
-            clone->lambda_captures.push_back(std::move(cloned_capture));
-        }
-        clone->lambda_blanket_mode = expr.lambda_blanket_mode;
-        clone->lambda_params.clear();
-        for (const Param& param : expr.lambda_params) clone->lambda_params.push_back(deep_clone_param(param));
-        clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
-        clone->lambda_is_mutable = expr.lambda_is_mutable;
-        if (expr.lambda_body != nullptr) clone->lambda_body = clone_stmt(*expr.lambda_body);
-        clone->type = expr.type;
-        clone->sizeof_operand_is_type = expr.sizeof_operand_is_type;
-        clone->has_paren_init = expr.has_paren_init;
-        clone->destroy_through_pointer = expr.destroy_through_pointer;
-        clone->through_arrow = expr.through_arrow;
-        clone->implicit_arrow_deref = expr.implicit_arrow_deref;
-        clone->implicit_arrow_chain_safe = expr.implicit_arrow_chain_safe;
-        return clone;
-    }
-
-    StmtPtr clone_stmt(const Stmt& stmt) {
-        auto clone = std::make_unique<Stmt>();
-        clone->kind = stmt.kind;
-        clone->loc = stmt.loc;
-        clone->type = stmt.type;
-        clone->var_name = stmt.var_name;
-        clone->declared_local = stmt.declared_local;
-        if (stmt.init != nullptr) clone->init = clone_expr(*stmt.init);
-        clone->is_constexpr = stmt.is_constexpr;
-        clone->has_ctor_args = stmt.has_ctor_args;
-        clone->ctor_args.clear();
-        for (const ExprPtr& arg : stmt.ctor_args) clone->ctor_args.push_back(clone_expr(*arg));
-        if (stmt.expr != nullptr) clone->expr = clone_expr(*stmt.expr);
-        if (stmt.condition != nullptr) clone->condition = clone_expr(*stmt.condition);
-        clone->if_mode = stmt.if_mode;
-        if (stmt.then_branch != nullptr) clone->then_branch = clone_stmt(*stmt.then_branch);
-        if (stmt.else_branch != nullptr) clone->else_branch = clone_stmt(*stmt.else_branch);
-        clone->switch_cases.clear();
-        for (const SwitchCase& switch_case : stmt.switch_cases) clone->switch_cases.push_back(switch_case);
-        clone->statements.clear();
-        for (const StmtPtr& s : stmt.statements) clone->statements.push_back(clone_stmt(*s));
-        clone->is_unsafe = stmt.is_unsafe;
-        return clone;
     }
 
     [[nodiscard]] bool is_exported_generic_type_template(const Program& program, const std::string& name) const {
@@ -3242,7 +3099,7 @@ private:
                 for (std::size_t p = 0; p < fn.params.size() && p < merged_fn.params.size(); p++) {
                     if (merged_fn.params[p].default_expr == nullptr && fn.params[p].default_expr != nullptr) {
                         merged_fn.params[p].default_expr =
-                            std::shared_ptr<Expr>(clone_expr(*fn.params[p].default_expr).release());
+                            std::shared_ptr<Expr>(deep_clone_expr(*fn.params[p].default_expr).release());
                     }
                 }
                 merged_fn.is_exported = merged_fn.is_exported || fn.is_exported;
@@ -4448,7 +4305,7 @@ private:
         clone.loc = fn.loc;
         for (const Param& param : fn.params) clone.params.push_back(deep_clone_param(param));
         clone.return_lifetime = fn.return_lifetime;
-        if (keep_body && fn.body != nullptr) clone.body = clone_stmt(*fn.body);
+        if (keep_body && fn.body != nullptr) clone.body = deep_clone_stmt(*fn.body);
         clone.is_extern_c = fn.is_extern_c;
         clone.is_module_extern = fn.is_module_extern;
         clone.is_unsafe = fn.is_unsafe;
@@ -4740,7 +4597,7 @@ private:
                     existing_fn->is_exported = existing_fn->is_exported || (is_reexport && fn.is_exported);
                     existing_fn->is_compile_time_dependency =
                         existing_fn->is_compile_time_dependency || fn.is_compile_time_dependency || needs_hidden_compile_time_visibility;
-                    if (existing_fn->body == nullptr && keep_body && fn.body != nullptr) existing_fn->body = clone_stmt(*fn.body);
+                    if (existing_fn->body == nullptr && keep_body && fn.body != nullptr) existing_fn->body = deep_clone_stmt(*fn.body);
                     if (existing_fn->body != nullptr && existing_fn->is_compile_time_dependency &&
                         existing_fn->eval_mode == FunctionEvalMode::RuntimeOnly) {
                         existing_fn->skip_imported_body_verification = true;
