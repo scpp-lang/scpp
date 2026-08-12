@@ -8594,6 +8594,409 @@ void run_array_element_lifetime_runtime_tests() {
     }
 }
 
+// A user-written destructor body must destroy the class's own class-typed
+// members, exactly like a `= default` one does. Before the fix, member
+// teardown lived only inside define_defaulted_function's defaulted-
+// destructor branch, so writing `virtual ~T() { }` instead of
+// `virtual ~T() = default;` silently leaked every class-typed member.
+void run_user_destructor_member_teardown_runtime_tests() {
+    const std::string counters =
+        "int dtors = 0;\n"
+        "int order = 0;\n"
+        "class Inner {\n"
+        "  public:\n"
+        "    Inner() { return; }\n"
+        "    virtual ~Inner() { dtors = dtors + 1; order = order * 10 + this.tag; return; }\n"
+        "    int tag = 0;\n"
+        "};\n";
+    const std::string counters_with_std = "import std;\n" + counters;
+
+    {
+        // The reported shape: a hand-written destructor body and two
+        // class-typed members. Before the fix `dtors` stayed 0.
+        std::string case_name = "user_written_destructor_destroys_its_own_members_in_reverse";
+        cases_run++;
+        RunResult result = compile_and_run(counters +
+                                               "class Outer {\n"
+                                               "  public:\n"
+                                               "    Outer() { this.a.tag = 1; this.b.tag = 2; return; }\n"
+                                               "    virtual ~Outer() { order = order * 10 + 9; return; }\n"
+                                               "    Inner a{};\n"
+                                               "    Inner b{};\n"
+                                               "};\n"
+                                               "int main() {\n"
+                                               "    {\n"
+                                               "        Outer o{};\n"
+                                               "    }\n"
+                                               "    if (dtors != 2) return 1;\n"
+                                               "    if (order != 921) return 2;\n"
+                                               "    return 0;\n"
+                                               "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected the user body first (9) then members in reverse (2 then 1), got exit " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // The `= default` spelling of the same class is the reference
+        // behavior; the two must agree.
+        std::string case_name = "user_written_and_defaulted_destructors_destroy_the_same_members";
+        cases_run++;
+        RunResult result = compile_and_run(counters +
+                                               "class UserBody {\n"
+                                               "  public:\n"
+                                               "    UserBody() { this.a.tag = 1; this.b.tag = 2; return; }\n"
+                                               "    virtual ~UserBody() { return; }\n"
+                                               "    Inner a{};\n"
+                                               "    Inner b{};\n"
+                                               "};\n"
+                                               "class Defaulted {\n"
+                                               "  public:\n"
+                                               "    Defaulted() { this.a.tag = 1; this.b.tag = 2; return; }\n"
+                                               "    virtual ~Defaulted() = default;\n"
+                                               "    Inner a{};\n"
+                                               "    Inner b{};\n"
+                                               "};\n"
+                                               "int main() {\n"
+                                               "    { UserBody u{}; }\n"
+                                               "    int user_dtors = dtors;\n"
+                                               "    int user_order = order;\n"
+                                               "    dtors = 0;\n"
+                                               "    order = 0;\n"
+                                               "    { Defaulted d{}; }\n"
+                                               "    if (user_dtors != dtors) return 1;\n"
+                                               "    if (user_order != order) return 2;\n"
+                                               "    if (dtors != 2) return 3;\n"
+                                               "    return 0;\n"
+                                               "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected `~T() { }` and `~T() = default;` to destroy the same members, got exit " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // Array-typed members are members too: #431 made array element
+        // teardown expressible, but a user-written destructor never
+        // reached it.
+        std::string case_name = "user_written_destructor_destroys_array_typed_members";
+        cases_run++;
+        RunResult result = compile_and_run(counters +
+                                               "class Outer {\n"
+                                               "  public:\n"
+                                               "    Outer() { this.items[0].tag = 1; this.items[1].tag = 2; return; }\n"
+                                               "    virtual ~Outer() { return; }\n"
+                                               "    Inner items[2]{};\n"
+                                               "};\n"
+                                               "int main() {\n"
+                                               "    { Outer o{}; }\n"
+                                               "    if (dtors != 2) return 1;\n"
+                                               "    if (order != 21) return 2;\n"
+                                               "    return 0;\n"
+                                               "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected both array elements destroyed back to front, got exit " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // The body has to still see its members alive: teardown is an
+        // epilogue, not a prologue.
+        std::string case_name = "user_written_destructor_body_sees_its_members_alive";
+        cases_run++;
+        RunResult result = compile_and_run(counters +
+                                               "int observed = 0;\n"
+                                               "class Outer {\n"
+                                               "  public:\n"
+                                               "    Outer() { this.a.tag = 7; return; }\n"
+                                               "    virtual ~Outer() { observed = this.a.tag; return; }\n"
+                                               "    Inner a{};\n"
+                                               "};\n"
+                                               "int main() {\n"
+                                               "    { Outer o{}; }\n"
+                                               "    if (observed != 7) return 1;\n"
+                                               "    if (dtors != 1) return 2;\n"
+                                               "    return 0;\n"
+                                               "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected the destructor body to read a live member before teardown, got exit " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // Teardown belongs to the function epilogue, so every exit path
+        // needs it -- an early `return;` as much as the last one.
+        std::string case_name = "user_written_destructor_tears_down_on_an_early_return";
+        cases_run++;
+        RunResult result = compile_and_run(counters +
+                                               "class Outer {\n"
+                                               "  public:\n"
+                                               "    Outer() { this.a.tag = 1; return; }\n"
+                                               "    virtual ~Outer() {\n"
+                                               "        if (this.a.tag == 1) {\n"
+                                               "            return;\n"
+                                               "        }\n"
+                                               "        return;\n"
+                                               "    }\n"
+                                               "    Inner a{};\n"
+                                               "};\n"
+                                               "int main() {\n"
+                                               "    { Outer o{}; }\n"
+                                               "    if (dtors != 1) return 1;\n"
+                                               "    return 0;\n"
+                                               "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected the early-return path to run member teardown, got exit " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // ...including the implicit `return;` synthesized when control
+        // falls off the end of the body, which used to skip the whole
+        // function epilogue.
+        std::string case_name = "user_written_destructor_tears_down_when_control_falls_off_the_end";
+        cases_run++;
+        RunResult result = compile_and_run(counters +
+                                               "class Outer {\n"
+                                               "  public:\n"
+                                               "    Outer() { this.a.tag = 1; return; }\n"
+                                               "    virtual ~Outer() { }\n"
+                                               "    Inner a{};\n"
+                                               "};\n"
+                                               "int main() {\n"
+                                               "    { Outer o{}; }\n"
+                                               "    if (dtors != 1) return 1;\n"
+                                               "    return 0;\n"
+                                               "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected a destructor with no explicit `return;` to run member teardown, got exit " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // The same epilogue gap swallowed by-value class parameters of an
+        // ordinary function whose body ends without `return;`.
+        std::string case_name = "by_value_class_parameter_is_destroyed_when_control_falls_off_the_end";
+        cases_run++;
+        RunResult result = compile_and_run(counters_with_std +
+                                               "void falls_off(Inner p) { }\n"
+                                               "void explicit_return(Inner p) { return; }\n"
+                                               "int main() {\n"
+                                               "    Inner a{};\n"
+                                               "    a.tag = 1;\n"
+                                               "    falls_off(std::move(a));\n"
+                                               "    if (dtors != 1) return 1;\n"
+                                               "    Inner b{};\n"
+                                               "    b.tag = 2;\n"
+                                               "    explicit_return(std::move(b));\n"
+                                               "    if (dtors != 2) return 2;\n"
+                                               "    if (order != 12) return 3;\n"
+                                               "    return 0;\n"
+                                               "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected a by-value class parameter destroyed on the fall-off-the-end path too, got exit " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // Each class in a chain owns exactly its own members: derived
+        // body, derived members, base body, base members. The base's
+        // members must be destroyed once, by the base -- a derived
+        // destructor that walked its flattened layout destroyed them a
+        // second time.
+        std::string case_name = "each_class_in_a_chain_destroys_only_its_own_members_once";
+        cases_run++;
+        RunResult result = compile_and_run(counters +
+                                               "class Base {\n"
+                                               "  public:\n"
+                                               "    Base() { this.bm.tag = 1; return; }\n"
+                                               "    virtual ~Base() { order = order * 10 + 7; return; }\n"
+                                               "    Inner bm{};\n"
+                                               "};\n"
+                                               "class Derived : public Base {\n"
+                                               "  public:\n"
+                                               "    Derived() { this.dm.tag = 2; return; }\n"
+                                               "    ~Derived() override { order = order * 10 + 8; return; }\n"
+                                               "    Inner dm{};\n"
+                                               "};\n"
+                                               "int main() {\n"
+                                               "    { Derived d{}; }\n"
+                                               "    if (dtors != 2) return 1;\n"
+                                               "    if (order != 8271) return 2;\n"
+                                               "    return 0;\n"
+                                               "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected derived body, derived member, base body, base member exactly once each, got exit " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // The same, but with `= default` destructors -- the double
+        // destruction of the base's members was a pre-existing defect of
+        // the defaulted path, not something the user-written path
+        // introduced.
+        std::string case_name = "defaulted_derived_destructor_does_not_destroy_base_members_twice";
+        cases_run++;
+        RunResult result = compile_and_run(counters +
+                                               "class Base {\n"
+                                               "  public:\n"
+                                               "    Base() { this.bm.tag = 1; return; }\n"
+                                               "    virtual ~Base() = default;\n"
+                                               "    Inner bm{};\n"
+                                               "};\n"
+                                               "class Derived : public Base {\n"
+                                               "  public:\n"
+                                               "    Derived() { this.dm.tag = 2; return; }\n"
+                                               "    ~Derived() override = default;\n"
+                                               "    Inner dm{};\n"
+                                               "};\n"
+                                               "int main() {\n"
+                                               "    { Derived d{}; }\n"
+                                               "    if (dtors != 2) return 1;\n"
+                                               "    if (order != 21) return 2;\n"
+                                               "    return 0;\n"
+                                               "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected each member destroyed exactly once (2 and 1), got exit " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // Three levels, so a bug that merely skipped one level or
+        // destroyed the immediate base's members twice still shows.
+        std::string case_name = "three_level_chain_destroys_every_member_exactly_once_in_order";
+        cases_run++;
+        RunResult result = compile_and_run(counters +
+                                               "class A {\n"
+                                               "  public:\n"
+                                               "    A() { this.am.tag = 1; return; }\n"
+                                               "    virtual ~A() { order = order * 10 + 7; return; }\n"
+                                               "    Inner am{};\n"
+                                               "};\n"
+                                               "class B : public A {\n"
+                                               "  public:\n"
+                                               "    B() { this.bm.tag = 2; return; }\n"
+                                               "    ~B() override { order = order * 10 + 8; return; }\n"
+                                               "    Inner bm{};\n"
+                                               "};\n"
+                                               "class C : public B {\n"
+                                               "  public:\n"
+                                               "    C() { this.cm.tag = 3; return; }\n"
+                                               "    ~C() override { order = order * 10 + 9; return; }\n"
+                                               "    Inner cm{};\n"
+                                               "};\n"
+                                               "int main() {\n"
+                                               "    { C c{}; }\n"
+                                               "    if (dtors != 3) return 1;\n"
+                                               "    if (order != 938271) return 2;\n"
+                                               "    return 0;\n"
+                                               "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected C body, cm, B body, bm, A body, am exactly once each, got exit " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // Destruction through a base pointer takes the vtable thunk into
+        // emit_destructor_chain_calls, which reaches the very same
+        // per-class destructors -- so the members must come out the same
+        // way.
+        std::string case_name = "virtual_destruction_through_a_base_pointer_destroys_every_member_once";
+        cases_run++;
+        RunResult result = compile_and_run(counters +
+                                               "class Base {\n"
+                                               "  public:\n"
+                                               "    Base() { this.bm.tag = 1; return; }\n"
+                                               "    virtual ~Base() { order = order * 10 + 7; return; }\n"
+                                               "    Inner bm{};\n"
+                                               "};\n"
+                                               "class Derived : public Base {\n"
+                                               "  public:\n"
+                                               "    Derived() { this.dm.tag = 2; return; }\n"
+                                               "    ~Derived() override { order = order * 10 + 8; return; }\n"
+                                               "    Inner dm{};\n"
+                                               "};\n"
+                                               "int main() {\n"
+                                               "    [[scpp::unsafe]] {\n"
+                                               "        Base* p = new Derived();\n"
+                                               "        delete p;\n"
+                                               "    }\n"
+                                               "    if (dtors != 2) return 1;\n"
+                                               "    if (order != 8271) return 2;\n"
+                                               "    return 0;\n"
+                                               "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected virtual destruction to reach every member exactly once, got exit " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // The practical consequence: a std::unique_ptr member of a class
+        // with a hand-written destructor was never freed.
+        std::string case_name = "user_written_destructor_frees_a_unique_ptr_member";
+        cases_run++;
+        RunResult result = compile_and_run(counters_with_std +
+                                               "class Holder {\n"
+                                               "  public:\n"
+                                               "    Holder() { return; }\n"
+                                               "    virtual ~Holder() { return; }\n"
+                                               "    std::unique_ptr<Inner> p{};\n"
+                                               "};\n"
+                                               "int main() {\n"
+                                               "    {\n"
+                                               "        Holder h{};\n"
+                                               "        h.p = std::make_unique<Inner>();\n"
+                                               "    }\n"
+                                               "    if (dtors != 1) return 1;\n"
+                                               "    return 0;\n"
+                                               "}\n",
+                                           case_name);
+        expect(result.exit_code == 0, case_name + ": expected the owned Inner to be freed exactly once, got exit " +
+                                          std::to_string(result.exit_code));
+    }
+
+    {
+        // A user-written *constructor* already initialized its members
+        // (emit_constructor_member_initializers runs for every
+        // constructor); this pins the symmetry the fix restores.
+        std::string case_name = "user_written_constructor_still_initializes_its_members_exactly_once";
+        cases_run++;
+        RunResult result = compile_and_run("int ctors = 0;\n"
+                                           "class Inner {\n"
+                                           "  public:\n"
+                                           "    Inner() { ctors = ctors + 1; this.tag = 5; return; }\n"
+                                           "    virtual ~Inner() = default;\n"
+                                           "    int tag = 0;\n"
+                                           "};\n"
+                                           "class Outer {\n"
+                                           "  public:\n"
+                                           "    Outer() { return; }\n"
+                                           "    virtual ~Outer() { return; }\n"
+                                           "    Inner a{};\n"
+                                           "};\n"
+                                           "int main() {\n"
+                                           "    Outer o{};\n"
+                                           "    if (ctors != 1) return 1;\n"
+                                           "    if (o.a.tag != 5) return 2;\n"
+                                           "    return 0;\n"
+                                           "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected a user-written constructor to construct its member once, got exit " +
+                   std::to_string(result.exit_code));
+    }
+}
+
 int main() {
     run_test_case_files();
     run_driver_single_test_case_files();
@@ -8646,6 +9049,7 @@ int main() {
     run_default_constructor_selection_tests();
     run_defaulted_special_member_tests();
     run_array_element_lifetime_runtime_tests();
+    run_user_destructor_member_teardown_runtime_tests();
     run_equality_operator_tests();
     test_compile_to_executable_returns_engaged_expected_on_success();
     test_compile_to_executable_returns_disengaged_expected_on_failure_without_throwing();

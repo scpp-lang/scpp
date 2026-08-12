@@ -759,6 +759,12 @@ private:
 
     [[nodiscard]] bool is_constructor_function(const Function& fn) const;
 
+    // The exact mirror of is_constructor_function: `fn` is the destructor
+    // of the class it is a member of. Used to give destruction the same
+    // "every lowering of this special member runs the class's own member
+    // logic" hook that construction already has.
+    [[nodiscard]] bool is_destructor_function(const Function& fn) const;
+
     [[nodiscard]] std::string unqualified_template_base_name(std::string_view class_name) const;
 
     [[nodiscard]] bool names_direct_base(const std::string& member_name, const ClassDef& def) const;
@@ -1163,6 +1169,23 @@ private:
     // The by-type counterpart of create_moved_flag_if_has_destructor.
     llvm::LLVMValueRef create_moved_flag_if_type_has_destructor(const Type& type);
 
+    // True when a *subobject* of this type has anything to release when its
+    // owner dies -- broader than type_has_destructor, see the definition.
+    [[nodiscard]] bool type_needs_subobject_teardown(const Type& type);
+
+    // Destroys `object_ptr`'s own class-typed members, in reverse
+    // declaration order. This is the destruction-side counterpart of
+    // emit_constructor_member_initializers, and like it, it belongs to the
+    // *class*, not to any one way of spelling the special member: both the
+    // `= default` destructor emitted by define_defaulted_function and a
+    // user-written destructor body lowered by define_function call it, so
+    // the two cannot drift apart. Base classes are deliberately *not*
+    // handled here -- a scpp destructor is non-chaining and every caller
+    // walks the chain itself via emit_destructor_chain_calls, so each
+    // class's destructor is responsible for exactly its own members.
+    [[nodiscard]] std::expected<void, CodegenError> emit_class_member_teardown(const std::string& class_name,
+                                                                              llvm::LLVMValueRef object_ptr);
+
     // Emits a counted loop over `array_type`'s elements, calling
     // `emit_element(element_ptr, index)` once per iteration with the
     // builder positioned inside the loop body, and leaves the builder
@@ -1251,8 +1274,13 @@ private:
     // function's own parameters in reverse parameter order -- matching
     // real C++'s "reverse of construction order" rule throughout (a
     // parameter is conceptually constructed before any of the body's own
-    // locals, so it's destroyed after all of them).
-    void free_unique_ptr_locals();
+    // locals, so it's destroyed after all of them) -- and finally, when
+    // the function being lowered is a destructor, that class's own
+    // members. Every path that leaves a function must call this, and
+    // exactly once: the explicit-`return` path in codegen_stmt and the
+    // implicit `return;` synthesized by define_function when control
+    // falls off the end of a void function.
+    [[nodiscard]] std::expected<void, CodegenError> emit_function_exit_cleanup();
 
     // The storage bound to `expr`, or null if it names no local of the
     // function being lowered (a global, a function, an enum constant, a
@@ -1293,7 +1321,7 @@ private:
     // an outer local takes only its own slot with it. If the current
     // block already has a terminator (e.g. the scope ended in `return`,
     // which already freed/destructed everything via
-    // free_unique_ptr_locals), no drop instructions are emitted here --
+    // emit_function_exit_cleanup), no drop instructions are emitted here --
     // there both to avoid inserting unreachable code after a terminator
     // and to avoid a double free/destruction.
     void pop_scope();
@@ -1306,14 +1334,14 @@ private:
     // for `break`/`continue` (target_depth = the loop's own scope depth,
     // so only the scopes entered since the loop was entered get cleaned
     // up) and, with target_depth 0, as the first phase of
-    // free_unique_ptr_locals() (see above), for `return` (see
+    // emit_function_exit_cleanup() (see above), for `return` (see
     // StmtKind::Return), which must unwind every enclosing scope all the
     // way to the function's own top, however deeply nested the return
     // is. Reads `scope_stack_` only; it does not itself pop any scope,
     // since the caller's own control-flow jump (a branch or a `ret`
     // terminator) makes whatever remains of the current block's codegen
     // unreachable anyway. Note this alone does *not* clean up function
-    // parameters (see free_unique_ptr_locals's own comment) -- they are
+    // parameters (see emit_function_exit_cleanup's own comment) -- they are
     // never pushed onto scope_stack_, only onto locals_.
     void emit_scope_cleanup_to_depth(std::size_t target_depth);
 

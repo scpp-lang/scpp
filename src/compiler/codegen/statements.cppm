@@ -648,7 +648,7 @@ namespace scpp {
                         value = std::move(value_result).value();
                     }
                 }
-                free_unique_ptr_locals();
+                if (auto r = emit_function_exit_cleanup(); !r.has_value()) return std::unexpected(std::move(r).error());
                 if (value != nullptr) {
                     llvm::LLVMBuildRet(builder_, value);
                 } else {
@@ -871,7 +871,7 @@ namespace scpp {
     }
 
 
-    void Codegen::free_unique_ptr_locals()
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::emit_function_exit_cleanup()
 {
         // Block-scoped locals first (deepest scope first, reverse
         // declaration order within each), matching pop_scope()'s own
@@ -899,6 +899,29 @@ namespace scpp {
                                                      slot_it->second.moved_flag);
             }
         }
+
+        // Finally, if this function *is* a destructor, the object's own
+        // members -- last, because the user-written body above may read
+        // them right up to the moment it returns. The `= default`
+        // destructor reaches the same routine from
+        // define_defaulted_function; routing both through
+        // emit_class_member_teardown is what keeps a hand-written `~T() {
+        // }` and `~T() = default;` destroying the same subobjects.
+        // Interface destructors are skipped: their `this` is a raw
+        // pointer to some unknown concrete object, not storage laid out
+        // by the interface, and an interface declares no members of its
+        // own.
+        if (current_function_def_ != nullptr && is_destructor_function(*current_function_def_) &&
+            !interface_destructor_uses_raw_this(*current_function_def_)) {
+            auto object_ptr_result = load_this_object_ptr();
+            if (!object_ptr_result.has_value()) return std::unexpected(std::move(object_ptr_result).error());
+            if (auto r = emit_class_member_teardown(current_function_def_->member_owner_class,
+                                                    std::move(object_ptr_result).value());
+                !r.has_value()) {
+                return std::unexpected(std::move(r).error());
+            }
+        }
+        return {};
     }
 
 
