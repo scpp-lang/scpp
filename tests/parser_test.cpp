@@ -5262,6 +5262,451 @@ void test_parse_returns_disengaged_expected_on_failure_without_throwing() {
            "parse_returns_disengaged_expected_on_failure_without_throwing: expected a non-empty diagnostic message");
 }
 
+// ---------------------------------------------------------------------------
+// Structural guard for the AST node cloners.
+//
+// Every clone of an `Expr` or a `Stmt` in the compiler funnels through exactly
+// one enumeration -- `scpp::assign_expr_fields` / `scpp::assign_stmt_fields` in
+// `src/compiler/ast.cppm`. That is a real improvement over the six `Expr` and
+// four `Stmt` hand-written cloners that used to exist and had silently drifted
+// apart, but it is still an enumeration a human has to keep in sync: scpp has
+// no reflection, and the node types cannot use a defaulted copy constructor
+// because a value-semantic owning pointer (`deep_ptr<T>`) is not expressible in
+// the language (`std::make_unique<T>(*other.ptr)` copies a borrow by value,
+// which ch05 forbids), so `ast.cppm` -- which must stay self-hostable -- has to
+// spell the fields out.
+//
+// The guards below make the omission *loud* instead of silent. They bind every
+// member of each node type by name; adding, removing or reordering a field
+// makes the corresponding binding fail to compile with a message naming the
+// type and both counts, e.g.
+//
+//     error: type 'scpp::Expr' binds to 30 elements, but only 29 names were
+//     provided
+//
+// If you land here after adding a field:
+//   1. add it to `assign_expr_fields` / `assign_stmt_fields` in ast.cppm,
+//   2. add its name to the binding below, and
+//   3. give it a distinctive value in the round-trip test underneath and assert
+//      that the clone carries it.
+// Step 3 is what actually proves the field is copied; the binding exists to
+// stop step 1 from being forgotten, which is how `Expr::resolved_local` was
+// once dropped by a subset of the cloners.
+// ---------------------------------------------------------------------------
+
+void test_expr_field_count_is_guarded() {
+    const scpp::Expr probe{};
+    const auto& [kind, resolved_local, loc, int_value, float_value, bool_value, name,
+                 explicit_global_qualification, binary_op, lhs, rhs, third, fold_ellipsis_on_left,
+                 unary_op, args, explicit_template_args, type, sizeof_operand_is_type, has_paren_init,
+                 destroy_through_pointer, through_arrow, implicit_arrow_deref, implicit_arrow_chain_safe,
+                 lambda_captures, lambda_blanket_mode, lambda_params, has_lambda_explicit_return_type,
+                 lambda_is_mutable, lambda_body] = probe;
+    expect(kind == scpp::ExprKind::IntegerLiteral && resolved_local == 0 && loc.line == 0 &&
+               int_value == 0 && float_value == 0.0 && !bool_value && name.empty() &&
+               !explicit_global_qualification && lhs == nullptr && rhs == nullptr && third == nullptr &&
+               !fold_ellipsis_on_left && args.empty() && explicit_template_args.empty() &&
+               type.kind == scpp::TypeKind::Named && type.name.empty() && !sizeof_operand_is_type && !has_paren_init &&
+               !destroy_through_pointer && !through_arrow && !implicit_arrow_deref &&
+               !implicit_arrow_chain_safe && lambda_captures.empty() &&
+               lambda_blanket_mode == scpp::LambdaCaptureMode::None && lambda_params.empty() &&
+               !has_lambda_explicit_return_type && !lambda_is_mutable && lambda_body == nullptr &&
+               binary_op == scpp::BinaryOp::Add && unary_op == scpp::UnaryOp::Neg,
+           "a default-constructed Expr value-initializes every field");
+}
+
+void test_stmt_field_count_is_guarded() {
+    const scpp::Stmt probe{};
+    const auto& [kind, loc, type, var_name, declared_local, init, alignment_specs, resolved_alignment,
+                 is_const, is_constexpr, is_static_local, has_ctor_args, ctor_args, expr, condition,
+                 if_mode, then_branch, else_branch, switch_cases, statements, is_unsafe] = probe;
+    expect(kind == scpp::StmtKind::VarDecl && loc.line == 0 && type.kind == scpp::TypeKind::Named &&
+               var_name.empty() && declared_local == 0 && init == nullptr && alignment_specs.empty() &&
+               resolved_alignment == 0 && !is_const && !is_constexpr && !is_static_local &&
+               !has_ctor_args && ctor_args.empty() && expr == nullptr && condition == nullptr &&
+               if_mode == scpp::IfMode::Runtime && then_branch == nullptr && else_branch == nullptr &&
+               switch_cases.empty() && statements.empty() && !is_unsafe,
+           "a default-constructed Stmt value-initializes every field");
+}
+
+void test_lambda_capture_field_count_is_guarded() {
+    const scpp::LambdaCapture probe{};
+    const auto& [name, by_reference, init, resolved_local] = probe;
+    expect(name.empty() && !by_reference && init == nullptr && resolved_local == 0,
+           "a default-constructed LambdaCapture value-initializes every field");
+}
+
+void test_switch_case_field_count_is_guarded() {
+    const scpp::SwitchCase probe{};
+    const auto& [loc, value, statements] = probe;
+    expect(loc.line == 0 && value == nullptr && statements.empty(),
+           "a default-constructed SwitchCase value-initializes every field");
+}
+
+void test_explicit_template_arg_field_count_is_guarded() {
+    const scpp::ExplicitTemplateArg probe{};
+    const auto& [is_type, type, value] = probe;
+    expect(is_type && type.kind == scpp::TypeKind::Named && value == nullptr,
+           "a default-constructed ExplicitTemplateArg value-initializes every field");
+}
+
+void test_param_field_count_is_guarded() {
+    const scpp::Param probe{};
+    const auto& [type, name, resolved_local, lifetime, default_expr, generic_concept,
+                 require_thread_movable, require_thread_shareable, is_parameter_pack] = probe;
+    expect(type.kind == scpp::TypeKind::Named && name.empty() && resolved_local == 0 &&
+               !lifetime.present() && default_expr == nullptr && generic_concept.empty() &&
+               !require_thread_movable && !require_thread_shareable && !is_parameter_pack,
+           "a default-constructed Param value-initializes every field");
+}
+
+// Builds an `Expr` in which *every* field holds a value distinguishable from
+// the default, so a clone that drops any one of them is detectable.
+scpp::Expr make_fully_populated_expr() {
+    scpp::Expr e{};
+    e.kind = scpp::ExprKind::Binary;
+    e.resolved_local = 41;
+    e.loc = scpp::SourceLocation{7, 13};
+    e.int_value = 1234;
+    e.float_value = 2.5;
+    e.bool_value = true;
+    e.name = "populated";
+    e.explicit_global_qualification = true;
+    e.binary_op = scpp::BinaryOp::Mul;
+    e.lhs = std::make_unique<scpp::Expr>();
+    e.lhs->kind = scpp::ExprKind::Identifier;
+    e.lhs->name = "lhs_child";
+    e.lhs->resolved_local = 51;
+    e.rhs = std::make_unique<scpp::Expr>();
+    e.rhs->kind = scpp::ExprKind::Identifier;
+    e.rhs->name = "rhs_child";
+    e.rhs->resolved_local = 52;
+    e.third = std::make_unique<scpp::Expr>();
+    e.third->kind = scpp::ExprKind::Identifier;
+    e.third->name = "third_child";
+    e.third->resolved_local = 53;
+    e.fold_ellipsis_on_left = true;
+    e.unary_op = scpp::UnaryOp::Not;
+    auto arg = std::make_unique<scpp::Expr>();
+    arg->kind = scpp::ExprKind::Identifier;
+    arg->name = "arg0";
+    arg->resolved_local = 54;
+    e.args.push_back(std::move(arg));
+    scpp::ExplicitTemplateArg targ{};
+    targ.is_type = false;
+    targ.type.kind = scpp::TypeKind::Pointer;
+    auto targ_value = std::make_unique<scpp::Expr>();
+    targ_value->kind = scpp::ExprKind::Identifier;
+    targ_value->name = "targ_value";
+    targ_value->resolved_local = 55;
+    targ.value = std::shared_ptr<scpp::Expr>(targ_value.release());
+    e.explicit_template_args.push_back(std::move(targ));
+    e.type.name = "populated_type";
+    e.sizeof_operand_is_type = true;
+    e.has_paren_init = true;
+    e.destroy_through_pointer = true;
+    e.through_arrow = true;
+    e.implicit_arrow_deref = true;
+    e.implicit_arrow_chain_safe = true;
+    scpp::LambdaCapture capture{};
+    capture.name = "cap";
+    capture.by_reference = true;
+    capture.resolved_local = 56;
+    capture.init = std::make_unique<scpp::Expr>();
+    capture.init->kind = scpp::ExprKind::Identifier;
+    capture.init->name = "cap_init";
+    capture.init->resolved_local = 57;
+    e.lambda_captures.push_back(std::move(capture));
+    e.lambda_blanket_mode = scpp::LambdaCaptureMode::ByReference;
+    scpp::Param param{};
+    param.name = "p0";
+    param.type.name = "param_type";
+    param.resolved_local = 58;
+    param.lifetime.name = "a";
+    param.generic_concept = "Concept";
+    param.require_thread_movable = true;
+    param.require_thread_shareable = true;
+    param.is_parameter_pack = true;
+    auto param_default = std::make_unique<scpp::Expr>();
+    param_default->kind = scpp::ExprKind::Identifier;
+    param_default->name = "param_default";
+    param_default->resolved_local = 59;
+    param.default_expr = std::shared_ptr<scpp::Expr>(param_default.release());
+    e.lambda_params.push_back(std::move(param));
+    e.has_lambda_explicit_return_type = true;
+    e.lambda_is_mutable = true;
+    e.lambda_body = std::make_unique<scpp::Stmt>();
+    e.lambda_body->kind = scpp::StmtKind::Block;
+    e.lambda_body->var_name = "lambda_body";
+    e.lambda_body->declared_local = 60;
+    return e;
+}
+
+// Builds a `Stmt` in which every field holds a non-default value.
+scpp::Stmt make_fully_populated_stmt() {
+    scpp::Stmt s{};
+    s.kind = scpp::StmtKind::If;
+    s.loc = scpp::SourceLocation{11, 3};
+    s.type.name = "stmt_type";
+    s.var_name = "populated_stmt";
+    s.declared_local = 71;
+    s.init = std::make_unique<scpp::Expr>();
+    s.init->kind = scpp::ExprKind::Identifier;
+    s.init->name = "init_child";
+    s.init->resolved_local = 72;
+    scpp::AlignmentSpecifier align{};
+    align.operand_is_type = true;
+    align.type.name = "align_type";
+    s.alignment_specs.push_back(std::move(align));
+    s.resolved_alignment = 32;
+    s.is_const = true;
+    s.is_constexpr = true;
+    s.is_static_local = true;
+    s.has_ctor_args = true;
+    auto ctor_arg = std::make_unique<scpp::Expr>();
+    ctor_arg->kind = scpp::ExprKind::Identifier;
+    ctor_arg->name = "ctor_arg0";
+    ctor_arg->resolved_local = 73;
+    s.ctor_args.push_back(std::move(ctor_arg));
+    s.expr = std::make_unique<scpp::Expr>();
+    s.expr->kind = scpp::ExprKind::Identifier;
+    s.expr->name = "expr_child";
+    s.expr->resolved_local = 74;
+    s.condition = std::make_unique<scpp::Expr>();
+    s.condition->kind = scpp::ExprKind::Identifier;
+    s.condition->name = "condition_child";
+    s.condition->resolved_local = 75;
+    s.if_mode = scpp::IfMode::ConstevalTrue;
+    s.then_branch = std::make_unique<scpp::Stmt>();
+    s.then_branch->kind = scpp::StmtKind::Block;
+    s.then_branch->var_name = "then_child";
+    s.then_branch->declared_local = 76;
+    s.else_branch = std::make_unique<scpp::Stmt>();
+    s.else_branch->kind = scpp::StmtKind::Block;
+    s.else_branch->var_name = "else_child";
+    s.else_branch->declared_local = 77;
+    scpp::SwitchCase switch_case{};
+    switch_case.loc = scpp::SourceLocation{19, 5};
+    switch_case.value = std::make_unique<scpp::Expr>();
+    switch_case.value->kind = scpp::ExprKind::IntegerLiteral;
+    switch_case.value->int_value = 99;
+    auto case_stmt = std::make_unique<scpp::Stmt>();
+    case_stmt->kind = scpp::StmtKind::Break;
+    case_stmt->var_name = "case_stmt";
+    case_stmt->declared_local = 78;
+    switch_case.statements.push_back(std::move(case_stmt));
+    s.switch_cases.push_back(std::move(switch_case));
+    auto child = std::make_unique<scpp::Stmt>();
+    child->kind = scpp::StmtKind::ExprStmt;
+    child->var_name = "block_child";
+    child->declared_local = 79;
+    s.statements.push_back(std::move(child));
+    s.is_unsafe = true;
+    return s;
+}
+
+// The binding here is deliberately the same shape as the guard above: a new
+// `Expr` field forces this assertion list to be revisited, so a field that is
+// added to the node but forgotten in `assign_expr_fields` cannot slip through.
+void expect_expr_round_trip(const scpp::Expr& clone, std::string_view label) {
+    const auto& [kind, resolved_local, loc, int_value, float_value, bool_value, name,
+                 explicit_global_qualification, binary_op, lhs, rhs, third, fold_ellipsis_on_left,
+                 unary_op, args, explicit_template_args, type, sizeof_operand_is_type, has_paren_init,
+                 destroy_through_pointer, through_arrow, implicit_arrow_deref, implicit_arrow_chain_safe,
+                 lambda_captures, lambda_blanket_mode, lambda_params, has_lambda_explicit_return_type,
+                 lambda_is_mutable, lambda_body] = clone;
+    expect(kind == scpp::ExprKind::Binary, std::string{label} + ": kind survives");
+    expect(resolved_local == 41, std::string{label} + ": resolved_local survives");
+    expect(loc.line == 7 && loc.column == 13, std::string{label} + ": loc survives");
+    expect(int_value == 1234, std::string{label} + ": int_value survives");
+    expect(float_value == 2.5, std::string{label} + ": float_value survives");
+    expect(bool_value, std::string{label} + ": bool_value survives");
+    expect(name == "populated", std::string{label} + ": name survives");
+    expect(explicit_global_qualification, std::string{label} + ": explicit_global_qualification survives");
+    expect(binary_op == scpp::BinaryOp::Mul, std::string{label} + ": binary_op survives");
+    expect(lhs != nullptr && lhs->name == "lhs_child" && lhs->resolved_local == 51,
+           std::string{label} + ": lhs survives with its resolution");
+    expect(rhs != nullptr && rhs->name == "rhs_child" && rhs->resolved_local == 52,
+           std::string{label} + ": rhs survives with its resolution");
+    expect(third != nullptr && third->name == "third_child" && third->resolved_local == 53,
+           std::string{label} + ": third survives with its resolution");
+    expect(fold_ellipsis_on_left, std::string{label} + ": fold_ellipsis_on_left survives");
+    expect(unary_op == scpp::UnaryOp::Not, std::string{label} + ": unary_op survives");
+    expect(args.size() == 1 && args[0] != nullptr && args[0]->name == "arg0" && args[0]->resolved_local == 54,
+           std::string{label} + ": args survive with their resolution");
+    expect(explicit_template_args.size() == 1 && explicit_template_args[0].value != nullptr &&
+               explicit_template_args[0].value->name == "targ_value" &&
+               explicit_template_args[0].value->resolved_local == 55 &&
+               explicit_template_args[0].type.kind == scpp::TypeKind::Pointer,
+           std::string{label} + ": explicit_template_args survive with their resolution");
+    expect(type.name == "populated_type", std::string{label} + ": type survives");
+    expect(sizeof_operand_is_type, std::string{label} + ": sizeof_operand_is_type survives");
+    expect(has_paren_init, std::string{label} + ": has_paren_init survives");
+    expect(destroy_through_pointer, std::string{label} + ": destroy_through_pointer survives");
+    expect(through_arrow, std::string{label} + ": through_arrow survives");
+    expect(implicit_arrow_deref, std::string{label} + ": implicit_arrow_deref survives");
+    expect(implicit_arrow_chain_safe, std::string{label} + ": implicit_arrow_chain_safe survives");
+    expect(lambda_captures.size() == 1 && lambda_captures[0].name == "cap" &&
+               lambda_captures[0].by_reference && lambda_captures[0].resolved_local == 56 &&
+               lambda_captures[0].init != nullptr && lambda_captures[0].init->name == "cap_init" &&
+               lambda_captures[0].init->resolved_local == 57,
+           std::string{label} + ": lambda_captures survive with their resolution");
+    expect(lambda_blanket_mode == scpp::LambdaCaptureMode::ByReference,
+           std::string{label} + ": lambda_blanket_mode survives");
+    expect(lambda_params.size() == 1 && lambda_params[0].name == "p0" && lambda_params[0].resolved_local == 58 &&
+               lambda_params[0].lifetime.name == "a" && lambda_params[0].type.name == "param_type" &&
+               lambda_params[0].generic_concept == "Concept" &&
+               lambda_params[0].require_thread_movable && lambda_params[0].require_thread_shareable &&
+               lambda_params[0].is_parameter_pack && lambda_params[0].default_expr != nullptr &&
+               lambda_params[0].default_expr->name == "param_default" &&
+               lambda_params[0].default_expr->resolved_local == 59,
+           std::string{label} + ": lambda_params survive with their resolution");
+    expect(has_lambda_explicit_return_type, std::string{label} + ": has_lambda_explicit_return_type survives");
+    expect(lambda_is_mutable, std::string{label} + ": lambda_is_mutable survives");
+    expect(lambda_body != nullptr && lambda_body->var_name == "lambda_body" && lambda_body->declared_local == 60,
+           std::string{label} + ": lambda_body survives with its resolution");
+}
+
+void expect_stmt_round_trip(const scpp::Stmt& clone, std::string_view label) {
+    const auto& [kind, loc, type, var_name, declared_local, init, alignment_specs, resolved_alignment,
+                 is_const, is_constexpr, is_static_local, has_ctor_args, ctor_args, expr, condition,
+                 if_mode, then_branch, else_branch, switch_cases, statements, is_unsafe] = clone;
+    expect(kind == scpp::StmtKind::If, std::string{label} + ": kind survives");
+    expect(loc.line == 11 && loc.column == 3, std::string{label} + ": loc survives");
+    expect(type.name == "stmt_type", std::string{label} + ": type survives");
+    expect(var_name == "populated_stmt", std::string{label} + ": var_name survives");
+    expect(declared_local == 71, std::string{label} + ": declared_local survives");
+    expect(init != nullptr && init->name == "init_child" && init->resolved_local == 72,
+           std::string{label} + ": init survives with its resolution");
+    expect(alignment_specs.size() == 1 && alignment_specs[0].operand_is_type &&
+               alignment_specs[0].type.name == "align_type",
+           std::string{label} + ": alignment_specs survive");
+    expect(resolved_alignment == 32, std::string{label} + ": resolved_alignment survives");
+    expect(is_const, std::string{label} + ": is_const survives");
+    expect(is_constexpr, std::string{label} + ": is_constexpr survives");
+    expect(is_static_local, std::string{label} + ": is_static_local survives");
+    expect(has_ctor_args, std::string{label} + ": has_ctor_args survives");
+    expect(ctor_args.size() == 1 && ctor_args[0] != nullptr && ctor_args[0]->name == "ctor_arg0" &&
+               ctor_args[0]->resolved_local == 73,
+           std::string{label} + ": ctor_args survive with their resolution");
+    expect(expr != nullptr && expr->name == "expr_child" && expr->resolved_local == 74,
+           std::string{label} + ": expr survives with its resolution");
+    expect(condition != nullptr && condition->name == "condition_child" && condition->resolved_local == 75,
+           std::string{label} + ": condition survives with its resolution");
+    expect(if_mode == scpp::IfMode::ConstevalTrue, std::string{label} + ": if_mode survives");
+    expect(then_branch != nullptr && then_branch->var_name == "then_child" && then_branch->declared_local == 76,
+           std::string{label} + ": then_branch survives with its resolution");
+    expect(else_branch != nullptr && else_branch->var_name == "else_child" && else_branch->declared_local == 77,
+           std::string{label} + ": else_branch survives with its resolution");
+    expect(switch_cases.size() == 1 && switch_cases[0].loc.line == 19 && switch_cases[0].value != nullptr &&
+               switch_cases[0].value->int_value == 99 && switch_cases[0].statements.size() == 1 &&
+               switch_cases[0].statements[0] != nullptr &&
+               switch_cases[0].statements[0]->var_name == "case_stmt" &&
+               switch_cases[0].statements[0]->declared_local == 78,
+           std::string{label} + ": switch_cases survive with their bodies");
+    expect(statements.size() == 1 && statements[0] != nullptr && statements[0]->var_name == "block_child" &&
+               statements[0]->declared_local == 79,
+           std::string{label} + ": statements survive with their resolution");
+    expect(is_unsafe, std::string{label} + ": is_unsafe survives");
+}
+
+// `deep_clone_expr`, the copy constructor and copy assignment are three
+// entry points onto the *same* enumeration -- assert all three, because
+// the drift that used to exist was precisely between such entry points.
+void test_expr_clone_preserves_every_field() {
+    const scpp::Expr original = make_fully_populated_expr();
+
+    scpp::ExprPtr deep = scpp::deep_clone_expr(original);
+    expect(deep != nullptr, "deep_clone_expr returns a node");
+    if (deep != nullptr) expect_expr_round_trip(*deep, "deep_clone_expr");
+
+    const scpp::Expr copy_constructed{original};
+    expect_expr_round_trip(copy_constructed, "Expr copy constructor");
+
+    scpp::Expr copy_assigned{};
+    copy_assigned = original;
+    expect_expr_round_trip(copy_assigned, "Expr copy assignment");
+
+    // Deep, not shared: mutating the clone must not disturb the original.
+    if (deep != nullptr && deep->lhs != nullptr) deep->lhs->name = "mutated";
+    expect(original.lhs != nullptr && original.lhs->name == "lhs_child",
+           "deep_clone_expr does not share children with the original");
+}
+
+void test_stmt_clone_preserves_every_field() {
+    const scpp::Stmt original = make_fully_populated_stmt();
+
+    scpp::StmtPtr deep = scpp::deep_clone_stmt(original);
+    expect(deep != nullptr, "deep_clone_stmt returns a node");
+    if (deep != nullptr) expect_stmt_round_trip(*deep, "deep_clone_stmt");
+
+    const scpp::Stmt copy_constructed{original};
+    expect_stmt_round_trip(copy_constructed, "Stmt copy constructor");
+
+    scpp::Stmt copy_assigned{};
+    copy_assigned = original;
+    expect_stmt_round_trip(copy_assigned, "Stmt copy assignment");
+
+    if (deep != nullptr && deep->then_branch != nullptr) deep->then_branch->var_name = "mutated";
+    expect(original.then_branch != nullptr && original.then_branch->var_name == "then_child",
+           "deep_clone_stmt does not share children with the original");
+}
+
+// A `Stmt` reached only through an enclosing node's *copy constructor* used to
+// go through a different, incomplete cloner: `clone_initializer_stmt` had no
+// `switch_cases` loop at all, so a global variable or default-argument lambda
+// body containing a `switch` lost every case. Both paths now share one
+// enumeration, so exercise the indirect one explicitly.
+void test_global_var_copy_preserves_switch_cases() {
+    scpp::GlobalVar original{};
+    original.decl = std::make_unique<scpp::Stmt>();
+    original.decl->kind = scpp::StmtKind::VarDecl;
+    original.decl->var_name = "g";
+    original.decl->init = std::make_unique<scpp::Expr>();
+    original.decl->init->kind = scpp::ExprKind::Lambda;
+    original.decl->init->lambda_body = std::make_unique<scpp::Stmt>();
+    original.decl->init->lambda_body->kind = scpp::StmtKind::Switch;
+    original.decl->init->lambda_body->is_const = true;
+    original.decl->init->lambda_body->is_static_local = true;
+    original.decl->init->lambda_body->resolved_alignment = 16;
+    scpp::SwitchCase only_case{};
+    only_case.value = std::make_unique<scpp::Expr>();
+    only_case.value->kind = scpp::ExprKind::IntegerLiteral;
+    only_case.value->int_value = 5;
+    only_case.statements.push_back(std::make_unique<scpp::Stmt>());
+    only_case.statements[0]->kind = scpp::StmtKind::Break;
+    original.decl->init->lambda_body->switch_cases.push_back(std::move(only_case));
+
+    const scpp::GlobalVar copy{original};
+    expect(copy.decl != nullptr && copy.decl->init != nullptr && copy.decl->init->lambda_body != nullptr,
+           "GlobalVar's copy constructor clones the declaration");
+    if (copy.decl == nullptr || copy.decl->init == nullptr || copy.decl->init->lambda_body == nullptr) return;
+    const scpp::Stmt& body = *copy.decl->init->lambda_body;
+    expect(body.switch_cases.size() == 1, "an indirectly cloned Stmt keeps its switch cases");
+    expect(body.switch_cases.size() == 1 && body.switch_cases[0].value != nullptr &&
+               body.switch_cases[0].value->int_value == 5 && body.switch_cases[0].statements.size() == 1,
+           "an indirectly cloned switch case keeps its value and body");
+    expect(body.is_const, "an indirectly cloned Stmt keeps is_const");
+    expect(body.is_static_local, "an indirectly cloned Stmt keeps is_static_local");
+    expect(body.resolved_alignment == 16, "an indirectly cloned Stmt keeps resolved_alignment");
+}
+
+// Codegen materializes each lambda capture by evaluating an `Identifier` that
+// names the captured entity in the enclosing scope. That node is synthesized,
+// not cloned, so it is a second way for a resolution field to go missing --
+// there is now one factory for it.
+void test_capture_identifier_carries_resolution() {
+    scpp::LambdaCapture capture{};
+    capture.name = "captured";
+    capture.by_reference = true;
+    capture.resolved_local = 88;
+    const scpp::Expr ident = scpp::make_capture_identifier(capture, scpp::SourceLocation{4, 9});
+    expect(ident.kind == scpp::ExprKind::Identifier, "a capture identifier is an Identifier");
+    expect(ident.name == "captured", "a capture identifier carries the captured name");
+    expect(ident.resolved_local == 88, "a capture identifier carries the enclosing local's id");
+    expect(ident.loc.line == 4 && ident.loc.column == 9, "a capture identifier carries the requested location");
+}
+
 } // namespace
 
 int main() {
@@ -5531,6 +5976,17 @@ int main() {
     test_namespace_relative_qualified_generic_type_declaration_parses();
     test_type_alias_declaration_parses_and_resolves();
     test_exported_type_alias_inside_namespace_parses();
+
+    test_expr_field_count_is_guarded();
+    test_stmt_field_count_is_guarded();
+    test_lambda_capture_field_count_is_guarded();
+    test_switch_case_field_count_is_guarded();
+    test_explicit_template_arg_field_count_is_guarded();
+    test_param_field_count_is_guarded();
+    test_expr_clone_preserves_every_field();
+    test_stmt_clone_preserves_every_field();
+    test_global_var_copy_preserves_switch_cases();
+    test_capture_identifier_carries_resolution();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

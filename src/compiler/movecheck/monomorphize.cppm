@@ -700,7 +700,7 @@ private:
         // parameter, so the expression converges to fully concrete once
         // every parameter has been substituted.
         if (result.array_size_expr) {
-            ExprPtr cloned = clone_expr(*result.array_size_expr);
+            ExprPtr cloned = deep_clone_expr(*result.array_size_expr);
             substitute_type_param_in_expr(*cloned, param_name, replacement);
             result.array_size_expr = std::shared_ptr<Expr>(std::move(cloned));
         }
@@ -750,7 +750,7 @@ private:
         // above -- clone-then-substitute so the template primary's own
         // array_size_expr is never mutated in place.
         if (result.array_size_expr) {
-            ExprPtr cloned = clone_expr(*result.array_size_expr);
+            ExprPtr cloned = deep_clone_expr(*result.array_size_expr);
             substitute_type_pack_in_expr(*cloned, pack_name, pack_elems);
             result.array_size_expr = std::shared_ptr<Expr>(std::move(cloned));
         }
@@ -1159,7 +1159,7 @@ private:
                     }
                 }
             }
-            clone.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
+            clone.body = method_tmpl.body ? deep_clone_stmt(*method_tmpl.body) : nullptr;
             if (clone.body) {
                 substitute_type_params_in_stmt(*clone.body, type_replacements);
                 substitute_type_packs_in_stmt(*clone.body, pack_replacements);
@@ -1252,7 +1252,7 @@ private:
         // and pack replacements are applied, mirroring how nested Types
         // above are substituted via both replacement maps.
         if (result.array_size_expr) {
-            ExprPtr cloned = clone_expr(*result.array_size_expr);
+            ExprPtr cloned = deep_clone_expr(*result.array_size_expr);
             substitute_type_params_in_expr(*cloned, replacements);
             substitute_type_packs_in_expr(*cloned, pack_replacements);
             result.array_size_expr = std::shared_ptr<Expr>(std::move(cloned));
@@ -1700,14 +1700,14 @@ private:
                 check_class.thread_movable_override = program_.classes[i].thread_movable_override;
                 check_class.thread_shareable_override = program_.classes[i].thread_shareable_override;
                 if (program_.classes[i].thread_movable_if_movable_expr) {
-                    check_class.thread_movable_if_movable_expr = clone_expr(*program_.classes[i].thread_movable_if_movable_expr);
+                    check_class.thread_movable_if_movable_expr = deep_clone_expr(*program_.classes[i].thread_movable_if_movable_expr);
                     substitute_type_params_in_expr(*check_class.thread_movable_if_movable_expr, type_replacements);
                     if (auto _r = resolve_generic_types_in_expr(*check_class.thread_movable_if_movable_expr); !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
                 }
                 if (program_.classes[i].thread_movable_if_shareable_expr) {
-                    check_class.thread_movable_if_shareable_expr = clone_expr(*program_.classes[i].thread_movable_if_shareable_expr);
+                    check_class.thread_movable_if_shareable_expr = deep_clone_expr(*program_.classes[i].thread_movable_if_shareable_expr);
                     substitute_type_params_in_expr(*check_class.thread_movable_if_shareable_expr, type_replacements);
                     if (auto _r = resolve_generic_types_in_expr(*check_class.thread_movable_if_shareable_expr); !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
@@ -1827,7 +1827,7 @@ private:
                         if (auto _r = resolve_generic_types_in_expr(*arg); !_r.has_value()) return std::unexpected(std::move(_r).error());
                     }
                 }
-                check_fn.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
+                check_fn.body = method_tmpl.body ? deep_clone_stmt(*method_tmpl.body) : nullptr;
                 if (check_fn.body) {
                     substitute_type_params_in_stmt(*check_fn.body, type_replacements);
                     resolve_generic_types_in_stmt_optimistic(*check_fn.body);
@@ -2564,9 +2564,9 @@ private:
             bool tmpl_thread_movable_override = tmpl.thread_movable_override;
             bool tmpl_thread_shareable_override = tmpl.thread_shareable_override;
             ExprPtr tmpl_thread_movable_if_movable_expr =
-                tmpl.thread_movable_if_movable_expr ? clone_expr(*tmpl.thread_movable_if_movable_expr) : nullptr;
+                tmpl.thread_movable_if_movable_expr ? deep_clone_expr(*tmpl.thread_movable_if_movable_expr) : nullptr;
             ExprPtr tmpl_thread_movable_if_shareable_expr =
-                tmpl.thread_movable_if_shareable_expr ? clone_expr(*tmpl.thread_movable_if_shareable_expr) : nullptr;
+                tmpl.thread_movable_if_shareable_expr ? deep_clone_expr(*tmpl.thread_movable_if_shareable_expr) : nullptr;
             std::vector<GenericTypeParam> template_params_copy = tmpl.template_params;
             std::vector<Function> methods = method_templates_of_owner(tmpl_owner_id);
             for (const GenericTypeParam& type_param : template_params_copy) {
@@ -2764,7 +2764,7 @@ private:
                         if (auto _r = resolve_generic_types_in_expr(*arg); !_r.has_value()) return fail(std::move(_r).error());
                     }
                 }
-                clone.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
+                clone.body = method_tmpl.body ? deep_clone_stmt(*method_tmpl.body) : nullptr;
                 if (clone.body) {
                     substitute_type_params_in_stmt(*clone.body, class_selection.bindings.type_replacements);
                     for (const auto& [class_pack_name, concrete_pack_types] : class_selection.bindings.type_pack_replacements) {
@@ -2858,13 +2858,13 @@ private:
             concrete.is_nodiscard = tmpl.is_nodiscard;
             concrete.nodiscard_reason = tmpl.nodiscard_reason;
             if (tmpl.thread_movable_if_movable_expr) {
-                concrete.thread_movable_if_movable_expr = clone_expr(*tmpl.thread_movable_if_movable_expr);
+                concrete.thread_movable_if_movable_expr = deep_clone_expr(*tmpl.thread_movable_if_movable_expr);
                 if (auto _r = resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr); !_r.has_value()) {
                     return fail(std::move(_r).error());
                 }
             }
             if (tmpl.thread_movable_if_shareable_expr) {
-                concrete.thread_movable_if_shareable_expr = clone_expr(*tmpl.thread_movable_if_shareable_expr);
+                concrete.thread_movable_if_shareable_expr = deep_clone_expr(*tmpl.thread_movable_if_shareable_expr);
                 if (auto _r = resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr); !_r.has_value()) {
                     return fail(std::move(_r).error());
                 }
@@ -2927,7 +2927,7 @@ private:
                         }
                     }
                 }
-                clone.body = method_tmpl.body ? clone_stmt(*method_tmpl.body) : nullptr;
+                clone.body = method_tmpl.body ? deep_clone_stmt(*method_tmpl.body) : nullptr;
                 if (clone.body) {
                     for (std::size_t i = 0; i < params_copy.size(); i++) {
                         substitute_non_type_param_in_stmt(*clone.body, params_copy[i].name, non_type_args[i]);
@@ -3047,13 +3047,13 @@ private:
             concrete.is_nodiscard = base_case_tmpl->is_nodiscard;
             concrete.nodiscard_reason = base_case_tmpl->nodiscard_reason;
             if (base_case_tmpl->thread_movable_if_movable_expr) {
-                concrete.thread_movable_if_movable_expr = clone_expr(*base_case_tmpl->thread_movable_if_movable_expr);
+                concrete.thread_movable_if_movable_expr = deep_clone_expr(*base_case_tmpl->thread_movable_if_movable_expr);
                 if (auto _r = resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr); !_r.has_value()) {
                     return fail(std::move(_r).error());
                 }
             }
             if (base_case_tmpl->thread_movable_if_shareable_expr) {
-                concrete.thread_movable_if_shareable_expr = clone_expr(*base_case_tmpl->thread_movable_if_shareable_expr);
+                concrete.thread_movable_if_shareable_expr = deep_clone_expr(*base_case_tmpl->thread_movable_if_shareable_expr);
                 if (auto _r = resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr); !_r.has_value()) {
                     return fail(std::move(_r).error());
                 }
@@ -3112,10 +3112,10 @@ private:
             recursive_base.has_value() && !recursive_base->get().base_type.non_type_args.empty() ? recursive_base->get().base_type.non_type_args.front()
                                                                                            : nullptr;
         ExprPtr thread_movable_if_movable_expr_copy = recursive_tmpl->thread_movable_if_movable_expr
-                                                          ? clone_expr(*recursive_tmpl->thread_movable_if_movable_expr)
+                                                          ? deep_clone_expr(*recursive_tmpl->thread_movable_if_movable_expr)
                                                           : nullptr;
         ExprPtr thread_movable_if_shareable_expr_copy = recursive_tmpl->thread_movable_if_shareable_expr
-                                                            ? clone_expr(*recursive_tmpl->thread_movable_if_shareable_expr)
+                                                            ? deep_clone_expr(*recursive_tmpl->thread_movable_if_shareable_expr)
                                                             : nullptr;
         std::vector<GenericTypeParam> template_params_copy = recursive_tmpl->template_params;
         std::string owner_id_copy = recursive_tmpl->template_owner_id;
@@ -3748,7 +3748,7 @@ private:
                         if (underlying.kind == TypeKind::Named && variadic_generic_type_names_.contains(underlying.name)) {
                             Expr fake_call;
                             fake_call.loc = loc;
-                            for (const ExprPtr& arg : args) fake_call.args.push_back(clone_expr(*arg));
+                            for (const ExprPtr& arg : args) fake_call.args.push_back(deep_clone_expr(*arg));
                             auto _deduced = deduce_via_base_class_chain(fake_call, arg_cursor, underlying, body, type_bindings,
                                                         value_bindings, pack_bindings,
                                                         upcasts);
@@ -3865,7 +3865,7 @@ private:
                     }
                     clone.params.push_back(std::move(p));
                 }
-                clone.body = tmpl.body ? clone_stmt(*tmpl.body) : nullptr;
+                clone.body = tmpl.body ? deep_clone_stmt(*tmpl.body) : nullptr;
                 if (clone.body) {
                     for (const auto& [name, replacement] : type_bindings) {
                         substitute_type_param_in_stmt(*clone.body, name, replacement);
@@ -3992,7 +3992,7 @@ private:
             }
             clone.params.push_back(std::move(p));
         }
-        clone.body = tmpl.body ? clone_stmt(*tmpl.body) : nullptr;
+        clone.body = tmpl.body ? deep_clone_stmt(*tmpl.body) : nullptr;
         if (clone.body) {
             substitute_type_bindings_in_stmt(*clone.body, type_bindings);
             substitute_type_packs_in_stmt(*clone.body, pack_bindings);
@@ -4117,7 +4117,7 @@ private:
         resolution.deferred_obligations.clear();
         resolution.concrete_pack_param_types.assign(stable_tmpl.params.size(), {});
 
-        ExprPtr expr_copy = clone_expr(expr);
+        ExprPtr expr_copy = deep_clone_expr(expr);
         if (auto _r = seed_explicit_template_arguments(*expr_copy, stable_tmpl, resolution.type_bindings, resolution.value_bindings,
                                          resolution.pack_bindings);
             !_r.has_value()) {
@@ -4180,7 +4180,7 @@ private:
             if (underlying.kind == TypeKind::Named && variadic_generic_type_names_.contains(underlying.name)) {
                 if (argument_type_can_participate_in_variadic_base_deduction(*expr_copy, arg_cursor, underlying.name,
                                                                              body)) {
-                    ExprPtr expr_copy_for_base_deduction = clone_expr(expr);
+                    ExprPtr expr_copy_for_base_deduction = deep_clone_expr(expr);
                     auto _deduced = deduce_via_base_class_chain(*expr_copy_for_base_deduction, arg_cursor, underlying, body,
                                                 resolution.type_bindings, resolution.value_bindings,
                                                 resolution.pack_bindings, resolution.upcasts);
@@ -5386,7 +5386,7 @@ private:
                 const Function& tmpl = program_.functions[candidate_index];
                 if (!compile_time_dependency_visible(tmpl, body)) continue;
                 if (tmpl.template_params.empty()) continue;
-                ExprPtr expr_copy = clone_expr(expr);
+                ExprPtr expr_copy = deep_clone_expr(expr);
                 std::unordered_map<std::string, Type> type_bindings;
                 std::unordered_map<std::string, int> value_bindings;
                 std::unordered_map<std::string, std::vector<Type>> explicit_pack_bindings;
@@ -5740,7 +5740,7 @@ private:
             std::any_of(expr.lambda_params.begin(), expr.lambda_params.end(),
                         [](const Param& param) { return !param.generic_concept.empty(); });
 
-        call_method.body = expr.lambda_body ? clone_stmt(*expr.lambda_body) : nullptr;
+        call_method.body = expr.lambda_body ? deep_clone_stmt(*expr.lambda_body) : nullptr;
         // ch05 §5.12: "a by-value capture can't be reassigned inside the
         // body" absent `mutable` -- checked on the *original* (pre field-
         // access-rewrite) body, where a captured name is still an
@@ -6087,14 +6087,14 @@ private:
 
     [[nodiscard]] ExprPtr instantiate_pack_operand(const Expr& pattern, const std::string& pack_name,
                                                    const std::string& concrete_name) {
-        ExprPtr result = clone_expr(pattern);
+        ExprPtr result = deep_clone_expr(pattern);
         substitute_identifier_in_expr(*result, pack_name, concrete_name);
         return result;
     }
 
     [[nodiscard]] std::expected<ExprPtr, DataflowError> expand_fold_for_pack(const Expr& fold_expr, const std::string& pack_name,
                                                const std::vector<std::string>& concrete_names) {
-        if (fold_expr.kind != ExprKind::Fold) return clone_expr(fold_expr);
+        if (fold_expr.kind != ExprKind::Fold) return deep_clone_expr(fold_expr);
         if (fold_expr.fold_ellipsis_on_left) {
             if (fold_expr.rhs != nullptr) {
                 return std::unexpected(DataflowError("binary left folds are not supported in this version", fold_expr.loc));
@@ -6137,10 +6137,10 @@ private:
                                 fold_expr.loc));
         }
         if (concrete_names.empty()) {
-            return lhs_mentions ? clone_expr(*fold_expr.rhs) : clone_expr(*fold_expr.lhs);
+            return lhs_mentions ? deep_clone_expr(*fold_expr.rhs) : deep_clone_expr(*fold_expr.lhs);
         }
         if (lhs_mentions) {
-            ExprPtr result = clone_expr(*fold_expr.rhs);
+            ExprPtr result = deep_clone_expr(*fold_expr.rhs);
             for (std::size_t i = concrete_names.size(); i-- > 0;) {
                 result = build_binary_expr(fold_expr.binary_op,
                                            instantiate_pack_operand(*fold_expr.lhs, pack_name, concrete_names[i]),
@@ -6148,7 +6148,7 @@ private:
             }
             return result;
         }
-        ExprPtr result = clone_expr(*fold_expr.lhs);
+        ExprPtr result = deep_clone_expr(*fold_expr.lhs);
         for (std::size_t i = 0; i < concrete_names.size(); i++) {
             result = build_binary_expr(fold_expr.binary_op, std::move(result),
                                        instantiate_pack_operand(*fold_expr.rhs, pack_name, concrete_names[i]));
@@ -6160,7 +6160,7 @@ private:
                                                             const std::vector<std::string>& concrete_names) {
         if (expr.kind != ExprKind::PackExpansion || expr.lhs == nullptr) {
             std::vector<ExprPtr> single;
-            single.push_back(clone_expr(expr));
+            single.push_back(deep_clone_expr(expr));
             return single;
         }
         if (!expr_mentions_identifier(*expr.lhs, pack_name)) {
@@ -6619,7 +6619,7 @@ private:
             p.type = concrete_param_types[i];
             clone.params.push_back(std::move(p));
         }
-        clone.body = tmpl.body ? clone_stmt(*tmpl.body) : nullptr;
+        clone.body = tmpl.body ? deep_clone_stmt(*tmpl.body) : nullptr;
         if (clone.body) {
             for (const auto& [witness_name, concrete] : witness_replacements) {
                 substitute_type_param_in_stmt(*clone.body, witness_name, concrete);

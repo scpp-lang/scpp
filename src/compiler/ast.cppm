@@ -530,7 +530,7 @@ class Expr {
     Expr(Expr&&) = default;
     Expr& operator=(Expr&&) = default;
 
-    ExprKind kind;
+    ExprKind kind{};
 
     // Name resolution's result for an `Identifier` naming a local
     // variable (or parameter) of the enclosing function: `id + 1`, where
@@ -556,7 +556,7 @@ class Expr {
     // SourceLocation) -- stamped by the parser, used only for diagnostics
     // (movecheck/codegen error messages), never consulted by any actual
     // check.
-    SourceLocation loc;
+    SourceLocation loc{};
 
     // IntegerLiteral, or CharLiteral's ordinal value (e.g. 'a' -> 97) --
     // sharing this field rather than adding a new one keeps Expr flat;
@@ -576,7 +576,7 @@ class Expr {
     // empty until movecheck's closure-resolution pass runs, see
     // lambda_captures's own comment; non-empty by the time codegen ever
     // sees this node).
-    std::string name;
+    std::string name{};
 
     // Identifier / Call only: true when the source spelled this name
     // with a leading `::`, forcing lookup from the global namespace
@@ -594,16 +594,16 @@ class Expr {
     // fold, and `fold_ellipsis_on_left` distinguishes `(... op pack)` from
     // `(pack op ...)`.
     BinaryOp binary_op{};
-    ExprPtr lhs;
-    ExprPtr rhs;
-    ExprPtr third;
+    ExprPtr lhs{};
+    ExprPtr rhs{};
+    ExprPtr third{};
     bool fold_ellipsis_on_left = false;
 
     // Unary (operand stored in `lhs`)
     UnaryOp unary_op{};
 
     // Call arguments / New constructor arguments
-    std::vector<ExprPtr> args;
+    std::vector<ExprPtr> args{};
 
     // ch05 §5.11/§5.14: Call only -- non-empty only for a call to a
     // full-header-form generic function that explicitly supplies one or
@@ -612,7 +612,7 @@ class Expr {
     // comment. Empty for every other call (the overwhelmingly common
     // case: an ordinary, non-generic call, or a generic call resolved
     // entirely by argument-position deduction).
-    std::vector<ExplicitTemplateArg> explicit_template_args;
+    std::vector<ExplicitTemplateArg> explicit_template_args{};
 
     // New: the allocated element type `T` in `new T...`.
     // Destroy: the explicitly-named destroyed type `T` in `expr.~T()` /
@@ -623,7 +623,7 @@ class Expr {
     // (operand stored in `lhs`, like Unary).
     // Sizeof(type): the queried type operand `T`.
     // ValueInit: the type to value-initialize (see ExprKind::ValueInit).
-    Type type;
+    Type type{};
     // Sizeof only: true when this node is the `sizeof(T)` form (queried type
     // stored in `type`), false for `sizeof(expr)` (unevaluated operand stored
     // in `lhs`).
@@ -662,18 +662,18 @@ class Expr {
     // in place, and sets `name` (above) to the synthesized concrete
     // class before movecheck's own per-function checking or codegen
     // ever runs.
-    std::vector<LambdaCapture> lambda_captures;
+    std::vector<LambdaCapture> lambda_captures{};
     LambdaCaptureMode lambda_blanket_mode = LambdaCaptureMode::None;
     // The lambda's own parameter list -- ordinary Params; a concept-
     // constrained lambda parameter is not supported in this version
     // (mirrors parser.cppm's reject_generic_params for methods).
-    std::vector<Param> lambda_params;
+    std::vector<Param> lambda_params{};
     bool has_lambda_explicit_return_type = false;
     // `[x](int y) mutable { ... }` -- licenses the synthesized "call"
     // method to modify by-value-captured fields (a non-`const` method,
     // mirroring an ordinary method's own trailing `const`, ch05 §5.9).
     bool lambda_is_mutable = false;
-    StmtPtr lambda_body;
+    StmtPtr lambda_body{};
 };
 
 enum class StmtKind {
@@ -710,9 +710,9 @@ class SwitchCase {
     SwitchCase(SwitchCase&&) = default;
     SwitchCase& operator=(SwitchCase&&) = default;
 
-    SourceLocation loc;
-    ExprPtr value; // null => default
-    std::vector<StmtPtr> statements;
+    SourceLocation loc{};
+    ExprPtr value{}; // null => default
+    std::vector<StmtPtr> statements{};
 };
 
 class Stmt {
@@ -724,15 +724,15 @@ class Stmt {
     Stmt(Stmt&&) = default;
     Stmt& operator=(Stmt&&) = default;
 
-    StmtKind kind;
+    StmtKind kind{};
 
     // Where this statement begins in the source file -- same purpose as
     // Expr::loc above.
-    SourceLocation loc;
+    SourceLocation loc{};
 
     // VarDecl
-    Type type;
-    std::string var_name;
+    Type type{};
+    std::string var_name{};
     // Name resolution's result for a VarDecl: the identity of the local
     // this declaration introduces, encoded exactly like
     // Expr::resolved_local (`id + 1`, zero meaning unresolved). Two
@@ -741,8 +741,8 @@ class Stmt {
     // pass refine one declaration's type (monomorphize's `auto`
     // resolution) without disturbing its namesakes.
     std::size_t declared_local = 0;
-    ExprPtr init; // optional
-    std::vector<AlignmentSpecifier> alignment_specs;
+    ExprPtr init{}; // optional
+    std::vector<AlignmentSpecifier> alignment_specs{};
     std::uint64_t resolved_alignment = 0;
 
     // VarDecl, scalar/struct/class (any non-reference, non-pointer)
@@ -775,20 +775,20 @@ class Stmt {
     // all (a bare `ClassName name;`) -- `ctor_args` alone being empty
     // can't distinguish those two.
     bool has_ctor_args = false;
-    std::vector<ExprPtr> ctor_args;
+    std::vector<ExprPtr> ctor_args{};
 
     // Return / ExprStmt (value/expr)
-    ExprPtr expr;
+    ExprPtr expr{};
 
     // If / While / Switch
-    ExprPtr condition;
+    ExprPtr condition{};
     IfMode if_mode = IfMode::Runtime;
-    StmtPtr then_branch;
-    StmtPtr else_branch; // optional, If only
-    std::vector<SwitchCase> switch_cases;
+    StmtPtr then_branch{};
+    StmtPtr else_branch{}; // optional, If only
+    std::vector<SwitchCase> switch_cases{};
 
     // Block
-    std::vector<StmtPtr> statements;
+    std::vector<StmtPtr> statements{};
     // Block: true for an `unsafe { }` block (ch01 §1.3), false for an
     // ordinary `{ }`. An unsafe block is otherwise a completely normal
     // Block -- same lexical scoping, same statement list -- this flag
@@ -807,6 +807,8 @@ class Stmt {
 [[nodiscard]] inline Param deep_clone_param(const Param& param);
 [[nodiscard]] inline ExprPtr deep_clone_expr(const Expr& expr);
 [[nodiscard]] inline StmtPtr deep_clone_stmt(const Stmt& stmt);
+inline void assign_expr_fields(Expr& dest, const Expr& src);
+inline void assign_stmt_fields(Stmt& dest, const Stmt& src);
 
 inline void rewrite_expr_locs(Expr& expr, const SourceLocation& loc) {
     expr.loc = loc;
@@ -848,13 +850,7 @@ inline void rewrite_expr_locs(Expr& expr, const SourceLocation& loc) {
 }
 
 [[nodiscard]] inline Param deep_clone_param(const Param& param) {
-    Param clone = param;
-    if (param.default_expr != nullptr) {
-        ExprPtr cloned_default_expr = deep_clone_expr(*param.default_expr);
-        std::shared_ptr<Expr> cloned_default{cloned_default_expr.release()};
-        clone.default_expr = std::move(cloned_default);
-    }
-    return clone;
+    return Param{param};
 }
 
 inline Param::Param(const Param& other)
@@ -893,90 +889,119 @@ inline ExplicitTemplateArg& ExplicitTemplateArg::operator=(const ExplicitTemplat
     return *this;
 }
 
+// The single authoritative field-by-field copy of an `Expr`.
+//
+// Every clone of an `Expr` anywhere in the compiler funnels through here:
+// `deep_clone_expr`, `Expr`'s copy constructor and `Expr::operator=` are thin
+// wrappers over it, and no other translation unit enumerates `Expr`'s fields.
+// A field added to `Expr` but not listed below is a field silently dropped by
+// every clone in the compiler -- that is exactly how `resolved_local` used to
+// get lost -- so `tests/parser_test.cpp` carries a structured-binding guard
+// that turns the omission into a compile error naming `Expr` and its field
+// count. If you add a field to `Expr`, add it here and to that guard.
+//
+// `dest` must be a freshly constructed node (or at least not alias `src`);
+// `Expr::operator=` copies-then-moves precisely so that self-assignment can
+// never reach this function.
+inline void assign_expr_fields(Expr& dest, const Expr& src) {
+    dest.kind = src.kind;
+    dest.resolved_local = src.resolved_local;
+    dest.loc = src.loc;
+    dest.int_value = src.int_value;
+    dest.float_value = src.float_value;
+    dest.bool_value = src.bool_value;
+    dest.name = src.name;
+    dest.explicit_global_qualification = src.explicit_global_qualification;
+    dest.binary_op = src.binary_op;
+    dest.lhs = nullptr;
+    if (src.lhs != nullptr) dest.lhs = deep_clone_expr(*src.lhs);
+    dest.rhs = nullptr;
+    if (src.rhs != nullptr) dest.rhs = deep_clone_expr(*src.rhs);
+    dest.third = nullptr;
+    if (src.third != nullptr) dest.third = deep_clone_expr(*src.third);
+    dest.fold_ellipsis_on_left = src.fold_ellipsis_on_left;
+    dest.unary_op = src.unary_op;
+    dest.args.clear();
+    for (std::size_t i = 0; i < src.args.size(); i++) dest.args.push_back(deep_clone_expr(*src.args[i]));
+    // `ExplicitTemplateArg`, `Type`, `LambdaCapture` and `Param` all have deep
+    // copy constructors of their own, so plain assignment already deep-clones
+    // whatever `Expr` nodes they hold.
+    dest.explicit_template_args = src.explicit_template_args;
+    dest.type = src.type;
+    dest.sizeof_operand_is_type = src.sizeof_operand_is_type;
+    dest.has_paren_init = src.has_paren_init;
+    dest.destroy_through_pointer = src.destroy_through_pointer;
+    dest.through_arrow = src.through_arrow;
+    dest.implicit_arrow_deref = src.implicit_arrow_deref;
+    dest.implicit_arrow_chain_safe = src.implicit_arrow_chain_safe;
+    dest.lambda_captures = src.lambda_captures;
+    dest.lambda_blanket_mode = src.lambda_blanket_mode;
+    dest.lambda_params = src.lambda_params;
+    dest.has_lambda_explicit_return_type = src.has_lambda_explicit_return_type;
+    dest.lambda_is_mutable = src.lambda_is_mutable;
+    dest.lambda_body = nullptr;
+    if (src.lambda_body != nullptr) dest.lambda_body = deep_clone_stmt(*src.lambda_body);
+}
+
+// The single authoritative field-by-field copy of a `Stmt`; see
+// `assign_expr_fields` above for the contract and for why there is only one.
+inline void assign_stmt_fields(Stmt& dest, const Stmt& src) {
+    dest.kind = src.kind;
+    dest.loc = src.loc;
+    dest.type = src.type;
+    dest.var_name = src.var_name;
+    dest.declared_local = src.declared_local;
+    dest.init = nullptr;
+    if (src.init != nullptr) dest.init = deep_clone_expr(*src.init);
+    dest.alignment_specs = src.alignment_specs;
+    dest.resolved_alignment = src.resolved_alignment;
+    dest.is_const = src.is_const;
+    dest.is_constexpr = src.is_constexpr;
+    dest.is_static_local = src.is_static_local;
+    dest.has_ctor_args = src.has_ctor_args;
+    dest.ctor_args.clear();
+    for (std::size_t i = 0; i < src.ctor_args.size(); i++) dest.ctor_args.push_back(deep_clone_expr(*src.ctor_args[i]));
+    dest.expr = nullptr;
+    if (src.expr != nullptr) dest.expr = deep_clone_expr(*src.expr);
+    dest.condition = nullptr;
+    if (src.condition != nullptr) dest.condition = deep_clone_expr(*src.condition);
+    dest.if_mode = src.if_mode;
+    dest.then_branch = nullptr;
+    if (src.then_branch != nullptr) dest.then_branch = deep_clone_stmt(*src.then_branch);
+    dest.else_branch = nullptr;
+    if (src.else_branch != nullptr) dest.else_branch = deep_clone_stmt(*src.else_branch);
+    // `SwitchCase` has a deep copy constructor of its own.
+    dest.switch_cases = src.switch_cases;
+    dest.statements.clear();
+    for (std::size_t i = 0; i < src.statements.size(); i++) dest.statements.push_back(deep_clone_stmt(*src.statements[i]));
+    dest.is_unsafe = src.is_unsafe;
+}
+
 [[nodiscard]] inline ExprPtr deep_clone_expr(const Expr& expr) {
     auto clone = std::make_unique<Expr>();
-    clone->kind = expr.kind;
-    clone->resolved_local = expr.resolved_local;
-    clone->loc = expr.loc;
-    clone->int_value = expr.int_value;
-    clone->float_value = expr.float_value;
-    clone->bool_value = expr.bool_value;
-    clone->name = expr.name;
-    clone->explicit_global_qualification = expr.explicit_global_qualification;
-    clone->binary_op = expr.binary_op;
-    clone->unary_op = expr.unary_op;
-    clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
-    clone->sizeof_operand_is_type = expr.sizeof_operand_is_type;
-    clone->type = expr.type;
-    clone->has_paren_init = expr.has_paren_init;
-    clone->destroy_through_pointer = expr.destroy_through_pointer;
-    clone->through_arrow = expr.through_arrow;
-    clone->implicit_arrow_deref = expr.implicit_arrow_deref;
-    clone->implicit_arrow_chain_safe = expr.implicit_arrow_chain_safe;
-    if (expr.lhs != nullptr) clone->lhs = deep_clone_expr(*expr.lhs);
-    if (expr.rhs != nullptr) clone->rhs = deep_clone_expr(*expr.rhs);
-    if (expr.third != nullptr) clone->third = deep_clone_expr(*expr.third);
-    for (std::size_t i = 0; i < expr.args.size(); i++) clone->args.push_back(deep_clone_expr(*expr.args[i]));
-    for (std::size_t i = 0; i < expr.explicit_template_args.size(); i++) {
-        const ExplicitTemplateArg& arg = expr.explicit_template_args[i];
-        ExplicitTemplateArg cloned_arg = arg;
-        if (!arg.is_type && arg.value != nullptr) {
-            ExprPtr cloned_value_expr = deep_clone_expr(*arg.value);
-            std::shared_ptr<Expr> cloned_value{cloned_value_expr.release()};
-            cloned_arg.value = std::move(cloned_value);
-        }
-        clone->explicit_template_args.push_back(std::move(cloned_arg));
-    }
-    for (std::size_t i = 0; i < expr.lambda_captures.size(); i++) {
-        const LambdaCapture& capture = expr.lambda_captures[i];
-        LambdaCapture cloned_capture{};
-        cloned_capture.name = capture.name;
-        cloned_capture.by_reference = capture.by_reference;
-        cloned_capture.resolved_local = capture.resolved_local;
-        if (capture.init != nullptr) cloned_capture.init = deep_clone_expr(*capture.init);
-        clone->lambda_captures.push_back(std::move(cloned_capture));
-    }
-    clone->lambda_blanket_mode = expr.lambda_blanket_mode;
-    for (std::size_t i = 0; i < expr.lambda_params.size(); i++) clone->lambda_params.push_back(deep_clone_param(expr.lambda_params[i]));
-    clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
-    clone->lambda_is_mutable = expr.lambda_is_mutable;
-    if (expr.lambda_body != nullptr) clone->lambda_body = deep_clone_stmt(*expr.lambda_body);
+    assign_expr_fields(*clone, expr);
     return clone;
 }
 
 [[nodiscard]] inline StmtPtr deep_clone_stmt(const Stmt& stmt) {
     auto clone = std::make_unique<Stmt>();
-    clone->kind = stmt.kind;
-    clone->loc = stmt.loc;
-    clone->type = stmt.type;
-    clone->var_name = stmt.var_name;
-    clone->declared_local = stmt.declared_local;
-    if (stmt.init != nullptr) clone->init = deep_clone_expr(*stmt.init);
-    clone->alignment_specs = stmt.alignment_specs;
-    clone->resolved_alignment = stmt.resolved_alignment;
-    clone->is_const = stmt.is_const;
-    clone->is_constexpr = stmt.is_constexpr;
-    clone->is_static_local = stmt.is_static_local;
-    clone->has_ctor_args = stmt.has_ctor_args;
-    for (std::size_t i = 0; i < stmt.ctor_args.size(); i++) clone->ctor_args.push_back(deep_clone_expr(*stmt.ctor_args[i]));
-    if (stmt.expr != nullptr) clone->expr = deep_clone_expr(*stmt.expr);
-    if (stmt.condition != nullptr) clone->condition = deep_clone_expr(*stmt.condition);
-    clone->if_mode = stmt.if_mode;
-    if (stmt.then_branch != nullptr) clone->then_branch = deep_clone_stmt(*stmt.then_branch);
-    if (stmt.else_branch != nullptr) clone->else_branch = deep_clone_stmt(*stmt.else_branch);
-    for (std::size_t i = 0; i < stmt.switch_cases.size(); i++) {
-        const SwitchCase& switch_case = stmt.switch_cases[i];
-        SwitchCase cloned_case{};
-        cloned_case.loc = switch_case.loc;
-        if (switch_case.value != nullptr) cloned_case.value = deep_clone_expr(*switch_case.value);
-        for (std::size_t j = 0; j < switch_case.statements.size(); j++) {
-            cloned_case.statements.push_back(deep_clone_stmt(*switch_case.statements[j]));
-        }
-        clone->switch_cases.push_back(std::move(cloned_case));
-    }
-    for (std::size_t i = 0; i < stmt.statements.size(); i++) clone->statements.push_back(deep_clone_stmt(*stmt.statements[i]));
-    clone->is_unsafe = stmt.is_unsafe;
+    assign_stmt_fields(*clone, stmt);
     return clone;
+}
+
+// The single authoritative mapping from a `LambdaCapture` to the `Identifier`
+// expression that names the captured entity in the *enclosing* scope. Codegen
+// materializes each capture by evaluating such a node, and a bare name would
+// not resolve: the node has to carry the enclosing declaration's id, which is
+// exactly the sort of field that used to get dropped by hand-written synthesis.
+// Anything that builds one of these must go through here.
+[[nodiscard]] inline Expr make_capture_identifier(const LambdaCapture& capture, const SourceLocation& loc) {
+    Expr ident{};
+    ident.kind = ExprKind::Identifier;
+    ident.loc = loc;
+    ident.name = capture.name;
+    ident.resolved_local = capture.resolved_local;
+    return ident;
 }
 
 [[nodiscard]] inline ExprPtr deep_clone_expr_with_loc(const Expr& expr, const SourceLocation& loc) {
@@ -1030,8 +1055,6 @@ class MemberInitializer {
     MemberInitializer& operator=(MemberInitializer&&) = default;
 };
 
-[[nodiscard]] inline StmtPtr clone_initializer_stmt(const Stmt& stmt);
-[[nodiscard]] inline ExprPtr clone_initializer_expr(const Expr& expr);
 
 inline Type::Type(const Type& other)
     : kind{other.kind},
@@ -1063,7 +1086,7 @@ inline Type::Type(const Type& other)
         element = std::make_shared<Type>(std::move(copied_element));
     }
     if (other.array_size_expr != nullptr) {
-        ExprPtr cloned_array_size_expr = clone_initializer_expr(*other.array_size_expr);
+        ExprPtr cloned_array_size_expr = deep_clone_expr(*other.array_size_expr);
         array_size_expr = std::shared_ptr<Expr>{cloned_array_size_expr.release()};
     }
     if (other.function_return != nullptr) {
@@ -1072,7 +1095,7 @@ inline Type::Type(const Type& other)
     }
     for (std::size_t i = 0; i < other.non_type_args.size(); i++) {
         if (other.non_type_args[i] != nullptr) {
-            ExprPtr cloned_non_type_arg = clone_initializer_expr(*other.non_type_args[i]);
+            ExprPtr cloned_non_type_arg = deep_clone_expr(*other.non_type_args[i]);
             non_type_args.push_back(std::shared_ptr<Expr>{cloned_non_type_arg.release()});
         } else {
             non_type_args.push_back(nullptr);
@@ -1086,85 +1109,9 @@ inline Type& Type::operator=(const Type& other) {
     return *this;
 }
 
-[[nodiscard]] inline ExprPtr clone_initializer_expr(const Expr& expr) {
-    auto clone = std::make_unique<Expr>();
-    clone->kind = expr.kind;
-    clone->resolved_local = expr.resolved_local;
-    clone->loc = expr.loc;
-    clone->int_value = expr.int_value;
-    clone->float_value = expr.float_value;
-    clone->bool_value = expr.bool_value;
-    clone->name = expr.name;
-    clone->explicit_global_qualification = expr.explicit_global_qualification;
-    clone->binary_op = expr.binary_op;
-    if (expr.lhs != nullptr) clone->lhs = clone_initializer_expr(*expr.lhs);
-    if (expr.rhs != nullptr) clone->rhs = clone_initializer_expr(*expr.rhs);
-    if (expr.third != nullptr) clone->third = clone_initializer_expr(*expr.third);
-    clone->fold_ellipsis_on_left = expr.fold_ellipsis_on_left;
-    clone->unary_op = expr.unary_op;
-    for (std::size_t i = 0; i < expr.args.size(); i++) clone->args.push_back(clone_initializer_expr(*expr.args[i]));
-    clone->explicit_template_args = expr.explicit_template_args;
-    for (std::size_t i = 0; i < clone->explicit_template_args.size(); i++) {
-        ExplicitTemplateArg& arg = clone->explicit_template_args[i];
-        if (arg.value != nullptr) {
-            ExprPtr cloned_value_expr = clone_initializer_expr(*arg.value);
-            std::shared_ptr<Expr> cloned_value{cloned_value_expr.release()};
-            arg.value = std::move(cloned_value);
-        }
-    }
-    clone->type = expr.type;
-    clone->sizeof_operand_is_type = expr.sizeof_operand_is_type;
-    clone->has_paren_init = expr.has_paren_init;
-    clone->destroy_through_pointer = expr.destroy_through_pointer;
-    clone->through_arrow = expr.through_arrow;
-    clone->implicit_arrow_deref = expr.implicit_arrow_deref;
-    clone->implicit_arrow_chain_safe = expr.implicit_arrow_chain_safe;
-    clone->lambda_captures.clear();
-    for (std::size_t i = 0; i < expr.lambda_captures.size(); i++) {
-        const LambdaCapture& capture = expr.lambda_captures[i];
-        LambdaCapture cloned{};
-        cloned.name = capture.name;
-        cloned.by_reference = capture.by_reference;
-        cloned.resolved_local = capture.resolved_local;
-        if (capture.init != nullptr) cloned.init = clone_initializer_expr(*capture.init);
-        clone->lambda_captures.push_back(std::move(cloned));
-    }
-    clone->lambda_blanket_mode = expr.lambda_blanket_mode;
-    for (std::size_t i = 0; i < expr.lambda_params.size(); i++) clone->lambda_params.push_back(deep_clone_param(expr.lambda_params[i]));
-    clone->has_lambda_explicit_return_type = expr.has_lambda_explicit_return_type;
-    clone->lambda_is_mutable = expr.lambda_is_mutable;
-    if (expr.lambda_body != nullptr) clone->lambda_body = clone_initializer_stmt(*expr.lambda_body);
-    return clone;
-}
-
-[[nodiscard]] inline StmtPtr clone_initializer_stmt(const Stmt& stmt) {
-    auto clone = std::make_unique<Stmt>();
-    clone->kind = stmt.kind;
-    clone->loc = stmt.loc;
-    clone->type = stmt.type;
-    clone->var_name = stmt.var_name;
-    clone->declared_local = stmt.declared_local;
-    if (stmt.init != nullptr) clone->init = clone_initializer_expr(*stmt.init);
-    clone->alignment_specs = stmt.alignment_specs;
-    clone->resolved_alignment = stmt.resolved_alignment;
-    clone->is_const = stmt.is_const;
-    clone->is_constexpr = stmt.is_constexpr;
-    clone->is_static_local = stmt.is_static_local;
-    clone->has_ctor_args = stmt.has_ctor_args;
-    for (std::size_t i = 0; i < stmt.ctor_args.size(); i++) clone->ctor_args.push_back(clone_initializer_expr(*stmt.ctor_args[i]));
-    if (stmt.expr != nullptr) clone->expr = clone_initializer_expr(*stmt.expr);
-    if (stmt.condition != nullptr) clone->condition = clone_initializer_expr(*stmt.condition);
-    clone->if_mode = stmt.if_mode;
-    if (stmt.then_branch != nullptr) clone->then_branch = clone_initializer_stmt(*stmt.then_branch);
-    if (stmt.else_branch != nullptr) clone->else_branch = clone_initializer_stmt(*stmt.else_branch);
-    for (std::size_t i = 0; i < stmt.statements.size(); i++) clone->statements.push_back(clone_initializer_stmt(*stmt.statements[i]));
-    clone->is_unsafe = stmt.is_unsafe;
-    return clone;
-}
-
 [[nodiscard]] inline GlobalVar clone_global_var(const GlobalVar& global) {
     GlobalVar clone{};
-    if (global.decl != nullptr) clone.decl = clone_initializer_stmt(*global.decl);
+    if (global.decl != nullptr) clone.decl = deep_clone_stmt(*global.decl);
     clone.namespace_path = global.namespace_path;
     clone.is_exported = global.is_exported;
     clone.owning_module = global.owning_module;
@@ -1173,7 +1120,7 @@ inline Type& Type::operator=(const Type& other) {
 
 inline AlignmentSpecifier::AlignmentSpecifier(const AlignmentSpecifier& other)
     : loc{other.loc}, operand_is_type{other.operand_is_type}, type{other.type}, expr{} {
-    if (other.expr != nullptr) expr = clone_initializer_expr(*other.expr);
+    if (other.expr != nullptr) expr = deep_clone_expr(*other.expr);
 }
 
 inline AlignmentSpecifier& AlignmentSpecifier::operator=(const AlignmentSpecifier& other) {
@@ -1184,7 +1131,7 @@ inline AlignmentSpecifier& AlignmentSpecifier::operator=(const AlignmentSpecifie
 
 inline GlobalVar::GlobalVar(const GlobalVar& other)
     : decl{}, namespace_path{other.namespace_path}, is_exported{other.is_exported}, owning_module{other.owning_module} {
-    if (other.decl != nullptr) decl = clone_initializer_stmt(*other.decl);
+    if (other.decl != nullptr) decl = deep_clone_stmt(*other.decl);
 }
 
 inline GlobalVar& GlobalVar::operator=(const GlobalVar& other) {
@@ -1195,7 +1142,7 @@ inline GlobalVar& GlobalVar::operator=(const GlobalVar& other) {
 
 inline LambdaCapture::LambdaCapture(const LambdaCapture& other)
     : name{other.name}, by_reference{other.by_reference}, init{}, resolved_local{other.resolved_local} {
-    if (other.init != nullptr) init = clone_initializer_expr(*other.init);
+    if (other.init != nullptr) init = deep_clone_expr(*other.init);
 }
 
 inline LambdaCapture& LambdaCapture::operator=(const LambdaCapture& other) {
@@ -1205,8 +1152,8 @@ inline LambdaCapture& LambdaCapture::operator=(const LambdaCapture& other) {
 }
 
 inline Initializer::Initializer(const Initializer& other) : expr{}, has_brace_args{other.has_brace_args}, brace_args{} {
-    if (other.expr != nullptr) expr = clone_initializer_expr(*other.expr);
-    for (std::size_t i = 0; i < other.brace_args.size(); i++) brace_args.push_back(clone_initializer_expr(*other.brace_args[i]));
+    if (other.expr != nullptr) expr = deep_clone_expr(*other.expr);
+    for (std::size_t i = 0; i < other.brace_args.size(); i++) brace_args.push_back(deep_clone_expr(*other.brace_args[i]));
 }
 
 inline Initializer& Initializer::operator=(const Initializer& other) {
@@ -1226,54 +1173,11 @@ inline SwitchCase& SwitchCase::operator=(const SwitchCase& other) {
     return *this;
 }
 
-inline Expr::Expr(const Expr& other)
-    : kind{other.kind},
-      resolved_local{other.resolved_local},
-      loc{other.loc},
-      int_value{other.int_value},
-      float_value{other.float_value},
-      bool_value{other.bool_value},
-      name{other.name},
-      explicit_global_qualification{other.explicit_global_qualification},
-      binary_op{other.binary_op},
-      lhs{},
-      rhs{},
-      third{},
-      fold_ellipsis_on_left{other.fold_ellipsis_on_left},
-      unary_op{other.unary_op},
-      args{},
-      explicit_template_args{other.explicit_template_args},
-      type{other.type},
-      sizeof_operand_is_type{other.sizeof_operand_is_type},
-      has_paren_init{other.has_paren_init},
-      destroy_through_pointer{other.destroy_through_pointer},
-      through_arrow{other.through_arrow},
-      implicit_arrow_deref{other.implicit_arrow_deref},
-      implicit_arrow_chain_safe{other.implicit_arrow_chain_safe},
-      lambda_captures{},
-      lambda_blanket_mode{other.lambda_blanket_mode},
-      lambda_params{other.lambda_params},
-      has_lambda_explicit_return_type{other.has_lambda_explicit_return_type},
-      lambda_is_mutable{other.lambda_is_mutable},
-      lambda_body{} {
-    if (other.lhs != nullptr) this->lhs = deep_clone_expr(*other.lhs);
-    if (other.rhs != nullptr) this->rhs = deep_clone_expr(*other.rhs);
-    if (other.third != nullptr) this->third = deep_clone_expr(*other.third);
-    for (std::size_t i = 0; i < other.args.size(); i++) this->args.push_back(deep_clone_expr(*other.args[i]));
-    for (std::size_t i = 0; i < this->explicit_template_args.size(); i++) {
-        if (this->explicit_template_args[i].value != nullptr) {
-            ExprPtr cloned_value_expr = deep_clone_expr(*this->explicit_template_args[i].value);
-            this->explicit_template_args[i].value = std::shared_ptr<Expr>{cloned_value_expr.release()};
-        }
-    }
-    for (std::size_t i = 0; i < other.lambda_captures.size(); i++) this->lambda_captures.push_back(other.lambda_captures[i]);
-    for (std::size_t i = 0; i < this->lambda_params.size(); i++) {
-        if (this->lambda_params[i].default_expr != nullptr) {
-            ExprPtr cloned_default_expr = deep_clone_expr(*this->lambda_params[i].default_expr);
-            this->lambda_params[i].default_expr = std::shared_ptr<Expr>{cloned_default_expr.release()};
-        }
-    }
-    if (other.lambda_body != nullptr) this->lambda_body = deep_clone_stmt(*other.lambda_body);
+// Every member of `Expr` has an in-class default member initializer, so this
+// constructor needs no member-initializer-list of its own and the field list
+// lives in exactly one place: `assign_expr_fields`.
+inline Expr::Expr(const Expr& other) {
+    assign_expr_fields(*this, other);
 }
 
 inline Expr& Expr::operator=(const Expr& other) {
@@ -1282,36 +1186,10 @@ inline Expr& Expr::operator=(const Expr& other) {
     return *this;
 }
 
-inline Stmt::Stmt(const Stmt& other)
-    : kind{other.kind},
-      loc{other.loc},
-      type{other.type},
-      var_name{other.var_name},
-      declared_local{other.declared_local},
-      init{},
-      alignment_specs{other.alignment_specs},
-      resolved_alignment{other.resolved_alignment},
-      is_const{other.is_const},
-      is_constexpr{other.is_constexpr},
-      is_static_local{other.is_static_local},
-      has_ctor_args{other.has_ctor_args},
-      ctor_args{},
-      expr{},
-      condition{},
-      if_mode{other.if_mode},
-      then_branch{},
-      else_branch{},
-      switch_cases{},
-      statements{},
-      is_unsafe{other.is_unsafe} {
-    if (other.init != nullptr) this->init = deep_clone_expr(*other.init);
-    for (std::size_t i = 0; i < other.ctor_args.size(); i++) this->ctor_args.push_back(deep_clone_expr(*other.ctor_args[i]));
-    if (other.expr != nullptr) this->expr = deep_clone_expr(*other.expr);
-    if (other.condition != nullptr) this->condition = deep_clone_expr(*other.condition);
-    if (other.then_branch != nullptr) this->then_branch = deep_clone_stmt(*other.then_branch);
-    if (other.else_branch != nullptr) this->else_branch = deep_clone_stmt(*other.else_branch);
-    for (std::size_t i = 0; i < other.switch_cases.size(); i++) this->switch_cases.push_back(other.switch_cases[i]);
-    for (std::size_t i = 0; i < other.statements.size(); i++) this->statements.push_back(deep_clone_stmt(*other.statements[i]));
+// See `Expr`'s copy constructor above: the field list lives only in
+// `assign_stmt_fields`.
+inline Stmt::Stmt(const Stmt& other) {
+    assign_stmt_fields(*this, other);
 }
 
 inline Stmt& Stmt::operator=(const Stmt& other) {
