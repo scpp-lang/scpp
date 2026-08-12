@@ -1903,6 +1903,256 @@ void run_array_element_lifetime_tests() {
     }
 }
 
+// Destruction has to be as symmetric as construction: every lowering of a
+// class's destructor -- `= default` and hand-written body alike -- must
+// destroy exactly that class's own class-typed members, once, after the
+// body, and must leave the base's members to the base's own destructor.
+void run_user_destructor_member_teardown_tests() {
+    const std::string inner_class =
+        "class Inner {\n"
+        "  public:\n"
+        "    Inner() { this->tag = 1; return; }\n"
+        "    virtual ~Inner() { this->tag = 0; return; }\n"
+        "    int tag = 0;\n"
+        "};\n";
+
+    {
+        // The reported shape: with a hand-written body, `Inner_delete`
+        // was never called from `Outer_delete` at all.
+        std::string case_name = "user_written_destructor_calls_its_members_destructors";
+        cases_run++;
+        auto ir = try_generate_ir(inner_class + "class Outer {\n"
+                                                "  public:\n"
+                                                "    Outer() { return; }\n"
+                                                "    virtual ~Outer() { return; }\n"
+                                                "    Inner a{};\n"
+                                                "    Inner b{};\n"
+                                                "};\n"
+                                                "int main() {\n"
+                                                "    Outer o{};\n"
+                                                "    return o.a.tag;\n"
+                                                "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::string dtor_ir = function_ir(ir.value(), "Outer_delete");
+            expect(!dtor_ir.empty(), case_name + ": expected a definition of `Outer_delete` in the module IR");
+            std::size_t member_destructions = count_occurrences(dtor_ir, "call void @Inner_delete(");
+            expect(member_destructions == 2,
+                   case_name + ": expected both members destroyed from the user-written destructor, got " +
+                       std::to_string(member_destructions));
+        }
+    }
+
+    {
+        // `~T() { }` and `~T() = default;` must emit the same member
+        // teardown -- they now share emit_class_member_teardown.
+        std::string case_name = "defaulted_and_user_written_destructors_emit_the_same_member_teardown";
+        cases_run++;
+        std::string body =
+            "class Outer {\n"
+            "  public:\n"
+            "    Outer() { return; }\n"
+            "    virtual ~Outer() { PLACEHOLDER }\n"
+            "    Inner a{};\n"
+            "};\n"
+            "int main() {\n"
+            "    Outer o{};\n"
+            "    return o.a.tag;\n"
+            "}\n";
+        std::string user_source = body;
+        user_source.replace(user_source.find("PLACEHOLDER"), std::string("PLACEHOLDER").size(), "return;");
+        std::string defaulted_source = body;
+        defaulted_source.replace(defaulted_source.find("virtual ~Outer() { PLACEHOLDER }"),
+                                 std::string("virtual ~Outer() { PLACEHOLDER }").size(), "virtual ~Outer() = default;");
+        auto user_ir = try_generate_ir(inner_class + user_source);
+        auto defaulted_ir = try_generate_ir(inner_class + defaulted_source);
+        expect(user_ir.has_value() && defaulted_ir.has_value(), case_name + ": expected both programs to compile");
+        if (user_ir.has_value() && defaulted_ir.has_value()) {
+            std::size_t user_count = count_occurrences(function_ir(user_ir.value(), "Outer_delete"), "call void @Inner_delete(");
+            std::size_t defaulted_count =
+                count_occurrences(function_ir(defaulted_ir.value(), "Outer_delete"), "call void @Inner_delete(");
+            expect(user_count == defaulted_count && user_count == 1,
+                   case_name + ": expected one member destructor call from each spelling, got user=" +
+                       std::to_string(user_count) + " defaulted=" + std::to_string(defaulted_count));
+        }
+    }
+
+    {
+        // A derived class's StructInfo carries the base's fields
+        // flattened in front of its own; walking all of them destroyed
+        // every inherited member a second time, since the base's own
+        // destructor already handles them.
+        std::string case_name = "derived_destructor_does_not_destroy_base_members";
+        cases_run++;
+        auto ir = try_generate_ir(inner_class + "class Base {\n"
+                                                "  public:\n"
+                                                "    Base() { return; }\n"
+                                                "    virtual ~Base() { return; }\n"
+                                                "    Inner bm{};\n"
+                                                "};\n"
+                                                "class Derived : public Base {\n"
+                                                "  public:\n"
+                                                "    Derived() { return; }\n"
+                                                "    ~Derived() override { return; }\n"
+                                                "    Inner dm{};\n"
+                                                "};\n"
+                                                "int main() {\n"
+                                                "    Derived d{};\n"
+                                                "    return d.dm.tag;\n"
+                                                "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::size_t derived_count =
+                count_occurrences(function_ir(ir.value(), "Derived_delete"), "call void @Inner_delete(");
+            expect(derived_count == 1, case_name + ": expected `Derived_delete` to destroy only its own member, got " +
+                                           std::to_string(derived_count));
+            std::size_t base_count = count_occurrences(function_ir(ir.value(), "Base_delete"), "call void @Inner_delete(");
+            expect(base_count == 1, case_name + ": expected `Base_delete` to destroy its own member, got " +
+                                        std::to_string(base_count));
+        }
+    }
+
+    {
+        // Same layout question, `= default` spelling: the double
+        // destruction was a pre-existing defect of the defaulted path.
+        std::string case_name = "defaulted_derived_destructor_does_not_destroy_base_members";
+        cases_run++;
+        auto ir = try_generate_ir(inner_class + "class Base {\n"
+                                                "  public:\n"
+                                                "    Base() { return; }\n"
+                                                "    virtual ~Base() = default;\n"
+                                                "    Inner bm{};\n"
+                                                "};\n"
+                                                "class Derived : public Base {\n"
+                                                "  public:\n"
+                                                "    Derived() { return; }\n"
+                                                "    ~Derived() override = default;\n"
+                                                "    Inner dm{};\n"
+                                                "};\n"
+                                                "int main() {\n"
+                                                "    Derived d{};\n"
+                                                "    return d.dm.tag;\n"
+                                                "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::size_t derived_count =
+                count_occurrences(function_ir(ir.value(), "Derived_delete"), "call void @Inner_delete(");
+            expect(derived_count == 1, case_name + ": expected one member destructor call in `Derived_delete`, got " +
+                                           std::to_string(derived_count));
+        }
+    }
+
+    {
+        // Teardown is emitted per exit path, not once per function: two
+        // `return;`s means two teardown sites, and none of them may be
+        // missing.
+        std::string case_name = "user_written_destructor_tears_down_on_every_return_path";
+        cases_run++;
+        auto ir = try_generate_ir(inner_class + "class Outer {\n"
+                                                "  public:\n"
+                                                "    Outer() { return; }\n"
+                                                "    virtual ~Outer() {\n"
+                                                "        if (this->a.tag == 1) {\n"
+                                                "            return;\n"
+                                                "        }\n"
+                                                "        return;\n"
+                                                "    }\n"
+                                                "    Inner a{};\n"
+                                                "};\n"
+                                                "int main() {\n"
+                                                "    Outer o{};\n"
+                                                "    return o.a.tag;\n"
+                                                "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::string dtor_ir = function_ir(ir.value(), "Outer_delete");
+            std::size_t destructions = count_occurrences(dtor_ir, "call void @Inner_delete(");
+            std::size_t returns = count_occurrences(dtor_ir, "ret void");
+            expect(destructions == returns && destructions == 2,
+                   case_name + ": expected one member teardown per return path, got " + std::to_string(destructions) +
+                       " teardown(s) for " + std::to_string(returns) + " return(s)");
+        }
+    }
+
+    {
+        // The implicit `return;` synthesized when control falls off the
+        // end of a void function is a return like any other and runs the
+        // same epilogue.
+        std::string case_name = "destructor_without_an_explicit_return_still_tears_down";
+        cases_run++;
+        auto ir = try_generate_ir(inner_class + "class Outer {\n"
+                                                "  public:\n"
+                                                "    Outer() { return; }\n"
+                                                "    virtual ~Outer() { }\n"
+                                                "    Inner a{};\n"
+                                                "};\n"
+                                                "int main() {\n"
+                                                "    Outer o{};\n"
+                                                "    return o.a.tag;\n"
+                                                "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::size_t destructions =
+                count_occurrences(function_ir(ir.value(), "Outer_delete"), "call void @Inner_delete(");
+            expect(destructions == 1, case_name + ": expected member teardown on the fall-off-the-end path, got " +
+                                          std::to_string(destructions));
+        }
+    }
+
+    {
+        // An array member is a member: its element loop has to be emitted
+        // from a hand-written destructor too.
+        std::string case_name = "user_written_destructor_tears_down_array_typed_members";
+        cases_run++;
+        auto ir = try_generate_ir(inner_class + "class Outer {\n"
+                                                "  public:\n"
+                                                "    Outer() { return; }\n"
+                                                "    virtual ~Outer() { return; }\n"
+                                                "    Inner items[3]{};\n"
+                                                "};\n"
+                                                "int main() {\n"
+                                                "    Outer o{};\n"
+                                                "    return o.items[0].tag;\n"
+                                                "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::string dtor_ir = function_ir(ir.value(), "Outer_delete");
+            std::size_t destructions = count_occurrences(dtor_ir, "call void @Inner_delete(");
+            expect(destructions == 1, case_name + ": expected one element-destructor call site inside a loop, got " +
+                                          std::to_string(destructions));
+        }
+    }
+
+    {
+        // Ordinary functions keep their epilogue exactly where it was:
+        // this pins that adding the fall-off-the-end call did not double
+        // up cleanup on the explicit-`return` path.
+        std::string case_name = "explicit_return_path_emits_exactly_one_local_teardown";
+        cases_run++;
+        auto ir = try_generate_ir(inner_class + "void scope() {\n"
+                                                "    Inner x{};\n"
+                                                "    return;\n"
+                                                "}\n"
+                                                "int main() {\n"
+                                                "    scope();\n"
+                                                "    return 0;\n"
+                                                "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::size_t destructions = count_occurrences(function_ir(ir.value(), "scope"), "call void @Inner_delete(");
+            expect(destructions == 1, case_name + ": expected exactly one local teardown, got " +
+                                          std::to_string(destructions));
+        }
+    }
+}
+
 int main() {
     run_test_case_files();
     test_generate_returns_engaged_expected_on_success();
@@ -1913,6 +2163,7 @@ int main() {
     run_virtual_base_initializer_frame_tests();
     run_value_initialized_temporary_constructor_tests();
     run_array_element_lifetime_tests();
+    run_user_destructor_member_teardown_tests();
 
     run_constexpr_error_copy_tests();
     run_constexpr_null_pointer_storage_tests();

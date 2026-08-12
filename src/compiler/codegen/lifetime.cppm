@@ -394,9 +394,7 @@ namespace scpp {
         (void)get_or_declare_free();
         for (std::size_t i = 0; i < info.field_types.size(); i++) {
             const Type& field_type = info.field_types[i];
-            bool is_record_field = field_type.kind == TypeKind::Named && structs_.contains(field_type.name);
-            bool is_record_array_field = field_type.kind == TypeKind::Array && type_has_destructor(field_type);
-            if (!is_record_field && !is_record_array_field) continue;
+            if (!type_needs_subobject_teardown(field_type)) continue;
             llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, ptr, info.physical_field_index(i),
                                                          info.field_names[i].c_str());
             codegen_destroy_old_state_for_move_assign(field_type, field_ptr);
@@ -481,6 +479,59 @@ namespace scpp {
         llvm::LLVMValueRef flag = create_entry_block_alloca(llvm::LLVMInt1TypeInContext(context_), "movedflag");
         llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, /*SignExtend=*/0), flag);
         return flag;
+    }
+
+
+    [[nodiscard]] bool Codegen::type_needs_subobject_teardown(const Type& type)
+{
+        // Deliberately broader than type_has_destructor for a Named type:
+        // a record field whose own class has *no* destructor can still own
+        // subobjects that must be released (a std::unique_ptr member, or a
+        // nested record that in turn owns one), and
+        // codegen_destroy_old_state_for_move_assign recurses into exactly
+        // that flattened layout. Answering "no" here for such a field would
+        // leak it.
+        if (type.kind == TypeKind::Array) return type_has_destructor(type);
+        return type.kind == TypeKind::Named && structs_.contains(type.name);
+    }
+
+
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::emit_class_member_teardown(const std::string& class_name,
+                                                                                        llvm::LLVMValueRef object_ptr)
+{
+        auto info_it = structs_.find(class_name);
+        if (info_it == structs_.end()) {
+            return std::unexpected(CodegenError("destructor of unknown class '" + class_name + "'", current_loc_));
+        }
+        const StructInfo& info = info_it->second;
+        // A derived class's StructInfo carries its base's fields flattened
+        // in front of its own (declare_class copies base_info.field_names/
+        // field_types, then appends `def.fields`), so the class's own
+        // members are exactly the last def.fields.size() entries. Walking
+        // the whole vector here would destroy every inherited member a
+        // second time, because the base's own destructor -- which the
+        // caller reaches through emit_destructor_chain_calls -- already
+        // destroys them. This mirrors construction, where
+        // emit_constructor_member_initializers walks class_def->fields
+        // (own fields only) and delegates the base subobject to the base
+        // constructor. Note the deliberate contrast with
+        // codegen_destroy_old_class_state_for_move_assign, which *does*
+        // walk the flattened layout: it only runs when no class in the
+        // chain has a destructor, so no base destructor exists to reach
+        // the inherited fields and it must reach them itself.
+        const ClassDef* class_def = find_class_def(class_name);
+        std::size_t own_field_count = class_def != nullptr ? class_def->fields.size() : info.field_types.size();
+        if (own_field_count > info.field_types.size()) own_field_count = info.field_types.size();
+        std::size_t first_own = info.field_types.size() - own_field_count;
+        for (std::size_t i = info.field_types.size(); i > first_own; --i) {
+            const Type& field_type = info.field_types[i - 1];
+            if (!type_needs_subobject_teardown(field_type)) continue;
+            llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, object_ptr,
+                                                                     info.physical_field_index(i - 1),
+                                                                     info.field_names[i - 1].c_str());
+            codegen_destroy_old_state_for_move_assign(field_type, field_ptr);
+        }
+        return {};
     }
 
 } // namespace scpp

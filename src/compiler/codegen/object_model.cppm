@@ -523,6 +523,15 @@ namespace scpp {
     }
 
 
+    [[nodiscard]] bool Codegen::is_destructor_function(const Function& fn) const
+{
+        if (fn.member_owner_class.empty() || !fn.name.ends_with("_delete") || fn.params.size() != 1) return false;
+        const Type& this_param = fn.params[0].type;
+        return this_param.kind == TypeKind::Reference && this_param.pointee != nullptr &&
+               this_param.pointee->kind == TypeKind::Named && this_param.pointee->name == fn.member_owner_class;
+    }
+
+
     [[nodiscard]] std::string Codegen::unqualified_template_base_name(std::string_view class_name) const
 {
         std::size_t scope = class_name.rfind("::");

@@ -148,6 +148,12 @@ namespace scpp {
         // valid, exactly like C++; synthesize the implicit `return;`.
         if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) == nullptr) {
             if (fn.return_type.kind == TypeKind::Named && fn.return_type.name == "void") {
+                // The synthesized `return;` is a return like any other and
+                // runs the same exit cleanup an explicit one does. Without
+                // this call, everything the epilogue owns -- by-value class
+                // parameters, and a destructor's own members -- silently
+                // survived on exactly the path that omits `return;`.
+                if (auto r = emit_function_exit_cleanup(); !r.has_value()) return std::unexpected(std::move(r).error());
                 llvm::LLVMBuildRetVoid(builder_);
                 llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
                 current_debug_scope_ = nullptr;
@@ -307,16 +313,8 @@ namespace scpp {
         }
 
         if (is_defaulted_destructor) {
-            for (std::size_t i = info.field_types.size(); i > 0; --i) {
-                const Type& field_type = info.field_types[i - 1];
-                bool is_record_field = field_type.kind == TypeKind::Named && structs_.contains(field_type.name);
-                bool is_record_array_field = field_type.kind == TypeKind::Array && type_has_destructor(field_type);
-                if (!is_record_field && !is_record_array_field) continue;
-                llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, this_ptr,
-                                                             info.physical_field_index(i - 1),
-                                                             info.field_names[i - 1].c_str());
-                codegen_destroy_old_state_for_move_assign(field_type, field_ptr);
-            }
+            if (auto r = emit_class_member_teardown(class_name, this_ptr); !r.has_value())
+                return std::unexpected(std::move(r).error());
             llvm::LLVMBuildRetVoid(builder_);
             llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
             current_debug_scope_ = nullptr;
