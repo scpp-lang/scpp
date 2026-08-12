@@ -2732,4 +2732,108 @@ public:
     return layout.compute(type);
 }
 
+// The one place a `Type` is rendered for a *diagnostic* -- as the user
+// would recognize it, not as codegen mangles it. Lives here, beside the
+// `Type` it prints, so movecheck and codegen render the same type the
+// same way: a call rejected by one and described by the other must not
+// name the same type two different ways, and a second copy of this
+// switch in another module would drift the moment a `TypeKind` is added
+// (`layout_of_type` above is the other switch over `TypeKind` in this
+// file; both must be extended together).
+//
+// Split into one helper per kind, like parser.cppm's type_to_string, so
+// that every case of the dispatcher below ends in a bare `return ...;`:
+// this file is itself compiled by scpp under the self-hosting probe, and
+// scpp's switch-case grammar (validate_switch_fallthrough) requires that.
+[[nodiscard]] inline std::string describe_type_brief(const Type& type);
+
+[[nodiscard]] inline std::string describe_type_brief_named(const Type& type) {
+    std::string result{""};
+    if (type.is_const_qualified) result += "const ";
+    result += type.name;
+    if (!type.template_args.empty()) {
+        result += "<";
+        for (std::size_t i = 0; i < type.template_args.size(); i++) {
+            if (i != 0) result += ",";
+            result += describe_type_brief(type.template_args[i]);
+        }
+        result += ">";
+    }
+    return result;
+}
+
+[[nodiscard]] inline std::string describe_type_brief_reference(const Type& type) {
+    if (type.pointee == nullptr) return "&?";
+    std::string result{""};
+    result += describe_type_brief(*type.pointee);
+    if (type.is_rvalue_ref) {
+        result += "&&";
+    } else if (type.is_mutable_ref) {
+        result += "&mut";
+    } else {
+        result += "&";
+    }
+    return result;
+}
+
+[[nodiscard]] inline std::string describe_type_brief_pointer(const Type& type) {
+    if (type.pointee == nullptr) return "*?";
+    std::string result{""};
+    result += describe_type_brief(*type.pointee);
+    result += "*";
+    return result;
+}
+
+[[nodiscard]] inline std::string describe_type_brief_array(const Type& type) {
+    if (type.element == nullptr) return "?[]";
+    std::string result{""};
+    result += describe_type_brief(*type.element);
+    result += "[";
+    result += std::to_string(type.array_size);
+    result += "]";
+    return result;
+}
+
+[[nodiscard]] inline std::string describe_type_brief_span(const Type& type) {
+    if (type.element == nullptr) return "std::span<?>";
+    std::string result{""};
+    result += "std::span<";
+    result += describe_type_brief(*type.element);
+    result += ">";
+    return result;
+}
+
+[[nodiscard]] inline std::string describe_type_brief_function(const Type& type) {
+    std::string result{""};
+    if (type.function_return == nullptr) {
+        result += "void";
+    } else {
+        result += describe_type_brief(*type.function_return);
+    }
+    if (type.kind == TypeKind::FunctionPointer) {
+        result += " (*)(";
+    } else {
+        result += " (";
+    }
+    for (std::size_t i = 0; i < type.function_params.size(); i++) {
+        if (i != 0) result += ", ";
+        result += describe_type_brief(type.function_params[i]);
+    }
+    result += ")";
+    return result;
+}
+
+[[nodiscard]] inline std::string describe_type_brief(const Type& type) {
+    switch (type.kind) {
+        case TypeKind::Named: return describe_type_brief_named(type);
+        case TypeKind::Reference: return describe_type_brief_reference(type);
+        case TypeKind::Pointer: return describe_type_brief_pointer(type);
+        case TypeKind::Array: return describe_type_brief_array(type);
+        case TypeKind::Span: return describe_type_brief_span(type);
+        case TypeKind::Function: return describe_type_brief_function(type);
+        case TypeKind::FunctionPointer: return describe_type_brief_function(type);
+    }
+    return "<type>";
+}
+
 } // namespace scpp

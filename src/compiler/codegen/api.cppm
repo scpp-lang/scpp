@@ -30,6 +30,25 @@ import :errors;
 
 export namespace scpp {
 
+// Why one particular function declaration cannot be what a given call
+// targets. `resolve_overload_by_type` only cares whether this is `None`;
+// `describe_call_resolution_failure` turns it into the message.
+enum class CallRejectionReason {
+    None,
+    ReceiverIsReadOnly,
+    ReceiverRefQualifier,
+    ArgumentCount,
+    ArgumentType,
+};
+
+struct CallCandidateRejection {
+    CallRejectionReason reason = CallRejectionReason::None;
+    // Both meaningful only for ArgumentType: which argument (0-based) and
+    // the parameter type it was measured against, after normalization.
+    std::size_t argument_index = 0;
+    Type expected_param_type{};
+};
+
 class Codegen {
 public:
     explicit Codegen(const std::string& module_name, std::string source_path = {}, bool emit_debug_info = false)
@@ -433,6 +452,32 @@ private:
     const Function* resolve_overload_by_type(const std::string& callee_name, const std::vector<ExprPtr>& args,
                                               std::size_t param_offset, bool receiver_is_mutable = true,
                                               const Expr* receiver_expr = nullptr);
+
+    // The candidate set and the per-candidate viability test that
+    // resolve_overload_by_type is built from, exposed so that
+    // describe_call_resolution_failure answers "why did that fail?" using
+    // the very predicates that failed rather than a second, drifting
+    // re-implementation of them.
+    std::vector<const Function*> collect_call_candidates(const std::string& callee_name, std::size_t param_offset,
+                                                         const Expr* receiver_expr);
+
+    CallCandidateRejection classify_call_candidate(const Function& fn, const std::vector<ExprPtr>& args,
+                                                   std::size_t param_offset, bool receiver_is_mutable,
+                                                   const Expr* receiver_expr);
+
+    // `display_name` is the call as *written* (`f`, `Box::take`), never
+    // codegen's mangled `Box_take`; `callee_name` stays the mangled name
+    // the resolver looks up.
+    std::string describe_call_resolution_failure(const std::string& callee_name, const std::string& display_name,
+                                                  const std::vector<ExprPtr>& args, std::size_t param_offset,
+                                                  bool receiver_is_mutable, const Expr* receiver_expr);
+
+    std::string call_display_name(const Expr& expr, const std::string& receiver_class);
+
+    bool rvalue_ref_collapses_to_value(const Function& fn, std::size_t param_index, const Expr& arg,
+                                       std::size_t param_offset);
+
+    Type normalized_param_type(const Expr& arg, Type type);
 
     const Function* resolve_constructor_overload_exact(const std::string& class_name, const std::vector<ExprPtr>& args);
 

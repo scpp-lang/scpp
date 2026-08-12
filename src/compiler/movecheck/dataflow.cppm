@@ -762,9 +762,8 @@ namespace scpp {
                                     "' through a read-only (const) receiver",
                 state.current_loc));
         }
-        return std::unexpected(DataflowError("no overload of '" + expr.name +
-                             "' matches these argument types (spec ch05.10 -- overload resolution is exact "
-                             "type match only; an explicit cast may be required)",
+        return std::unexpected(DataflowError(
+            describe_overload_failure(expr, callee, callee_display, name_it->second, body, signatures),
             state.current_loc));
     }
     if (report_errors && sig != nullptr && sig->access == AccessSpecifier::Private &&

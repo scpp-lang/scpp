@@ -75,29 +75,6 @@ using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature
 [[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
 
-[[nodiscard]] std::string describe_type_brief(const Type& type) {
-    switch (type.kind) {
-        case TypeKind::Named: {
-            std::string result = type.is_const_qualified ? "const " + type.name : type.name;
-            if (!type.template_args.empty()) {
-                result += "<";
-                for (std::size_t i = 0; i < type.template_args.size(); i++) {
-                    if (i != 0) result += ",";
-                    result += describe_type_brief(type.template_args[i]);
-                }
-                result += ">";
-            }
-            return result;
-        }
-        case TypeKind::Reference:
-            if (type.pointee == nullptr) return "&?";
-            return describe_type_brief(*type.pointee) + (type.is_rvalue_ref ? "&&" : (type.is_mutable_ref ? "&mut" : "&"));
-        case TypeKind::Pointer:
-            if (type.pointee == nullptr) return "*?";
-            return describe_type_brief(*type.pointee) + "*";
-        default: return "<type>";
-    }
-}
 
 [[nodiscard]] std::string describe_constructor_candidate(const FunctionSignature& candidate) {
     std::string result = candidate.member_owner_class + "_new(";

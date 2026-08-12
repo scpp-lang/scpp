@@ -287,17 +287,37 @@ namespace scpp {
         std::string error(error_message != nullptr ? error_message : "");
         llvm::LLVMDisposeMessage(error_message);
         if (broken) {
-            char* ir_dump = llvm::LLVMPrintModuleToString(module_);
-            std::ofstream dump_out("scratch_selfhost/broken_module_dump.ll");
-            dump_out << ir_dump;
-            llvm::LLVMDisposeMessage(ir_dump);
+            // A module-level verifier failure is a compiler bug, and the
+            // IR dump is the thing that diagnoses it -- but it is a
+            // *developer* aid, so it is opt-in and goes exactly where it
+            // is asked to go. This used to write "scratch_selfhost/
+            // broken_module_dump.ll" unconditionally: a hard-coded
+            // relative path that dropped a file into whatever directory
+            // the user happened to run the compiler from, or, if that
+            // directory didn't exist, silently wrote nothing at all while
+            // still looking like it had. Neither is acceptable behaviour
+            // for a compiler.
+            std::string dump_note;
+            if (const char* dump_path = std::getenv("SCPP_DUMP_BROKEN_MODULE");
+                dump_path != nullptr && dump_path[0] != '\0') {
+                char* ir_dump = llvm::LLVMPrintModuleToString(module_);
+                std::ofstream dump_out(dump_path);
+                dump_out << (ir_dump != nullptr ? ir_dump : "");
+                dump_out.flush();
+                // A dump that failed to write is worse than no dump: it
+                // sends the reader to an empty or absent file believing
+                // the compiler produced one.
+                dump_note = dump_out ? "; module IR written to '" + std::string(dump_path) + "'"
+                                     : "; could not write module IR to '" + std::string(dump_path) + "'";
+                llvm::LLVMDisposeMessage(ir_dump);
+            }
             // Anything reaching here is a *module*-level invariant (every
             // function-local one was already attributed to its own
             // function above), so there is no single statement to blame
             // -- deliberately reported at the module's own location
             // rather than at a stale current_loc_ that would point at an
             // unrelated function.
-            return std::unexpected(CodegenError("module verification failed: " + error, SourceLocation{}));
+            return std::unexpected(CodegenError("module verification failed: " + error + dump_note, SourceLocation{}));
         }
         return module_;
     }

@@ -296,6 +296,77 @@ void test_non_const_method_call_through_const_reference_reports_clear_diagnostic
               (error.has_value() ? *error : std::string("<no error>")) + "'");
 }
 
+// Overload resolution used to answer every one of these with the same
+// sentence -- "no overload of 'f' matches these argument types" --
+// including the two cases where that sentence is factually wrong: an
+// argument-*count* mismatch is not a type problem, and telling the reader
+// to look at their types sends them to the wrong place entirely.
+void test_overload_failure_distinguishes_arity_from_argument_type() {
+    cases_run++;
+    std::optional<std::string> too_few = move_error_message(
+        "import std;\n"
+        "void sink(int a, int b) {\n"
+        "    return;\n"
+        "}\n"
+        "void caller() {\n"
+        "    sink(1);\n"
+        "    return;\n"
+        "}\n");
+    expect(too_few.has_value() && too_few->find("takes 1 argument") != std::string::npos,
+           "overload_failure_distinguishes_arity_from_argument_type: expected an argument-count diagnostic, got '" +
+              (too_few.has_value() ? *too_few : std::string("<no error>")) + "'");
+    expect(too_few.has_value() && too_few->find("candidate: sink(int, int)") != std::string::npos,
+           "overload_failure_distinguishes_arity_from_argument_type: expected the candidate signature to be listed, "
+           "got '" + (too_few.has_value() ? *too_few : std::string("<no error>")) + "'");
+
+    std::optional<std::string> too_many = move_error_message(
+        "import std;\n"
+        "void sink(int a) {\n"
+        "    return;\n"
+        "}\n"
+        "void caller() {\n"
+        "    sink(1, 2);\n"
+        "    return;\n"
+        "}\n");
+    expect(too_many.has_value() && too_many->find("takes 2 arguments") != std::string::npos,
+           "overload_failure_distinguishes_arity_from_argument_type: expected a plural argument-count diagnostic, "
+           "got '" + (too_many.has_value() ? *too_many : std::string("<no error>")) + "'");
+}
+
+// With two or more overloads the frontend does check argument types, but
+// it never said *which* argument was wrong, what it actually was, or what
+// was expected -- everything the reader needs in order to act on it.
+void test_overload_failure_names_the_offending_argument_and_types() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "import std;\n"
+        "void sink(std::int64_t a, std::int64_t b) {\n"
+        "    return;\n"
+        "}\n"
+        "void sink(bool a, bool b) {\n"
+        "    return;\n"
+        "}\n"
+        "void caller() {\n"
+        "    std::int64_t wide = 1;\n"
+        "    int narrow = 2;\n"
+        "    sink(wide, narrow);\n"
+        "    return;\n"
+        "}\n");
+    std::string text = error.has_value() ? *error : std::string("<no error>");
+    expect(error.has_value() && text.find("argument 2 is 'int'") != std::string::npos,
+           "overload_failure_names_the_offending_argument_and_types: expected the second argument to be named with "
+           "its actual type, got '" + text + "'");
+    expect(error.has_value() && text.find("expects 'int64_t'") != std::string::npos,
+           "overload_failure_names_the_offending_argument_and_types: expected the parameter type to be named, got '" +
+              text + "'");
+    expect(error.has_value() && text.find("static_cast<T>") != std::string::npos,
+           "overload_failure_names_the_offending_argument_and_types: expected the diagnostic to name the fix that "
+           "actually works, got '" + text + "'");
+    expect(error.has_value() && text.find("candidate: sink(bool, bool)") != std::string::npos,
+           "overload_failure_names_the_offending_argument_and_types: expected every candidate to be listed, got '" +
+              text + "'");
+}
+
 void test_std_string_const_reference_mutation_reports_clear_diagnostic() {
     cases_run++;
     std::optional<std::string> error = move_error_message(
@@ -766,6 +837,8 @@ int main() {
     test_range_for_mutable_reference_over_span_is_accepted();
     test_range_for_const_reference_over_span_rejects_mutation();
     test_non_const_method_call_through_const_reference_reports_clear_diagnostic();
+    test_overload_failure_distinguishes_arity_from_argument_type();
+    test_overload_failure_names_the_offending_argument_and_types();
     test_std_string_const_reference_mutation_reports_clear_diagnostic();
     test_derived_constructor_requires_explicit_base_initializer_without_default_base_ctor();
     test_explicit_base_initializer_satisfies_nondefault_base_ctor();
