@@ -231,8 +231,12 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         resolve_overload_by_type(receiver_named.name + "_" + expr.name, expr.args, /*param_offset=*/1,
                                                  !is_read_only_place(*expr.lhs), expr.lhs.get());
                     if (callee == nullptr) {
-                        return std::unexpected(CodegenError("call to unknown function '" + receiver_named.name + "_" + expr.name + "'",
-                                           current_loc_));
+                        return std::unexpected(CodegenError(
+                            describe_call_resolution_failure(receiver_named.name + "_" + expr.name,
+                                                             receiver_named.name + "::" + expr.name, expr.args,
+                                                             /*param_offset=*/1, !is_read_only_place(*expr.lhs),
+                                                             expr.lhs.get()),
+                            current_loc_));
                     }
                     auto receiver_value_result = codegen_expr(*expr.lhs);
                     if (!receiver_value_result.has_value()) return std::unexpected(std::move(receiver_value_result).error());
@@ -481,12 +485,18 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             }
         }
         if (callee_def == nullptr) {
-            return std::unexpected(CodegenError("call to unknown function '" + callee_name + "' (resolve)",
+            return std::unexpected(CodegenError(
+                describe_call_resolution_failure(callee_name, call_display_name(expr, receiver_static_class_name),
+                                                 expr.args, param_offset, receiver_is_mutable, expr.lhs.get()),
                 current_loc_));
         }
         llvm::LLVMValueRef callee = llvm::LLVMGetNamedFunction(module_, overload_names_.at(callee_def).c_str());
         if (callee == nullptr) {
-            return std::unexpected(CodegenError("call to unknown function '" + callee_name + "' (llvm)",
+            // Not a user error at all: resolution succeeded, so the
+            // declaration exists, but no llvm::LLVM function was ever emitted
+            // for it. Say that, rather than blaming the call.
+            return std::unexpected(CodegenError("internal error: no generated code for resolved function '" +
+                                                    overload_names_.at(callee_def) + "' called here",
                 current_loc_));
         }
         auto args_result = codegen_call_args(expr.args, callee_def, param_offset);
@@ -2704,7 +2714,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                                                      receiver_is_mutable, expr.lhs.get())) {
                         llvm::LLVMValueRef callee = llvm::LLVMGetNamedFunction(module_, overload_names_.at(callee_def).c_str());
                         if (callee == nullptr) {
-                            return std::unexpected(CodegenError("call to unknown function '" + operand.type.name + "_operator_deref'",
+                            return std::unexpected(CodegenError("internal error: no generated code for '" +
+                                                                    operand.type.name + "::operator*' used here",
                                 current_loc_));
                         }
                         llvm::LLVMValueRef referent_ptr = build_call(callee, {operand.ptr});
@@ -2932,7 +2943,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     }
                     llvm::LLVMValueRef target = llvm::LLVMGetNamedFunction(module_, overload_names_.at(callee).c_str());
                     if (target == nullptr) {
-                        return std::unexpected(CodegenError("call to unknown function '" + lhs_operand.name + "_append'", current_loc_));
+                        return std::unexpected(CodegenError("internal error: no generated code for '" +
+                                                                lhs_operand.name + "::append' used here",
+                            current_loc_));
                     }
                     auto args_result = codegen_call_args(append_args, callee, /*param_offset=*/1);
                     if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());

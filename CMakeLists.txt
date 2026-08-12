@@ -300,4 +300,24 @@ add_custom_target(scpp_workspace_artifacts ALL
     DEPENDS scpp
     VERBATIM)
 
+# driver_test compiles real programs against the *built* stdlib artifacts
+# (SCPP_STDLIB_STD_INTERFACE_PATH / SCPP_STDLIB_SCPP_INTERFACE_PATH above,
+# i.e. build/libs/*.scppm), so it needs them current -- but nothing said
+# so, and `cmake --build build --target driver_test` therefore skipped
+# scpp_workspace_artifacts entirely and left whatever artifacts the
+# previous compiler had produced. A `.scppm` written by an older compiler
+# is now rejected outright by its own format-version guard, which turns
+# that into a loud failure rather than a silent one; the missing edge is
+# the actual defect and this is it.
+#
+# add_dependencies, not a file-level DEPENDS: scpp_workspace_artifacts is
+# deliberately an always-run target with no OUTPUT to track (see its own
+# comment above), because `scpp build` has its own content-hash cache.
+# This adds ordering only and leaves that design untouched -- the whole
+# ALL build already ran it; only targeted builds were missing it.
+# httpserver_test needs no equivalent edge: it consumes the httpserver
+# binary through httpserver_app_artifact, which already DEPENDS on
+# scpp_workspace_artifacts.
+add_dependencies(driver_test scpp_workspace_artifacts)
+
 add_subdirectory(applications/httpserver)

@@ -8636,6 +8636,52 @@ void run_array_element_lifetime_runtime_tests() {
 // which recomputes them), but they are serialized now regardless: relying on a
 // downstream pass to repair a lossy format is exactly the sort of implicit
 // coupling that stops being true the moment the pass order changes.
+// The module-level IR dump used to be written unconditionally to the
+// hard-coded relative path "scratch_selfhost/broken_module_dump.ll":
+// junk in whatever directory the user happened to be standing in, or --
+// if that directory didn't exist -- nothing at all, silently, while still
+// looking to the reader like a dump had been produced.
+void run_broken_module_dump_is_opt_in_tests() {
+    {
+        cases_run++;
+        std::string case_name = "compiling_does_not_write_a_debug_dump_into_the_working_directory";
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        std::filesystem::path source = root / "ok.scpp";
+        write_text_file(source, "int main() { return 0; }\n");
+        RunResult build = run_command_capture("cd " + root.string() + " && " + std::string(SCPP_BINARY_PATH) + " " +
+                                              source.string() + " -o " + (root / "app").string() + " 2>&1");
+        expect(build.exit_code == 0, case_name + ": expected a clean build, got '" + build.stdout_text + "'");
+        expect(!std::filesystem::exists(root / "scratch_selfhost"),
+               case_name + ": the compiler must not create a 'scratch_selfhost' directory in the user's cwd");
+        expect(!std::filesystem::exists(root / "broken_module_dump.ll"),
+               case_name + ": the compiler must not drop a debug dump in the user's cwd");
+        std::filesystem::remove_all(root);
+    }
+    {
+        // The environment variable is the whole opt-in: no variable, no
+        // file, anywhere.
+        cases_run++;
+        std::string case_name = "broken_module_dump_env_var_is_the_only_way_to_get_a_dump";
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        std::filesystem::path dump_path = root / "requested_dump.ll";
+        std::filesystem::path source = root / "ok.scpp";
+        write_text_file(source, "int main() { return 0; }\n");
+        RunResult build = run_command_capture("SCPP_DUMP_BROKEN_MODULE=" + dump_path.string() + " " +
+                                              std::string(SCPP_BINARY_PATH) + " " + source.string() + " -o " +
+                                              (root / "app").string() + " 2>&1");
+        expect(build.exit_code == 0, case_name + ": expected a clean build, got '" + build.stdout_text + "'");
+        // A *successful* compile has no broken module, so even with the
+        // variable set there is nothing to dump.
+        expect(!std::filesystem::exists(dump_path),
+               case_name + ": a successful compile must not write a broken-module dump");
+        std::filesystem::remove_all(root);
+    }
+}
+
 void run_scppm_payload_round_trip_tests() {
     // Compiles `consumer` against `module_source` twice -- once with the module
     // as source (cold) and once through a `build-module` `.scppm` artifact
@@ -9564,6 +9610,7 @@ int main() {
     run_return_type_checking_runtime_tests();
     run_generic_body_clone_fidelity_tests();
     run_scppm_payload_round_trip_tests();
+    run_broken_module_dump_is_opt_in_tests();
     run_equality_operator_tests();
     test_compile_to_executable_returns_engaged_expected_on_success();
     test_compile_to_executable_returns_disengaged_expected_on_failure_without_throwing();

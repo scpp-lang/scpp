@@ -794,38 +794,39 @@ namespace {
     }
 
 
-    const Function* Codegen::resolve_overload_by_type(const std::string& callee_name, const std::vector<ExprPtr>& args,
-                                              std::size_t param_offset, bool receiver_is_mutable ,
-                                              const Expr* receiver_expr)
+    bool Codegen::rvalue_ref_collapses_to_value(const Function& fn, std::size_t param_index, const Expr& arg,
+                                                std::size_t param_offset)
 {
-        auto rvalue_ref_collapses_to_value = [&](const Function& fn, std::size_t param_index, const Expr& arg) {
-            if (param_offset == 0) return false;
-            if (!fn.member_owner_class.empty()) return false;
-            if (param_index >= fn.params.size()) return false;
-            const Type& param_type = fn.params[param_index].type;
-            return param_type.kind == TypeKind::Reference && param_type.is_rvalue_ref && param_type.pointee != nullptr &&
-                   produces_rvalue_of_type(arg, *param_type.pointee);
-        };
-        auto normalized_param_type = [&](const Expr& arg, Type type) {
-            if (type.kind == TypeKind::Named && !type.name.empty() && type.template_args.empty() &&
-                !type.name.empty() && std::isupper(static_cast<unsigned char>(type.name[0]))) {
-                if (std::optional<Type> inferred = infer_type(arg); inferred.has_value()) return *inferred;
-            }
-            return type;
-        };
-        auto scalar_exact_match_score = [&](const Function* fn) {
-            int score = 0;
-            std::size_t fixed_param_count = fn->params.size() - param_offset;
-            for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
-                std::optional<Type> arg_type = infer_type(*args[i]);
-                if (!arg_type.has_value()) continue;
-                Type candidate_param_type = normalized_param_type(*args[i], fn->params[i + param_offset].type);
-                if (candidate_param_type.kind == TypeKind::Reference) continue;
-                if (types_equal(*arg_type, candidate_param_type)) score += 4;
-                else if (literal_matches_scalar_parameter(*args[i], candidate_param_type)) score += 1;
-            }
-            return score;
-        };
+        if (param_offset == 0) return false;
+        if (!fn.member_owner_class.empty()) return false;
+        if (param_index >= fn.params.size()) return false;
+        const Type& param_type = fn.params[param_index].type;
+        return param_type.kind == TypeKind::Reference && param_type.is_rvalue_ref && param_type.pointee != nullptr &&
+               produces_rvalue_of_type(arg, *param_type.pointee);
+    }
+
+
+    Type Codegen::normalized_param_type(const Expr& arg, Type type)
+{
+        if (type.kind == TypeKind::Named && !type.name.empty() && type.template_args.empty() &&
+            std::isupper(static_cast<unsigned char>(type.name[0]))) {
+            if (std::optional<Type> inferred = infer_type(arg); inferred.has_value()) return *inferred;
+        }
+        return type;
+    }
+
+
+    // Every name whose declaration could conceivably be what this call
+    // targets, before any argument is looked at -- monomorphized clones
+    // and inherited-method helpers included (see the four shape tests
+    // below). Split out of resolve_overload_by_type so that
+    // describe_call_resolution_failure can ask the same question: a
+    // diagnostic that decides "this name doesn't exist" by a *different*
+    // rule than the resolver used is exactly how the misleading "call to
+    // unknown function" message survived this long.
+    std::vector<const Function*> Codegen::collect_call_candidates(const std::string& callee_name,
+                                                                  std::size_t param_offset, const Expr* receiver_expr)
+{
         auto is_constructor_clone = [&](const Function& fn) {
             return callee_name.ends_with("_new") &&
                    fn.name.starts_with(callee_name + ".");
@@ -885,64 +886,190 @@ namespace {
                 candidates.push_back(&fn);
             }
         }
+        return candidates;
+    }
+
+
+    // The single viability test for one candidate against one call --
+    // used both to *resolve* (any non-None reason means "not this one")
+    // and to *explain* (the reason itself is what the diagnostic
+    // reports). Previously the single-candidate and multi-candidate arms
+    // of resolve_overload_by_type each ran their own copy of these four
+    // checks, in different orders and with slightly different guards.
+    CallCandidateRejection Codegen::classify_call_candidate(const Function& fn, const std::vector<ExprPtr>& args,
+                                                            std::size_t param_offset, bool receiver_is_mutable,
+                                                            const Expr* receiver_expr)
+{
+        if (param_offset == 1 && receiver_expr != nullptr) {
+            if (!fn.params.empty() && fn.params[0].type.kind == TypeKind::Reference &&
+                fn.params[0].type.is_mutable_ref && !receiver_is_mutable) {
+                return CallCandidateRejection{CallRejectionReason::ReceiverIsReadOnly, 0, Type{}};
+            }
+            if (!receiver_matches_method_qualifier(*receiver_expr, fn)) {
+                return CallCandidateRejection{CallRejectionReason::ReceiverRefQualifier, 0, Type{}};
+            }
+        }
+        if (!function_accepts_argument_count(fn, args.size(), param_offset)) {
+            return CallCandidateRejection{CallRejectionReason::ArgumentCount, 0, Type{}};
+        }
+        std::size_t fixed_param_count = fn.params.size() - param_offset;
+        for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
+            Type candidate_param_type = normalized_param_type(*args[i], fn.params[i + param_offset].type);
+            if (rvalue_ref_collapses_to_value(fn, i + param_offset, *args[i], param_offset)) {
+                candidate_param_type = *candidate_param_type.pointee;
+            }
+            if (!argument_matches_parameter(*args[i], candidate_param_type) &&
+                !literal_matches_scalar_parameter(*args[i], candidate_param_type)) {
+                return CallCandidateRejection{CallRejectionReason::ArgumentType, i, candidate_param_type};
+            }
+        }
+        return CallCandidateRejection{CallRejectionReason::None, 0, Type{}};
+    }
+
+
+    // A call named the way the user wrote it. codegen mangles a method
+    // call to `Class_method` for lookup, but that spelling appears
+    // nowhere in the source, so it must never reach a diagnostic.
+    std::string Codegen::call_display_name(const Expr& expr, const std::string& receiver_class)
+{
+        if (!receiver_class.empty()) return receiver_class + "::" + expr.name;
+        if (!expr.name.empty()) return expr.name;
+        if (expr.lhs != nullptr && expr.lhs->kind == ExprKind::Identifier) return expr.lhs->name;
+        return "<function pointer>";
+    }
+
+
+    // Turns a failed resolve_overload_by_type into a message that names
+    // the actual problem.
+    //
+    // Every one of these failures used to be reported as "call to unknown
+    // function 'X' (resolve)" -- a name-lookup message for a question that
+    // is not about name lookup at all. It sent the reader looking for a
+    // missing declaration when the declaration was right there and only
+    // an argument type differed, and for a method it printed codegen's own
+    // mangled `Class_method` spelling, a name that appears nowhere in the
+    // user's source. (Same defect shape as the ch06 cast diagnostic fixed
+    // earlier: a message that describes a different problem than the one
+    // that occurred is worse than no message, because it is actively
+    // misleading.)
+    //
+    // Note this path only runs for calls the *frontend* let through.
+    // movecheck's resolve_overload deliberately accepts a single-candidate
+    // name without matching argument types at all -- documented there,
+    // because infer_expr_type cannot type Member/Subscript chains and
+    // requiring a match would reject valid calls -- and explicitly defers
+    // to "codegen's own type checking". That deferral is sound; codegen
+    // does the checking. It was only ever the *report* that was wrong.
+    std::string Codegen::describe_call_resolution_failure(const std::string& callee_name,
+                                                          const std::string& display_name,
+                                                          const std::vector<ExprPtr>& args, std::size_t param_offset,
+                                                          bool receiver_is_mutable, const Expr* receiver_expr)
+{
+        std::vector<const Function*> candidates = collect_call_candidates(callee_name, param_offset, receiver_expr);
+        if (candidates.empty()) {
+            return "call to unknown function '" + display_name + "': no function with that name is declared here";
+        }
+
+        auto describe_signature = [&](const Function& fn) {
+            std::string result = display_name + "(";
+            for (std::size_t i = param_offset; i < fn.params.size(); i++) {
+                if (i != param_offset) result += ", ";
+                result += describe_type_brief(fn.params[i].type);
+            }
+            result += ")";
+            if (fn.is_generic_template) result += " [generic]";
+            return result;
+        };
+        auto candidate_list = [&]() {
+            std::string result;
+            for (const Function* fn : candidates) {
+                result += "\n  candidate: " + describe_signature(*fn);
+            }
+            return result;
+        };
+
+        // Report the most specific cause available: a candidate rejected
+        // purely on an argument type says more than one rejected on
+        // arity, which in turn says more than a receiver-shape mismatch.
+        const Function* type_mismatch_fn = nullptr;
+        CallCandidateRejection type_mismatch{CallRejectionReason::None, 0, Type{}};
+        bool any_read_only_receiver = false;
+        bool any_ref_qualifier = false;
+        for (const Function* fn : candidates) {
+            CallCandidateRejection rejection =
+                classify_call_candidate(*fn, args, param_offset, receiver_is_mutable, receiver_expr);
+            switch (rejection.reason) {
+                case CallRejectionReason::ArgumentType:
+                    if (type_mismatch_fn == nullptr) {
+                        type_mismatch_fn = fn;
+                        type_mismatch = rejection;
+                    }
+                    break;
+                case CallRejectionReason::ReceiverIsReadOnly: any_read_only_receiver = true; break;
+                case CallRejectionReason::ReceiverRefQualifier: any_ref_qualifier = true; break;
+                default: break;
+            }
+        }
+
+        if (type_mismatch_fn != nullptr) {
+            std::optional<Type> actual = infer_type(*args[type_mismatch.argument_index]);
+            std::string actual_text =
+                actual.has_value() ? "'" + describe_type_brief(*actual) + "'" : "a different type";
+            return "no overload of '" + display_name + "' matches these argument types: argument " +
+                   std::to_string(type_mismatch.argument_index + 1) + " is " + actual_text + ", but '" +
+                   describe_signature(*type_mismatch_fn) + "' expects '" +
+                   describe_type_brief(type_mismatch.expected_param_type) +
+                   "' (spec ch05.10 -- overload resolution is exact type match only; an explicit "
+                   "static_cast<T> may be required)" +
+                   (candidates.size() > 1 ? candidate_list() : std::string());
+        }
+        if (any_read_only_receiver) {
+            return "cannot call non-const member function '" + display_name +
+                   "' through a read-only (const) receiver";
+        }
+        if (any_ref_qualifier) {
+            return "no overload of '" + display_name +
+                   "' accepts this receiver: its '&'/'&&' ref-qualifier does not match the receiver "
+                   "expression (spec ch05.9)" +
+                   candidate_list();
+        }
+        return "no overload of '" + display_name + "' takes " + std::to_string(args.size()) +
+               (args.size() == 1 ? " argument" : " arguments") + candidate_list();
+    }
+
+
+    const Function* Codegen::resolve_overload_by_type(const std::string& callee_name, const std::vector<ExprPtr>& args,
+                                              std::size_t param_offset, bool receiver_is_mutable ,
+                                              const Expr* receiver_expr)
+{
+        auto scalar_exact_match_score = [&](const Function* fn) {
+            int score = 0;
+            std::size_t fixed_param_count = fn->params.size() - param_offset;
+            for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
+                std::optional<Type> arg_type = infer_type(*args[i]);
+                if (!arg_type.has_value()) continue;
+                Type candidate_param_type = normalized_param_type(*args[i], fn->params[i + param_offset].type);
+                if (candidate_param_type.kind == TypeKind::Reference) continue;
+                if (types_equal(*arg_type, candidate_param_type)) score += 4;
+                else if (literal_matches_scalar_parameter(*args[i], candidate_param_type)) score += 1;
+            }
+            return score;
+        };
+        std::vector<const Function*> candidates = collect_call_candidates(callee_name, param_offset, receiver_expr);
         if (candidates.empty()) return nullptr;
         if (candidates.size() == 1 && !candidates[0]->is_generic_template) {
-            if (param_offset == 1 && receiver_expr != nullptr) {
-                if (candidates[0]->params.size() > 0 && candidates[0]->params[0].type.kind == TypeKind::Reference &&
-                    candidates[0]->params[0].type.is_mutable_ref && !receiver_is_mutable) {
-                    return nullptr;
-                }
-                if (!receiver_matches_method_qualifier(*receiver_expr, *candidates[0])) {
-                    return nullptr;
-                }
-            }
-            if (!function_accepts_argument_count(*candidates[0], args.size(), param_offset)) {
-                return nullptr;
-            }
-            std::size_t fixed_param_count = candidates[0]->params.size() - param_offset;
-            for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
-                Type candidate_param_type = normalized_param_type(*args[i], candidates[0]->params[i + param_offset].type);
-                if (rvalue_ref_collapses_to_value(*candidates[0], i + param_offset, *args[i])) {
-                    candidate_param_type = *candidate_param_type.pointee;
-                }
-                bool arg_matches = argument_matches_parameter(*args[i], candidate_param_type);
-                if (!arg_matches && literal_matches_scalar_parameter(*args[i], candidate_param_type)) {
-                    arg_matches = true;
-                }
-                if (!arg_matches) {
-                    return nullptr;
-                }
-            }
-            return candidates[0];
+            return classify_call_candidate(*candidates[0], args, param_offset, receiver_is_mutable, receiver_expr).reason ==
+                           CallRejectionReason::None
+                       ? candidates[0]
+                       : nullptr;
         }
 
         std::vector<const Function*> matches;
         for (const Function* fn : candidates) {
-            if (!function_accepts_argument_count(*fn, args.size(), param_offset)) {
-                continue;
+            if (classify_call_candidate(*fn, args, param_offset, receiver_is_mutable, receiver_expr).reason ==
+                CallRejectionReason::None) {
+                matches.push_back(fn);
             }
-            // The receiver (`this`): viable only if the candidate's own
-            // `this` mutability doesn't demand more than the receiver
-            // place can actually provide.
-            if (param_offset == 1 && fn->params[0].type.is_mutable_ref && !receiver_is_mutable) {
-                continue;
-            }
-            if (param_offset == 1 && receiver_expr != nullptr &&
-                !receiver_matches_method_qualifier(*receiver_expr, *fn)) {
-                continue;
-            }
-            std::size_t fixed_param_count = fn->params.size() - param_offset;
-            bool all_match = true;
-            for (std::size_t i = 0; all_match && i < args.size() && i < fixed_param_count; i++) {
-                Type candidate_param_type = normalized_param_type(*args[i], fn->params[i + param_offset].type);
-                if (rvalue_ref_collapses_to_value(*fn, i + param_offset, *args[i])) {
-                    candidate_param_type = *candidate_param_type.pointee;
-                }
-                bool arg_match = argument_matches_parameter(*args[i], candidate_param_type) ||
-                                 literal_matches_scalar_parameter(*args[i], candidate_param_type);
-                all_match = arg_match;
-            }
-            if (all_match) matches.push_back(fn);
         }
         if (matches.empty()) return nullptr;
         if (matches.size() == 1) return matches[0];

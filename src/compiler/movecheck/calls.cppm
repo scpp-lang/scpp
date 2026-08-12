@@ -779,6 +779,67 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 // falls back to the first match found (in declaration order) rather
 // than crashing, since v0.1's scalar-only overload sets make actually
 // reaching this exceedingly rare in a real, well-formed program.
+// Explains a resolve_overload failure, for the case where the *name*
+// exists and only the call doesn't fit it.
+//
+// One message -- "no overload of 'f' matches these argument types" --
+// used to stand in for every cause here, including the one it is
+// factually wrong about: passing the wrong *number* of arguments is not
+// an argument-type problem, and telling the reader to look at their
+// types sends them to the wrong place. The same generic-message-for-
+// several-distinct-causes shape as codegen's "call to unknown function";
+// both are fixed the same way, by asking the resolver's own predicates
+// which stage rejected each candidate.
+[[nodiscard]] std::string describe_overload_failure(const Expr& call_expr, const CalleeSignature& callee,
+                                                     const std::string& display_name,
+                                                     const std::vector<FunctionSignature>& candidates, const Body& body,
+                                                     const Signatures& signatures) {
+    auto describe_signature = [&](const FunctionSignature& sig) {
+        std::string result = display_name + "(";
+        for (std::size_t i = callee.param_offset; i < sig.param_types.size(); i++) {
+            if (i != callee.param_offset) result += ", ";
+            result += describe_type_brief(sig.param_types[i]);
+        }
+        result += ")";
+        if (sig.is_generic_template) result += " [generic]";
+        return result;
+    };
+    std::string candidate_list;
+    for (const FunctionSignature& sig : candidates) {
+        candidate_list += "\n  candidate: " + describe_signature(sig);
+    }
+
+    std::vector<const FunctionSignature*> right_arity;
+    for (const FunctionSignature& sig : candidates) {
+        if (signature_accepts_argument_count(sig, call_expr.args.size(), callee.param_offset)) right_arity.push_back(&sig);
+    }
+    if (right_arity.empty()) {
+        return "no overload of '" + display_name + "' takes " + std::to_string(call_expr.args.size()) +
+               (call_expr.args.size() == 1 ? " argument" : " arguments") + candidate_list;
+    }
+
+    for (const FunctionSignature* sig : right_arity) {
+        std::size_t fixed_param_count = sig->param_types.size() - callee.param_offset;
+        for (std::size_t i = 0; i < call_expr.args.size() && i < fixed_param_count; i++) {
+            const Type& param_type = sig->param_types[i + callee.param_offset];
+            if (argument_matches_parameter(*call_expr.args[i], param_type, body, signatures)) continue;
+            std::optional<Type> actual = infer_expr_type(*call_expr.args[i], body, signatures);
+            return "no overload of '" + display_name + "' matches these argument types: argument " +
+                   std::to_string(i + 1) + " is " +
+                   (actual.has_value() ? "'" + describe_type_brief(*actual) + "'" : "a different type") + ", but '" +
+                   describe_signature(*sig) + "' expects '" + describe_type_brief(param_type) +
+                   "' (spec ch05.10 -- overload resolution is exact type match only; an explicit "
+                   "static_cast<T> may be required)" +
+                   (candidates.size() > 1 ? candidate_list : std::string());
+        }
+    }
+    return "no overload of '" + display_name +
+           "' matches these argument types (spec ch05.10 -- overload resolution is exact type match only; an "
+           "explicit static_cast<T> may be required)" +
+           candidate_list;
+}
+
+
 [[nodiscard]] const FunctionSignature* resolve_overload(const Expr& call_expr, const CalleeSignature& callee,
                                                           const Body& body, const Signatures& signatures) {
     if (callee.direct_signature.has_value()) {

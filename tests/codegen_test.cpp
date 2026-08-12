@@ -2402,6 +2402,127 @@ void run_user_destructor_member_teardown_tests() {
     }
 }
 
+// codegen resolves overloads a second time, by exact type, and every one
+// of its failures used to be reported as "call to unknown function 'X'
+// (resolve)" -- a name-lookup message for a question that has nothing to
+// do with name lookup. The function was declared; only an argument type
+// differed. For a method it printed codegen's mangled `Class_method`
+// spelling too, a name that appears nowhere in the user's source.
+//
+// This reaches codegen (rather than being stopped by the frontend)
+// because movecheck's resolve_overload deliberately accepts a
+// single-candidate name without matching argument types -- documented
+// there, and sound, since it explicitly defers the type check to codegen.
+// Only the report was wrong.
+void run_call_resolution_diagnostic_tests() {
+    auto error_for = [](std::string_view source) -> std::string {
+        auto result = try_generate_ir(source);
+        if (result.has_value()) return "<no error>";
+        return result.error().message;
+    };
+
+    {
+        cases_run++;
+        std::string message = error_for("void sink(std::int64_t value) { }\n"
+                                        "int main() {\n"
+                                        "    int narrow = 5;\n"
+                                        "    sink(narrow);\n"
+                                        "    return 0;\n"
+                                        "}\n");
+        expect(message.find("unknown function") == std::string::npos,
+               "call_resolution_diagnostic: an argument type mismatch must not be reported as an unknown "
+               "function, got '" + message + "'");
+        expect(message.find("argument 1 is 'int'") != std::string::npos,
+               "call_resolution_diagnostic: expected the offending argument and its actual type, got '" + message +
+                   "'");
+        expect(message.find("expects 'int64_t'") != std::string::npos,
+               "call_resolution_diagnostic: expected the parameter type, got '" + message + "'");
+    }
+    {
+        // The mismatch is in the *second* argument; a diagnostic that
+        // only says "these argument types" leaves the reader to find it.
+        cases_run++;
+        std::string message = error_for("void sink(std::int64_t a, std::int64_t b) { }\n"
+                                        "int main() {\n"
+                                        "    std::int64_t wide = 1;\n"
+                                        "    int narrow = 2;\n"
+                                        "    sink(wide, narrow);\n"
+                                        "    return 0;\n"
+                                        "}\n");
+        expect(message.find("argument 2 is 'int'") != std::string::npos,
+               "call_resolution_diagnostic: expected the second argument to be named, got '" + message + "'");
+    }
+    {
+        // A method: the message must use the name the user wrote, never
+        // codegen's internal `Box_take` mangling.
+        cases_run++;
+        std::string message = error_for("class Box {\n"
+                                        "  public:\n"
+                                        "    virtual ~Box() = default;\n"
+                                        "    int value{};\n"
+                                        "    void take(std::int64_t v) { value = 1; }\n"
+                                        "};\n"
+                                        "int main() {\n"
+                                        "    Box b{};\n"
+                                        "    int narrow = 2;\n"
+                                        "    b.take(narrow);\n"
+                                        "    return 0;\n"
+                                        "}\n");
+        expect(message.find("Box_take") == std::string::npos,
+               "call_resolution_diagnostic: the mangled method name must never reach a diagnostic, got '" + message +
+                   "'");
+        expect(message.find("'Box::take'") != std::string::npos,
+               "call_resolution_diagnostic: expected the method to be named as written, got '" + message + "'");
+    }
+    {
+        // A genuinely absent name still says so -- and still says it
+        // without the mangling, and without the internal "(resolve)" tag.
+        cases_run++;
+        std::string message = error_for("class Box {\n"
+                                        "  public:\n"
+                                        "    virtual ~Box() = default;\n"
+                                        "    int value{};\n"
+                                        "};\n"
+                                        "int main() {\n"
+                                        "    Box b{};\n"
+                                        "    b.missing();\n"
+                                        "    return 0;\n"
+                                        "}\n");
+        expect(message.find("call to unknown function 'Box::missing'") != std::string::npos,
+               "call_resolution_diagnostic: expected an unknown-name diagnostic naming Box::missing, got '" +
+                   message + "'");
+        expect(message.find("(resolve)") == std::string::npos && message.find("(llvm)") == std::string::npos,
+               "call_resolution_diagnostic: internal phase tags must not appear in user-facing diagnostics, got '" +
+                   message + "'");
+    }
+    {
+        // Argument *count*, reported as a count problem rather than as a
+        // type problem.
+        cases_run++;
+        std::string message = error_for("void sink(int a, int b) { }\n"
+                                        "int main() {\n"
+                                        "    sink(1);\n"
+                                        "    return 0;\n"
+                                        "}\n");
+        expect(message.find("takes 1 argument") != std::string::npos,
+               "call_resolution_diagnostic: expected an argument-count diagnostic, got '" + message + "'");
+        expect(message.find("candidate: sink(int, int)") != std::string::npos,
+               "call_resolution_diagnostic: expected the candidate signature, got '" + message + "'");
+    }
+    {
+        // Valid code still compiles -- the new diagnosis must only run on
+        // the failure path.
+        cases_run++;
+        auto ir = try_generate_ir("std::int64_t widen(std::int64_t value) { return value; }\n"
+                                  "int main() {\n"
+                                  "    std::int64_t wide = 5;\n"
+                                  "    return static_cast<int>(widen(wide));\n"
+                                  "}\n");
+        expect(ir.has_value(), "call_resolution_diagnostic: a correctly-typed call must still compile, got '" +
+                                   (ir.has_value() ? std::string() : ir.error().message) + "'");
+    }
+}
+
 int main() {
     run_test_case_files();
     test_generate_returns_engaged_expected_on_success();
@@ -2413,6 +2534,7 @@ int main() {
     run_value_initialized_temporary_constructor_tests();
     run_array_element_lifetime_tests();
     run_user_destructor_member_teardown_tests();
+    run_call_resolution_diagnostic_tests();
     run_return_type_checking_tests();
 
     run_constexpr_error_copy_tests();
