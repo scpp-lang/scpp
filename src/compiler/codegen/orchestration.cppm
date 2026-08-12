@@ -216,8 +216,10 @@ namespace scpp {
         }
         for (const Function& fn : program.functions) {
             if (is_never_compiled(fn)) continue;
+            bool defined_a_body = false;
             if (fn.body != nullptr) {
                 if (auto r = define_function(fn); !r.has_value()) return std::unexpected(std::move(r).error());
+                defined_a_body = true;
             } else if (!fn.owning_module.empty() && fn.is_exported) {
                 // A defaulted special member (e.g. `virtual ~X() = default;`)
                 // or an inherited-method forwarding stub recovered from an
@@ -251,16 +253,33 @@ namespace scpp {
                 // emitted above.
             } else if (fn.is_defaulted) {
                 if (auto r = define_defaulted_function(fn); !r.has_value()) return std::unexpected(std::move(r).error());
+                defined_a_body = true;
             } else if (!fn.forwards_to.empty()) {
                 // ch05 §5.14: an inherited method's own forwarding stub
                 // (synthesize_inherited_method_forwards) -- has no
                 // scpp-level AST body at all, just a thin codegen-only
                 // wrapper.
                 if (auto r = define_forwarding_function(fn); !r.has_value()) return std::unexpected(std::move(r).error());
+                defined_a_body = true;
             }
             // Otherwise: a bodyless `extern "C"` declaration (ch02
             // §2.1) already got its llvm::LLVM `declare` from declare_function
             // above; there's no body to lower.
+
+            // Verified here, one function at a time, rather than only
+            // once over the finished module below: LLVMVerifyModule's
+            // message names the offending *value*, but the compiler has
+            // no way back from that to a source position, so it used to
+            // report whatever current_loc_ the last function lowered
+            // happened to leave behind -- typically some unrelated
+            // stdlib function, many files away from the real defect.
+            // Every invariant the verifier checks about a function body
+            // is function-local, so checking each one as soon as it is
+            // complete attributes the failure to the function that
+            // actually has it.
+            if (defined_a_body) {
+                if (auto r = verify_defined_function(fn); !r.has_value()) return std::unexpected(std::move(r).error());
+            }
         }
         finalize_debug_info();
         char* error_message = nullptr;
@@ -272,10 +291,35 @@ namespace scpp {
             std::ofstream dump_out("scratch_selfhost/broken_module_dump.ll");
             dump_out << ir_dump;
             llvm::LLVMDisposeMessage(ir_dump);
-            return std::unexpected(CodegenError("module verification failed: " + error,
-                current_loc_));
+            // Anything reaching here is a *module*-level invariant (every
+            // function-local one was already attributed to its own
+            // function above), so there is no single statement to blame
+            // -- deliberately reported at the module's own location
+            // rather than at a stale current_loc_ that would point at an
+            // unrelated function.
+            return std::unexpected(CodegenError("module verification failed: " + error, SourceLocation{}));
         }
         return module_;
+    }
+
+
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::verify_defined_function(const Function& fn)
+{
+        auto name_it = overload_names_.find(&fn);
+        if (name_it == overload_names_.end()) return {};
+        llvm::LLVMValueRef llvm_fn = llvm::LLVMGetNamedFunction(module_, name_it->second.c_str());
+        if (llvm_fn == nullptr) return {};
+        if (llvm::LLVMVerifyFunction(llvm_fn, llvm::LLVMReturnStatusAction) == 0) return {};
+        // Re-run the module verifier purely to recover the human-readable
+        // description of what is wrong; only this one function can be
+        // broken so far, so the text describes it.
+        char* error_message = nullptr;
+        (void)llvm::LLVMVerifyModule(module_, llvm::LLVMReturnStatusAction, &error_message);
+        std::string error(error_message != nullptr ? error_message : "");
+        llvm::LLVMDisposeMessage(error_message);
+        while (!error.empty() && error.back() == '\n') error.pop_back();
+        return std::unexpected(CodegenError("internal error: generated invalid IR for '" + fn.name + "': " + error,
+            fn.loc));
     }
 
 

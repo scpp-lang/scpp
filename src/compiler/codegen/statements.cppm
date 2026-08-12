@@ -598,10 +598,19 @@ namespace scpp {
                 // -- codegen_lvalue, not codegen_expr (which would
                 // auto-dereference it, same as any other read).
                 llvm::LLVMValueRef value = nullptr;
+                // Tracked separately from `value` so the void branch below can
+                // still be type-checked: a void function emits `ret void`
+                // (value stays null) but `return expr;` is only well-formed
+                // there when `expr` itself is void-typed, so the check needs
+                // the expression's own type, not the `ret` operand's.
+                llvm::LLVMTypeRef returned_type = llvm::LLVMVoidTypeInContext(context_);
                 if (stmt.expr) {
                     if (current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Named &&
                         current_function_def_->return_type.name == "void") {
-                        if (auto r = codegen_expr(*stmt.expr); !r.has_value()) return std::unexpected(std::move(r).error());
+                        auto value_result = codegen_expr(*stmt.expr);
+                        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                        if (llvm::LLVMValueRef evaluated = std::move(value_result).value())
+                            returned_type = llvm::LLVMTypeOf(evaluated);
                     } else if (current_function_def_ != nullptr && is_interface_reference_type(current_function_def_->return_type)) {
                         auto value_result = codegen_interface_value_for_target(*stmt.expr, current_function_def_->return_type);
                         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
@@ -648,6 +657,8 @@ namespace scpp {
                         value = std::move(value_result).value();
                     }
                 }
+                if (value != nullptr) returned_type = llvm::LLVMTypeOf(value);
+                if (auto r = check_return_type(returned_type, stmt); !r.has_value()) return std::unexpected(std::move(r).error());
                 if (auto r = emit_function_exit_cleanup(); !r.has_value()) return std::unexpected(std::move(r).error());
                 if (value != nullptr) {
                     llvm::LLVMBuildRet(builder_, value);

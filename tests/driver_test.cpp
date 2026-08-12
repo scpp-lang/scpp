@@ -8599,6 +8599,199 @@ void run_array_element_lifetime_runtime_tests() {
 // teardown lived only inside define_defaulted_function's defaulted-
 // destructor branch, so writing `virtual ~T() { }` instead of
 // `virtual ~T() = default;` silently leaked every class-typed member.
+// Compiler bug #7, end to end. `return` never checked the returned
+// value's type against the declared return type, so an `int`-typed
+// expression returned from a `std::int64_t` function emitted `ret i32`
+// in an `i64` function. Nothing in the frontend objected; LLVM's module
+// verifier did, but it runs once over the finished module and reported
+// the failure at whatever source position the *last* lowered function
+// left behind -- a stdlib file the user never opened. These cases pin
+// both halves: the mismatch is now a frontend diagnostic, and it names
+// the user's own file.
+void run_return_type_checking_runtime_tests() {
+    {
+        // The exact reported shape: an `int` field read through a
+        // pointer, returned from a `std::int64_t` function. This is the
+        // one movecheck could never have caught -- infer_expr_type gives
+        // up on Member/Subscript chains because it has no Program-level
+        // field-type information.
+        std::string case_name = "return_int_member_from_int64_function_is_diagnosed_in_the_users_file";
+        cases_run++;
+        auto result = try_compile_and_run("import std;\n"
+                                          "class Node {\n"
+                                          "public:\n"
+                                          "    int tag = 3;\n"
+                                          "    virtual ~Node() { }\n"
+                                          "};\n"
+                                          "std::int64_t tag_of(Node& value) {\n"
+                                          "    return value.tag;\n"
+                                          "}\n"
+                                          "int main() { return 0; }\n",
+                                          case_name);
+        bool rejected = !result.has_value();
+        std::string message = rejected ? result.error().what() : "";
+        expect(rejected, case_name + ": expected an 'int' member returned from an 'int64_t' function to be rejected");
+        if (rejected) {
+            expect(message.find("std_memory.scpp") == std::string::npos,
+                   case_name + ": the diagnostic still points into the stdlib instead of the offending return, got: " +
+                       message);
+            expect(message.find("tag_of") != std::string::npos,
+                   case_name + ": expected the diagnostic to name the offending function, got: " + message);
+        }
+    }
+
+    {
+        // ...and the correct spelling of the same function compiles and
+        // produces the right value at runtime. Widening has to be
+        // written out, because scpp has no implicit scalar conversions.
+        std::string case_name = "explicitly_widened_member_return_produces_the_right_value";
+        cases_run++;
+        RunResult result = compile_and_run("import std;\n"
+                                          "class Node {\n"
+                                           "public:\n"
+                                           "    int tag = 3;\n"
+                                           "    virtual ~Node() { }\n"
+                                           "};\n"
+                                           "std::int64_t tag_of(Node& value) {\n"
+                                           "    return static_cast<std::int64_t>(value.tag);\n"
+                                           "}\n"
+                                           "int main() {\n"
+                                           "    Node n{};\n"
+                                           "    std::int64_t t = tag_of(n);\n"
+                                           "    return static_cast<int>(t);\n"
+                                           "}\n",
+                                           case_name);
+        expect(result.exit_code == 3,
+               case_name + ": expected the widened member value to survive the return, got exit code " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // The gap was not limited to integer widths -- returning a class
+        // value from an `int` function was equally unchecked, and equally
+        // reached the verifier.
+        std::string case_name = "return_class_value_from_int_function_is_diagnosed_in_the_users_file";
+        cases_run++;
+        auto result = try_compile_and_run("import std;\n"
+                                          "class Box {\n"
+                                          "public:\n"
+                                          "    int v = 1;\n"
+                                          "    virtual ~Box() { }\n"
+                                          "};\n"
+                                          "int returns_class() {\n"
+                                          "    Box b{};\n"
+                                          "    return b;\n"
+                                          "}\n"
+                                          "int main() { return 0; }\n",
+                                          case_name);
+        bool rejected = !result.has_value();
+        std::string message = rejected ? result.error().what() : "";
+        expect(rejected, case_name + ": expected a class value returned from an 'int' function to be rejected");
+        if (rejected) {
+            expect(message.find("std_memory.scpp") == std::string::npos,
+                   case_name + ": the diagnostic still points into the stdlib, got: " + message);
+        }
+    }
+
+    {
+        std::string case_name = "bare_return_from_value_returning_function_is_diagnosed";
+        cases_run++;
+        auto result = try_compile_and_run("import std;\n"
+                                          "int bare() { return; }\n"
+                                          "int main() { return 0; }\n",
+                                          case_name);
+        bool rejected = !result.has_value();
+        std::string message = rejected ? result.error().what() : "";
+        expect(rejected, case_name + ": expected a bare 'return;' in an 'int' function to be rejected");
+        if (rejected) {
+            expect(message.find("std_memory.scpp") == std::string::npos,
+                   case_name + ": the diagnostic still points into the stdlib, got: " + message);
+        }
+    }
+
+    {
+        std::string case_name = "returning_a_value_from_a_void_function_is_diagnosed";
+        cases_run++;
+        auto result = try_compile_and_run("import std;\n"
+                                          "void nothing() { return 5; }\n"
+                                          "int main() { nothing(); return 0; }\n",
+                                          case_name);
+        expect(!result.has_value(), case_name + ": expected a value returned from a 'void' function to be rejected");
+    }
+
+    {
+        // Every shape the return path already handled specially still
+        // has to compile *and* still has to produce the right value:
+        // literal adaptation, a reference return, a class-by-value
+        // return, a unique_ptr return, and an expected<T, E> built by
+        // the converting constructor.
+        std::string case_name = "all_valid_return_shapes_still_produce_correct_values";
+        cases_run++;
+        RunResult result = compile_and_run("import std;\n"
+                                           "class Box {\n"
+                                           "public:\n"
+                                           "    int v = 7;\n"
+                                           "    virtual ~Box() { }\n"
+                                           "};\n"
+                                           "std::int64_t wide() { return 5; }\n"
+                                           "Box& pick(Box& a) { return a; }\n"
+                                           "Box make_box() {\n"
+                                           "    Box b{};\n"
+                                           "    return b;\n"
+                                           "}\n"
+                                           "std::unique_ptr<int> owned() { return std::make_unique<int>(9); }\n"
+                                           "std::expected<int, int> ok_case() { return 4; }\n"
+                                           "std::expected<void, int> void_case() { return {}; }\n"
+                                           "void inner() { }\n"
+                                           "void outer() { return inner(); }\n"
+                                           "int main() {\n"
+                                           "    int total = 0;\n"
+                                           "    total = total + static_cast<int>(wide());\n"
+                                           "    Box b{};\n"
+                                           "    Box& r = pick(b);\n"
+                                           "    total = total + r.v;\n"
+                                           "    Box c = make_box();\n"
+                                           "    total = total + c.v;\n"
+                                           "    auto p = owned();\n"
+                                           "    total = total + *p;\n"
+                                           "    auto e = ok_case();\n"
+                                           "    if (!e.has_value()) { return 100; }\n"
+                                           "    total = total + e.value();\n"
+                                           "    auto v = void_case();\n"
+                                           "    if (!v.has_value()) { return 101; }\n"
+                                           "    outer();\n"
+                                           "    return total;\n"
+                                           "}\n",
+                                           case_name);
+        expect(result.exit_code == 32,
+               case_name + ": expected 5 + 7 + 7 + 9 + 4 == 32 from the valid return shapes, got exit code " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // The store-boundary diagnostic used to end with "cast
+        // expressions aren't implemented in this version yet". They are:
+        // this program proves static_cast works at both boundaries and
+        // computes the right answer.
+        std::string case_name = "static_cast_satisfies_both_boundaries_at_runtime";
+        cases_run++;
+        RunResult result = compile_and_run("import std;\n"
+                                           "std::int64_t widen(int x) {\n"
+                                           "    return static_cast<std::int64_t>(x);\n"
+                                           "}\n"
+                                           "int main() {\n"
+                                           "    int x = 21;\n"
+                                           "    std::int64_t y = static_cast<std::int64_t>(x);\n"
+                                           "    std::int64_t z = widen(x);\n"
+                                           "    return static_cast<int>(y) + static_cast<int>(z);\n"
+                                           "}\n",
+                                           case_name);
+        expect(result.exit_code == 42,
+               case_name + ": expected 21 + 21 == 42 through explicit casts, got exit code " +
+                   std::to_string(result.exit_code));
+    }
+}
+
 void run_user_destructor_member_teardown_runtime_tests() {
     const std::string counters =
         "int dtors = 0;\n"
@@ -9050,6 +9243,7 @@ int main() {
     run_defaulted_special_member_tests();
     run_array_element_lifetime_runtime_tests();
     run_user_destructor_member_teardown_runtime_tests();
+    run_return_type_checking_runtime_tests();
     run_equality_operator_tests();
     test_compile_to_executable_returns_engaged_expected_on_success();
     test_compile_to_executable_returns_disengaged_expected_on_failure_without_throwing();

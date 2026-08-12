@@ -974,6 +974,25 @@ private:
     // gap, since same-width scalars can never corrupt memory this way.
     [[nodiscard]] std::expected<void, CodegenError> check_store_type(llvm::LLVMValueRef value, llvm::LLVMTypeRef expected, const std::string& what);
 
+    // check_store_type's counterpart for the `return` boundary: the value
+    // being returned must have exactly the enclosing function's declared
+    // return type, since scpp has no implicit conversions. `actual` is
+    // the returned expression's own type -- the void type for a bare
+    // `return;` -- passed separately rather than read back off the `ret`
+    // operand, because a void function's `return expr;` still evaluates
+    // `expr` while emitting `ret void`. Reported at the returned
+    // expression's own location, so the diagnostic names the offending
+    // statement rather than wherever LLVM's end-of-module verifier
+    // happened to notice the resulting invalid IR.
+    [[nodiscard]] std::expected<void, CodegenError> check_return_type(llvm::LLVMTypeRef actual, const Stmt& stmt);
+
+    // Runs LLVM's verifier over one just-defined function, so an IR
+    // invariant violation is reported at that function's own location.
+    // The module-wide verifier at the end of generate() cannot do this:
+    // by the time it runs, every function has been lowered and there is
+    // no current statement left to blame.
+    [[nodiscard]] std::expected<void, CodegenError> verify_defined_function(const Function& fn);
+
     [[nodiscard]] std::expected<void, CodegenError> define_global_initializers(const Program& program);
 
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_expr(const Expr& expr);

@@ -256,6 +256,7 @@ void LLVMStructSetBody(LLVMTypeRef StructTy, LLVMTypeRef* ElementTypes, unsigned
 unsigned int LLVMCountStructElementTypes(LLVMTypeRef StructTy);
 void LLVMGetStructElementTypes(LLVMTypeRef StructTy, LLVMTypeRef* Dest);
 LLVMTypeKind LLVMGetTypeKind(LLVMTypeRef Ty);
+LLVMTypeRef LLVMGetReturnType(LLVMTypeRef FunctionTy);
 unsigned int LLVMGetIntTypeWidth(LLVMTypeRef IntegerTy);
 
 // Values / constants / globals / functions
