@@ -62,7 +62,7 @@ struct DriverError : std::runtime_error {
     DriverErrorKind kind;
 };
 
-inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 7;
+inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 8;
 inline constexpr std::string_view SCPPM_COMPILE_TIME_AST_MAGIC = "SAST";
 
 struct CompileTimePayloadPlan {
@@ -834,16 +834,20 @@ void write_generic_type_param(std::ostream& out, const GenericTypeParam& param) 
     return param;
 }
 
+// Structurally bound; see `write_expr`.
 void write_param(std::ostream& out, const Param& param) {
-    write_type(out, param.type);
-    write_string(out, param.name);
-    write_string(out, param.lifetime.name);
-    write_u8(out, param.default_expr ? 1u : 0u);
-    if (param.default_expr) write_expr(out, *param.default_expr);
-    write_string(out, param.generic_concept);
-    write_u8(out, param.require_thread_movable ? 1u : 0u);
-    write_u8(out, param.require_thread_shareable ? 1u : 0u);
-    write_u8(out, param.is_parameter_pack ? 1u : 0u);
+    const auto& [type, name, resolved_local, lifetime, default_expr, generic_concept, require_thread_movable,
+                 require_thread_shareable, is_parameter_pack] = param;
+    write_type(out, type);
+    write_string(out, name);
+    write_u64_le(out, static_cast<std::uint64_t>(resolved_local));
+    write_string(out, lifetime.name);
+    write_u8(out, default_expr ? 1u : 0u);
+    if (default_expr) write_expr(out, *default_expr);
+    write_string(out, generic_concept);
+    write_u8(out, require_thread_movable ? 1u : 0u);
+    write_u8(out, require_thread_shareable ? 1u : 0u);
+    write_u8(out, is_parameter_pack ? 1u : 0u);
 }
 
 [[nodiscard]] std::expected<Param, DriverError> read_param(std::istream& in, const std::string& context) {
@@ -854,6 +858,9 @@ void write_param(std::ostream& out, const Param& param) {
     auto name_r = read_string(in, context + " name");
     if (!name_r.has_value()) return std::unexpected(std::move(name_r).error());
     param.name = std::move(name_r).value();
+    auto resolved_local_r = read_u64_le(in, context + " resolved local");
+    if (!resolved_local_r.has_value()) return std::unexpected(std::move(resolved_local_r).error());
+    param.resolved_local = static_cast<std::size_t>(resolved_local_r.value());
     auto lifetime_r = read_string(in, context + " lifetime");
     if (!lifetime_r.has_value()) return std::unexpected(std::move(lifetime_r).error());
     param.lifetime.name = std::move(lifetime_r).value();
@@ -879,11 +886,14 @@ void write_param(std::ostream& out, const Param& param) {
     return param;
 }
 
+// Structurally bound; see `write_expr`.
 void write_lambda_capture(std::ostream& out, const LambdaCapture& capture) {
-    write_string(out, capture.name);
-    write_u8(out, capture.by_reference ? 1u : 0u);
-    write_u8(out, capture.init ? 1u : 0u);
-    if (capture.init) write_expr(out, *capture.init);
+    const auto& [name, by_reference, init, resolved_local] = capture;
+    write_string(out, name);
+    write_u8(out, by_reference ? 1u : 0u);
+    write_u64_le(out, static_cast<std::uint64_t>(resolved_local));
+    write_u8(out, init ? 1u : 0u);
+    if (init) write_expr(out, *init);
 }
 
 [[nodiscard]] std::expected<LambdaCapture, DriverError> read_lambda_capture(std::istream& in, const std::string& context) {
@@ -894,6 +904,9 @@ void write_lambda_capture(std::ostream& out, const LambdaCapture& capture) {
     auto by_ref_r = read_u8(in, context + " by_reference");
     if (!by_ref_r.has_value()) return std::unexpected(std::move(by_ref_r).error());
     capture.by_reference = by_ref_r.value() != 0u;
+    auto resolved_local_r = read_u64_le(in, context + " resolved local");
+    if (!resolved_local_r.has_value()) return std::unexpected(std::move(resolved_local_r).error());
+    capture.resolved_local = static_cast<std::size_t>(resolved_local_r.value());
     auto init_present_r = read_u8(in, context + " init present");
     if (!init_present_r.has_value()) return std::unexpected(std::move(init_present_r).error());
     if (init_present_r.value() != 0u) {
@@ -929,43 +942,67 @@ void write_explicit_template_arg(std::ostream& out, const ExplicitTemplateArg& a
     return arg;
 }
 
+// Serialization is the second place -- after ast.cppm's `assign_expr_fields` --
+// that has to enumerate every field of an `Expr`, and an omission here is worse
+// than an omission in a cloner: a lossy cache *persists*, so a module built from
+// source and the same module loaded from its `.scppm` stop agreeing, and the
+// difference outlives the run that created it.
+//
+// Binding the node structurally makes that omission a compile error here, at the
+// exact function that must be updated:
+//
+//     error: type 'const scpp::Expr' binds to 30 elements, but only 29 names
+//     were provided
+//
+// If you land here after adding a field to `Expr`: name it in the binding below,
+// write it out, read it back in `read_expr` (in the same order), bump
+// SCPPM_COMPILE_TIME_AST_VERSION so stale caches are rejected rather than
+// misread, and extend the round-trip case in tests/driver_test.cpp. The reader
+// has no equivalent compile-time guard -- the round-trip test is what covers it.
 void write_expr(std::ostream& out, const Expr& expr) {
-    write_enum(out, expr.kind);
-    write_source_location(out, expr.loc);
-    write_i64_le(out, expr.int_value);
-    write_double_le(out, expr.float_value);
-    write_u8(out, expr.bool_value ? 1u : 0u);
-    write_string(out, expr.name);
-    write_u8(out, expr.explicit_global_qualification ? 1u : 0u);
-    write_enum(out, expr.binary_op);
-    write_u8(out, expr.lhs ? 1u : 0u);
-    if (expr.lhs) write_expr(out, *expr.lhs);
-    write_u8(out, expr.rhs ? 1u : 0u);
-    if (expr.rhs) write_expr(out, *expr.rhs);
-    write_u8(out, expr.third ? 1u : 0u);
-    if (expr.third) write_expr(out, *expr.third);
-    write_u8(out, expr.fold_ellipsis_on_left ? 1u : 0u);
-    write_enum(out, expr.unary_op);
-    write_u32_le(out, static_cast<std::uint32_t>(expr.args.size()));
-    for (const auto& arg : expr.args) write_expr(out, *arg);
-    write_u32_le(out, static_cast<std::uint32_t>(expr.explicit_template_args.size()));
-    for (const ExplicitTemplateArg& arg : expr.explicit_template_args) write_explicit_template_arg(out, arg);
-    write_type(out, expr.type);
-    write_u8(out, expr.sizeof_operand_is_type ? 1u : 0u);
-    write_u8(out, expr.has_paren_init ? 1u : 0u);
-    write_u8(out, expr.destroy_through_pointer ? 1u : 0u);
-    write_u8(out, expr.through_arrow ? 1u : 0u);
-    write_u8(out, expr.implicit_arrow_deref ? 1u : 0u);
-    write_u8(out, expr.implicit_arrow_chain_safe ? 1u : 0u);
-    write_u32_le(out, static_cast<std::uint32_t>(expr.lambda_captures.size()));
-    for (const LambdaCapture& capture : expr.lambda_captures) write_lambda_capture(out, capture);
-    write_enum(out, expr.lambda_blanket_mode);
-    write_u32_le(out, static_cast<std::uint32_t>(expr.lambda_params.size()));
-    for (const Param& param : expr.lambda_params) write_param(out, param);
-    write_u8(out, expr.has_lambda_explicit_return_type ? 1u : 0u);
-    write_u8(out, expr.lambda_is_mutable ? 1u : 0u);
-    write_u8(out, expr.lambda_body ? 1u : 0u);
-    if (expr.lambda_body) write_stmt(out, *expr.lambda_body);
+    const auto& [kind, resolved_local, loc, int_value, float_value, bool_value, name,
+                 explicit_global_qualification, binary_op, lhs, rhs, third, fold_ellipsis_on_left, unary_op,
+                 args, explicit_template_args, type, sizeof_operand_is_type, has_paren_init,
+                 destroy_through_pointer, through_arrow, implicit_arrow_deref, implicit_arrow_chain_safe,
+                 lambda_captures, lambda_blanket_mode, lambda_params, has_lambda_explicit_return_type,
+                 lambda_is_mutable, lambda_body] = expr;
+    write_enum(out, kind);
+    write_u64_le(out, static_cast<std::uint64_t>(resolved_local));
+    write_source_location(out, loc);
+    write_i64_le(out, int_value);
+    write_double_le(out, float_value);
+    write_u8(out, bool_value ? 1u : 0u);
+    write_string(out, name);
+    write_u8(out, explicit_global_qualification ? 1u : 0u);
+    write_enum(out, binary_op);
+    write_u8(out, lhs ? 1u : 0u);
+    if (lhs) write_expr(out, *lhs);
+    write_u8(out, rhs ? 1u : 0u);
+    if (rhs) write_expr(out, *rhs);
+    write_u8(out, third ? 1u : 0u);
+    if (third) write_expr(out, *third);
+    write_u8(out, fold_ellipsis_on_left ? 1u : 0u);
+    write_enum(out, unary_op);
+    write_u32_le(out, static_cast<std::uint32_t>(args.size()));
+    for (const auto& arg : args) write_expr(out, *arg);
+    write_u32_le(out, static_cast<std::uint32_t>(explicit_template_args.size()));
+    for (const ExplicitTemplateArg& arg : explicit_template_args) write_explicit_template_arg(out, arg);
+    write_type(out, type);
+    write_u8(out, sizeof_operand_is_type ? 1u : 0u);
+    write_u8(out, has_paren_init ? 1u : 0u);
+    write_u8(out, destroy_through_pointer ? 1u : 0u);
+    write_u8(out, through_arrow ? 1u : 0u);
+    write_u8(out, implicit_arrow_deref ? 1u : 0u);
+    write_u8(out, implicit_arrow_chain_safe ? 1u : 0u);
+    write_u32_le(out, static_cast<std::uint32_t>(lambda_captures.size()));
+    for (const LambdaCapture& capture : lambda_captures) write_lambda_capture(out, capture);
+    write_enum(out, lambda_blanket_mode);
+    write_u32_le(out, static_cast<std::uint32_t>(lambda_params.size()));
+    for (const Param& param : lambda_params) write_param(out, param);
+    write_u8(out, has_lambda_explicit_return_type ? 1u : 0u);
+    write_u8(out, lambda_is_mutable ? 1u : 0u);
+    write_u8(out, lambda_body ? 1u : 0u);
+    if (lambda_body) write_stmt(out, *lambda_body);
 }
 
 [[nodiscard]] std::expected<ExprPtr, DriverError> read_expr(std::istream& in, const std::string& context) {
@@ -973,6 +1010,9 @@ void write_expr(std::ostream& out, const Expr& expr) {
     auto kind_r = read_enum<ExprKind>(in, context + " kind");
     if (!kind_r.has_value()) return std::unexpected(std::move(kind_r).error());
     expr->kind = kind_r.value();
+    auto resolved_local_r = read_u64_le(in, context + " resolved local");
+    if (!resolved_local_r.has_value()) return std::unexpected(std::move(resolved_local_r).error());
+    expr->resolved_local = static_cast<std::size_t>(resolved_local_r.value());
     auto loc_r = read_source_location(in, context + " loc");
     if (!loc_r.has_value()) return std::unexpected(std::move(loc_r).error());
     expr->loc = std::move(loc_r).value();
@@ -1097,41 +1137,50 @@ void write_expr(std::ostream& out, const Expr& expr) {
     return expr;
 }
 
+// Structurally bound for the same reason as `write_expr` above; `is_static_local`
+// and `declared_local` were both missing from this list until the round-trip test
+// in tests/driver_test.cpp caught them.
 void write_stmt(std::ostream& out, const Stmt& stmt) {
-    write_enum(out, stmt.kind);
-    write_source_location(out, stmt.loc);
-    write_type(out, stmt.type);
-    write_string(out, stmt.var_name);
-    write_u8(out, stmt.init ? 1u : 0u);
-    if (stmt.init) write_expr(out, *stmt.init);
-    write_u32_le(out, static_cast<std::uint32_t>(stmt.alignment_specs.size()));
-    for (const AlignmentSpecifier& spec : stmt.alignment_specs) write_alignment_specifier(out, spec);
-    write_u64_le(out, stmt.resolved_alignment);
-    write_u8(out, stmt.is_const ? 1u : 0u);
-    write_u8(out, stmt.is_constexpr ? 1u : 0u);
-    write_u8(out, stmt.has_ctor_args ? 1u : 0u);
-    write_u32_le(out, static_cast<std::uint32_t>(stmt.ctor_args.size()));
-    for (const auto& arg : stmt.ctor_args) write_expr(out, *arg);
-    write_u8(out, stmt.expr ? 1u : 0u);
-    if (stmt.expr) write_expr(out, *stmt.expr);
-    write_u8(out, stmt.condition ? 1u : 0u);
-    if (stmt.condition) write_expr(out, *stmt.condition);
-    write_enum(out, stmt.if_mode);
-    write_u8(out, stmt.then_branch ? 1u : 0u);
-    if (stmt.then_branch) write_stmt(out, *stmt.then_branch);
-    write_u8(out, stmt.else_branch ? 1u : 0u);
-    if (stmt.else_branch) write_stmt(out, *stmt.else_branch);
-    write_u32_le(out, static_cast<std::uint32_t>(stmt.switch_cases.size()));
-    for (const SwitchCase& switch_case : stmt.switch_cases) {
-        write_source_location(out, switch_case.loc);
-        write_u8(out, switch_case.value ? 1u : 0u);
-        if (switch_case.value) write_expr(out, *switch_case.value);
-        write_u32_le(out, static_cast<std::uint32_t>(switch_case.statements.size()));
-        for (const auto& nested : switch_case.statements) write_stmt(out, *nested);
+    const auto& [kind, loc, type, var_name, declared_local, init, alignment_specs, resolved_alignment,
+                 is_const, is_constexpr, is_static_local, has_ctor_args, ctor_args, expr, condition, if_mode,
+                 then_branch, else_branch, switch_cases, statements, is_unsafe] = stmt;
+    write_enum(out, kind);
+    write_source_location(out, loc);
+    write_type(out, type);
+    write_string(out, var_name);
+    write_u64_le(out, static_cast<std::uint64_t>(declared_local));
+    write_u8(out, init ? 1u : 0u);
+    if (init) write_expr(out, *init);
+    write_u32_le(out, static_cast<std::uint32_t>(alignment_specs.size()));
+    for (const AlignmentSpecifier& spec : alignment_specs) write_alignment_specifier(out, spec);
+    write_u64_le(out, resolved_alignment);
+    write_u8(out, is_const ? 1u : 0u);
+    write_u8(out, is_constexpr ? 1u : 0u);
+    write_u8(out, is_static_local ? 1u : 0u);
+    write_u8(out, has_ctor_args ? 1u : 0u);
+    write_u32_le(out, static_cast<std::uint32_t>(ctor_args.size()));
+    for (const auto& arg : ctor_args) write_expr(out, *arg);
+    write_u8(out, expr ? 1u : 0u);
+    if (expr) write_expr(out, *expr);
+    write_u8(out, condition ? 1u : 0u);
+    if (condition) write_expr(out, *condition);
+    write_enum(out, if_mode);
+    write_u8(out, then_branch ? 1u : 0u);
+    if (then_branch) write_stmt(out, *then_branch);
+    write_u8(out, else_branch ? 1u : 0u);
+    if (else_branch) write_stmt(out, *else_branch);
+    write_u32_le(out, static_cast<std::uint32_t>(switch_cases.size()));
+    for (const SwitchCase& switch_case : switch_cases) {
+        const auto& [case_loc, case_value, case_statements] = switch_case;
+        write_source_location(out, case_loc);
+        write_u8(out, case_value ? 1u : 0u);
+        if (case_value) write_expr(out, *case_value);
+        write_u32_le(out, static_cast<std::uint32_t>(case_statements.size()));
+        for (const auto& nested : case_statements) write_stmt(out, *nested);
     }
-    write_u32_le(out, static_cast<std::uint32_t>(stmt.statements.size()));
-    for (const auto& nested : stmt.statements) write_stmt(out, *nested);
-    write_u8(out, stmt.is_unsafe ? 1u : 0u);
+    write_u32_le(out, static_cast<std::uint32_t>(statements.size()));
+    for (const auto& nested : statements) write_stmt(out, *nested);
+    write_u8(out, is_unsafe ? 1u : 0u);
 }
 
 [[nodiscard]] std::expected<StmtPtr, DriverError> read_stmt(std::istream& in, const std::string& context) {
@@ -1148,6 +1197,9 @@ void write_stmt(std::ostream& out, const Stmt& stmt) {
     auto var_name_r = read_string(in, context + " var name");
     if (!var_name_r.has_value()) return std::unexpected(std::move(var_name_r).error());
     stmt->var_name = std::move(var_name_r).value();
+    auto declared_local_r = read_u64_le(in, context + " declared local");
+    if (!declared_local_r.has_value()) return std::unexpected(std::move(declared_local_r).error());
+    stmt->declared_local = static_cast<std::size_t>(declared_local_r.value());
     auto init_present_r = read_u8(in, context + " init present");
     if (!init_present_r.has_value()) return std::unexpected(std::move(init_present_r).error());
     if (init_present_r.value() != 0u) {
@@ -1173,6 +1225,9 @@ void write_stmt(std::ostream& out, const Stmt& stmt) {
     auto is_constexpr_r = read_u8(in, context + " is_constexpr");
     if (!is_constexpr_r.has_value()) return std::unexpected(std::move(is_constexpr_r).error());
     stmt->is_constexpr = is_constexpr_r.value() != 0u;
+    auto is_static_local_r = read_u8(in, context + " is_static_local");
+    if (!is_static_local_r.has_value()) return std::unexpected(std::move(is_static_local_r).error());
+    stmt->is_static_local = is_static_local_r.value() != 0u;
     auto has_ctor_args_r = read_u8(in, context + " has ctor args");
     if (!has_ctor_args_r.has_value()) return std::unexpected(std::move(has_ctor_args_r).error());
     stmt->has_ctor_args = has_ctor_args_r.value() != 0u;

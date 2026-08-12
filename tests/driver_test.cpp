@@ -8618,6 +8618,219 @@ void run_array_element_lifetime_runtime_tests() {
 // hole (const went unenforced) and a miscompilation (a `static` local became an
 // ordinary one). All cloning now shares a single enumeration, so exercise the
 // generic path end to end.
+// An exported function template cannot be pre-compiled, so `build-module` ships
+// its *body* inside the `.scppm` structured compile-time payload and the importer
+// deserializes and instantiates it. That serializer is the second place that has
+// to enumerate every field of an `Expr`/`Stmt`, and it was missing five of them:
+// `Expr::resolved_local`, `Stmt::declared_local`, `Stmt::is_static_local`,
+// `Param::resolved_local` and `LambdaCapture::resolved_local`.
+//
+// `is_static_local` was the observable one, and it is the worst shape of bug this
+// project has: a *persisted* lossy artifact. Identical sources produced a working
+// program when the module was built from source and a silently wrong one when the
+// same module was loaded from its cache -- a cold-build/warm-build divergence
+// that outlives the run that created it.
+//
+// The resolution fields turned out to be benign in practice (the payload is
+// merged into the importing Program before that compilation's own resolver runs,
+// which recomputes them), but they are serialized now regardless: relying on a
+// downstream pass to repair a lossy format is exactly the sort of implicit
+// coupling that stops being true the moment the pass order changes.
+void run_scppm_payload_round_trip_tests() {
+    // Compiles `consumer` against `module_source` twice -- once with the module
+    // as source (cold) and once through a `build-module` `.scppm` artifact
+    // (warm) -- and returns both exit codes. They must be equal.
+    auto cold_and_warm_exit_codes = [](const std::string& case_name, std::string_view module_text,
+                                       std::string_view consumer_text) -> std::pair<int, int> {
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        std::filesystem::path module_source = root / "probe_mod.scpp";
+        std::filesystem::path interface_path = root / "probe_mod.scppm";
+        std::filesystem::path archive_path = root / "libprobe_mod.scppa";
+        std::filesystem::path consumer_source = root / "consumer.scpp";
+        write_text_file(module_source, module_text);
+        write_text_file(consumer_source, consumer_text);
+
+        std::filesystem::path cold_exe = root / "cold_app";
+        RunResult cold_build = run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() +
+                                                  " -o " + cold_exe.string() + " --import probe_mod=" +
+                                                  module_source.string() + " 2>&1");
+        int cold_code = -1;
+        if (cold_build.exit_code == 0) {
+            cold_code = run_command_capture(cold_exe.string() + " 2>&1").exit_code;
+        } else {
+            expect(false, case_name + ": cold build failed: " + cold_build.stdout_text);
+        }
+
+        RunResult emit = run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " +
+                                             module_source.string() + " --interface-out " + interface_path.string() +
+                                             " --archive-out " + archive_path.string() + " 2>&1");
+        expect(emit.exit_code == 0, case_name + ": build-module failed: " + emit.stdout_text);
+        std::vector<unsigned char> interface_bytes = read_binary_file(interface_path);
+        expect(interface_bytes.size() >= 8 && (interface_bytes[7] & 0x01u) != 0u,
+               case_name + ": expected the module to carry a structured compile-time payload");
+        // Remove the source so the artifact is provably the only thing the warm
+        // build can be reading the template body from.
+        std::filesystem::remove(module_source);
+
+        std::filesystem::path warm_exe = root / "warm_app";
+        RunResult warm_build = run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() +
+                                                  " -o " + warm_exe.string() + " --import probe_mod=" +
+                                                  interface_path.string() + " 2>&1");
+        int warm_code = -1;
+        if (warm_build.exit_code == 0) {
+            warm_code = run_command_capture(warm_exe.string() + " 2>&1").exit_code;
+        } else {
+            expect(false, case_name + ": warm build failed: " + warm_build.stdout_text);
+        }
+        std::filesystem::remove_all(root);
+        return std::pair<int, int>{cold_code, warm_code};
+    };
+
+    {
+        // Pre-fix: cold 123, warm 111 -- `is_static_local` never reached the
+        // artifact, so the static local was re-initialized on every call.
+        std::string case_name = "scppm_payload_preserves_static_locals_in_exported_templates";
+        cases_run++;
+        auto [cold_code, warm_code] = cold_and_warm_exit_codes(case_name,
+                                                               "export module probe_mod;\n"
+                                                               "namespace probe_mod {\n"
+                                                               "export template <typename T>\n"
+                                                               "T bump(T seed) {\n"
+                                                               "    static T counter = seed;\n"
+                                                               "    counter = counter + 1;\n"
+                                                               "    return counter;\n"
+                                                               "}\n"
+                                                               "}\n",
+                                                               "import probe_mod;\n"
+                                                               "int main() {\n"
+                                                               "    int first = probe_mod::bump<int>(0);\n"
+                                                               "    int second = probe_mod::bump<int>(0);\n"
+                                                               "    int third = probe_mod::bump<int>(0);\n"
+                                                               "    return first * 100 + second * 10 + third;\n"
+                                                               "}\n");
+        expect(cold_code == 123,
+               case_name + ": a static local in a template built from source should count 1,2,3, got " +
+                   std::to_string(cold_code));
+        expect(warm_code == 123,
+               case_name + ": the same template loaded from its .scppm should behave identically, got " +
+                   std::to_string(warm_code));
+        expect(cold_code == warm_code,
+               case_name + ": cold and warm builds diverged (cold " + std::to_string(cold_code) + ", warm " +
+                   std::to_string(warm_code) + ")");
+    }
+    {
+        // The other `Stmt` declaration modifiers travel through the same list.
+        std::string case_name = "scppm_payload_preserves_const_and_switch_in_exported_templates";
+        cases_run++;
+        auto [cold_code, warm_code] = cold_and_warm_exit_codes(case_name,
+                                                               "export module probe_mod;\n"
+                                                               "namespace probe_mod {\n"
+                                                               "export template <typename T>\n"
+                                                               "T classify(T value) {\n"
+                                                               "    const T bonus = 1;\n"
+                                                               "    switch (value) {\n"
+                                                               "        case 1:\n"
+                                                               "            return 10 + bonus;\n"
+                                                               "        case 2:\n"
+                                                               "            return 20 + bonus;\n"
+                                                               "        default:\n"
+                                                               "            return 30 + bonus;\n"
+                                                               "    }\n"
+                                                               "}\n"
+                                                               "}\n",
+                                                               "import probe_mod;\n"
+                                                               "int main() {\n"
+                                                               "    return probe_mod::classify<int>(1) + probe_mod::classify<int>(2) +\n"
+                                                               "           probe_mod::classify<int>(9);\n"
+                                                               "}\n");
+        expect(cold_code == 63, case_name + ": expected 11 + 21 + 31 = 63 from source, got " + std::to_string(cold_code));
+        expect(warm_code == 63, case_name + ": expected 11 + 21 + 31 = 63 from .scppm, got " + std::to_string(warm_code));
+        expect(cold_code == warm_code,
+               case_name + ": cold and warm builds diverged (cold " + std::to_string(cold_code) + ", warm " +
+                   std::to_string(warm_code) + ")");
+    }
+    {
+        // Lambda captures and parameters carry `resolved_local` too, and a
+        // template body containing a lambda exercises both.
+        std::string case_name = "scppm_payload_preserves_lambda_captures_in_exported_templates";
+        cases_run++;
+        auto [cold_code, warm_code] = cold_and_warm_exit_codes(case_name,
+                                                               "export module probe_mod;\n"
+                                                               "namespace probe_mod {\n"
+                                                               "export template <typename T>\n"
+                                                               "T capture_sum(T seed) {\n"
+                                                               "    const T base = seed;\n"
+                                                               "    T extra = seed + seed;\n"
+                                                               "    auto adder = [base, &extra](T more) -> T { return base + extra + more; };\n"
+                                                               "    return adder(seed);\n"
+                                                               "}\n"
+                                                               "}\n",
+                                                               "import probe_mod;\n"
+                                                               "int main() { return probe_mod::capture_sum<int>(3); }\n");
+        expect(cold_code == 12, case_name + ": expected 3 + 6 + 3 = 12 from source, got " + std::to_string(cold_code));
+        expect(warm_code == 12, case_name + ": expected 3 + 6 + 3 = 12 from .scppm, got " + std::to_string(warm_code));
+        expect(cold_code == warm_code,
+               case_name + ": cold and warm builds diverged (cold " + std::to_string(cold_code) + ", warm " +
+                   std::to_string(warm_code) + ")");
+    }
+    {
+        // The on-disk layout changed, so a cache written by an older compiler
+        // must be *rejected*, not misread. Without the version guard a stale
+        // artifact would deserialize into garbage at a byte offset.
+        std::string case_name = "stale_structured_payload_version_is_rejected";
+        cases_run++;
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        std::filesystem::path module_source = root / "stale_mod.scpp";
+        std::filesystem::path interface_path = root / "stale_mod.scppm";
+        std::filesystem::path archive_path = root / "libstale_mod.scppa";
+        std::filesystem::path consumer_source = root / "consumer.scpp";
+        write_text_file(module_source,
+                        "export module stale_mod;\n"
+                        "namespace stale_mod {\n"
+                        "export template <typename T>\n"
+                        "T identity(T value) { return value; }\n"
+                        "}\n");
+        write_text_file(consumer_source,
+                        "import stale_mod;\n"
+                        "int main() { return stale_mod::identity<int>(0); }\n");
+        RunResult emit = run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                             " --interface-out " + interface_path.string() + " --archive-out " +
+                                             archive_path.string() + " 2>&1");
+        expect(emit.exit_code == 0, case_name + ": build-module failed: " + emit.stdout_text);
+        std::vector<unsigned char> bytes = read_binary_file(interface_path);
+        // Find the payload's "SAST" magic and corrupt the version word that
+        // immediately follows it, simulating an artifact from an older compiler.
+        bool patched = false;
+        for (std::size_t i = 0; i + 8 <= bytes.size(); i++) {
+            if (bytes[i] == 'S' && bytes[i + 1] == 'A' && bytes[i + 2] == 'S' && bytes[i + 3] == 'T') {
+                bytes[i + 4] = 1u;
+                bytes[i + 5] = 0u;
+                bytes[i + 6] = 0u;
+                bytes[i + 7] = 0u;
+                patched = true;
+                break;
+            }
+        }
+        expect(patched, case_name + ": expected to find the structured payload magic in the artifact");
+        if (patched) {
+            std::ofstream out(interface_path, std::ios::binary | std::ios::trunc);
+            out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+            out.close();
+            RunResult build = run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() +
+                                                  " -o " + (root / "app").string() + " --import stale_mod=" +
+                                                  interface_path.string() + " 2>&1");
+            expect(build.exit_code != 0, case_name + ": a stale payload version should be rejected, not accepted");
+            expect(build.stdout_text.find("unsupported structured compile-time payload version") != std::string::npos,
+                   case_name + ": expected a payload-version diagnostic, got: " + build.stdout_text);
+        }
+        std::filesystem::remove_all(root);
+    }
+}
+
 void run_generic_body_clone_fidelity_tests() {
     {
         // Pre-fix this compiled and ran: `is_const` never reached the
@@ -9350,6 +9563,7 @@ int main() {
     run_user_destructor_member_teardown_runtime_tests();
     run_return_type_checking_runtime_tests();
     run_generic_body_clone_fidelity_tests();
+    run_scppm_payload_round_trip_tests();
     run_equality_operator_tests();
     test_compile_to_executable_returns_engaged_expected_on_success();
     test_compile_to_executable_returns_disengaged_expected_on_failure_without_throwing();
