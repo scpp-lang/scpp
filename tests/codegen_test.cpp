@@ -117,15 +117,21 @@ scpp::Program parse_with_std_imports(std::string_view source) {
 struct GenerateIrError {
     std::string kind; // "ParseError" | "DataflowError" | "ConstexprError" | "CodegenError"
     std::string message;
+    // Only a CodegenError carries one; the point of recording it is that a
+    // diagnostic is only as good as the position it blames (compiler bug
+    // #7 -- an IR-invariant violation used to be reported once per module,
+    // at whatever position the last-lowered function left behind).
+    int line = 0;
+    std::string source_path;
 };
 
 std::expected<std::string, GenerateIrError> try_generate_ir(std::string_view source) {
     auto parse_result = try_parse_with_std_imports(source);
-    if (!parse_result.has_value()) return std::unexpected(GenerateIrError{"ParseError", parse_result.error().what()});
+    if (!parse_result.has_value()) return std::unexpected(GenerateIrError{"ParseError", parse_result.error().what(), 0, {}});
     scpp::Program program = std::move(parse_result.value());
     auto monomorphize_result = scpp::monomorphize_generics(program);
     if (!monomorphize_result.has_value())
-        return std::unexpected(GenerateIrError{"DataflowError", monomorphize_result.error().what()});
+        return std::unexpected(GenerateIrError{"DataflowError", monomorphize_result.error().what(), 0, {}});
     // ch05 §9.4: resolves every array bound (and other constant-expression
     // context, e.g. `alignas`) before codegen ever reads a type's layout --
     // codegen itself never evaluates constant expressions, only the
@@ -134,11 +140,13 @@ std::expected<std::string, GenerateIrError> try_generate_ir(std::string_view sou
     // ... -> codegen).
     auto fold_result = scpp::fold_immediate_calls(program);
     if (!fold_result.has_value())
-        return std::unexpected(GenerateIrError{"ConstexprError", fold_result.error().what()});
+        return std::unexpected(GenerateIrError{"ConstexprError", fold_result.error().what(), 0, {}});
     scpp::Codegen codegen("test_module");
     auto generate_result = codegen.generate(program);
     if (!generate_result.has_value())
-        return std::unexpected(GenerateIrError{"CodegenError", generate_result.error().what()});
+        return std::unexpected(GenerateIrError{"CodegenError", generate_result.error().what(),
+                                              generate_result.error().loc.line,
+                                              generate_result.error().loc.source_path_text()});
     return codegen.module_ir();
 }
 
@@ -782,6 +790,247 @@ void run_local_shadowing_tests() {
             expect(ir.error().message.find("'nowhere'") != std::string::npos,
                    case_name + ": expected the diagnostic to name 'nowhere', got: " + ir.error().message);
         }
+    }
+}
+
+// Compiler bug #7. `return` was the only boundary in the language that
+// handed a value to a declared type without ever asking whether the two
+// types matched. Initialization and assignment ask it in
+// check_store_type; a call argument asks it during overload resolution.
+// A `return` did not, so `std::int64_t f() { int x = 5; return x; }`
+// lowered a `ret i32` into an `i64` function and got no further than
+// LLVM's own module verifier -- which runs once over the *finished*
+// module, long after the offending statement was left behind, and so
+// blamed whichever function happened to be lowered last (in practice a
+// stdlib function the user never wrote).
+void run_return_type_checking_tests() {
+    {
+        // The reported shape: a narrower integer value returned from a
+        // wider-integer function. scpp has no implicit scalar
+        // conversions (spec ch06), so this is an error, not a widening.
+        std::string case_name = "return_int_from_int64_function_is_rejected";
+        cases_run++;
+        auto ir = try_generate_ir("std::int64_t widen() {\n"
+                                  "    int x = 5;\n"
+                                  "    return x;\n"
+                                  "}\n"
+                                  "int main() { return 0; }\n");
+        expect(!ir.has_value(), case_name + ": expected an 'int' returned from an 'int64_t' function to be rejected");
+        if (!ir.has_value()) {
+            expect(ir.error().kind == "CodegenError",
+                   case_name + ": expected the frontend to reject this, got: " + ir.error().kind);
+            expect(ir.error().message.find("'widen'") != std::string::npos,
+                   case_name + ": expected the diagnostic to name the offending function, got: " + ir.error().message);
+            // The other half of the bug: the position. `return x;` is on
+            // line 3 of the source above, and it is not in the stdlib.
+            expect(ir.error().line == 3,
+                   case_name + ": expected the diagnostic at the offending return (line 3), got line " +
+                       std::to_string(ir.error().line));
+            expect(ir.error().source_path.find("std_memory") == std::string::npos &&
+                       ir.error().source_path.find("libs/std/") == std::string::npos,
+                   case_name + ": expected the diagnostic to blame the user's own source, got path '" +
+                       ir.error().source_path + "'");
+        }
+    }
+
+    {
+        // Not specific to integer widths: the gap was total, so a class
+        // value returned from an `int` function was equally unchecked.
+        std::string case_name = "return_class_value_from_int_function_is_rejected";
+        cases_run++;
+        auto ir = try_generate_ir("class Box {\n"
+                                  "public:\n"
+                                  "    int v = 1;\n"
+                                  "    virtual ~Box() { }\n"
+                                  "};\n"
+                                  "int returns_class() {\n"
+                                  "    Box b{};\n"
+                                  "    return b;\n"
+                                  "}\n"
+                                  "int main() { return 0; }\n");
+        expect(!ir.has_value(), case_name + ": expected a class value returned from an 'int' function to be rejected");
+    }
+
+    {
+        // The other direction: a wider value narrowed into a narrower
+        // return type is just as much a mismatch.
+        std::string case_name = "return_int64_from_int_function_is_rejected";
+        cases_run++;
+        auto ir = try_generate_ir("int narrows() {\n"
+                                  "    std::int64_t x = 1;\n"
+                                  "    return x;\n"
+                                  "}\n"
+                                  "int main() { return 0; }\n");
+        expect(!ir.has_value(), case_name + ": expected an 'int64_t' returned from an 'int' function to be rejected");
+    }
+
+    {
+        std::string case_name = "return_int_from_bool_function_is_rejected";
+        cases_run++;
+        auto ir = try_generate_ir("bool flag() {\n"
+                                  "    int x = 1;\n"
+                                  "    return x;\n"
+                                  "}\n"
+                                  "int main() { return 0; }\n");
+        expect(!ir.has_value(), case_name + ": expected an 'int' returned from a 'bool' function to be rejected");
+    }
+
+    {
+        std::string case_name = "return_int_from_double_function_is_rejected";
+        cases_run++;
+        auto ir = try_generate_ir("double scaled() {\n"
+                                  "    int x = 1;\n"
+                                  "    return x;\n"
+                                  "}\n"
+                                  "int main() { return 0; }\n");
+        expect(!ir.has_value(), case_name + ": expected an 'int' returned from a 'double' function to be rejected");
+    }
+
+    {
+        // A bare `return;` in a value-returning function left the `ret`
+        // operand missing entirely -- `ret void` in an `i32` function.
+        std::string case_name = "bare_return_from_value_returning_function_is_rejected";
+        cases_run++;
+        auto ir = try_generate_ir("int bare() { return; }\n"
+                                  "int main() { return 0; }\n");
+        expect(!ir.has_value(), case_name + ": expected a bare 'return;' in an 'int' function to be rejected");
+        if (!ir.has_value()) {
+            expect(ir.error().message.find("'int'") != std::string::npos,
+                   case_name + ": expected the diagnostic to name the declared return type, got: " +
+                       ir.error().message);
+        }
+    }
+
+    {
+        // The mirror image, and the one shape the check originally still
+        // missed: a void function's return branch evaluated the operand
+        // for its side effects and then silently discarded it.
+        std::string case_name = "returning_a_value_from_a_void_function_is_rejected";
+        cases_run++;
+        auto ir = try_generate_ir("void nothing() { return 5; }\n"
+                                  "int main() { return 0; }\n");
+        expect(!ir.has_value(), case_name + ": expected a value returned from a 'void' function to be rejected");
+        if (!ir.has_value()) {
+            expect(ir.error().message.find("'void'") != std::string::npos,
+                   case_name + ": expected the diagnostic to say the function returns void, got: " +
+                       ir.error().message);
+        }
+    }
+
+    {
+        // ...while `return void_call();` -- returning another void-typed
+        // expression -- stays legal, exactly as in real C++.
+        std::string case_name = "returning_a_void_call_from_a_void_function_is_accepted";
+        cases_run++;
+        auto ir = try_generate_ir("void inner() { }\n"
+                                  "void outer() { return inner(); }\n"
+                                  "int main() { outer(); return 0; }\n");
+        expect(ir.has_value(), case_name + ": expected 'return void_call();' to still compile, got: " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+    }
+
+    {
+        // Integer and float literals legitimately adapt to the target
+        // type at every other boundary (codegen_value_for_target
+        // const-folds them), and the return boundary must not break
+        // that -- a literal is not a value of some other type.
+        std::string case_name = "literal_returns_still_adapt_to_the_declared_return_type";
+        cases_run++;
+        auto ir = try_generate_ir("std::int64_t wide() { return 5; }\n"
+                                  "double frac() { return 1.5; }\n"
+                                  "bool yes() { return true; }\n"
+                                  "int main() { return 0; }\n");
+        expect(ir.has_value(), case_name + ": expected literal returns to still compile, got: " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            expect(ir.value().find("ret i64 5") != std::string::npos,
+                   case_name + ": expected the integer literal to be folded to the declared i64 return type");
+        }
+    }
+
+    {
+        // Reference returns go through codegen_lvalue and yield a
+        // pointer, and class-by-value returns go through
+        // codegen_class_value_for_boundary. Both already produce exactly
+        // the declared type; pin that so the new check never starts
+        // rejecting them.
+        std::string case_name = "reference_and_class_value_returns_are_still_accepted";
+        cases_run++;
+        auto ir = try_generate_ir("class Box {\n"
+                                  "public:\n"
+                                  "    int v = 7;\n"
+                                  "    virtual ~Box() { }\n"
+                                  "};\n"
+                                  "Box& pick(Box& a) { return a; }\n"
+                                  "Box make_box() {\n"
+                                  "    Box b{};\n"
+                                  "    return b;\n"
+                                  "}\n"
+                                  "int main() { return 0; }\n");
+        expect(ir.has_value(), case_name + ": expected reference/class-value returns to still compile, got: " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+    }
+
+    {
+        // The diagnostic has to name the type the user actually wrote,
+        // not codegen's lowered spelling of it -- verbatim_type_spelling,
+        // the same source the store-boundary diagnostic uses.
+        std::string case_name = "return_diagnostic_names_the_declared_return_type_verbatim";
+        cases_run++;
+        auto ir = try_generate_ir("std::int64_t widen() {\n"
+                                  "    int x = 5;\n"
+                                  "    return x;\n"
+                                  "}\n"
+                                  "int main() { return 0; }\n");
+        expect(!ir.has_value(), case_name + ": expected the mismatch to be rejected");
+        if (!ir.has_value()) {
+            expect(ir.error().message.find("int64_t") != std::string::npos,
+                   case_name + ": expected the diagnostic to name 'int64_t', got: " + ir.error().message);
+            expect(ir.error().message.find("static_cast") != std::string::npos,
+                   case_name + ": expected the diagnostic to suggest an explicit static_cast, got: " +
+                       ir.error().message);
+        }
+    }
+
+    {
+        // The store-boundary diagnostic next door used to end with "cast
+        // expressions aren't implemented in this version yet", which is
+        // no longer true -- static_cast<T>(...) compiles and runs. A
+        // diagnostic that denies the existence of the only available fix
+        // is worse than no hint at all.
+        std::string case_name = "store_mismatch_diagnostic_suggests_static_cast";
+        cases_run++;
+        auto ir = try_generate_ir("int main() {\n"
+                                  "    int x = 5;\n"
+                                  "    std::int64_t y = x;\n"
+                                  "    return 0;\n"
+                                  "}\n");
+        expect(!ir.has_value(), case_name + ": expected the store mismatch to still be rejected");
+        if (!ir.has_value()) {
+            expect(ir.error().message.find("static_cast") != std::string::npos,
+                   case_name + ": expected the diagnostic to suggest an explicit static_cast, got: " +
+                       ir.error().message);
+            expect(ir.error().message.find("aren't implemented") == std::string::npos,
+                   case_name + ": the diagnostic still claims casts are unimplemented, got: " + ir.error().message);
+        }
+    }
+
+    {
+        // And the fix it suggests has to actually work, at both
+        // boundaries.
+        std::string case_name = "static_cast_satisfies_both_the_store_and_return_boundaries";
+        cases_run++;
+        auto ir = try_generate_ir("std::int64_t widen() {\n"
+                                  "    int x = 5;\n"
+                                  "    return static_cast<std::int64_t>(x);\n"
+                                  "}\n"
+                                  "int main() {\n"
+                                  "    int x = 5;\n"
+                                  "    std::int64_t y = static_cast<std::int64_t>(x);\n"
+                                  "    return static_cast<int>(y) - 5;\n"
+                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected an explicit static_cast to satisfy both boundaries, got: " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
     }
 }
 
@@ -2164,6 +2413,7 @@ int main() {
     run_value_initialized_temporary_constructor_tests();
     run_array_element_lifetime_tests();
     run_user_destructor_member_teardown_tests();
+    run_return_type_checking_tests();
 
     run_constexpr_error_copy_tests();
     run_constexpr_null_pointer_storage_tests();

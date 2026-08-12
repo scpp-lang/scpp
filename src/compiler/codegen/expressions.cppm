@@ -1281,11 +1281,66 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         if (llvm::LLVMTypeOf(value) != expected) {
             return std::unexpected(CodegenError("type mismatch initializing/assigning " + what +
                                 ": scpp has no implicit conversion between distinct scalar types (e.g. "
-                                "bool/char/int are all distinct, spec ch06) -- an explicit cast would be "
-                                "required, but cast expressions aren't implemented in this version yet",
+                                "bool/char/int are all distinct, spec ch06) -- use an explicit "
+                                "'static_cast<T>(...)' if the conversion is intended",
                 current_loc_));
         }
         return {};
+    }
+
+
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::check_return_type(llvm::LLVMTypeRef actual, const Stmt& stmt)
+{
+        // The return boundary's counterpart of check_store_type above.
+        // Every other boundary that hands a value to a declared type
+        // already answers "does this value have exactly that type": an
+        // initializer and an assignment through check_store_type, a call
+        // argument through overload resolution's exact-type match (spec
+        // ch05.10). `return` answered it nowhere at all, so an `int`
+        // returned from a `std::int64_t` function -- or a class value
+        // returned from an `int` function -- was lowered verbatim and
+        // only caught by LLVM's own module verifier, which runs once
+        // over the finished module and could no longer say where the
+        // offending statement was.
+        //
+        // Compared here at the *llvm::LLVM* type, exactly as check_store_type
+        // does, and for the same reason: this is the point where the
+        // value being returned actually has a known type. movecheck's
+        // infer_expr_type deliberately gives up on Member/Subscript
+        // chains (it has no Program-level field-type information), which
+        // is precisely the shape that motivated this check --
+        // `return value->tag;` -- so an earlier-phase check could not
+        // have caught it without guessing.
+        llvm::LLVMBasicBlockRef block = llvm::LLVMGetInsertBlock(builder_);
+        if (block == nullptr) return {};
+        llvm::LLVMValueRef llvm_fn = llvm::LLVMGetBasicBlockParent(block);
+        if (llvm_fn == nullptr) return {};
+        llvm::LLVMTypeRef expected = llvm::LLVMGetReturnType(llvm::LLVMGlobalGetValueType(llvm_fn));
+        llvm::LLVMTypeRef void_type = llvm::LLVMVoidTypeInContext(context_);
+        if (actual == expected) return {};
+
+        SourceLocation loc = stmt.expr != nullptr ? stmt.expr->loc : stmt.loc;
+        std::string declared = current_function_def_ != nullptr
+                                   ? "'" + verbatim_type_spelling(current_function_def_->return_type) + "'"
+                                   : std::string("its declared return type");
+        std::string in_function =
+            current_function_def_ != nullptr ? " from '" + current_function_def_->name + "'" : std::string();
+        if (stmt.expr == nullptr) {
+            return std::unexpected(
+                CodegenError("cannot 'return;' without a value" + in_function + ": it returns " + declared, loc));
+        }
+        if (expected == void_type) {
+            return std::unexpected(CodegenError("cannot return a value" + in_function +
+                                    ": it returns 'void', so only 'return;' or returning another void-typed "
+                                    "expression is allowed",
+                loc));
+        }
+        return std::unexpected(CodegenError("type mismatch returning a value" + in_function + ": it returns " +
+                                declared +
+                                ", and the returned expression has a different type; scpp has no implicit "
+                                "conversion between distinct types (e.g. int and std::int64_t are distinct, "
+                                "spec ch06) -- use an explicit 'static_cast<T>(...)' if the conversion is intended",
+            loc));
     }
 
 

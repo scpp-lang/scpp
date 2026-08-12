@@ -33,11 +33,11 @@
 // project -- surveyed function-by-function and signature-by-signature
 // against that one file and real llvm-c/Analysis.h, not a blanket
 // re-declaration of Analysis.h's much larger surface (real Analysis.h also
-// declares `LLVMVerifyFunction` and the debugging-only
+// declares the debugging-only
 // `LLVMViewFunctionCFG`/`LLVMViewFunctionCFGOnly` pair, which open a
 // ghostview window on the current function's CFG -- entirely unsuited to
-// this compiler's own batch codegen -- none of which orchestration.cppm
-// needs). This partition's own original introduction (as the standalone
+// this compiler's own batch codegen -- which orchestration.cppm does not
+// need). This partition's own original introduction (as the standalone
 // module `llvm.analysis`, before this consolidation) removed the *last*
 // `#include <llvm-c/*.h>` anywhere in this project's own compiler sources:
 // Analysis.h was the sixth and final llvm-c header still directly
@@ -52,7 +52,8 @@
 // not part of `src/` itself).
 //
 // Depends on `llvm:types` (types.scpp, same directory) for `LLVMModuleRef`
-// (the module handle `LLVMVerifyModule` below checks) and `LLVMBool` (its
+// (the module handle `LLVMVerifyModule` below checks), `LLVMValueRef` (the
+// function handle `LLVMVerifyFunction` below checks) and `LLVMBool` (its
 // return type): those are genuinely llvm-c/Types.h's own declarations, not
 // Analysis.h's -- exactly the same reasoning `llvm:core`, `llvm:debug_info`,
 // `llvm:target`, and `llvm:target_machine` already rely on for their own
@@ -140,6 +141,7 @@ export constexpr llvm::LLVMVerifierFailureAction LLVMReturnStatusAction =
 export extern "C" {
 
 LLVMBool LLVMVerifyModule(LLVMModuleRef M, LLVMVerifierFailureAction Action, char** OutMessage);
+LLVMBool LLVMVerifyFunction(LLVMValueRef Fn, LLVMVerifierFailureAction Action);
 
 } // extern "C"
 
