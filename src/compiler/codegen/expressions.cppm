@@ -721,6 +721,22 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             return {};
         }
         if (args.empty()) {
+            // An array of class type is not "trivially" initialized by a
+            // zero fill: each element is an object of the element type
+            // and gets exactly the same value-initialization any other
+            // object of that type would -- constructor, default member
+            // initializers, vtable pointer and all. Recursing into this
+            // same function per element is what makes that literally the
+            // same logic rather than a second, drifting copy of it.
+            if (target.type.kind == TypeKind::Array && target.type.element != nullptr &&
+                type_needs_nontrivial_default_init(target.type)) {
+                return emit_array_element_loop(
+                    target.type, target.ptr, /*reverse=*/false,
+                    [&](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef) -> std::expected<void, CodegenError> {
+                        return initialize_storage_from_brace_args(
+                            LValue{element_ptr, *target.type.element, alignment_for_type(*target.type.element)}, {});
+                    });
+            }
             return zero_initialize_storage(target.ptr, target.type, target.alignment);
         }
         if (args.size() != 1) {

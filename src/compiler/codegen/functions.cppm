@@ -309,12 +309,13 @@ namespace scpp {
         if (is_defaulted_destructor) {
             for (std::size_t i = info.field_types.size(); i > 0; --i) {
                 const Type& field_type = info.field_types[i - 1];
-                if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
-                    llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, this_ptr,
-                                                                 info.physical_field_index(i - 1),
-                                                                 info.field_names[i - 1].c_str());
-                    codegen_destroy_old_class_state_for_move_assign(field_ptr, field_type.name);
-                }
+                bool is_record_field = field_type.kind == TypeKind::Named && structs_.contains(field_type.name);
+                bool is_record_array_field = field_type.kind == TypeKind::Array && type_has_destructor(field_type);
+                if (!is_record_field && !is_record_array_field) continue;
+                llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, this_ptr,
+                                                             info.physical_field_index(i - 1),
+                                                             info.field_names[i - 1].c_str());
+                codegen_destroy_old_state_for_move_assign(field_type, field_ptr);
             }
             llvm::LLVMBuildRetVoid(builder_);
             llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
