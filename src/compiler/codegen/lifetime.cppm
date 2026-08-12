@@ -215,23 +215,88 @@ namespace scpp {
                                                           info.field_names[i].c_str());
             llvm::LLVMValueRef src_field = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, src_ptr, info.physical_field_index(i),
                                                          info.field_names[i].c_str());
-            if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
-                if (const Function* user_ctor = find_user_declared_copy_ctor_ast(field_type.name)) {
-                    llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
-                    build_call(ctor, {dest_field, src_field});
-                } else if (auto nested_result = codegen_memberwise_copy_construct(dest_field, src_field, field_type.name);
-                           !nested_result.has_value()) {
-                    return std::unexpected(std::move(nested_result).error());
-                }
-            } else {
-                auto llvm_field_type_result = to_llvm_type(field_type);
-                if (!llvm_field_type_result.has_value()) return std::unexpected(std::move(llvm_field_type_result).error());
-                llvm::LLVMTypeRef llvm_field_type = std::move(llvm_field_type_result).value();
-                llvm::LLVMValueRef value = llvm::LLVMBuildLoad2(builder_, llvm_field_type, src_field, "copiedfield");
-                create_store(value, dest_field, std::nullopt);
+            if (auto r = codegen_copy_construct_field(dest_field, src_field, field_type); !r.has_value()) {
+                return std::unexpected(std::move(r).error());
             }
         }
         return {};
+    }
+
+
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::codegen_copy_construct_field(llvm::LLVMValueRef dest_ptr, llvm::LLVMValueRef src_ptr,
+                                            const Type& field_type)
+{
+        // is_field_copy_constructible already looks *through* an array to
+        // its element type when deciding whether a field is copyable, so
+        // emission has to look through it too: a bitwise load/store of a
+        // `Owner[3]` field would bypass the very copy constructor that
+        // check just approved.
+        if (field_type.kind == TypeKind::Array && field_type.element != nullptr &&
+            type_needs_nontrivial_default_init(field_type)) {
+            auto array_llvm_type_result = to_llvm_type(field_type);
+            if (!array_llvm_type_result.has_value()) return std::unexpected(std::move(array_llvm_type_result).error());
+            llvm::LLVMTypeRef array_llvm_type = std::move(array_llvm_type_result).value();
+            return emit_array_element_loop(
+                field_type, dest_ptr, /*reverse=*/false,
+                [&](llvm::LLVMValueRef dest_element, llvm::LLVMValueRef index) -> std::expected<void, CodegenError> {
+                    return codegen_copy_construct_field(dest_element, build_array_element_gep(array_llvm_type, src_ptr, index),
+                                                        *field_type.element);
+                });
+        }
+        if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
+            if (const Function* user_ctor = find_user_declared_copy_ctor_ast(field_type.name)) {
+                llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
+                build_call(ctor, {dest_ptr, src_ptr});
+                return {};
+            }
+            return codegen_memberwise_copy_construct(dest_ptr, src_ptr, field_type.name);
+        }
+        auto llvm_field_type_result = to_llvm_type(field_type);
+        if (!llvm_field_type_result.has_value()) return std::unexpected(std::move(llvm_field_type_result).error());
+        llvm::LLVMTypeRef llvm_field_type = std::move(llvm_field_type_result).value();
+        llvm::LLVMValueRef value = llvm::LLVMBuildLoad2(builder_, llvm_field_type, src_ptr, "copiedfield");
+        create_store(value, dest_ptr, std::nullopt);
+        return {};
+    }
+
+
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::codegen_copy_assign_field(llvm::LLVMValueRef dest_ptr, llvm::LLVMValueRef src_ptr,
+                                            const Type& field_type)
+{
+        if (field_type.kind == TypeKind::Array && field_type.element != nullptr &&
+            type_needs_nontrivial_default_init(field_type)) {
+            auto array_llvm_type_result = to_llvm_type(field_type);
+            if (!array_llvm_type_result.has_value()) return std::unexpected(std::move(array_llvm_type_result).error());
+            llvm::LLVMTypeRef array_llvm_type = std::move(array_llvm_type_result).value();
+            return emit_array_element_loop(
+                field_type, dest_ptr, /*reverse=*/false,
+                [&](llvm::LLVMValueRef dest_element, llvm::LLVMValueRef index) -> std::expected<void, CodegenError> {
+                    return codegen_copy_assign_field(dest_element, build_array_element_gep(array_llvm_type, src_ptr, index),
+                                                     *field_type.element);
+                });
+        }
+        if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
+            if (const Function* user_assign = find_user_declared_copy_assign_ast(field_type.name)) {
+                llvm::LLVMValueRef op = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_assign).c_str());
+                build_call(op, {dest_ptr, src_ptr});
+                return {};
+            }
+            return codegen_memberwise_copy_assign(dest_ptr, src_ptr, field_type.name);
+        }
+        auto llvm_field_type_result = to_llvm_type(field_type);
+        if (!llvm_field_type_result.has_value()) return std::unexpected(std::move(llvm_field_type_result).error());
+        llvm::LLVMTypeRef llvm_field_type = std::move(llvm_field_type_result).value();
+        llvm::LLVMValueRef value = llvm::LLVMBuildLoad2(builder_, llvm_field_type, src_ptr, "copiedfield");
+        create_store(value, dest_ptr, std::nullopt);
+        return {};
+    }
+
+
+    llvm::LLVMValueRef Codegen::build_array_element_gep(llvm::LLVMTypeRef array_llvm_type, llvm::LLVMValueRef array_ptr,
+                                               llvm::LLVMValueRef index)
+{
+        llvm::LLVMValueRef indices[] = {llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), 0, /*SignExtend=*/0), index};
+        return llvm::LLVMBuildGEP2(builder_, array_llvm_type, array_ptr, indices, 2, "arrayelem");
     }
 
 
@@ -244,20 +309,8 @@ namespace scpp {
                                                           info.field_names[i].c_str());
             llvm::LLVMValueRef src_field = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, src_ptr, info.physical_field_index(i),
                                                          info.field_names[i].c_str());
-            if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
-                if (const Function* user_assign = find_user_declared_copy_assign_ast(field_type.name)) {
-                    llvm::LLVMValueRef op = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_assign).c_str());
-                    build_call(op, {dest_field, src_field});
-                } else if (auto nested_result = codegen_memberwise_copy_assign(dest_field, src_field, field_type.name);
-                           !nested_result.has_value()) {
-                    return std::unexpected(std::move(nested_result).error());
-                }
-            } else {
-                auto llvm_field_type_result = to_llvm_type(field_type);
-                if (!llvm_field_type_result.has_value()) return std::unexpected(std::move(llvm_field_type_result).error());
-                llvm::LLVMTypeRef llvm_field_type = std::move(llvm_field_type_result).value();
-                llvm::LLVMValueRef value = llvm::LLVMBuildLoad2(builder_, llvm_field_type, src_field, "copiedfield");
-                create_store(value, dest_field, std::nullopt);
+            if (auto r = codegen_copy_assign_field(dest_field, src_field, field_type); !r.has_value()) {
+                return std::unexpected(std::move(r).error());
             }
         }
         return {};
@@ -341,12 +394,93 @@ namespace scpp {
         (void)get_or_declare_free();
         for (std::size_t i = 0; i < info.field_types.size(); i++) {
             const Type& field_type = info.field_types[i];
-            if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
-                llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, ptr, info.physical_field_index(i),
-                                                             info.field_names[i].c_str());
-                codegen_destroy_old_class_state_for_move_assign(field_ptr, field_type.name);
-            }
+            bool is_record_field = field_type.kind == TypeKind::Named && structs_.contains(field_type.name);
+            bool is_record_array_field = field_type.kind == TypeKind::Array && type_has_destructor(field_type);
+            if (!is_record_field && !is_record_array_field) continue;
+            llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, ptr, info.physical_field_index(i),
+                                                         info.field_names[i].c_str());
+            codegen_destroy_old_state_for_move_assign(field_type, field_ptr);
         }
+    }
+
+
+    [[nodiscard]] bool Codegen::type_has_destructor(const Type& type)
+{
+        if (type.kind == TypeKind::Array) {
+            return type.element != nullptr && type.array_size > 0 && type_has_destructor(*type.element);
+        }
+        return type.kind == TypeKind::Named && class_has_destructor_in_chain(type.name);
+    }
+
+
+    [[nodiscard]] bool Codegen::type_needs_nontrivial_default_init(const Type& type)
+{
+        if (type.kind == TypeKind::Array) {
+            return type.element != nullptr && type.array_size > 0 && type_needs_nontrivial_default_init(*type.element);
+        }
+        return type.kind == TypeKind::Named && find_class_def(type.name) != nullptr;
+    }
+
+
+    void Codegen::emit_storage_destruction(const Type& type, llvm::LLVMValueRef ptr)
+{
+        if (type.kind == TypeKind::Array) {
+            if (!type_has_destructor(type)) return;
+            // Reverse of construction order, exactly as for a derived
+            // object's base subobjects.
+            (void)emit_array_element_loop(type, ptr, /*reverse=*/true,
+                                          [&](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef) -> std::expected<void, CodegenError> {
+                                              emit_storage_destruction(*type.element, element_ptr);
+                                              return {};
+                                          });
+            return;
+        }
+        if (type.kind != TypeKind::Named) return;
+        emit_destructor_chain_calls(type.name, ptr);
+    }
+
+
+    void Codegen::codegen_destroy_storage_unless_moved(const Type& type, llvm::LLVMValueRef ptr, llvm::LLVMValueRef moved_flag)
+{
+        if (!type_has_destructor(type)) return;
+        if (moved_flag == nullptr) {
+            emit_storage_destruction(type, ptr);
+            return;
+        }
+        llvm::LLVMValueRef was_moved = llvm::LLVMBuildLoad2(builder_, llvm::LLVMInt1TypeInContext(context_), moved_flag, "wasmoved");
+        llvm::LLVMValueRef current_fn = llvm::LLVMGetBasicBlockParent(llvm::LLVMGetInsertBlock(builder_));
+        llvm::LLVMBasicBlockRef then_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "dtorcall");
+        llvm::LLVMBasicBlockRef merge_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "dtorskip");
+        llvm::LLVMBuildCondBr(builder_, was_moved, merge_bb, then_bb);
+        llvm::LLVMPositionBuilderAtEnd(builder_, then_bb);
+        emit_storage_destruction(type, ptr);
+        llvm::LLVMBuildBr(builder_, merge_bb);
+        llvm::LLVMPositionBuilderAtEnd(builder_, merge_bb);
+    }
+
+
+    void Codegen::codegen_destroy_old_state_for_move_assign(const Type& type, llvm::LLVMValueRef ptr, llvm::LLVMValueRef moved_flag)
+{
+        if (type.kind == TypeKind::Array) {
+            if (!type_has_destructor(type)) return;
+            (void)emit_array_element_loop(type, ptr, /*reverse=*/true,
+                                          [&](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef) -> std::expected<void, CodegenError> {
+                                              codegen_destroy_old_state_for_move_assign(*type.element, element_ptr);
+                                              return {};
+                                          });
+            return;
+        }
+        if (type.kind != TypeKind::Named) return;
+        codegen_destroy_old_class_state_for_move_assign(ptr, type.name, moved_flag);
+    }
+
+
+    llvm::LLVMValueRef Codegen::create_moved_flag_if_type_has_destructor(const Type& type)
+{
+        if (!type_has_destructor(type)) return nullptr;
+        llvm::LLVMValueRef flag = create_entry_block_alloca(llvm::LLVMInt1TypeInContext(context_), "movedflag");
+        llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, /*SignExtend=*/0), flag);
+        return flag;
     }
 
 } // namespace scpp

@@ -1064,6 +1064,15 @@ private:
     // to.
     [[nodiscard]] std::expected<void, CodegenError> codegen_memberwise_copy_assign(llvm::LLVMValueRef dest_ptr, llvm::LLVMValueRef src_ptr, const std::string& class_name);
 
+    // The per-field bodies of the two functions above, split out so that
+    // an array-typed field can recurse per element into the very same
+    // logic instead of re-deciding what a copy means one level down.
+    [[nodiscard]] std::expected<void, CodegenError> codegen_copy_construct_field(llvm::LLVMValueRef dest_ptr, llvm::LLVMValueRef src_ptr,
+                                                                                 const Type& field_type);
+
+    [[nodiscard]] std::expected<void, CodegenError> codegen_copy_assign_field(llvm::LLVMValueRef dest_ptr, llvm::LLVMValueRef src_ptr,
+                                                                              const Type& field_type);
+
     [[nodiscard]] bool class_has_destructor_in_chain(const std::string& class_name);
 
     void emit_destructor_chain_calls(const std::string& class_name, llvm::LLVMValueRef object_ptr);
@@ -1102,6 +1111,119 @@ private:
     // correctly becomes a no-op exactly as the spec/book require.
     void codegen_destroy_old_class_state_for_move_assign(llvm::LLVMValueRef ptr, const std::string& class_name,
                                                          llvm::LLVMValueRef moved_flag = nullptr);
+
+    // ---- Type-directed object lifetime -------------------------------
+    //
+    // Everything above answers a lifetime question about a *class*: "does
+    // `ClassName` have a destructor", "run `ClassName`'s destructor chain
+    // on this pointer". An array of that class is an object too, and its
+    // elements have exactly the same lifetime as any other object of the
+    // element type -- but a `Type` whose kind is Array carries no class
+    // name, so none of the by-name entry points can be handed one.
+    //
+    // Every caller therefore used to spell the same guard by hand:
+    //
+    //     if (type.kind == TypeKind::Named && class_has_destructor_in_chain(type.name)) ...
+    //
+    // which silently means "arrays have no lifetime", and that is exactly
+    // how class-typed array elements ended up never constructed and never
+    // destroyed. The functions below are the by-*type* entry points those
+    // callers should have had: they answer the same questions, dispatch
+    // Named to the by-name logic unchanged, and dispatch Array by
+    // recursing over its elements. Adding a case here -- not another
+    // hand-written `kind == Named` test at a call site -- is how a new
+    // aggregate kind gets object lifetime.
+    [[nodiscard]] bool type_has_destructor(const Type& type);
+
+    // True when storage of this type needs more than a zero fill to be
+    // brought to life: a class with a constructor, default member
+    // initializers or a vtable pointer, or an array that (recursively)
+    // holds one. Scalars, pointers and arrays of scalars are complete
+    // after zero_initialize_storage and answer false.
+    [[nodiscard]] bool type_needs_nontrivial_default_init(const Type& type);
+
+    // Runs the destructor of every subobject of `ptr`, in reverse
+    // construction order: array elements back to front, recursing for
+    // nested arrays. A no-op when type_has_destructor is false.
+    void emit_storage_destruction(const Type& type, llvm::LLVMValueRef ptr);
+
+    // emit_storage_destruction guarded by `!moved_flag` when present --
+    // the by-type counterpart of codegen_call_destructor_chain_unless_moved,
+    // and what every scope-exit cleanup path calls. The guard is emitted
+    // once around the whole object, not once per array element: an array
+    // is moved from as a unit, so all of its elements share the one flag.
+    void codegen_destroy_storage_unless_moved(const Type& type, llvm::LLVMValueRef ptr,
+                                              llvm::LLVMValueRef moved_flag = nullptr);
+
+    // The by-type counterpart of codegen_destroy_old_class_state_for_move_assign,
+    // used for member/local teardown where the object may be an array.
+    void codegen_destroy_old_state_for_move_assign(const Type& type, llvm::LLVMValueRef ptr,
+                                                   llvm::LLVMValueRef moved_flag = nullptr);
+
+    // The by-type counterpart of create_moved_flag_if_has_destructor.
+    llvm::LLVMValueRef create_moved_flag_if_type_has_destructor(const Type& type);
+
+    // Emits a counted loop over `array_type`'s elements, calling
+    // `emit_element(element_ptr, index)` once per iteration with the
+    // builder positioned inside the loop body, and leaves the builder
+    // positioned at the loop exit. `reverse` walks n-1 down to 0
+    // (destruction order); otherwise 0 up to n-1 (construction order).
+    // `index` is handed to the callback so a second, parallel array (a
+    // copy constructor's source, say) can be indexed in lockstep.
+    //
+    // A loop rather than an unrolled sequence: array bounds are compile-
+    // time constants but unbounded in size, and emitting one call per
+    // element would make a large array's IR (and the LLVM time spent on
+    // it) grow without limit for no semantic gain. `emit_element` may
+    // itself create basic blocks -- nested arrays and the moved-flag
+    // guard both do -- so the loop's back edge is wired from wherever the
+    // body actually ended, not from the header.
+    template <typename ElemFn>
+    [[nodiscard]] std::expected<void, CodegenError> emit_array_element_loop(const Type& array_type,
+                                                                            llvm::LLVMValueRef array_ptr, bool reverse,
+                                                                            ElemFn&& emit_element) {
+        if (array_type.kind != TypeKind::Array || array_type.element == nullptr) {
+            return std::unexpected(CodegenError("internal error: expected an array type for element iteration", current_loc_));
+        }
+        std::int64_t count = array_type.array_size;
+        if (count <= 0) return {};
+        auto array_llvm_type_result = to_llvm_type(array_type);
+        if (!array_llvm_type_result.has_value()) return std::unexpected(std::move(array_llvm_type_result).error());
+        llvm::LLVMTypeRef array_llvm_type = std::move(array_llvm_type_result).value();
+
+        llvm::LLVMTypeRef i64 = llvm::LLVMInt64TypeInContext(context_);
+        llvm::LLVMValueRef current_fn = llvm::LLVMGetBasicBlockParent(llvm::LLVMGetInsertBlock(builder_));
+        llvm::LLVMBasicBlockRef entry_bb = llvm::LLVMGetInsertBlock(builder_);
+        llvm::LLVMBasicBlockRef body_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "arrayelem.body");
+        llvm::LLVMBasicBlockRef end_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "arrayelem.end");
+        llvm::LLVMBuildBr(builder_, body_bb);
+
+        llvm::LLVMPositionBuilderAtEnd(builder_, body_bb);
+        llvm::LLVMValueRef index = llvm::LLVMBuildPhi(builder_, i64, "arrayelem.i");
+        llvm::LLVMValueRef first = llvm::LLVMConstInt(i64, reverse ? static_cast<unsigned long long>(count - 1) : 0ULL,
+                                                       /*SignExtend=*/0);
+        llvm::LLVMValueRef element_ptr = build_array_element_gep(array_llvm_type, array_ptr, index);
+        if (auto r = emit_element(element_ptr, index); !r.has_value()) return std::unexpected(std::move(r).error());
+
+        llvm::LLVMBasicBlockRef latch_bb = llvm::LLVMGetInsertBlock(builder_);
+        llvm::LLVMValueRef next = reverse ? llvm::LLVMBuildSub(builder_, index, llvm::LLVMConstInt(i64, 1, 0), "arrayelem.prev")
+                                          : llvm::LLVMBuildAdd(builder_, index, llvm::LLVMConstInt(i64, 1, 0), "arrayelem.next");
+        llvm::LLVMValueRef done =
+            reverse ? llvm::LLVMBuildICmp(builder_, llvm::LLVMIntEQ, index, llvm::LLVMConstInt(i64, 0, 0), "arrayelem.done")
+                    : llvm::LLVMBuildICmp(builder_, llvm::LLVMIntEQ, next,
+                                          llvm::LLVMConstInt(i64, static_cast<unsigned long long>(count), 0), "arrayelem.done");
+        llvm::LLVMBuildCondBr(builder_, done, end_bb, body_bb);
+
+        llvm::LLVMValueRef incoming_values[] = {first, next};
+        llvm::LLVMBasicBlockRef incoming_blocks[] = {entry_bb, latch_bb};
+        llvm::LLVMAddIncoming(index, incoming_values, incoming_blocks, 2);
+
+        llvm::LLVMPositionBuilderAtEnd(builder_, end_bb);
+        return {};
+    }
+
+    llvm::LLVMValueRef build_array_element_gep(llvm::LLVMTypeRef array_llvm_type, llvm::LLVMValueRef array_ptr,
+                                               llvm::LLVMValueRef index);
 
     // Releases every *currently in-scope* unique_ptr local's owned
     // resource, and runs every currently-in-scope class-typed local's

@@ -8335,6 +8335,265 @@ void test_compile_to_executable_returns_disengaged_expected_on_failure_without_t
 
 } // namespace
 
+// Compiler bug #8: class-typed array elements had no object lifetime.
+// codegen_test covers the emitted IR; these cases cover what the IR
+// actually *does* at runtime, because "the constructor is called" and
+// "the constructor is called once per element, on that element's own
+// storage, and the destructors run back to front" are different claims
+// and only the second one is the fix. Each program encodes its
+// observations into its exit status, so a wrong count or a wrong order
+// is a distinct failing number rather than a crash.
+void run_array_element_lifetime_runtime_tests() {
+    const std::string tracked_class =
+        "int ctors = 0;\n"
+        "int dtors = 0;\n"
+        "int order = 0;\n"
+        "class Tracked {\n"
+        "  public:\n"
+        "    Tracked() { ctors = ctors + 1; this.tag = ctors; return; }\n"
+        "    virtual ~Tracked() { dtors = dtors + 1; order = order * 10 + this.tag; return; }\n"
+        "    int tag = 0;\n"
+        "};\n";
+
+    {
+        // Three elements, three constructors, three destructors, and the
+        // destructors run 3-2-1. Before the fix this program ran zero of
+        // each and returned 0.
+        std::string case_name = "array_elements_run_constructors_and_destructors_in_reverse";
+        cases_run++;
+        RunResult result = compile_and_run(tracked_class +
+                                               "void scope() {\n"
+                                               "    Tracked arr[3]{};\n"
+                                               "    return;\n"
+                                               "}\n"
+                                               "int main() {\n"
+                                               "    scope();\n"
+                                               "    if (ctors != 3) return 1;\n"
+                                               "    if (dtors != 3) return 2;\n"
+                                               "    if (order != 321) return 3;\n"
+                                               "    return 0;\n"
+                                               "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected 3 constructors, 3 destructors and reverse destruction order (exit 0), got exit " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // Each element must be constructed on its *own* storage: a fix
+        // that ran the constructor N times against element 0 would pass a
+        // pure call-count check but alias every element together.
+        std::string case_name = "each_array_element_is_constructed_on_its_own_storage";
+        cases_run++;
+        RunResult result = compile_and_run(tracked_class +
+                                               "int main() {\n"
+                                               "    Tracked arr[3]{};\n"
+                                               "    if (arr[0].tag != 1) return 1;\n"
+                                               "    if (arr[1].tag != 2) return 2;\n"
+                                               "    if (arr[2].tag != 3) return 3;\n"
+                                               "    arr[1].tag = 9;\n"
+                                               "    if (arr[0].tag != 1) return 4;\n"
+                                               "    if (arr[2].tag != 3) return 5;\n"
+                                               "    return 0;\n"
+                                               "}\n",
+                                           case_name);
+        expect(result.exit_code == 0, case_name + ": expected each element to have its own storage (exit 0), got exit " +
+                                          std::to_string(result.exit_code));
+    }
+
+    {
+        // A nested array is an array whose element type is an array, so
+        // all four leaf elements get the same treatment.
+        std::string case_name = "nested_array_leaf_elements_have_full_lifetime";
+        cases_run++;
+        RunResult result = compile_and_run(tracked_class +
+                                               "void scope() {\n"
+                                               "    Tracked grid[2][2]{};\n"
+                                               "    return;\n"
+                                               "}\n"
+                                               "int main() {\n"
+                                               "    scope();\n"
+                                               "    if (ctors != 4) return 1;\n"
+                                               "    if (dtors != 4) return 2;\n"
+                                               "    if (order != 4321) return 3;\n"
+                                               "    return 0;\n"
+                                               "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected 4 constructors and 4 destructors in reverse order (exit 0), got exit " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // A fresh set of elements per iteration, each destroyed at the end
+        // of its own iteration -- not leaked and not destroyed twice.
+        std::string case_name = "array_in_a_loop_body_is_constructed_and_destroyed_per_iteration";
+        cases_run++;
+        RunResult result = compile_and_run(tracked_class +
+                                               "int main() {\n"
+                                               "    int i = 0;\n"
+                                               "    while (i < 3) {\n"
+                                               "        Tracked arr[2]{};\n"
+                                               "        i = i + 1;\n"
+                                               "    }\n"
+                                               "    if (ctors != 6) return 1;\n"
+                                               "    if (dtors != 6) return 2;\n"
+                                               "    return 0;\n"
+                                               "}\n",
+                                           case_name);
+        expect(result.exit_code == 0, case_name + ": expected 6 constructors and 6 destructors (exit 0), got exit " +
+                                          std::to_string(result.exit_code));
+    }
+
+    {
+        // An array of a polymorphic class used to be left with null vtable
+        // pointers by the whole-array memset, so this program segfaulted
+        // on the first virtual call.
+        std::string case_name = "virtual_call_through_an_array_element_dispatches_correctly";
+        cases_run++;
+        RunResult result = compile_and_run("class Base {\n"
+                                           "  public:\n"
+                                           "    virtual ~Base() = default;\n"
+                                           "    virtual int who() { return 7; }\n"
+                                           "};\n"
+                                           "int main() {\n"
+                                           "    Base arr[2]{};\n"
+                                           "    if (arr[0].who() != 7) return 1;\n"
+                                           "    if (arr[1].who() != 7) return 2;\n"
+                                           "    return 0;\n"
+                                           "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected virtual dispatch through array elements to work (exit 0), got exit " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // A class-typed array member: constructed by the enclosing
+        // object's constructor, destroyed by its destructor.
+        std::string case_name = "class_member_array_elements_have_full_lifetime";
+        cases_run++;
+        RunResult result = compile_and_run(tracked_class +
+                                               "class Holder {\n"
+                                               "  public:\n"
+                                               "    Holder() { return; }\n"
+                                               "    virtual ~Holder() = default;\n"
+                                               "    Tracked items[2]{};\n"
+                                               "};\n"
+                                               "int main() {\n"
+                                               "    {\n"
+                                               "        Holder h{};\n"
+                                               "        if (h.items[0].tag != 1) return 1;\n"
+                                               "        if (h.items[1].tag != 2) return 2;\n"
+                                               "    }\n"
+                                               "    if (ctors != 2) return 3;\n"
+                                               "    if (dtors != 2) return 4;\n"
+                                               "    if (order != 21) return 5;\n"
+                                               "    return 0;\n"
+                                               "}\n",
+                                           case_name);
+        expect(result.exit_code == 0, case_name + ": expected the member array to be fully constructed and destroyed "
+                                                  "(exit 0), got exit " +
+                                          std::to_string(result.exit_code));
+    }
+
+    {
+        // Copying an object with an array-of-class member has to run the
+        // element type's copy constructor per element, and assigning has
+        // to run its copy-assignment operator per element -- the eligibility
+        // check already looked through the array, only emission did not.
+        std::string case_name = "class_member_array_is_copied_and_assigned_element_by_element";
+        cases_run++;
+        RunResult result = compile_and_run("int copies = 0;\n"
+                                           "int assigns = 0;\n"
+                                           "class Item {\n"
+                                           "  public:\n"
+                                           "    Item() { this.v = 1; return; }\n"
+                                           "    Item(const Item& other) { this.v = other.v + 10; copies = copies + 1; return; }\n"
+                                           "    Item& operator=(const Item& other) { this.v = other.v + 100; assigns = assigns + 1; return *this; }\n"
+                                           "    virtual ~Item() = default;\n"
+                                           "    int v = 0;\n"
+                                           "};\n"
+                                           "class Holder {\n"
+                                           "  public:\n"
+                                           "    Holder() { return; }\n"
+                                           "    Holder(const Holder& other) = default;\n"
+                                           "    Holder& operator=(const Holder& other) = default;\n"
+                                           "    virtual ~Holder() = default;\n"
+                                           "    Item items[2]{};\n"
+                                           "};\n"
+                                           "int main() {\n"
+                                           "    Holder a{};\n"
+                                           "    Holder b{a};\n"
+                                           "    if (copies != 2) return 1;\n"
+                                           "    if (b.items[0].v != 11) return 2;\n"
+                                           "    if (b.items[1].v != 11) return 3;\n"
+                                           "    Holder c{};\n"
+                                           "    c = a;\n"
+                                           "    if (assigns != 2) return 4;\n"
+                                           "    if (c.items[0].v != 101) return 5;\n"
+                                           "    if (c.items[1].v != 101) return 6;\n"
+                                           "    return 0;\n"
+                                           "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected element-wise copy construction and assignment (exit 0), got exit " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // Every scope-exit path has to reach the array, not just the
+        // fall-off-the-end one.
+        std::string case_name = "array_elements_are_destroyed_on_an_early_return";
+        cases_run++;
+        RunResult result = compile_and_run(tracked_class +
+                                               "int scope(int n) {\n"
+                                               "    Tracked arr[2]{};\n"
+                                               "    if (n > 0) {\n"
+                                               "        return arr[0].tag;\n"
+                                               "    }\n"
+                                               "    return 0;\n"
+                                               "}\n"
+                                               "int main() {\n"
+                                               "    int seen = scope(1);\n"
+                                               "    if (seen != 1) return 1;\n"
+                                               "    if (ctors != 2) return 2;\n"
+                                               "    if (dtors != 2) return 3;\n"
+                                               "    if (order != 21) return 4;\n"
+                                               "    return 0;\n"
+                                               "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected the array to be destroyed on the early-return path (exit 0), got exit " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // An array of a class with a default member initializer but no
+        // user-declared constructor: the member initializers still have to
+        // be applied per element rather than left as the whole-array zero
+        // fill.
+        std::string case_name = "array_of_constructorless_class_applies_default_member_initializers";
+        cases_run++;
+        RunResult result = compile_and_run("class Plain {\n"
+                                           "  public:\n"
+                                           "    virtual ~Plain() = default;\n"
+                                           "    int v = 9;\n"
+                                           "};\n"
+                                           "int main() {\n"
+                                           "    Plain arr[3]{};\n"
+                                           "    if (arr[0].v != 9) return 1;\n"
+                                           "    if (arr[1].v != 9) return 2;\n"
+                                           "    if (arr[2].v != 9) return 3;\n"
+                                           "    return 0;\n"
+                                           "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected default member initializers to be applied per element (exit 0), got exit " +
+                   std::to_string(result.exit_code));
+    }
+}
+
 int main() {
     run_test_case_files();
     run_driver_single_test_case_files();
@@ -8386,6 +8645,7 @@ int main() {
     run_inheritance_constructor_and_destructor_tests();
     run_default_constructor_selection_tests();
     run_defaulted_special_member_tests();
+    run_array_element_lifetime_runtime_tests();
     run_equality_operator_tests();
     test_compile_to_executable_returns_engaged_expected_on_success();
     test_compile_to_executable_returns_disengaged_expected_on_failure_without_throwing();

@@ -87,7 +87,7 @@ namespace scpp {
                         llvm::LLVMPositionBuilderAtEnd(builder_, entry);
                         current_function_def_ = nullptr;
                         current_loc_ = stmt.loc;
-                        codegen_call_destructor_chain_unless_moved(stmt.type.name, storage, moved_flag);
+                        codegen_destroy_storage_unless_moved(stmt.type, storage, moved_flag);
                         llvm::LLVMBuildRetVoid(builder_);
                         current_function_def_ = saved_function;
                         current_loc_ = saved_loc;
@@ -115,7 +115,7 @@ namespace scpp {
                         guard_type, static_base + ".guard",
                         llvm::LLVMConstInt(guard_type, 0, /*SignExtend=*/0));
                     llvm::LLVMValueRef moved_flag = nullptr;
-                    if (stmt.type.kind == TypeKind::Named && class_has_destructor_in_chain(stmt.type.name)) {
+                    if (type_has_destructor(stmt.type)) {
                         llvm::LLVMTypeRef moved_flag_type = llvm::LLVMInt1TypeInContext(context_);
                         moved_flag = add_internal_global(
                             moved_flag_type, static_base + ".moved",
@@ -454,9 +454,7 @@ namespace scpp {
                     if (auto r = zero_initialize_storage(slot, stmt.type, declared_alignment); !r.has_value()) return std::unexpected(std::move(r).error());
                     locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
                     locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
-                    if (stmt.type.kind == TypeKind::Named) {
-                        locals_[declared_local_of(stmt)].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
-                    }
+                    locals_[declared_local_of(stmt)].moved_flag = create_moved_flag_if_type_has_destructor(stmt.type);
                     if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                     if (!scope_stack_.empty()) {
                         scope_stack_.back().push_back(declared_local_of(stmt));
@@ -575,9 +573,7 @@ namespace scpp {
                 }
                 locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
                 locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
-                if (stmt.type.kind == TypeKind::Named) {
-                    locals_[declared_local_of(stmt)].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
-                }
+                locals_[declared_local_of(stmt)].moved_flag = create_moved_flag_if_type_has_destructor(stmt.type);
                 if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                 if (!scope_stack_.empty()) {
                     scope_stack_.back().push_back(declared_local_of(stmt));
@@ -899,12 +895,8 @@ namespace scpp {
                 auto slot_it = locals_.find(param_local(*it));
                 if (slot_it == locals_.end()) continue;
                 if (slot_it->second.is_static_storage) continue;
-                if (slot_it->second.type.kind == TypeKind::Named) {
-                    if (class_has_destructor_in_chain(slot_it->second.type.name)) {
-                        codegen_call_destructor_chain_unless_moved(slot_it->second.type.name, slot_it->second.alloca,
-                                                                   slot_it->second.moved_flag);
-                    }
-                }
+                codegen_destroy_storage_unless_moved(slot_it->second.type, slot_it->second.alloca,
+                                                     slot_it->second.moved_flag);
             }
         }
     }
@@ -925,12 +917,8 @@ namespace scpp {
                 auto slot_it = locals_.find(*it);
                 if (slot_it == locals_.end()) continue;
                 if (slot_it->second.is_static_storage) continue;
-                if (slot_it->second.type.kind == TypeKind::Named) {
-                    if (class_has_destructor_in_chain(slot_it->second.type.name)) {
-                        codegen_call_destructor_chain_unless_moved(slot_it->second.type.name, slot_it->second.alloca,
-                                                                   slot_it->second.moved_flag);
-                    }
-                }
+                codegen_destroy_storage_unless_moved(slot_it->second.type, slot_it->second.alloca,
+                                                     slot_it->second.moved_flag);
             }
         }
         // By declaration, not by name: an inner scope that shadows an
@@ -951,12 +939,8 @@ namespace scpp {
                 auto slot_it = locals_.find(*it);
                 if (slot_it == locals_.end()) continue;
                 if (slot_it->second.is_static_storage) continue;
-                if (slot_it->second.type.kind == TypeKind::Named) {
-                    if (class_has_destructor_in_chain(slot_it->second.type.name)) {
-                        codegen_call_destructor_chain_unless_moved(slot_it->second.type.name, slot_it->second.alloca,
-                                                                   slot_it->second.moved_flag);
-                    }
-                }
+                codegen_destroy_storage_unless_moved(slot_it->second.type, slot_it->second.alloca,
+                                                     slot_it->second.moved_flag);
             }
         }
     }

@@ -1657,6 +1657,252 @@ void run_constexpr_resolved_alignment_tests() {
     }
 }
 
+// Compiler bug #8: an array of class type had no object lifetime at all.
+// Every lifetime decision in codegen was spelled as a by-*name* question
+// about a class ("does `Tracked` have a destructor", "run `Tracked`'s
+// constructor here"), and each call site guarded it with a hand-written
+// `type.kind == TypeKind::Named` test. A `Type` whose kind is Array
+// carries no class name, so every one of those guards silently answered
+// "no lifetime" for it: `Tracked arr[3]{};` ran zero constructors and zero
+// destructors, and an array of a polymorphic class was left with null
+// vtable pointers, so a virtual call through an element segfaulted.
+//
+// The by-name entry points now have by-type counterparts
+// (type_has_destructor / emit_storage_destruction /
+// codegen_destroy_storage_unless_moved / type_needs_nontrivial_default_init)
+// that dispatch Named to the old logic unchanged and dispatch Array by
+// looping over its elements and *recursing into that same logic*, so an
+// element is initialized and destroyed exactly the way a standalone
+// object of the element type is. Construction runs front to back,
+// destruction back to front.
+void run_array_element_lifetime_tests() {
+    const std::string tracked_class =
+        "class Tracked {\n"
+        "  public:\n"
+        "    Tracked() { this->tag = 1; return; }\n"
+        "    virtual ~Tracked() { this->tag = 0; return; }\n"
+        "    int tag = 0;\n"
+        "};\n";
+
+    {
+        // The reported shape. One call site each, inside a counted loop
+        // over the elements -- a loop rather than three unrolled calls so
+        // that the IR for a large array stays bounded.
+        std::string case_name = "array_of_class_type_is_constructed_and_destroyed";
+        cases_run++;
+        auto ir = try_generate_ir(tracked_class + "int main() {\n"
+                                                  "    Tracked arr[3]{};\n"
+                                                  "    return arr[0].tag;\n"
+                                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::string main_ir = function_ir(ir.value(), "main");
+            expect(!main_ir.empty(), case_name + ": expected a definition of `main` in the module IR");
+            std::size_t constructions = count_occurrences(main_ir, "call void @Tracked_new(");
+            expect(constructions == 1, case_name + ": expected exactly one element-constructor call site, got " +
+                                           std::to_string(constructions));
+            std::size_t destructions = count_occurrences(main_ir, "call void @Tracked_delete(");
+            expect(destructions == 1, case_name + ": expected exactly one element-destructor call site, got " +
+                                          std::to_string(destructions));
+        }
+    }
+
+    {
+        // The loop has to actually cover every element, and destruction
+        // has to run back to front: construction counts up from 0 and
+        // stops at the bound, destruction counts down and stops at 0.
+        std::string case_name = "element_loops_cover_every_element_and_destroy_in_reverse";
+        cases_run++;
+        auto ir = try_generate_ir(tracked_class + "int main() {\n"
+                                                  "    Tracked arr[3]{};\n"
+                                                  "    return arr[0].tag;\n"
+                                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed");
+        if (ir.has_value()) {
+            std::string main_ir = function_ir(ir.value(), "main");
+            expect(main_ir.find("arrayelem.i = phi i64 [ 0,") != std::string::npos,
+                   case_name + ": expected the construction loop to start at element 0");
+            expect(main_ir.find("= add i64 %arrayelem.i") != std::string::npos,
+                   case_name + ": expected the construction loop to walk forwards");
+            expect(main_ir.find("icmp eq i64 %arrayelem.next, 3") != std::string::npos,
+                   case_name + ": expected the construction loop to stop after the last element");
+            expect(main_ir.find("phi i64 [ 2,") != std::string::npos,
+                   case_name + ": expected the destruction loop to start at the last element");
+            expect(main_ir.find("= sub i64 %arrayelem.i") != std::string::npos,
+                   case_name + ": expected the destruction loop to walk backwards");
+        }
+    }
+
+    {
+        // A zero-cost path must stay zero-cost: an array of a scalar type
+        // has no per-element work to do, so it keeps the single memset.
+        std::string case_name = "array_of_scalar_type_still_uses_a_single_zero_fill";
+        cases_run++;
+        auto ir = try_generate_ir("int main() {\n"
+                                  "    int nums[4]{};\n"
+                                  "    return nums[0];\n"
+                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed");
+        if (ir.has_value()) {
+            std::string main_ir = function_ir(ir.value(), "main");
+            expect(main_ir.find("arrayelem.body") == std::string::npos,
+                   case_name + ": expected no per-element loop for an array of scalars");
+            expect(main_ir.find("llvm.memset") != std::string::npos,
+                   case_name + ": expected the array to still be zero-filled");
+        }
+    }
+
+    {
+        // Nested arrays are just arrays whose element type is an array,
+        // so the same recursion has to reach the leaf elements.
+        std::string case_name = "nested_array_elements_are_constructed_and_destroyed";
+        cases_run++;
+        auto ir = try_generate_ir(tracked_class + "int main() {\n"
+                                                  "    Tracked grid[2][2]{};\n"
+                                                  "    return grid[0][0].tag;\n"
+                                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::string main_ir = function_ir(ir.value(), "main");
+            expect(count_occurrences(main_ir, "call void @Tracked_new(") == 1,
+                   case_name + ": expected the nested element constructor to be called");
+            expect(count_occurrences(main_ir, "call void @Tracked_delete(") == 1,
+                   case_name + ": expected the nested element destructor to be called");
+            expect(count_occurrences(main_ir, "arrayelem.body") >= 4,
+                   case_name + ": expected an outer and an inner element loop for both construction and destruction");
+        }
+    }
+
+    {
+        // An array of a polymorphic class used to be left with null vtable
+        // pointers, because the whole-array memset is not the element's
+        // value-initialization. A virtual call through an element then
+        // dispatched through null and crashed at runtime.
+        std::string case_name = "array_of_polymorphic_class_gets_element_vtable_pointers";
+        cases_run++;
+        auto ir = try_generate_ir("class Base {\n"
+                                  "  public:\n"
+                                  "    virtual ~Base() = default;\n"
+                                  "    virtual int who() { return 3; }\n"
+                                  "};\n"
+                                  "int main() {\n"
+                                  "    Base arr[2]{};\n"
+                                  "    return arr[0].who();\n"
+                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::string main_ir = function_ir(ir.value(), "main");
+            expect(main_ir.find("store ptr @__scpp_vtable.Base") != std::string::npos,
+                   case_name + ": expected each element's vtable pointer to be initialized");
+        }
+    }
+
+    {
+        // A class-typed array *member* is initialized by the same
+        // initialize_storage path, and torn down by the defaulted
+        // destructor's field walk -- both of which used to skip arrays.
+        std::string case_name = "class_member_array_is_constructed_and_destroyed";
+        cases_run++;
+        auto ir = try_generate_ir(tracked_class + "class Holder {\n"
+                                                  "  public:\n"
+                                                  "    Holder() { return; }\n"
+                                                  "    virtual ~Holder() = default;\n"
+                                                  "    Tracked items[2]{};\n"
+                                                  "};\n"
+                                                  "int main() {\n"
+                                                  "    Holder h{};\n"
+                                                  "    return h.items[0].tag;\n"
+                                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::string ctor_ir = function_ir(ir.value(), "Holder_new");
+            expect(!ctor_ir.empty(), case_name + ": expected a definition of `Holder_new`");
+            expect(count_occurrences(ctor_ir, "call void @Tracked_new(") == 1,
+                   case_name + ": expected the member array's elements to be constructed");
+            std::string dtor_ir = function_ir(ir.value(), "Holder_delete");
+            expect(!dtor_ir.empty(), case_name + ": expected a definition of `Holder_delete`");
+            expect(count_occurrences(dtor_ir, "call void @Tracked_delete(") == 1,
+                   case_name + ": expected the member array's elements to be destroyed");
+        }
+    }
+
+    {
+        // is_field_copy_constructible already looked *through* an array to
+        // its element type when deciding a field was copyable, but
+        // emission then bitwise-copied the whole array -- so the very copy
+        // constructor that check approved never ran. Same for assignment.
+        std::string case_name = "class_member_array_is_copied_element_by_element";
+        cases_run++;
+        auto ir = try_generate_ir("class Item {\n"
+                                  "  public:\n"
+                                  "    Item() { this->v = 1; return; }\n"
+                                  "    Item(const Item& other) { this->v = other.v + 1; return; }\n"
+                                  "    Item& operator=(const Item& other) { this->v = other.v + 2; return *this; }\n"
+                                  "    virtual ~Item() = default;\n"
+                                  "    int v = 0;\n"
+                                  "};\n"
+                                  "class Holder {\n"
+                                  "  public:\n"
+                                  "    Holder() { return; }\n"
+                                  "    Holder(const Holder& other) = default;\n"
+                                  "    Holder& operator=(const Holder& other) = default;\n"
+                                  "    virtual ~Holder() = default;\n"
+                                  "    Item items[2]{};\n"
+                                  "};\n"
+                                  "int main() {\n"
+                                  "    Holder a{};\n"
+                                  "    Holder b{a};\n"
+                                  "    b = a;\n"
+                                  "    return b.items[0].v;\n"
+                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::string copy_ctor_ir = function_ir(ir.value(), "Holder_new.Holder_ref.Holder_cref");
+            expect(!copy_ctor_ir.empty(), case_name + ": expected a definition of the defaulted copy constructor");
+            expect(count_occurrences(copy_ctor_ir, "call void @Item_new.Item_ref.Item_cref(") == 1,
+                   case_name + ": expected the member array to be copy-constructed element by element rather than "
+                               "bitwise-copied, got " +
+                       std::to_string(count_occurrences(copy_ctor_ir, "call void @Item_new.Item_ref.Item_cref(")) +
+                       " element copy-constructor call site(s)");
+            std::string copy_assign_ir = function_ir(ir.value(), "Holder_operator_assign");
+            expect(!copy_assign_ir.empty(), case_name + ": expected a definition of the defaulted copy-assignment operator");
+            expect(count_occurrences(copy_assign_ir, "@Item_operator_assign(") == 1,
+                   case_name + ": expected the member array to be copy-assigned element by element, got " +
+                       std::to_string(count_occurrences(copy_assign_ir, "@Item_operator_assign(")) +
+                       " element copy-assignment call site(s)");
+        }
+    }
+
+    {
+        // Scope-exit cleanup reaches arrays through every exit path, not
+        // just the fall-off-the-end one: an early return goes through
+        // emit_scope_cleanup_to_depth rather than pop_scope, and both used
+        // to carry their own copy of the `kind == Named` guard.
+        std::string case_name = "array_elements_are_destroyed_on_an_early_return";
+        cases_run++;
+        auto ir = try_generate_ir(tracked_class + "int main() {\n"
+                                                  "    Tracked arr[2]{};\n"
+                                                  "    if (arr[0].tag == 1) {\n"
+                                                  "        return 1;\n"
+                                                  "    }\n"
+                                                  "    return 0;\n"
+                                                  "}\n");
+        expect(ir.has_value(), case_name + ": expected IR generation to succeed, got " +
+                                   (ir.has_value() ? std::string() : ir.error().kind + ": " + ir.error().message));
+        if (ir.has_value()) {
+            std::string main_ir = function_ir(ir.value(), "main");
+            expect(count_occurrences(main_ir, "call void @Tracked_delete(") == 2,
+                   case_name + ": expected the array to be destroyed on both the early-return and the fall-through path, got " +
+                       std::to_string(count_occurrences(main_ir, "call void @Tracked_delete(")) + " destructor call site(s)");
+        }
+    }
+}
+
 int main() {
     run_test_case_files();
     test_generate_returns_engaged_expected_on_success();
@@ -1666,6 +1912,7 @@ int main() {
     run_local_shadowing_tests();
     run_virtual_base_initializer_frame_tests();
     run_value_initialized_temporary_constructor_tests();
+    run_array_element_lifetime_tests();
 
     run_constexpr_error_copy_tests();
     run_constexpr_null_pointer_storage_tests();
