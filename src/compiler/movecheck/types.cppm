@@ -45,6 +45,7 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred);
 [[nodiscard]] std::string named_type_name(const Type& type);
 [[nodiscard]] bool types_equal(const Type& a, const Type& b);
 [[nodiscard]] bool raw_pointer_implicitly_convertible(const Type& source, const Type& target);
+[[nodiscard]] bool is_resolved_named_type(const Type& type, const Program* program);
 [[nodiscard]] bool is_scalar_named_type(const Type& type);
 [[nodiscard]] bool is_float_named_type(const Type& type);
 [[nodiscard]] bool integer_literal_compatible_with_type(const Type& type);
@@ -330,6 +331,29 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
     bool source_is_void = source_pointee.kind == TypeKind::Named && source_pointee.name == "void";
     bool target_is_void = target_pointee.kind == TypeKind::Named && target_pointee.name == "void";
     return source_is_void || target_is_void;
+}
+
+// spec §6: does `type` name a type that actually exists at this phase,
+// or a placeholder that only becomes one at monomorphization?
+//
+// Inside an uninstantiated generic a bare type-parameter name is a
+// TypeKind::Named like any other -- nothing about its shape tells `T`
+// apart from `int` or `Widget`. Judging a conversion against one
+// therefore compares *spellings*: a `U*` returned by a generic callee
+// assigned into the caller's own `T*` is reported incompatible by
+// types_equal because "U" != "T", even though substitution makes both
+// the same type and monomorphization would never produce that
+// diagnostic. This is the rule arithmetic already follows (see
+// binary_expr_has_valid_arithmetic_types, which judges only operands
+// that are known scalars) -- a still-generic type is not a conversion
+// question here, and is answered by the machinery that runs after
+// substitution.
+[[nodiscard]] bool is_resolved_named_type(const Type& type, const Program* program) {
+    if (type.kind != TypeKind::Named) return true;
+    if (is_scalar_type_name(type.name) || type.name == "void" || is_nullptr_type(type)) return true;
+    if (program == nullptr) return false;
+    return find_class_def(*program, type.name) != nullptr || find_struct_def(*program, type.name) != nullptr ||
+           find_enum_def(program, type.name) != nullptr;
 }
 
 [[nodiscard]] bool is_scalar_named_type(const Type& type) {

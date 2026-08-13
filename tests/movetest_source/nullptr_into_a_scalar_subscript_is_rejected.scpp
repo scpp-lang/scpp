@@ -1,0 +1,7 @@
+// nullptr never converts to a scalar, including through a subscript --
+// and the diagnostic has to be able to name the place it is writing.
+int f() {
+    int arr[2];
+    arr[0] = nullptr;
+    return 0;
+}

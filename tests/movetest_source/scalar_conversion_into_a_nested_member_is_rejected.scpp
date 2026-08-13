@@ -1,0 +1,11 @@
+// The place may be an arbitrarily long member chain -- resolution has to
+// follow it all the way to the field actually being written.
+struct Inner { char c; };
+struct Outer { Inner inner; };
+int f() {
+    Outer o{};
+    bool b = true;
+    o.inner.c = b;
+    if (o.inner.c == 'a') { return 1; }
+    return 0;
+}

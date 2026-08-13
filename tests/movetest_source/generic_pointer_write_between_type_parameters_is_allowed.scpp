@@ -1,0 +1,29 @@
+// A still-generic type parameter is a placeholder, not a type: `U*`
+// returned by a generic callee and stored into the caller's own `T*` is
+// the same type after substitution, so it may not be judged before it.
+// The genuine mismatches are still caught once the body is instantiated.
+template<typename U>
+U* pass_through(U* p) {
+    return p;
+}
+template<typename T>
+class Box {
+  private:
+    T* ptr_{};
+
+  public:
+    Box() { return; }
+    void set(T* raw) {
+        T* tmp = pass_through<T>(raw);
+        this->ptr_ = tmp;
+        return;
+    }
+    virtual ~Box() { return; }
+};
+struct A { int x; };
+int f() {
+    A a{};
+    Box<A> b{};
+    b.set(&a);
+    return 0;
+}
