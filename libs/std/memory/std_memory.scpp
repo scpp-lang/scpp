@@ -296,9 +296,16 @@ public:
     }
 
     void operator=(const shared_ptr<T>& other) {
+        // Derived from the handle this object now owns, exactly as the
+        // copy constructor just above does, rather than from
+        // `other.get()`. `other` is a const reference, so `.get()`
+        // selects the `const T*` overload, and storing that into a `T*`
+        // field silently dropped const -- accepted only because an
+        // assignment to a *field* was reaching none of the conversion
+        // checks a plain local's assignment gets.
         __shared_handle copied = other.__copy_handle();
-        this->ptr_ = other.get();
         this->handle_.copy_from(copied);
+        this->ptr_ = std::__shared_ptr_detail_unerase<T>(this->handle_.ptr_);
         return;
     }
 

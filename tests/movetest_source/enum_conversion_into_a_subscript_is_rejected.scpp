@@ -1,0 +1,9 @@
+// Enum elements go through the same assignment path -- an unrelated enum
+// type may not be stored into one.
+enum class E { X, Y };
+enum class F { P, Q };
+int f() {
+    E earr[2];
+    earr[0] = F::P;
+    return 0;
+}

@@ -1,0 +1,12 @@
+// The pointer rule has the same place-blindness as the scalar one: a
+// field of pointer type may not be written from an unrelated pointer.
+struct A { int x; };
+struct B { int y; };
+struct Holder { B* p; };
+int f() {
+    A a{};
+    Holder h{};
+    A* pa = &a;
+    h.p = pa;
+    return 0;
+}

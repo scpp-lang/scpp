@@ -1299,6 +1299,19 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
         types_compatible_with_base_conversion(*source_type, target_type, *body.program, enclosing_class_name(body))) {
         return {};
     }
+    // A mismatch only means something once both pointees are real types
+    // -- see is_resolved_named_type. Inside an uninstantiated generic
+    // they may still be type-parameter names, and `U*` into `T*` is not
+    // a conversion error just because the two placeholders are spelled
+    // differently.
+    auto effective_pointee = [](const Type& pointer_type) -> const Type& {
+        const Type& pointee = *pointer_type.pointee;
+        return pointee.kind == TypeKind::Reference && pointee.pointee != nullptr ? *pointee.pointee : pointee;
+    };
+    if (!is_resolved_named_type(effective_pointee(*source_type), body.program) ||
+        !is_resolved_named_type(effective_pointee(target_type), body.program)) {
+        return {};
+    }
     return std::unexpected(DataflowError("cannot initialize or assign raw pointer '" + target_name +
                             "' from an incompatible pointer type without an explicit cast",
                         loc));

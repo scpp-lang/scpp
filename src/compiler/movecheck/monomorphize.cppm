@@ -4598,7 +4598,7 @@ private:
         return true;
     }
 
-    [[nodiscard]] ExprPtr make_integer_literal_expr(SourceLocation loc, long long value) const {
+    [[nodiscard]] ExprPtr make_integer_literal_expr(SourceLocation loc, std::int64_t value) const {
         auto node = std::make_unique<Expr>();
         node->kind = ExprKind::IntegerLiteral;
         node->loc = loc;
@@ -4689,8 +4689,8 @@ private:
                                             "': missing explicit argument for non-type parameter '" + tp.name + "'",
                                         expr.loc));
                 }
-                type.non_type_args.push_back(
-                    std::shared_ptr<Expr>(make_integer_literal_expr(expr.loc, value_it->second).release()));
+                type.non_type_args.push_back(std::shared_ptr<Expr>(
+                    make_integer_literal_expr(expr.loc, static_cast<std::int64_t>(value_it->second)).release()));
                 continue;
             }
             auto type_it = type_bindings.find(tp.name);
@@ -4725,8 +4725,8 @@ private:
                                             template_name + "' from this constructor call",
                                         loc));
                 }
-                type.non_type_args.push_back(
-                    std::shared_ptr<Expr>(make_integer_literal_expr(loc, value_it->second).release()));
+                type.non_type_args.push_back(std::shared_ptr<Expr>(
+                    make_integer_literal_expr(loc, static_cast<std::int64_t>(value_it->second)).release()));
                 continue;
             }
             auto type_it = resolution.type_bindings.find(tp.name);

@@ -1507,6 +1507,133 @@ void test_out_of_range_literal_reports_the_value_not_a_conversion() {
                *error);
 }
 
+// spec §6: the rule is about the two types, so it has to reach every
+// place a value can be written to -- not just the locals and globals
+// the statement-level path happens to see. A member or subscript target
+// is lowered to an opaque expression rather than a MIR assignment, so
+// these two shapes used to be checked by neither the name rule nor the
+// representation backstop (the LLVM types match for int8_t/uint8_t) and
+// silently miscompiled.
+void test_scalar_conversion_into_a_member_place_is_rejected() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "struct S { uint8_t u; };\n"
+        "int main() {\n"
+        "    S s{};\n"
+        "    int8_t a = 1;\n"
+        "    s.u = a;\n"
+        "    if (s.u == 1) { return 1; }\n"
+        "    return 0;\n"
+        "}\n");
+    expect(error.has_value(),
+           "scalar_conversion_into_a_member_place_is_rejected: expected int8_t -> uint8_t through a field to be "
+           "rejected");
+    if (!error.has_value()) return;
+    expect(error->find("'s.u'") != std::string::npos,
+           "scalar_conversion_into_a_member_place_is_rejected: expected the diagnostic to name the field being "
+           "written, got: " +
+               *error);
+    expect(error->find("static_cast<uint8_t>") != std::string::npos,
+           "scalar_conversion_into_a_member_place_is_rejected: expected the suggested cast to be spelled out, "
+           "got: " +
+               *error);
+}
+
+// The subscript shape has no name of its own to report, so the place
+// description has to be synthesised from the base -- an empty '' in the
+// message (which is what the representation backstop produced before)
+// tells the user nothing about which write is at fault.
+void test_scalar_conversion_into_a_subscript_place_names_the_array() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "int main() {\n"
+        "    int arr[2];\n"
+        "    unsigned int u = 1;\n"
+        "    arr[0] = u;\n"
+        "    if (arr[0] == 1) { return 1; }\n"
+        "    return 0;\n"
+        "}\n");
+    expect(error.has_value(),
+           "scalar_conversion_into_a_subscript_place_names_the_array: expected unsigned int -> int through a "
+           "subscript to be rejected");
+    if (!error.has_value()) return;
+    expect(error->find("arr[") != std::string::npos,
+           "scalar_conversion_into_a_subscript_place_names_the_array: expected the diagnostic to name the array "
+           "being written, got: " +
+               *error);
+    expect(error->find("''") == std::string::npos,
+           "scalar_conversion_into_a_subscript_place_names_the_array: the place must never be reported as an "
+           "empty name, got: " +
+               *error);
+}
+
+// A bare type-parameter name is a placeholder, not a type: judging `U*`
+// against `T*` compares spellings and rejects code that substitution
+// makes identical. The answer is deferred to monomorphization, which
+// still catches the genuine mismatches (see the case below).
+void test_pointer_write_between_unsubstituted_type_parameters_is_allowed() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "template<typename U>\n"
+        "U* pass_through(U* p) {\n"
+        "    return p;\n"
+        "}\n"
+        "template<typename T>\n"
+        "class Box {\n"
+        "  private:\n"
+        "    T* ptr_{};\n"
+        "  public:\n"
+        "    Box() { return; }\n"
+        "    void set(T* raw) {\n"
+        "        T* tmp = pass_through<T>(raw);\n"
+        "        this->ptr_ = tmp;\n"
+        "        return;\n"
+        "    }\n"
+        "    virtual ~Box() { return; }\n"
+        "};\n"
+        "struct A { int x; };\n"
+        "int main() {\n"
+        "    A a{};\n"
+        "    Box<A> b{};\n"
+        "    b.set(&a);\n"
+        "    return 0;\n"
+        "}\n");
+    expect(!error.has_value(),
+           "pointer_write_between_unsubstituted_type_parameters_is_allowed: expected U* -> T* inside an "
+           "uninstantiated generic to be accepted" +
+               (error.has_value() ? std::string(", got '") + *error + "'" : ""));
+}
+
+// Deferring is not the same as disabling: once T is substituted, both
+// pointees are real types again and a genuine mismatch is still caught.
+void test_pointer_write_wrong_after_substitution_is_still_rejected() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "struct A { int x; };\n"
+        "struct B { int y; };\n"
+        "template<typename T>\n"
+        "class Box {\n"
+        "  private:\n"
+        "    T* ptr_{};\n"
+        "  public:\n"
+        "    Box() { return; }\n"
+        "    void set(B* b) {\n"
+        "        this->ptr_ = b;\n"
+        "        return;\n"
+        "    }\n"
+        "    virtual ~Box() { return; }\n"
+        "};\n"
+        "int main() {\n"
+        "    B b{};\n"
+        "    Box<A> box{};\n"
+        "    box.set(&b);\n"
+        "    return 0;\n"
+        "}\n");
+    expect(error.has_value(),
+           "pointer_write_wrong_after_substitution_is_still_rejected: expected B* -> A* to be rejected once T "
+           "is substituted");
+}
+
 } // namespace
 
 
@@ -1567,6 +1694,10 @@ int main() {
 
     test_scalar_conversion_diagnostic_names_both_types_and_the_cast();
     test_scalar_conversion_return_diagnostic_names_the_function();
+    test_scalar_conversion_into_a_member_place_is_rejected();
+    test_scalar_conversion_into_a_subscript_place_names_the_array();
+    test_pointer_write_between_unsubstituted_type_parameters_is_allowed();
+    test_pointer_write_wrong_after_substitution_is_still_rejected();
     test_out_of_range_literal_reports_the_value_not_a_conversion();
 
     if (failures > 0) {

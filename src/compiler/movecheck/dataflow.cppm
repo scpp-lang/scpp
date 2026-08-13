@@ -25,6 +25,16 @@ namespace scpp {
                                      const SourceLocation& loc);
 [[nodiscard]] std::optional<Type> resolve_member_field_type(const Expr& member_expr, const Body& body,
                                                             const DataflowState& state, const Signatures& signatures);
+[[nodiscard]] std::optional<Type> resolve_assignment_place_type(const Expr& place, const Body& body,
+                                                                const DataflowState& state,
+                                                                const Signatures& signatures);
+[[nodiscard]] std::string describe_assignment_place(const Expr& place);
+[[nodiscard]] std::expected<void, DataflowError> check_assignment_target_conversions(const Expr& place, const Expr& value,
+                                                                                     const Body& body,
+                                                                                     const DataflowState& state,
+                                                                                     const Signatures& signatures,
+                                                                                     const SourceLocation& loc,
+                                                                                     bool report_errors);
 [[nodiscard]] std::expected<void, DataflowError> validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
                          const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> apply_deref(const Expr& expr, const DataflowState& state, const Body& body, const Signatures& signatures,
@@ -422,6 +432,122 @@ namespace scpp {
     auto field_it = class_it->second.find(member_expr.name);
     if (field_it == class_it->second.end()) return std::nullopt;
     return field_it->second;
+}
+
+// The declared type of the place an assignment writes to, for any place
+// shape the language allows on the left of `=`.
+//
+// Every conversion rule an assignment has to obey (scalar, raw pointer,
+// function pointer, `nullptr`, enum) is a question about *this* type,
+// and is therefore the same question no matter how the place was
+// spelled. It was previously asked per-shape, and so got a different
+// answer per shape: `x = v` was fully checked, `s.f = v` was checked for
+// two of the five rules, and `a[i] = v` was checked for none at all --
+// see check_assignment_target_conversions' own comment for how the
+// shapes came to diverge. Resolving the type in one place is what lets
+// the checks be applied in one place.
+[[nodiscard]] std::optional<Type> resolve_assignment_place_type(const Expr& place, const Body& body,
+                                                                const DataflowState& state,
+                                                                const Signatures& signatures) {
+    if (place.kind == ExprKind::Identifier) {
+        if (const Type* local_type = body.type_if_local(place); local_type != nullptr) return *local_type;
+        return find_visible_global_type(place.name, /*explicit_global_qualification=*/false, body);
+    }
+    if (place.kind == ExprKind::Member) {
+        // resolve_member_field_type reads the precomputed field-type
+        // cache, which is what makes an implicit `this.f` resolvable at
+        // all; infer_expr_type answers the same question from the
+        // Program for the base-typed spellings the cache cannot reach.
+        // Neither subsumes the other, so both are consulted.
+        if (std::optional<Type> field_type = resolve_member_field_type(place, body, state, signatures);
+            field_type.has_value()) {
+            return field_type;
+        }
+        return infer_expr_type(place, body, signatures);
+    }
+    if (place.kind == ExprKind::Subscript) return infer_expr_type(place, body, signatures);
+    return std::nullopt;
+}
+
+// How to name an assignment target in a diagnostic. Mirrors
+// validate_deref_expr's own place description, which faced the same
+// problem: an Expr carries a `name` only for the shapes that have one,
+// so a Member has to be rebuilt from its base and field, and a Subscript
+// has no name of its own at all. Getting this wrong is visible -- a
+// `nullptr` assigned to an array element used to reach codegen's
+// representation backstop and be reported against an empty name
+// ("assigning ''"), because the only description available that far down
+// was a name the expression never had.
+[[nodiscard]] std::string describe_assignment_place(const Expr& place) {
+    if (place.kind == ExprKind::Member) {
+        if (place.lhs == nullptr) return place.name;
+        std::string base = describe_assignment_place(*place.lhs);
+        return base.empty() ? place.name : base + "." + place.name;
+    }
+    if (place.kind == ExprKind::Subscript) {
+        if (place.lhs == nullptr) return "this element";
+        std::string base = describe_assignment_place(*place.lhs);
+        return base.empty() ? std::string("this element") : base + "[...]";
+    }
+    return place.name;
+}
+
+// spec §6: the complete set of conversion rules an assignment's value
+// must satisfy against its target's declared type, applied uniformly to
+// every place shape.
+//
+// These five checks already existed, but only the
+// MirStatementKind::Assign *statement* path ran all of them, and that
+// path only exists for a bare-name target: mir.cppm lowers `x = v;` to
+// an Assign node and everything else -- `s.f = v;`, `a[i] = v;` -- to an
+// opaque Eval of the whole expression, which is sound for the
+// initialization tracking that choice was made for (a field write never
+// changes the enclosing local's own state) but leaves this expression
+// handler as the only place those assignments are ever seen. It checked
+// two of the five for a Member target and none for a Subscript one, so
+// `s.u = some_int8;` and `a[0] = some_unsigned;` silently converted,
+// `s.p = &wrong_type;` silently type-confused a raw pointer, and
+// `enum_array[0] = OtherEnum::X;` was accepted outright -- each one the
+// exact defect the corresponding check was written to prevent, reachable
+// by spelling the target differently.
+//
+// Applied to an Identifier target here too, which is not redundant: a
+// statement-level `x = v;` never reaches this handler at all (it became
+// an Assign node), so the only Identifier assignments that arrive here
+// are the nested ones -- `f(x = v)`, `while ((x = v))` -- which had the
+// same two-of-five coverage a Member target did.
+[[nodiscard]] std::expected<void, DataflowError> check_assignment_target_conversions(const Expr& place, const Expr& value,
+                                                                                     const Body& body,
+                                                                                     const DataflowState& state,
+                                                                                     const Signatures& signatures,
+                                                                                     const SourceLocation& loc,
+                                                                                     bool report_errors) {
+    std::optional<Type> target_type = resolve_assignment_place_type(place, body, state, signatures);
+    if (!target_type.has_value()) return {};
+    std::string target_name = describe_assignment_place(place);
+    if (auto _r = check_function_pointer_assignment(*target_type, value, body, signatures, loc, target_name,
+                                                    report_errors);
+        !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
+    if (auto _r = check_raw_pointer_assignment(*target_type, value, body, signatures, loc, target_name, report_errors);
+        !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
+    if (auto _r = check_nullptr_assignment(*target_type, value, loc, target_name, report_errors); !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
+    if (auto _r = check_scalar_conversion(*target_type, value, body, signatures, loc, "'" + target_name + "'",
+                                          report_errors);
+        !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
+    if (report_errors) {
+        if (auto _r = check_enum_conversion_compatibility(*target_type, value, body, signatures, loc); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    }
+    return {};
 }
 
 // Validates that `operand` (a plain Identifier, e.g. `p`, or a
@@ -1810,37 +1936,10 @@ struct ConvertingConstructorBinding {
                         return std::unexpected(std::move(_r).error());
                     }
                 }
-                if (expr.lhs->kind == ExprKind::Identifier) {
-                    if (const Type* target_type = body.type_if_local(*expr.lhs); target_type != nullptr) {
-                        if (auto _r = check_function_pointer_assignment(*target_type, *expr.rhs, body, signatures, state.current_loc,
-                                                          expr.lhs->name, report_errors);
-                            !_r.has_value()) {
-                            return std::unexpected(std::move(_r).error());
-                        }
-                        if (report_errors) {
-                            if (auto _r = check_enum_conversion_compatibility(*target_type, *expr.rhs, body, signatures,
-                                                                state.current_loc);
-                                !_r.has_value()) {
-                                return std::unexpected(std::move(_r).error());
-                            }
-                        }
-                    }
-                } else if (expr.lhs->kind == ExprKind::Member) {
-                    std::optional<Type> field_type = resolve_member_field_type(*expr.lhs, body, state, signatures);
-                    if (field_type.has_value()) {
-                        if (auto _r = check_function_pointer_assignment(*field_type, *expr.rhs, body, signatures, state.current_loc,
-                                                          expr.lhs->name, report_errors);
-                            !_r.has_value()) {
-                            return std::unexpected(std::move(_r).error());
-                        }
-                        if (report_errors) {
-                            if (auto _r = check_enum_conversion_compatibility(*field_type, *expr.rhs, body, signatures,
-                                                                state.current_loc);
-                                !_r.has_value()) {
-                                return std::unexpected(std::move(_r).error());
-                            }
-                        }
-                    }
+                if (auto _r = check_assignment_target_conversions(*expr.lhs, *expr.rhs, body, state, signatures,
+                                                                  state.current_loc, report_errors);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
                 }
                 if (std::optional<LocalId> target = body.local_of(*expr.lhs); target.has_value()) {
                     // The assignment target is never a "read": whatever

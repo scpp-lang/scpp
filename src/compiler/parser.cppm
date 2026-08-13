@@ -1344,7 +1344,7 @@ private:
         return expr;
     }
 
-    [[nodiscard]] ExprPtr make_integer_literal_expr(SourceLocation loc, long value) {
+    [[nodiscard]] ExprPtr make_integer_literal_expr(SourceLocation loc, std::int64_t value) {
         auto expr = std::make_unique<Expr>();
         expr->kind = ExprKind::IntegerLiteral;
         expr->loc = loc;
@@ -5454,7 +5454,7 @@ private:
     // quotes (see CharLiteral's definition in lexer.cppm). Supports the
     // same minimal named-escape set as decode_string_literal above: \n \t
     // \r \\ \' \" \0 -- no hex/octal escapes.
-    [[nodiscard]] std::expected<long, ParseError> decode_char_literal(const Token& tok) {
+    [[nodiscard]] std::expected<std::int64_t, ParseError> decode_char_literal(const Token& tok) {
         // A well-formed literal is always at least `''` (2 quote chars);
         // anything shorter means the lexer hit EOF before a closing
         // quote (an unterminated literal) -- guard before the substr
@@ -5471,19 +5471,19 @@ private:
         std::string_view inner = tok.text.substr(static_cast<std::size_t>(1), tok.text.size() - 2);
         if (inner.size() == 1 && inner.at(0) != '\\') {
             std::uint8_t plain_char_byte = static_cast<std::uint8_t>(inner.at(0));
-            long plain_char_value = static_cast<long>(plain_char_byte);
+            std::int64_t plain_char_value = static_cast<std::int64_t>(plain_char_byte);
             return plain_char_value;
         }
         if (inner.size() == 2 && inner.at(0) == '\\') {
-            long escaped_value = 0;
+            std::int64_t escaped_value = 0;
             switch (inner.at(1)) {
-                case 'n': escaped_value = static_cast<long>('\n'); return escaped_value;
-                case 't': escaped_value = static_cast<long>('\t'); return escaped_value;
-                case 'r': escaped_value = static_cast<long>('\r'); return escaped_value;
-                case '0': escaped_value = static_cast<long>('\0'); return escaped_value;
-                case '\\': escaped_value = static_cast<long>('\\'); return escaped_value;
-                case '\'': escaped_value = static_cast<long>('\''); return escaped_value;
-                case '"': escaped_value = static_cast<long>('"'); return escaped_value;
+                case 'n': escaped_value = static_cast<std::int64_t>('\n'); return escaped_value;
+                case 't': escaped_value = static_cast<std::int64_t>('\t'); return escaped_value;
+                case 'r': escaped_value = static_cast<std::int64_t>('\r'); return escaped_value;
+                case '0': escaped_value = static_cast<std::int64_t>('\0'); return escaped_value;
+                case '\\': escaped_value = static_cast<std::int64_t>('\\'); return escaped_value;
+                case '\'': escaped_value = static_cast<std::int64_t>('\''); return escaped_value;
+                case '"': escaped_value = static_cast<std::int64_t>('"'); return escaped_value;
                 default: break;
             }
         }
@@ -5513,23 +5513,21 @@ private:
     // initializing lambda capture isn't valid either: see this
     // function's own call site for the full reasoning) -- functionally
     // identical, just avoiding both of those.
-    [[nodiscard]] std::expected<long, ParseError> eval_enum_constant_expr(const Expr& current,
-                                                                          const std::string& enum_name) {
+    [[nodiscard]] std::expected<std::int64_t, ParseError> eval_enum_constant_expr(const Expr& current,
+                                                                                  const std::string& enum_name) {
         switch (current.kind) {
             case ExprKind::IntegerLiteral:
             case ExprKind::CharLiteral:
-                // Expr::int_value is std::int64_t (ast.cppm), a distinct
-                // named type from this function's own `long` return
-                // slot as far as scpp's own type system is concerned
+                // std::int64_t all the way through: Expr::int_value and
+                // the EnumVariant::value this eventually lands in are
+                // both std::int64_t (ast.cppm), so carrying the value in
+                // that same named type avoids a conversion at every step
                 // (ch06: no two differently-spelled scalar type names
-                // are ever treated as interchangeable, even when their
-                // underlying representation is identical on every
-                // target platform scpp supports today) -- an explicit
-                // conversion is required at this boundary, exactly like
-                // the sibling literal-derived `long` locals just below
-                // (plain_char_value/escaped_value in decode_char_literal
-                // above) already use.
-                return static_cast<long>(current.int_value);
+                // are ever interchangeable, even when their underlying
+                // representation is identical on every target scpp
+                // supports today -- so a `long` return slot here would
+                // need an explicit cast in *and* an explicit cast out).
+                return current.int_value;
             case ExprKind::Unary:
                 if (current.unary_op == UnaryOp::Neg && current.lhs != nullptr) {
                     auto inner_result = eval_enum_constant_expr(*current.lhs, enum_name);
@@ -5548,7 +5546,7 @@ private:
         }
     }
 
-    [[nodiscard]] std::expected<long, ParseError> parse_enum_constant_expr(const std::string& enum_name) {
+    [[nodiscard]] std::expected<std::int64_t, ParseError> parse_enum_constant_expr(const std::string& enum_name) {
         auto expr_result = parse_unary();
         if (!expr_result.has_value()) return std::unexpected(std::move(expr_result).error());
         ExprPtr expr = std::move(expr_result).value();
