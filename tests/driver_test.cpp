@@ -8975,10 +8975,15 @@ void run_generic_body_clone_fidelity_tests() {
 void run_return_type_checking_runtime_tests() {
     {
         // The exact reported shape: an `int` field read through a
-        // pointer, returned from a `std::int64_t` function. This is the
-        // one movecheck could never have caught -- infer_expr_type gives
-        // up on Member/Subscript chains because it has no Program-level
-        // field-type information.
+        // pointer, returned from a `std::int64_t` function. Originally
+        // caught only by codegen's LLVM-type backstop, on the assumption
+        // that infer_expr_type always gives up on Member chains for want
+        // of Program-level field-type information. It does resolve this
+        // one, so movecheck's own name-based return check now reports it
+        // first; the assertions below deliberately pin only what the
+        // user needs from the diagnostic -- the offending function named,
+        // and a location in their file rather than the stdlib -- so
+        // either layer satisfies them.
         std::string case_name = "return_int_member_from_int64_function_is_diagnosed_in_the_users_file";
         cases_run++;
         auto result = try_compile_and_run("import std;\n"
@@ -9054,6 +9059,102 @@ void run_return_type_checking_runtime_tests() {
         if (rejected) {
             expect(message.find("std_memory.scpp") == std::string::npos,
                    case_name + ": the diagnostic still points into the stdlib, got: " + message);
+        }
+    }
+
+    {
+        // spec §6: `bool` has exactly two values, and every branch
+        // condition is produced by truncating its i8 representation to
+        // i1 -- which reads the low bit. A cast to bool used to be an
+        // ordinary width conversion, so `static_cast<bool>(2)` truncated
+        // i32 2 to i8 2 and produced a bool that `static_cast<int>`
+        // reported as 2 while `if` treated as *false*. Exit code 102
+        // was the observable symptom; 1 is the correct answer.
+        std::string case_name = "static_cast_to_bool_normalises_to_zero_or_one";
+        cases_run++;
+        RunResult result = compile_and_run("int main() {\n"
+                                           "    bool b = static_cast<bool>(2);\n"
+                                           "    int back = static_cast<int>(b);\n"
+                                           "    if (b) { return back; }\n"
+                                           "    return 100 + back;\n"
+                                           "}\n",
+                                           case_name);
+        expect(result.exit_code == 1,
+               case_name + ": expected static_cast<bool>(2) to be true and read back as 1, got exit code " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // The equal-width sources are the worse half of the same bug:
+        // they took the identical-LLVM-type fast path and copied the
+        // byte through completely untouched.
+        std::string case_name = "static_cast_to_bool_normalises_equal_width_sources";
+        cases_run++;
+        RunResult result = compile_and_run("int main() {\n"
+                                           "    int8_t raw = 7;\n"
+                                           "    bool b = static_cast<bool>(raw);\n"
+                                           "    if (static_cast<int>(b) != 1) { return 10; }\n"
+                                           "    char c = 'A';\n"
+                                           "    bool cb = static_cast<bool>(c);\n"
+                                           "    if (static_cast<int>(cb) != 1) { return 20; }\n"
+                                           "    int8_t zero = 0;\n"
+                                           "    bool zb = static_cast<bool>(zero);\n"
+                                           "    if (static_cast<int>(zb) != 0) { return 30; }\n"
+                                           "    if (zb) { return 40; }\n"
+                                           "    return 0;\n"
+                                           "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected every equal-width cast to bool to normalise, got exit code " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // A non-zero float converts to true, and only exactly 0.0 to
+        // false -- the truncating lowering got 2.0 wrong for the same
+        // reason it got the integer 2 wrong.
+        std::string case_name = "static_cast_to_bool_from_float_compares_against_zero";
+        cases_run++;
+        RunResult result = compile_and_run("int main() {\n"
+                                           "    double two = 2.0;\n"
+                                           "    if (!static_cast<bool>(two)) { return 10; }\n"
+                                           "    double small = 0.5;\n"
+                                           "    if (!static_cast<bool>(small)) { return 20; }\n"
+                                           "    double zero = 0.0;\n"
+                                           "    if (static_cast<bool>(zero)) { return 30; }\n"
+                                           "    return 0;\n"
+                                           "}\n",
+                                           case_name);
+        expect(result.exit_code == 0,
+               case_name + ": expected float-to-bool to be a comparison against zero, got exit code " +
+                   std::to_string(result.exit_code));
+    }
+
+    {
+        // spec §6: the arithmetic operators were the one class never
+        // name-checked, so mismatched widths escaped movecheck entirely
+        // and surfaced as an "invalid IR" internal error naming LLVM's
+        // module verifier, with no source location for the user to act
+        // on. It has to be an ordinary diagnostic pointing at the
+        // offending operands.
+        std::string case_name = "mixed_width_arithmetic_is_a_source_diagnostic_not_an_llvm_verifier_error";
+        cases_run++;
+        auto result = try_compile_and_run("int main() {\n"
+                                          "    int a = 1;\n"
+                                          "    long b = 2;\n"
+                                          "    if (a + b == 3) { return 1; }\n"
+                                          "    return 0;\n"
+                                          "}\n",
+                                          case_name);
+        bool rejected = !result.has_value();
+        std::string message = rejected ? result.error().what() : "";
+        expect(rejected, case_name + ": expected 'int + long' to be rejected");
+        if (rejected) {
+            expect(message.find("invalid IR") == std::string::npos,
+                   case_name + ": expected a source-level diagnostic rather than an LLVM verifier error, got: " +
+                       message);
+            expect(message.find("no implicit conversion") != std::string::npos,
+                   case_name + ": expected the diagnostic to cite the no-implicit-conversion rule, got: " + message);
         }
     }
 

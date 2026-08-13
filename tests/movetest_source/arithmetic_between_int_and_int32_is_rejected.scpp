@@ -1,0 +1,9 @@
+// spec §6: arithmetic operands are held to the same rule as comparison
+// operands. This used to be the one operator class that was never
+// name-checked at all.
+int f() {
+    int a = 1;
+    int32_t b = 2;
+    if (a + b == 3) { return 1; }
+    return 0;
+}

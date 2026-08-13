@@ -1,0 +1,7 @@
+// spec §6: the same holds across the floating-point family.
+int f() {
+    float a = 1.0;
+    float32_t b = a;
+    if (b > 0.0) { return 1; }
+    return 0;
+}

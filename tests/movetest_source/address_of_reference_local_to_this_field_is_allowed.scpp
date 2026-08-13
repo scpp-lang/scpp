@@ -19,5 +19,6 @@ public:
 int f() {
     Box box{5};
     const int* p = box.ptr();
-    return p == nullptr;
+    if (p == nullptr) { return 1; }
+    return 0;
 }

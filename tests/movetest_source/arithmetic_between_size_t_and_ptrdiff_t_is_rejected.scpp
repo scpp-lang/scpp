@@ -1,0 +1,7 @@
+// spec §6: as above, for two distinct 64-bit types.
+int f() {
+    size_t a = 1;
+    ptrdiff_t b = 2;
+    if (a + b == 3) { return 1; }
+    return 0;
+}

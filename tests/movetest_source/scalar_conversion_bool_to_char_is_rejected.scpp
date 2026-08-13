@@ -1,0 +1,9 @@
+// spec §6: `bool` and `char` share an 8-bit representation, which used
+// to be the only thing the initialization boundary checked -- so this
+// silently compiled while `b == c` on the same two values was rejected.
+int f() {
+    bool b = true;
+    char c = b;
+    if (c == 'x') { return 1; }
+    return 0;
+}

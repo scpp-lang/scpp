@@ -251,8 +251,36 @@ namespace scpp {
     const Type& lhs_operand = binary_operand_type(*lhs_type);
     const Type& rhs_operand = binary_operand_type(*rhs_type);
     bool pointer_operand_present = lhs_operand.kind == TypeKind::Pointer || rhs_operand.kind == TypeKind::Pointer;
-    if (!pointer_operand_present) return true;
-    return pointer_arithmetic_result_type(expr.binary_op, *lhs_type, *rhs_type).has_value();
+    if (pointer_operand_present) {
+        return pointer_arithmetic_result_type(expr.binary_op, *lhs_type, *rhs_type).has_value();
+    }
+    // spec §6: arithmetic operands are held to the same no-implicit-
+    // conversion rule as everything else. This used to `return true`
+    // unconditionally the moment neither side was a pointer, so
+    // arithmetic was the one operator class never name-checked at all --
+    // `int + int32_t`, `int + unsigned int` and `size_t + ptrdiff_t` all
+    // went straight through, while the comparison operators just below
+    // rejected the very same operand pairs. Only the *mismatch* was
+    // invisible: `int + long`, whose operands lower differently, still
+    // failed, but downstream in LLVM's module verifier rather than here.
+    //
+    // Restricted to two operands that are both actually scalars.
+    // Arithmetic on a class type is dispatched through an operator
+    // overload, and a still-generic parameter carries a placeholder type
+    // (`$auto` for a forwarding reference, or a bare type-parameter
+    // name) that only becomes real at monomorphization -- neither is a
+    // scalar-conversion question, and both are answered by machinery
+    // that runs elsewhere, so neither may be judged here.
+    //
+    // Deferring the rest to binary_expr_has_compatible_types keeps
+    // arithmetic and comparison answering out of one function, so the
+    // two can no longer drift apart. It carries the literal exemption
+    // with it, which arithmetic needs just as much: `x + 1` must stay
+    // legal for every integral `x`, not only for an `int` one.
+    bool both_operands_are_scalars = lhs_operand.kind == TypeKind::Named && rhs_operand.kind == TypeKind::Named &&
+                                     is_scalar_type_name(lhs_operand.name) && is_scalar_type_name(rhs_operand.name);
+    if (!both_operands_are_scalars) return true;
+    return binary_expr_has_compatible_types(expr, body, signatures);
 }
 
 [[nodiscard]] bool write_is_licensed_by_mutable_reborrow_lender(const Expr& target, const DataflowState& state,
@@ -2385,6 +2413,11 @@ struct ConvertingConstructorBinding {
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
+                if (auto _r = check_scalar_conversion(*global_type, *stmt.expr, body, signatures, state.current_loc,
+                                                      "'" + target_name + "'", report_errors);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
                 return apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
             }
             if (is_reference((*local_type))) {
@@ -2672,6 +2705,11 @@ struct ConvertingConstructorBinding {
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
+                if (auto _r = check_scalar_conversion((*local_type), *stmt.expr, body, signatures, state.current_loc,
+                                                      "'" + target_name + "'", report_errors);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
                 if (report_errors) {
                     if (auto _r = check_enum_conversion_compatibility((*local_type), *stmt.expr, body, signatures,
                                                         state.current_loc);
@@ -2780,6 +2818,12 @@ struct ConvertingConstructorBinding {
             return apply_expr(*term.condition, false, state, body, signatures, /*report_errors=*/true);
         case TerminatorKind::Return: {
             if (term.return_value == nullptr) return {};
+            if (auto _r = check_scalar_conversion(fn.return_type, *term.return_value, body, signatures, term.loc,
+                                                  "the return value of '" + fn.name + "'",
+                                                  /*report_errors=*/true);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             if (is_pointer_return_lifetime_source_type(fn.return_type)) {
                 bool null_pointer_return =
                     fn.return_type.kind == TypeKind::Pointer &&

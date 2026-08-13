@@ -13,5 +13,6 @@ public:
 int main() {
     Derived derived{};
     Base* base = &derived;
-    return base == nullptr;
+    if (base == nullptr) { return 1; }
+    return 0;
 }

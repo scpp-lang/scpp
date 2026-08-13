@@ -1315,6 +1315,15 @@ namespace {
         return type.kind == TypeKind::Reference ? *type.pointee : type;
     }
 
+    [[nodiscard]] const Expr& Codegen::unwrap_negated_numeric_literal(const Expr& expr)
+{
+        if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Neg && expr.lhs != nullptr &&
+            (expr.lhs->kind == ExprKind::IntegerLiteral || expr.lhs->kind == ExprKind::FloatLiteral)) {
+            return *expr.lhs;
+        }
+        return expr;
+    }
+
 
     [[nodiscard]] bool Codegen::is_pointer_arithmetic_offset_type(const Type& type)
 {

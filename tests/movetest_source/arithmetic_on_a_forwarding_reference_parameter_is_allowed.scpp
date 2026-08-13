@@ -1,0 +1,21 @@
+// spec §6: a still-generic parameter's type is a placeholder (`$auto`
+// for a forwarding reference) that only becomes a real type at
+// monomorphization, so the scalar name check must not judge it -- doing
+// so reported "no implicit conversion between '$auto' and 'int'" for
+// perfectly ordinary generic code.
+int forward_one(auto&& x) {
+    x += 1;
+    return x;
+}
+
+template<typename T>
+T twice(T value) {
+    return value + value;
+}
+
+int main() {
+    int value = 4;
+    int result = forward_one(value);
+    int doubled = twice(3);
+    return result + value + doubled - 20;
+}

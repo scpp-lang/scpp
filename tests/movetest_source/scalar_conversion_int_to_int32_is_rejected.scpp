@@ -1,0 +1,9 @@
+// spec §6: `int` is NOT an alias for `int32_t`. They are distinct types
+// that happen to have equal width, so neither converts to the other
+// without an explicit cast.
+int f() {
+    int a = 1;
+    int32_t b = a;
+    if (b == 1) { return 1; }
+    return 0;
+}

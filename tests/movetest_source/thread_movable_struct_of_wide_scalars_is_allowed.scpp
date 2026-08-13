@@ -1,0 +1,27 @@
+// spec §5.15/§8.2: every scalar type is thread-movable, so a struct
+// whose fields are all scalars is thread-movable by the structural rule
+// -- for the whole scalar family, not just the int/bool/char subset a
+// long-stale duplicate of is_scalar_type_name (since deleted from
+// monomorphize.cppm, where it had no callers left) still named.
+struct WideCounters {
+    uint64_t ticks;
+    size_t index;
+    float64_t weight;
+    int8_t flag;
+    ptrdiff_t offset;
+};
+
+template<typename T>
+void spawn(T&& f [[scpp::thread_movable]]) {
+    return;
+}
+
+WideCounters make_counters() {
+    WideCounters c{};
+    return c;
+}
+
+int main() {
+    spawn(make_counters());
+    return 0;
+}

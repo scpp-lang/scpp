@@ -1,0 +1,17 @@
+// spec §6: an explicit cast is exactly what the rejection diagnostics
+// tell the user to write, so every pair the tightened check rejects has
+// to be expressible this way.
+int f() {
+    int a = 1;
+    int32_t b = static_cast<int32_t>(a);
+    unsigned int c = static_cast<unsigned int>(a);
+    size_t d = static_cast<size_t>(a);
+    ptrdiff_t e = static_cast<ptrdiff_t>(d);
+    long g = static_cast<long>(a);
+    int64_t h = static_cast<int64_t>(g);
+    if (b == 1) { return 1; }
+    if (c == 1) { return 1; }
+    if (e == 1) { return 1; }
+    if (h == 1) { return 1; }
+    return 0;
+}

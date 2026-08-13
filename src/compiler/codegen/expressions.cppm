@@ -2208,9 +2208,39 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         auto target_llvm_result = to_llvm_type(target_type);
         if (!target_llvm_result.has_value()) return std::unexpected(std::move(target_llvm_result).error());
         llvm::LLVMTypeRef target_llvm = std::move(target_llvm_result).value();
-        if (llvm::LLVMTypeOf(value) == target_llvm) return value;
         std::string source_name = scalar_name_for_cast(source_type);
         std::string target_name = scalar_name_for_cast(target_type);
+        // spec §6: `bool` has exactly two values, and the whole codebase
+        // relies on its i8 representation holding only 0 or 1 -- every
+        // branch/select condition is produced by truncating that i8 down
+        // to i1, which reads the *low bit* and nothing else.
+        //
+        // A cast to bool therefore cannot be an ordinary width
+        // conversion. It used to be one, so `static_cast<bool>(2)`
+        // truncated i32 2 to i8 2 and handed back a bool holding a bit
+        // pattern that is neither true nor false: `static_cast<int>` of
+        // it returned 2, yet `if` on it took the *false* branch, because
+        // 2's low bit is 0. Worse for equal-width sources -- `bool b =
+        // static_cast<bool>(some_int8)` hit the identical-LLVM-type fast
+        // path below and copied the byte through untouched.
+        //
+        // The C++ rule (a scalar converts to bool as `value != 0`) is
+        // both what users expect and the only lowering that restores the
+        // invariant, so it is applied here, ahead of the fast path that
+        // equal-width sources would otherwise take.
+        if (target_name == "bool" && source_name != "bool") {
+            llvm::LLVMValueRef nonzero = nullptr;
+            if (is_float_scalar_type_name(source_name)) {
+                nonzero = llvm::LLVMBuildFCmp(builder_, llvm::LLVMRealUNE, value,
+                                              llvm::LLVMConstReal(llvm::LLVMTypeOf(value), 0.0), "tobooltmp");
+            } else {
+                nonzero = llvm::LLVMBuildICmp(builder_, llvm::LLVMIntNE, value,
+                                              llvm::LLVMConstInt(llvm::LLVMTypeOf(value), 0, /*SignExtend=*/0),
+                                              "tobooltmp");
+            }
+            return llvm::LLVMBuildZExt(builder_, nonzero, target_llvm, "boolnormtmp");
+        }
+        if (llvm::LLVMTypeOf(value) == target_llvm) return value;
         bool source_is_float = is_float_scalar_type_name(source_name);
         bool target_is_float = is_float_scalar_type_name(target_name);
         if (source_is_float && target_is_float) {
@@ -3056,8 +3086,12 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         // scalar-type mismatch, so this can never itself paper over a
         // genuine type error -- only ever resolves an otherwise-untyped
         // literal.
-        bool lhs_is_literal = expr.lhs->kind == ExprKind::IntegerLiteral || expr.lhs->kind == ExprKind::FloatLiteral;
-        bool rhs_is_literal = expr.rhs->kind == ExprKind::IntegerLiteral || expr.rhs->kind == ExprKind::FloatLiteral;
+        const Expr& lhs_literal_form = unwrap_negated_numeric_literal(*expr.lhs);
+        const Expr& rhs_literal_form = unwrap_negated_numeric_literal(*expr.rhs);
+        bool lhs_is_literal =
+            lhs_literal_form.kind == ExprKind::IntegerLiteral || lhs_literal_form.kind == ExprKind::FloatLiteral;
+        bool rhs_is_literal =
+            rhs_literal_form.kind == ExprKind::IntegerLiteral || rhs_literal_form.kind == ExprKind::FloatLiteral;
         std::optional<Type> lhs_type = infer_type(*expr.lhs);
         std::optional<Type> rhs_type = infer_type(*expr.rhs);
         if (expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne) {
@@ -3199,12 +3233,12 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             !types_equal(binary_operand_type(*lhs_type), binary_operand_type(*rhs_type)) &&
             context_type.has_value()) {
             const Type& literal_target = *context_type;
-            bool lhs_matches = !lhs_is_literal || ((expr.lhs->kind == ExprKind::FloatLiteral && is_float_scalar_type_name(literal_target.name)) ||
-                                                   (expr.lhs->kind == ExprKind::IntegerLiteral &&
+            bool lhs_matches = !lhs_is_literal || ((lhs_literal_form.kind == ExprKind::FloatLiteral && is_float_scalar_type_name(literal_target.name)) ||
+                                                   (lhs_literal_form.kind == ExprKind::IntegerLiteral &&
                                                     literal_target.kind == TypeKind::Named &&
                                                     literal_target.name != "bool" && literal_target.name != "char"));
-            bool rhs_matches = !rhs_is_literal || ((expr.rhs->kind == ExprKind::FloatLiteral && is_float_scalar_type_name(literal_target.name)) ||
-                                                   (expr.rhs->kind == ExprKind::IntegerLiteral &&
+            bool rhs_matches = !rhs_is_literal || ((rhs_literal_form.kind == ExprKind::FloatLiteral && is_float_scalar_type_name(literal_target.name)) ||
+                                                   (rhs_literal_form.kind == ExprKind::IntegerLiteral &&
                                                     literal_target.kind == TypeKind::Named &&
                                                     literal_target.name != "bool" && literal_target.name != "char"));
             if (!(lhs_matches && rhs_matches)) {

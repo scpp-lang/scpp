@@ -1,0 +1,8 @@
+// spec §6: assignment is the same boundary as initialization.
+int f() {
+    int32_t b = 0;
+    int a = 1;
+    b = a;
+    if (b == 1) { return 1; }
+    return 0;
+}
