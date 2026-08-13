@@ -1,0 +1,33 @@
+// ch06 §6: `nullptr` used to be parsed as an ordinary
+// Identifier named "nullptr" with no type at all, so every consumer
+// needing one either special-cased the spelling or reported the literal
+// as an undeclared variable. It is now a literal of its own, of the
+// builtin type `nullptr_t` -- spellable bare or as `std::nullptr_t`,
+// with no module imported.
+//
+// Against the pre-change compiler every declaration below except the
+// first two failed outright: `nullptr_t`/`std::nullptr_t` did not parse
+// as a type at all, `auto x = nullptr;` could not deduce, a null
+// function pointer was rejected as "expected a function or function
+// pointer with matching signature", and `nullptr == nullptr` reported
+// "use of undeclared variable 'nullptr'".
+import std;
+
+int* returns_null() { return nullptr; }
+
+void takes_pointer(int* p) { return; }
+
+int main() {
+    int* p = nullptr;
+    const int* cp = nullptr;
+    void* vp = nullptr;
+    nullptr_t bare = nullptr;
+    std::nullptr_t qualified = nullptr;
+    auto deduced = nullptr;
+    int (*fp)(int) = nullptr;
+    takes_pointer(nullptr);
+    bool all_null = p == nullptr && cp == nullptr && vp == nullptr && fp == nullptr &&
+                    returns_null() == nullptr && nullptr == nullptr && bare == nullptr &&
+                    qualified == nullptr && deduced == nullptr;
+    return all_null ? 0 : 1;
+}

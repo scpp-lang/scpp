@@ -1,0 +1,35 @@
+// ch06 §6: `nullptr_t` is a real builtin type, not a spelling the
+// compiler recognizes only in a handful of hard-coded positions. So it
+// must work everywhere a type works -- as a class member, as a function
+// return type, as a parameter, and as a template argument deduced from
+// `nullptr` itself. Against the pre-change compiler none of these
+// parsed, because `nullptr_t` was not a type and `nullptr` was an
+// Identifier expression with no type to deduce from.
+import std;
+
+class Tagged {
+  public:
+    Tagged() : tag{nullptr}, payload{nullptr} { return; }
+    virtual ~Tagged() { return; }
+
+    nullptr_t tag;
+    int* payload;
+};
+
+nullptr_t make_null() { return nullptr; }
+
+bool accepts_null(nullptr_t marker) { return marker == nullptr; }
+
+template <typename T>
+int deduced_kind(T value) {
+    return 7;
+}
+
+int main() {
+    Tagged tagged{};
+    nullptr_t returned = make_null();
+    int from_template = deduced_kind(nullptr);
+    bool ok = tagged.tag == nullptr && tagged.payload == nullptr && returned == nullptr &&
+              accepts_null(nullptr) && from_template == 7;
+    return ok ? 0 : 1;
+}

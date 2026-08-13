@@ -53,6 +53,14 @@ public:
         return;
     }
 
+    // std::unique_ptr(nullptr_t) -- real C++'s own null constructor,
+    // which is what makes `std::unique_ptr<T> p = nullptr;` mean the
+    // same thing as `std::unique_ptr<T> p{};`.
+    unique_ptr(nullptr_t null_pointer) {
+        this->owns_ = false;
+        return;
+    }
+
     unique_ptr(T* ptr) {
         this->ptr_ = ptr;
         this->owns_ = true;
@@ -251,6 +259,11 @@ private:
 
 public:
     shared_ptr() { return; }
+
+    // std::shared_ptr(nullptr_t) -- the null constructor, exactly as in
+    // real C++ (and as unique_ptr has just above): an empty shared_ptr
+    // owning nothing, with no control block allocated.
+    shared_ptr(nullptr_t null_pointer) { return; }
 
     shared_ptr(T* ptr) {
         this->ptr_ = ptr;

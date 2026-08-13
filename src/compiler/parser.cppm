@@ -217,12 +217,13 @@ using PartitionResolver = std::function<std::expected<Program, ParseError>(const
 }
 
 [[nodiscard]] bool is_type_start_keyword(TokenKind kind) {
-    return kind == TokenKind::KwConst || kind == TokenKind::KwUnsigned ||
+    return kind == TokenKind::KwConst || kind == TokenKind::KwUnsigned || kind == TokenKind::KwNullptrT ||
            !builtin_scalar_keyword_type_name(kind).empty();
 }
 
 [[nodiscard]] bool is_cast_type_start_keyword(TokenKind kind) {
-    return kind == TokenKind::KwUnsigned || !builtin_scalar_keyword_type_name(kind).empty();
+    return kind == TokenKind::KwUnsigned || kind == TokenKind::KwNullptrT ||
+           !builtin_scalar_keyword_type_name(kind).empty();
 }
 
 // ch05 §5.14: one injected generic type name's own template-parameter
@@ -1677,18 +1678,25 @@ private:
         advance(); // <member>
     }
 
-    [[nodiscard]] std::optional<std::string_view> peek_std_qualified_builtin_scalar_type_name(std::size_t offset = 0) const {
+    [[nodiscard]] std::optional<std::string> peek_std_qualified_builtin_scalar_type_name(std::size_t offset = 0) const {
         if (peek_at(offset).kind != TokenKind::Identifier || peek_at(offset).text != "std" ||
             peek_at(offset + 1).kind != TokenKind::ColonColon) {
-            return std::optional<std::string_view>{};
+            return std::optional<std::string>{};
         }
+        // `std::nullptr_t` -- the spelling real C++ exposes for
+        // `nullptr`'s type, normalized here to the same bare
+        // `nullptr_t` every other phase compares against. Handled
+        // separately from the scalar family below because `nullptr_t`
+        // is deliberately not a scalar (it must never convert to an
+        // integer), so it has no builtin_scalar_keyword_type_name entry.
+        if (peek_at(offset + 2).kind == TokenKind::KwNullptrT) return nullptr_type_name();
         std::string_view name = builtin_scalar_keyword_type_name(peek_at(offset + 2).kind);
         if (name == "size_t" || name == "ptrdiff_t" || name == "int8_t" || name == "uint8_t" ||
             name == "int16_t" || name == "uint16_t" || name == "int32_t" || name == "uint32_t" ||
             name == "int64_t" || name == "uint64_t") {
-            return name;
+            return std::string(name.data(), name.size());
         }
-        return std::optional<std::string_view>{};
+        return std::optional<std::string>{};
     }
 
     // Looks ahead (without consuming anything) at a possibly-qualified
@@ -3436,12 +3444,12 @@ private:
     // an outer pointer level), never a later/outer one, mirroring how
     // real C++ reads `const int**` as "pointer to (pointer to const int)".
     [[nodiscard]] std::expected<Type, ParseError> parse_unqualified_type(bool const_qualifies_first_pointer = false) {
-        if (std::optional<std::string_view> std_builtin_scalar = peek_std_qualified_builtin_scalar_type_name();
+        if (std::optional<std::string> std_builtin_scalar = peek_std_qualified_builtin_scalar_type_name();
             std_builtin_scalar.has_value()) {
             Type type{};
 
             type.kind = TypeKind::Named;
-            type.name = std::string(std_builtin_scalar->data(), std_builtin_scalar->size());
+            type.name = *std_builtin_scalar;
             consume_std_qualified();
             bool first_star = true;
             while (match(TokenKind::Star)) {
@@ -3484,6 +3492,14 @@ private:
         if (std::string_view builtin_name = builtin_scalar_keyword_type_name(tok.kind); !builtin_name.empty() &&
             tok.kind != TokenKind::KwLong) {
             type.name = std::string(builtin_name.data(), builtin_name.size());
+            advance();
+        } else if (tok.kind == TokenKind::KwNullptrT) {
+            // ch06 §6: `nullptr_t` -- `nullptr`'s own type. Deliberately
+            // *not* part of builtin_scalar_keyword_type_name's set: that
+            // set is exactly the scalar/numeric family a
+            // `static_cast<T>` may convert freely between, and
+            // `nullptr_t` must never convert to or from an integer.
+            type.name = nullptr_type_name();
             advance();
         } else if (tok.kind == TokenKind::KwLong) {
             // ch06 §6: `long` -- deliberately fixed as an alias for
@@ -10357,6 +10373,12 @@ private:
             node->kind = ExprKind::BoolLiteral;
             node->loc = loc;
             node->bool_value = false;
+            return std::move(node);
+        }
+        if (match(TokenKind::KwNullptr)) {
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::NullptrLiteral;
+            node->loc = loc;
             return std::move(node);
         }
         if (check(TokenKind::Identifier)) {

@@ -351,6 +351,15 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
         case ExprKind::FloatLiteral: return is_float_named_type(operand_type);
         case ExprKind::BoolLiteral: return operand_type.kind == TypeKind::Named && operand_type.name == "bool";
         case ExprKind::CharLiteral: return operand_type.kind == TypeKind::Named && operand_type.name == "char";
+        // ch06 §6: `nullptr` compares against any raw pointer type
+        // (`p == nullptr`), and against `nullptr_t` itself
+        // (`nullptr == nullptr`, and a `nullptr_t`-typed place compared
+        // with the literal). It is compatible with nothing else -- in
+        // particular with no integer type, so `i == nullptr` stays the
+        // error it has always been.
+        case ExprKind::NullptrLiteral:
+            return operand_type.kind == TypeKind::Pointer || operand_type.kind == TypeKind::FunctionPointer ||
+                   is_nullptr_type(operand_type);
         default: return false;
     }
 }

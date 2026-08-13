@@ -116,7 +116,7 @@ namespace scpp {
 }
 
 [[nodiscard]] bool is_nullptr_literal_expr(const Expr& expr) {
-    return expr.kind == ExprKind::Identifier && expr.name == "nullptr" && !expr.explicit_global_qualification;
+    return expr.kind == ExprKind::NullptrLiteral;
 }
 
 [[nodiscard]] bool is_supported_compound_assignment(BinaryOp op) {
@@ -1378,6 +1378,7 @@ struct ConvertingConstructorBinding {
         case ExprKind::IntegerLiteral:
         case ExprKind::FloatLiteral:
         case ExprKind::BoolLiteral:
+        case ExprKind::NullptrLiteral:
         case ExprKind::CharLiteral:
         case ExprKind::StringLiteral:
         case ExprKind::TypeTrait:
@@ -2379,6 +2380,11 @@ struct ConvertingConstructorBinding {
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
+                if (auto _r = check_nullptr_assignment(*global_type, *stmt.expr, state.current_loc, target_name,
+                                                      report_errors);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
                 return apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
             }
             if (is_reference((*local_type))) {
@@ -2658,6 +2664,11 @@ struct ConvertingConstructorBinding {
                 }
                 if (auto _r = check_raw_pointer_assignment((*local_type), *stmt.expr, body, signatures, state.current_loc,
                                              target_name, report_errors);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                if (auto _r = check_nullptr_assignment((*local_type), *stmt.expr, state.current_loc, target_name,
+                                                      report_errors);
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
