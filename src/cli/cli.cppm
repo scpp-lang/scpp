@@ -24,6 +24,8 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::FloatLiteral: return "FloatLiteral";
         case scpp::TokenKind::CharLiteral: return "CharLiteral";
         case scpp::TokenKind::StringLiteral: return "StringLiteral";
+        case scpp::TokenKind::KwNullptr: return "KwNullptr";
+        case scpp::TokenKind::KwNullptrT: return "KwNullptrT";
         case scpp::TokenKind::KwInt: return "KwInt";
         case scpp::TokenKind::KwBool: return "KwBool";
         case scpp::TokenKind::KwChar: return "KwChar";
@@ -452,6 +454,9 @@ void print_expr(const scpp::Expr& expr, int depth) {
             break;
         case scpp::ExprKind::BoolLiteral:
             std::cout << "BoolLiteral " << (expr.bool_value ? "true" : "false") << "\n";
+            break;
+        case scpp::ExprKind::NullptrLiteral:
+            std::cout << "NullptrLiteral\n";
             break;
         case scpp::ExprKind::TypeTrait:
             std::cout << "TypeTrait " << expr.name << "\n";

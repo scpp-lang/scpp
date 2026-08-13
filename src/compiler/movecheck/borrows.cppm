@@ -99,6 +99,7 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
         case ExprKind::IntegerLiteral:
         case ExprKind::FloatLiteral:
         case ExprKind::BoolLiteral:
+        case ExprKind::NullptrLiteral:
         case ExprKind::CharLiteral:
         case ExprKind::StringLiteral:
             return {};
@@ -358,6 +359,7 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
         case ExprKind::IntegerLiteral:
         case ExprKind::FloatLiteral:
         case ExprKind::BoolLiteral:
+        case ExprKind::NullptrLiteral:
         case ExprKind::CharLiteral:
         case ExprKind::StringLiteral:
         case ExprKind::TypeTrait:
@@ -817,8 +819,12 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
 [[nodiscard]] RootSet resolve_lifetime_source_roots(const Expr& expr, DataflowState& state, const Body& body,
                                                     const Signatures& signatures, bool report_errors) {
     switch (expr.kind) {
+        // `nullptr` borrows nothing and can therefore never dangle: it
+        // designates no object, so there is no root for a later use to
+        // outlive. An empty RootSet is exactly that statement.
+        case ExprKind::NullptrLiteral: return {};
+
         case ExprKind::Identifier: {
-            if (expr.name == "nullptr" && !expr.explicit_global_qualification) return {};
             if (std::optional<LocalId> local = body.local_of(expr); local.has_value()) {
                 auto local_it = state.local_lifetime_sources.find(*local);
                 if (local_it != state.local_lifetime_sources.end()) return local_it->second;

@@ -1091,6 +1091,17 @@ private:
         return cell;
     }
 
+    // `nullptr` (ch06 §6). A Pointer cell whose PointerValue is
+    // default-constructed: its `storage` is a null shared_ptr, which is
+    // exactly the "points at no object" state every pointer consumer
+    // here already tests for before dereferencing.
+    [[nodiscard]] std::shared_ptr<Cell> make_nullptr_cell() {
+        auto cell = std::make_shared<Cell>();
+        cell->type = nullptr_named_type();
+        cell->data.set_pointer(PointerValue{});
+        return cell;
+    }
+
     [[nodiscard]] std::expected<std::vector<ClassField>, ConstexprError> collect_class_fields(const ClassDef& def) {
         std::vector<ClassField> fields{};
         if (auto base = def.direct_ordinary_base(); base.has_value()) {
@@ -2413,6 +2424,7 @@ private:
             case ExprKind::IntegerLiteral: return named_type("int");
             case ExprKind::FloatLiteral: return named_type("double");
             case ExprKind::BoolLiteral: return named_type("bool");
+            case ExprKind::NullptrLiteral: return nullptr_named_type();
             case ExprKind::CharLiteral: return named_type("char");
             case ExprKind::TypeTrait: return named_type("bool");
             case ExprKind::Alignof:
@@ -2582,6 +2594,7 @@ private:
             case ExprKind::IntegerLiteral: return make_scalar_cell(named_type("int"), expr.int_value);
             case ExprKind::FloatLiteral: return make_double_cell(expr.float_value);
             case ExprKind::BoolLiteral: return make_bool_cell(expr.bool_value);
+            case ExprKind::NullptrLiteral: return make_nullptr_cell();
             case ExprKind::CharLiteral: return make_scalar_cell(named_type("char"), expr.int_value);
             case ExprKind::StringLiteral: return make_string_literal_pointer(expr);
             case ExprKind::Destroy:
@@ -3080,6 +3093,7 @@ private:
         case ExprKind::IntegerLiteral:
         case ExprKind::FloatLiteral:
         case ExprKind::BoolLiteral:
+        case ExprKind::NullptrLiteral:
         case ExprKind::CharLiteral:
         case ExprKind::StringLiteral:
         case ExprKind::TypeTrait:

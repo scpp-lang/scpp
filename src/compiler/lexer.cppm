@@ -56,6 +56,15 @@ enum class TokenKind {
     KwUnsigned,
     KwSizeT,
     KwPtrdiffT,
+    // ch06 §6: the null pointer literal `nullptr` and its type
+    // `nullptr_t`. Real C++ makes `nullptr` a keyword and exposes the
+    // type only as the library alias `std::nullptr_t` (over the
+    // unspellable `decltype(nullptr)`); scpp gives the type a real
+    // builtin spelling instead, exactly as it already does for
+    // `size_t`/`ptrdiff_t` above -- so `nullptr`'s type is known to the
+    // compiler with no module imported at all.
+    KwNullptr,
+    KwNullptrT,
     KwInt8T,
     KwUInt8T,
     KwInt16T,
@@ -283,6 +292,8 @@ private:
         if (text == "unsigned") return TokenKind::KwUnsigned;
         if (text == "size_t") return TokenKind::KwSizeT;
         if (text == "ptrdiff_t") return TokenKind::KwPtrdiffT;
+        if (text == "nullptr") return TokenKind::KwNullptr;
+        if (text == "nullptr_t") return TokenKind::KwNullptrT;
         if (text == "int8_t") return TokenKind::KwInt8T;
         if (text == "uint8_t") return TokenKind::KwUInt8T;
         if (text == "int16_t") return TokenKind::KwInt16T;

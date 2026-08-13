@@ -439,6 +439,14 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
                 return llvm::LLVMArrayType2(std::move(element_result).value(), type.array_size);
             }
             case TypeKind::Named:
+                // ch06 §6: `nullptr_t`, the type of the `nullptr`
+                // literal. It has exactly one value, so nothing about it
+                // needs to be *read* at runtime -- but it is a real
+                // object type (a `nullptr_t` local/field/parameter has
+                // storage), and real C++ gives it the size and alignment
+                // of a pointer, so it lowers to an opaque pointer whose
+                // only ever value is null.
+                if (is_nullptr_type(type)) return llvm::LLVMPointerTypeInContext(context_, 0);
                 if (type.name == "int") return llvm::LLVMInt32TypeInContext(context_);
                 // A full byte (i8), matching real C++'s sizeof(bool)==1
                 // and the spec's false=0/true=1 invariant (ch06) -- not

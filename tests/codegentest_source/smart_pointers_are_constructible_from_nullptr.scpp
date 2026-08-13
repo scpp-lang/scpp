@@ -1,0 +1,25 @@
+// The stdlib fidelity gap this closes: real `std::unique_ptr` and
+// `std::shared_ptr` both declare a `nullptr_t` constructor, so
+// `std::unique_ptr<T> p = nullptr;` is the ordinary spelling for an
+// empty smart pointer. scpp's declared none, because there was no
+// `nullptr_t` type to declare one over -- `= nullptr` reported "use of
+// undeclared variable 'nullptr'".
+//
+// `std::shared_ptr` gains the same constructor; it is exercised in
+// movecheck_test rather than here only because this harness cannot
+// lower `std::shared_ptr`'s layout at all (a pre-existing limitation --
+// no codegen case file uses it).
+//
+// `std::optional` is deliberately *not* given one: real
+// `std::optional` takes `nullopt_t`, and `std::optional<int> o =
+// nullptr;` is ill-formed in real C++. Adding one would be less
+// faithful, not more.
+import std;
+
+int main() {
+    std::unique_ptr<int> owned = nullptr;
+    std::unique_ptr<int> braced{nullptr};
+
+    std::unique_ptr<int> live = std::make_unique<int>(11);
+    return *live == 11 ? 0 : 1;
+}

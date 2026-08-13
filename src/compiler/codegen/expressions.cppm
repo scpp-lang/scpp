@@ -1239,8 +1239,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         if (is_named_record_type(target_type)) {
             return codegen_class_value_for_boundary(expr, target_type, /*allow_implicit_converting_ctor=*/true);
         }
-        if (target_type.kind == TypeKind::Pointer && expr.kind == ExprKind::Identifier && expr.name == "nullptr" &&
-            !expr.explicit_global_qualification) {
+        if ((target_type.kind == TypeKind::Pointer || target_type.kind == TypeKind::FunctionPointer) &&
+            expr.kind == ExprKind::NullptrLiteral) {
             auto target_llvm_type_result = to_llvm_type(target_type);
             if (!target_llvm_type_result.has_value()) return std::unexpected(std::move(target_llvm_type_result).error());
             return llvm::LLVMConstNull(std::move(target_llvm_type_result).value());
@@ -1387,6 +1387,16 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 // codegen_value_for_target), exactly like an
                 // IntegerLiteral's own default-to-`int` treatment.
                 return llvm::LLVMConstReal(llvm::LLVMDoubleTypeInContext(context_), expr.float_value);
+
+            case ExprKind::NullptrLiteral:
+                // A bare `nullptr` with no pointer target type in
+                // context -- e.g. one stored into a `nullptr_t`-typed
+                // place. `nullptr_t` lowers to an opaque pointer (see
+                // to_llvm_type), and its sole value is the null one.
+                // Where a *pointer* target type is known, this case is
+                // not reached at all: codegen_value_for_target builds
+                // the null constant of that exact pointer type first.
+                return llvm::LLVMConstNull(llvm::LLVMPointerTypeInContext(context_, 0));
 
             case ExprKind::BoolLiteral:
             case ExprKind::TypeTrait:
@@ -3068,16 +3078,22 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             // through to the generic operand codegen further below,
             // which would otherwise try to evaluate "nullptr" as an
             // ordinary named value and fail.
-            auto is_nullptr_identifier = [](const Expr& operand) {
-                return operand.kind == ExprKind::Identifier && operand.name == "nullptr" &&
-                       !operand.explicit_global_qualification;
-            };
-            bool lhs_is_nullptr = is_nullptr_identifier(*expr.lhs);
-            bool rhs_is_nullptr = is_nullptr_identifier(*expr.rhs);
+            bool lhs_is_nullptr = expr.lhs->kind == ExprKind::NullptrLiteral;
+            bool rhs_is_nullptr = expr.rhs->kind == ExprKind::NullptrLiteral;
+            // `nullptr == nullptr` / `nullptr != nullptr`: both operands
+            // are the same, sole value of `nullptr_t`, so the answer is
+            // a compile-time constant with no pointer type involved at
+            // all. Handled before the mixed case below, which needs one
+            // side to carry a real pointer type.
+            if (lhs_is_nullptr && rhs_is_nullptr) {
+                return i1_to_bool(llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_),
+                                                     expr.binary_op == BinaryOp::Eq ? 1 : 0, 0));
+            }
             if (lhs_is_nullptr != rhs_is_nullptr) {
                 const Expr& pointer_expr = lhs_is_nullptr ? *expr.rhs : *expr.lhs;
                 const std::optional<Type>& pointer_expr_type = lhs_is_nullptr ? rhs_type : lhs_type;
-                if (pointer_expr_type.has_value() && pointer_expr_type->kind == TypeKind::Pointer) {
+                if (pointer_expr_type.has_value() && (pointer_expr_type->kind == TypeKind::Pointer ||
+                                                      pointer_expr_type->kind == TypeKind::FunctionPointer)) {
                     auto pointer_value_result = codegen_expr(pointer_expr);
                     if (!pointer_value_result.has_value()) return std::unexpected(std::move(pointer_value_result).error());
                     llvm::LLVMValueRef pointer_value = std::move(pointer_value_result).value();
