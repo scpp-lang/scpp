@@ -7,19 +7,15 @@ modules for distribution -- as raw `.scpp` interface source, or as a
 `.scppa` archive per target triple, or a mix -- into one distributable
 archive.
 
-`.scppkg` is referenced from
-[ch11 §11.12](../../book/en/ch11-modules-and-libraries.md#1112-the-scppm-scppa-and-scppkg-formats)
-of the language specification.
-
 A `.scppa` file, named from a `.scppkg` manifest (§3), is not a format
 this document defines: it is exactly the target platform's own native
 static-library archive format (the `ar` format for a Unix `.a`, or a
 Windows `.lib`), bundling one `.scppo` object member per file that
 contributed code to a module -- its primary interface unit, an
-implementation unit, or a partition (see ch11
-[§11.3](../../book/en/ch11-modules-and-libraries.md#113-export-surface-and-the-interfaceimplementation-split)
+implementation unit, or a partition (see
+[§10.3](12-modules-and-namespaces.md#103-export-declarations-and-the-required-namespace-moduleinterface)
 and
-[§11.4](../../book/en/ch11-modules-and-libraries.md#114-module-partitions))
+[§10.2](12-modules-and-namespaces.md#102-module-declaration-forms-and-partitions-moduleunit))
 -- for one target triple. Because it is a native archive, a system linker
 reads a `.scppa` file directly and unpacks it exactly as it would any
 other static library; nothing about it is scpp-specific except which
@@ -160,9 +156,9 @@ Each `archives` entry:
 
 A module built from several contributing files (its primary interface
 unit, one or more implementation units, one or more partitions -- see
-ch11 [§11.3](../../book/en/ch11-modules-and-libraries.md#113-export-surface-and-the-interfaceimplementation-split)
+[§10.3](12-modules-and-namespaces.md#103-export-declarations-and-the-required-namespace-moduleinterface)
 and
-[§11.4](../../book/en/ch11-modules-and-libraries.md#114-module-partitions))
+[§10.2](12-modules-and-namespaces.md#102-module-declaration-forms-and-partitions-moduleunit))
 still has exactly one `archives` entry per target triple: the `.scppa`
 file itself is a native archive bundling however many `.scppo` members
 that module needed for that triple, so this manifest never has to

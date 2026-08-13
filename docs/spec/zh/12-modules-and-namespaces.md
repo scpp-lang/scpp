@@ -298,4 +298,4 @@ int use(ns::Tag t) {
 
 ---
 
-[← 上一节：继承与接口](11-inheritance-and-interfaces.md) · [目录](README.md)
+[← 上一节：继承与接口](11-inheritance-and-interfaces.md) · [目录](README.md) · [下一节：空指针类型 →](13-null-pointer-type.md)
