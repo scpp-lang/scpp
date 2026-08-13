@@ -1,4 +1,4 @@
-// docs/book/en/ch04-struct-vs-class.md §4.3 and docs/spec/en/05-unions-and-packed-layout.md §9.2:
+// docs/spec/en/05-unions-and-packed-layout.md §9.2(3):
 // [[scpp::packed]] removes inter-member padding, so the int begins immediately
 // after the leading char in the raw byte representation.
 extern "C" {

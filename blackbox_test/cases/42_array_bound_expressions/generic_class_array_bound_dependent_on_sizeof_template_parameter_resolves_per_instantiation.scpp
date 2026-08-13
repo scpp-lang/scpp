@@ -13,7 +13,11 @@
 // bare (unconstrained) type parameter on a generic *struct* is rejected
 // by a separate, pre-existing rule unrelated to array bounds (struct
 // field triviality is a whole-type property that must be guaranteed by a
-// concept constraint -- see the old book's ch05 §5.14, still enforced).
+// concept constraint). That rule currently has no home in `docs/`: it was
+// stated only in the old book's ch05 §5.14, which was deleted wholesale.
+// The compiler does still enforce it, as
+// 21_generic_types/generic_struct_bare_type_parameter_is_rejected.scpp
+// witnesses.
 // That rule cannot be satisfied here: `T` is only ever used inside
 // `sizeof(T)`, never as an actual field type, so no concept expressible
 // in this language version (which only supports method-call-shaped

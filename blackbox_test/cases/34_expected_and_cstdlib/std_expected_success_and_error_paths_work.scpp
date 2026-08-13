@@ -1,7 +1,9 @@
 import std;
-// docs/old-book/en/ch05-static-checks.md §5.6 and current stdlib semantics:
-// `std::expected<T, E>` and `std::unexpected<E>` represent success/error
-// states without exceptions.
+// docs/book/en/ch09-03-using-std-expected.md, "The working rules for
+// `std::expected<T, E>` today": construct the success state from a `T` and
+// the error state from `std::unexpected<E>`, and branch on `has_value()`
+// before calling `value()` or `error()` -- "explicit manual branching, not
+// hidden exception flow".
 enum class calc_error { invalid };
 
 std::expected<int, calc_error> ok() {
