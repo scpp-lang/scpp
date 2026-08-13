@@ -1,0 +1,20 @@
+// The `return` boundary for a converting constructor *template*, and
+// the reason libs/std/expected/std_expected.scpp can now declare its
+// value constructor as a template the way the real std::expected's
+// `template<class U = T> expected(U&&)` does: `return "hi";` from a
+// function returning a class built out of a std::string is one
+// user-defined conversion, which real C++ accepts and scpp rejected
+// only because the instantiation was never created.
+import std;
+
+class Message {
+public:
+    std::string text{};
+    template<typename U>
+    Message(U source) { text = std::string(source); }
+    virtual ~Message() = default;
+};
+
+Message greet() { return "hi"; }
+
+int main() { return static_cast<int>(greet().text.length()); }

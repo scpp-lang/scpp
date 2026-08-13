@@ -94,19 +94,6 @@ namespace scpp {
                                explicit_global_qualification);
 }
 
-[[nodiscard]] bool function_signature_accepts_argument_count(const FunctionSignature& sig, std::size_t arg_count,
-                                                             std::size_t param_offset) {
-    if (sig.param_types.size() < param_offset) return false;
-    std::size_t fixed_param_count = sig.param_types.size() - param_offset;
-    std::size_t min_required = fixed_param_count;
-    while (min_required > 0 && sig.param_default_exprs[param_offset + min_required - 1] != nullptr) {
-        min_required--;
-    }
-    if (arg_count < min_required) return false;
-    if (!sig.has_varargs && arg_count > fixed_param_count) return false;
-    return sig.has_varargs || arg_count <= fixed_param_count;
-}
-
 [[nodiscard]] std::optional<Type> find_visible_global_type(const std::string& name, bool explicit_global_qualification,
                                                            const Body& body) {
     const GlobalVar* global = find_visible_global_for_name(name, explicit_global_qualification, body);

@@ -1,0 +1,2 @@
+sequence: define i32 @main | call void @Wrap_new.int(ptr %classtmp, i32 3) | call void @Wrap_delete(ptr %w)
+contains: define void @Wrap_new.int(ptr %this, i32 %source)

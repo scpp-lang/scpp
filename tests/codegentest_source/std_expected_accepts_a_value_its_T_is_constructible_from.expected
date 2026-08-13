@@ -1,0 +1,3 @@
+contains: define void @"std::expected.std::string.int_new.char_cptr"(ptr %this, ptr %value)
+contains: define internal void @"_scppM3_stdF28_expected.std::string.int_newQ0_P2_30_std::expected.std::string.int&26_const std::unexpected.int&"(ptr %this, ptr %error)
+sequence: define %"class.std::expected.std::string.int" @greeting() | call void @"std::expected.std::string.int_new.char_cptr"

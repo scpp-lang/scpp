@@ -44,7 +44,8 @@ private:
     alignas(T) alignas(E) char storage_[sizeof(T) > sizeof(E) ? sizeof(T) : sizeof(E)]{};
 
 public:
-    expected(T value) {
+    template<typename U>
+    expected(U value) {
         this->has_value_ = true;
         [[scpp::unsafe]] {
             new ((T*)&this->storage_) T(std::move(value));

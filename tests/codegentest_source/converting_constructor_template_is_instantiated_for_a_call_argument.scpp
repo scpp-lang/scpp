@@ -1,0 +1,28 @@
+// A single-argument constructor *template* is a converting constructor
+// just as much as a non-template one is, and movecheck's
+// find_single_argument_converting_constructor_signature has always
+// selected it. Nothing ever created the instantiation, though: only an
+// *explicit* construction (`T v{x};`, `new T(x)`, `T(x)`) reached
+// maybe_instantiate_generic_constructor_overloads, so an implicit
+// conversion arrived at codegen with the constructor it had chosen
+// missing.
+//
+// At the call-argument boundary the argument was then lowered as its
+// unconverted self -- an i32 passed where a class value was expected --
+// and the whole function was rejected by the module verifier with
+// "internal error: generated invalid IR for 'main'".
+//
+// Note there is deliberately no other construction of Wrap anywhere in
+// this file: the bug also "went away" whenever some unrelated statement
+// happened to instantiate the same specialization first.
+class Wrap {
+public:
+    int value{};
+    template<typename U>
+    Wrap(U source) { value = static_cast<int>(source) + 1; }
+    virtual ~Wrap() = default;
+};
+
+int sink(Wrap w) { return w.value; }
+
+int main() { return sink(3); }

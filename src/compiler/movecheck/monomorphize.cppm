@@ -3686,12 +3686,278 @@ private:
         return {};
     }
 
+    // Whether a *non-template* constructor of `class_name` already
+    // accepts `args` -- the constructor counterpart of the ordinary-call
+    // path's `ordinary_overload_exists`/`resolve_overload` pair. Asks
+    // the same argument-vs-parameter question constructor *selection*
+    // asks (check_constructor_arguments' own
+    // argument_matches_parameter_for_constructor_selection), so a
+    // constructor this predicate reports as viable is exactly one that
+    // selection can subsequently choose.
+    [[nodiscard]] const FunctionSignature* find_ordinary_constructor_overload(const std::string& class_name,
+                                                                             const std::vector<ExprPtr>& args,
+                                                                             const Body& body) {
+        std::string ctor_name = class_name + "_new";
+        for (const auto& [name, overloads] : signatures_) {
+            if (!(name == ctor_name || name.starts_with(ctor_name + "."))) continue;
+            for (const FunctionSignature& candidate : overloads) {
+                if (candidate.member_owner_class != class_name) continue;
+                if (candidate.is_generic_template) continue;
+                if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
+                if (!function_signature_accepts_argument_count(candidate, args.size(), 1)) continue;
+                bool all_match = true;
+                for (std::size_t i = 0; all_match && i < args.size(); i++) {
+                    all_match = argument_matches_parameter_for_constructor_selection(*args[i], candidate.param_types[i + 1],
+                                                                                     body, signatures_);
+                }
+                if (all_match) return &candidate;
+            }
+        }
+        return nullptr;
+    }
+
+    // Whether the callee spelling `callee_name` names the class
+    // `class_name` -- i.e. whether the call is a construction `T(args)`
+    // rather than an ordinary call that merely returns a `T`.
+    //
+    // Compares base names because the two spellings legitimately differ
+    // in ways that carry no meaning here: a generic class is monomorphized
+    // to `Holder.std::string` while the call is still spelled `Holder`,
+    // and a class may be referred to unqualified (`error(...)`) while its
+    // resolved type name is fully qualified (`scpp::rand::error`).
+    [[nodiscard]] static bool callee_name_spells_type(std::string_view callee_name, std::string_view class_name) {
+        auto base_name = [](std::string_view name) {
+            if (std::size_t suffix = name.find('.'); suffix != std::string_view::npos) name = name.substr(0, suffix);
+            if (std::size_t qualifier = name.rfind("::"); qualifier != std::string_view::npos) {
+                name = name.substr(qualifier + 2);
+            }
+            return name;
+        };
+        if (callee_name.empty()) return false;
+        return base_name(callee_name) == base_name(class_name);
+    }
+
+    // Whether a *non-template* constructor of `class_name` matches
+    // `args` exactly by type -- the suppression guard's question, which
+    // is deliberately narrower than find_ordinary_constructor_overload's.
+    //
+    // check_constructor_arguments does not simply prefer a non-template
+    // over a template. Its preference chain is
+    //   sole arity match -> sole type match -> *exact* type match ->
+    //   non-generic,
+    // so the exact-type-match rung outranks the non-generic one. A
+    // suppression guard has to ask the question of the rung that
+    // actually decides, or it removes a candidate selection would have
+    // chosen: `std::function<bool(AccessSpecifier)>{lambda}` has a
+    // non-template copy constructor taking `const std::function<...>&`
+    // that constructor_parameter_accepts_argument_directly reports as
+    // viable for a closure argument, while the constructor *template*
+    // `function(F)` is the one selection actually wants. Suppressing on
+    // mere viability there left the class with no matching constructor
+    // at all.
+    //
+    // Mirrors check_constructor_arguments' own `exact_type_match`, with
+    // the reference/const normalization that comparing an argument's
+    // inferred value type against a by-reference parameter needs.
+    [[nodiscard]] bool non_template_constructor_matches_arguments_exactly(const std::string& class_name,
+                                                                         const std::vector<ExprPtr>& args, const Body& body) {
+        std::string ctor_name = class_name + "_new";
+        for (const auto& [name, overloads] : signatures_) {
+            if (!(name == ctor_name || name.starts_with(ctor_name + "."))) continue;
+            for (const FunctionSignature& candidate : overloads) {
+                if (candidate.member_owner_class != class_name) continue;
+                if (candidate.is_generic_template) continue;
+                if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
+                if (!function_signature_accepts_argument_count(candidate, args.size(), 1)) continue;
+                bool all_match = true;
+                for (std::size_t i = 0; all_match && i < args.size(); i++) {
+                    std::optional<Type> arg_type = infer_expr_type(*args[i], body, signatures_);
+                    if (!arg_type.has_value()) {
+                        all_match = false;
+                        break;
+                    }
+                    Type argument = is_reference(*arg_type) && arg_type->pointee != nullptr ? *arg_type->pointee : *arg_type;
+                    Type parameter = candidate.param_types[i + 1];
+                    if (is_reference(parameter) && parameter.pointee != nullptr) parameter = *parameter.pointee;
+                    argument.is_const_qualified = false;
+                    parameter.is_const_qualified = false;
+                    all_match = types_equal(argument, parameter);
+                }
+                if (all_match) return true;
+            }
+        }
+        return false;
+    }
+
+    // dataflow.cppm's resolve_converting_constructor_binding decides, at
+    // each of the four value-to-declared-class-type boundaries, that a
+    // source of some *other* type may initialize a class-typed
+    // destination through one of that class's single-argument converting
+    // constructors. When the constructor it selects is a constructor
+    // *template*, the instantiation has to be created here: this is the
+    // last pass that can add a function to the program at all, and
+    // codegen can only look up definitions that already exist.
+    //
+    // Nothing used to create it. Only an *explicit* construction
+    // (`T v{x};`, `new T(x)`, `T(x)`) reached
+    // maybe_instantiate_generic_constructor_overloads; an implicit
+    // conversion reached nothing, so the program that check_moves had
+    // just accepted arrived at codegen with the chosen constructor
+    // missing. What happened next depended only on which boundary it
+    // was:
+    //
+    //   * a call argument was lowered as its *unconverted* self, so an
+    //     `int` was passed where a class value was expected and the
+    //     module verifier rejected the finished function with
+    //     "internal error: generated invalid IR";
+    //   * a variable initializer and a `return` operand hit
+    //     check_store_type/check_return_type and were reported as
+    //     "scpp has no implicit conversion between distinct scalar
+    //     types" -- a type-error message for what is really a missing
+    //     instantiation;
+    //   * and it *worked* whenever some unrelated line elsewhere in the
+    //     same program happened to instantiate the same specialization
+    //     first, since codegen then found that one. Correctness that
+    //     depends on a different statement existing somewhere else is
+    //     the worst of the three.
+    //
+    // Deliberately asks the *same* question dataflow.cppm asks, through
+    // the same find_single_argument_converting_constructor_signature, so
+    // the set of conversions this pass materializes cannot drift from
+    // the set the checker accepts.
+    void instantiate_converting_constructor_template(Type destination_type, const Expr& source, Body& body,
+                                                     SourceLocation loc) {
+        if (destination_type.kind != TypeKind::Named) return;
+        // The destination may still be spelled as an *uninstantiated*
+        // generic (`Holder<std::string>` rather than the concrete
+        // `Holder.std::string` this pass rewrites it to). Resolving it
+        // first is what makes the constructor found below the one whose
+        // own class parameters are already bound -- looking the name up
+        // unresolved finds the generic class's constructor template with
+        // `T` still free, and instantiating *that* produces a clone
+        // whose body cannot be checked at all ("class 'T' has no
+        // constructor matching this call").
+        Type concrete_destination = resolve_generic_type_optimistic(destination_type, loc);
+        if (concrete_destination.kind != TypeKind::Named) return;
+        // No conversion is involved when the source already *is* a
+        // destination-typed value: that is a copy or a move, and the
+        // constructor template must not be instantiated for it. Real
+        // C++'s own `std::expected` spells this exclusion out as
+        // `!is_same_v<expected, remove_cvref_t<U>>` among its converting
+        // constructor's constraints, for the same reason -- an
+        // unconstrained `U` otherwise deduces to the class itself and
+        // the resulting body tries to build the wrapped `T` out of a
+        // whole wrapper.
+        if (std::optional<Type> source_type = infer_expr_type(source, body, signatures_); source_type.has_value()) {
+            const Type& source_value_type =
+                source_type->kind == TypeKind::Reference && source_type->pointee != nullptr ? *source_type->pointee
+                                                                                            : *source_type;
+            Type compared = source_value_type;
+            compared.is_const_qualified = false;
+            if (types_equal(compared, concrete_destination)) return;
+        }
+        const FunctionSignature* ctor =
+            find_single_argument_converting_constructor_signature(concrete_destination, source, body, signatures_);
+        if (ctor == nullptr || !ctor->is_generic_template) return;
+        std::vector<ExprPtr> converting_args;
+        converting_args.push_back(deep_clone_expr(source));
+        maybe_instantiate_generic_constructor_overloads(concrete_destination.name, converting_args, body, loc);
+    }
+
+    // Every by-value class-typed parameter of `call`'s resolved callee,
+    // for the call-argument boundary above. Resolution can legitimately
+    // fail here (an as-yet-unmonomorphized generic callee, a function
+    // pointer, a name this pass has not rewritten yet), in which case
+    // there is simply no destination type to convert to and nothing to
+    // do -- check_moves reports any real problem later.
+    void instantiate_converting_constructor_templates_for_call_arguments(Expr& call, Body& body) {
+        if (call.kind != ExprKind::Call) return;
+        CalleeSignature callee = resolve_callee_signature(call, body, signatures_);
+        if (callee.key.empty()) return;
+        const FunctionSignature* sig = resolve_overload(call, callee, body, signatures_);
+        if (sig == nullptr) return;
+        // Snapshot the destination types before instantiating anything.
+        // Each instantiation appends to `signatures_`, which rehashes the
+        // map and reallocates the overload vector `sig` points into, so
+        // reading `sig->param_types` again afterwards is a use-after-free.
+        std::vector<Type> destination_types;
+        for (std::size_t i = 0; i < call.args.size(); i++) {
+            std::size_t param_index = i + callee.param_offset;
+            if (param_index >= sig->param_types.size()) break;
+            destination_types.push_back(sig->param_types[param_index]);
+        }
+        for (std::size_t i = 0; i < destination_types.size(); i++) {
+            instantiate_converting_constructor_template(destination_types[i], *call.args[i], body, call.loc);
+        }
+    }
+
+    // The constructor-argument boundary: an argument of an *explicit*
+    // construction may itself need converting to the constructor's own
+    // by-value class parameter type (`Holder h{"hi"};` where `Holder`
+    // takes a `std::string`).
+    void instantiate_converting_constructor_templates_for_constructor_arguments(const std::string& class_name,
+                                                                                const std::vector<ExprPtr>& args, Body& body,
+                                                                                SourceLocation loc) {
+        const FunctionSignature* sig = find_ordinary_constructor_overload(class_name, args, body);
+        if (sig == nullptr) return;
+        // Snapshot first -- see the call-argument boundary above for why.
+        std::vector<Type> destination_types;
+        for (std::size_t i = 0; i < args.size() && i + 1 < sig->param_types.size(); i++) {
+            destination_types.push_back(sig->param_types[i + 1]);
+        }
+        for (std::size_t i = 0; i < destination_types.size(); i++) {
+            instantiate_converting_constructor_template(destination_types[i], *args[i], body, loc);
+        }
+    }
+
     [[maybe_unused]] void maybe_instantiate_generic_constructor_overloads(const std::string& class_name,
                                                                            const std::vector<ExprPtr>& args,
                                                                            Body& body, SourceLocation loc) {
         std::string ctor_name = class_name + "_new";
-        for (const Function& tmpl : program_.functions) {
-            if (!(tmpl.name == ctor_name || tmpl.name.starts_with(ctor_name + ".")) || tmpl.template_params.empty()) continue;
+        // ch05 §5.10, mirroring the identical guard the *ordinary*-call
+        // path already applies (see the `ordinary_overload_exists` check
+        // in maybe_monomorphize_generic_call): when a non-template
+        // constructor of this class already accepts these arguments, it
+        // wins, and the template must not be instantiated at all. Real
+        // C++ ranks a non-template above a template specialization when
+        // neither is otherwise better, and scpp already got that right
+        // for free functions -- constructors simply never asked. The
+        // asymmetry was observable: given both `Wrap(int)` and
+        // `template<typename U> Wrap(U)`, `Wrap w{3}` ran the *template*
+        // regardless of declaration order, while the same overload pair
+        // spelled as two free functions correctly ran the non-template.
+        //
+        // It matters far beyond a tie-break, because an unconstrained
+        // constructor template is otherwise greedy: scpp cannot express
+        // a `requires` clause on a member template, so a class such as
+        // std::expected -- whose value constructor must accept anything
+        // its `T` is constructible from -- would have its own
+        // `expected(const std::unexpected<E>&)` swallowed by the
+        // template and could never be given an error at all.
+        if (non_template_constructor_matches_arguments_exactly(class_name, args, body)) return;
+        // By index, and re-read through `program_.functions` each time,
+        // because the body below *appends* the clone it builds to that
+        // same vector. Range-iterating it while it grows is a
+        // use-after-free of both the iterator and `tmpl`; the ordinary
+        // call path next door already collects candidate *indices* first
+        // (maybe_monomorphize_generic_call's `visible_template_candidates`)
+        // for exactly this reason, and the constructor path simply never
+        // did. It survived only because it was reached rarely enough that
+        // the vector usually had spare capacity at that moment -- once
+        // implicit conversions started instantiating constructors too, it
+        // began crashing the compiler outright on programs as small as a
+        // single `sink(3)`.
+        std::vector<std::size_t> candidate_indices;
+        for (std::size_t index = 0; index < program_.functions.size(); index++) {
+            const Function& candidate = program_.functions[index];
+            if (!(candidate.name == ctor_name || candidate.name.starts_with(ctor_name + ".")) ||
+                candidate.template_params.empty()) {
+                continue;
+            }
+            candidate_indices.push_back(index);
+        }
+        for (std::size_t candidate_index : candidate_indices) {
+            const Function& tmpl = program_.functions[candidate_index];
             auto _candidate = [&]() -> std::expected<void, DataflowError> {
                 std::unordered_map<std::string, Type> type_bindings;
                 std::unordered_map<std::string, int> value_bindings;
@@ -3889,6 +4155,8 @@ private:
                 }
                 return {};
             }();
+            // `tmpl` is dangling from here on if the body above appended.
+
             if (!_candidate.has_value()) {
                 continue;
             }
@@ -5019,8 +5287,9 @@ private:
                     Type concrete_ctor_type = stmt.type;
                     maybe_mark_reference_wrapper_lifetime_source(concrete_ctor_type);
                     maybe_instantiate_generic_constructor_overloads(concrete_ctor_type.name, stmt.ctor_args, body, stmt.loc);
-                }
-                // ch05 §5.12: `auto name = expr;` -- infer the concrete
+                    instantiate_converting_constructor_templates_for_constructor_arguments(concrete_ctor_type.name,
+                                                                                           stmt.ctor_args, body, stmt.loc);
+                }                // ch05 §5.12: `auto name = expr;` -- infer the concrete
                 // type from the (by-now-fully-resolved, e.g. a Lambda's
                 // own synthesized class) initializer. Must overwrite
                 // *both* the AST's own `stmt.type` (so check_moves/
@@ -5121,8 +5390,22 @@ private:
                     stmt.type.pointee = std::make_shared<Type>(*inferred);
                     refine_declared_type(stmt, body, stmt.type);
                 }
+                // The variable-initializer boundary, once `stmt.type` is
+                // known to be concrete (after the `auto` resolution just
+                // above, which can only ever produce the initializer's
+                // own type and so never needs a conversion of its own).
+                if (stmt.init && stmt.type.kind == TypeKind::Named && stmt.type.name != "auto") {
+                    instantiate_converting_constructor_template(stmt.type, *stmt.init, body, stmt.loc);
+                }
                 return {};
             case StmtKind::Return:
+                if (stmt.expr) {
+                    if (auto _r = walk_expr(*stmt.expr, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                    instantiate_converting_constructor_template(current_walk_return_type_, *stmt.expr, body, stmt.loc);
+                }
+                return {};
             case StmtKind::ExprStmt:
                 if (stmt.expr) {
                     if (auto _r = walk_expr(*stmt.expr, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
@@ -5333,6 +5616,8 @@ private:
             Type concrete_ctor_type = expr.type;
             maybe_mark_reference_wrapper_lifetime_source(concrete_ctor_type);
             maybe_instantiate_generic_constructor_overloads(concrete_ctor_type.name, expr.args, body, expr.loc);
+            instantiate_converting_constructor_templates_for_constructor_arguments(concrete_ctor_type.name, expr.args, body,
+                                                                                   expr.loc);
         }
         if (expr.kind == ExprKind::Call && expr.lhs == nullptr) {
             if (auto _r = maybe_resolve_generic_type_constructor_call(expr, body); !_r.has_value()) {
@@ -5350,11 +5635,44 @@ private:
                     }
                 }
             }
+            // ...but a *class-typed* call is not the same question as a
+            // *construction*. infer_expr_type answers "what type does
+            // this expression have", which for an ordinary call is its
+            // return type -- so `parse(tokens, ...)` returning
+            // `std::expected<Program, ParseError>` and
+            // `uniform_int_distribution<int>::make(lo, hi)` returning
+            // `std::expected<uniform_int_distribution<int>, error>` both
+            // reached here and were treated as constructions of
+            // `std::expected` taking the *callee's* arguments: a
+            // 4-argument and a 2-argument "constructor call" for a class
+            // whose constructors take one.
+            //
+            // That was inert only for as long as no such class had a
+            // constructor *template*: the loop below simply found
+            // nothing to instantiate and returned. The moment one does
+            // (std::expected's value constructor, so it can accept
+            // anything its `T` is constructible from, the way the real
+            // one's `template<class U = T> expected(U&&)` does), the
+            // bogus construction deduced `U` from an unrelated argument
+            // -- `U = std::vector<Token>`, `U = int` -- and emitted a
+            // clone whose body tried to build `T` out of it.
+            //
+            // The construction question is about the *callee spelling*:
+            // `T(args)` constructs, `f(args)` does not, however
+            // class-typed `f`'s result is.
+            if (names_known_class) {
+                names_known_class = callee_name_spells_type(expr.name, direct_call_type->name);
+            }
             if (names_known_class) {
                 Type concrete_ctor_type = *direct_call_type;
                 maybe_mark_reference_wrapper_lifetime_source(concrete_ctor_type);
                 maybe_instantiate_generic_constructor_overloads(concrete_ctor_type.name, expr.args, body, expr.loc);
+                instantiate_converting_constructor_templates_for_constructor_arguments(concrete_ctor_type.name, expr.args, body,
+                                                                                       expr.loc);
             }
+        }
+        if (expr.kind == ExprKind::Call) {
+            instantiate_converting_constructor_templates_for_call_arguments(expr, body);
         }
 
         if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Deref && expr.lhs != nullptr) {

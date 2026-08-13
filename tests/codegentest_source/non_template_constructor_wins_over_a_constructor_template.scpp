@@ -1,0 +1,35 @@
+// ch05 §5.10: a non-template constructor outranks a constructor
+// template when both match, exactly as real C++ ranks a non-template
+// above a template specialization -- and exactly as scpp already ranked
+// two *free functions*. Constructors simply never asked the question:
+// maybe_instantiate_generic_constructor_overloads had no counterpart to
+// the ordinary-call path's `ordinary_overload_exists` guard, so it
+// instantiated the template anyway and selection then picked whichever
+// of the two equally-exact candidates the signature hash table happened
+// to enumerate first -- which was the freshly-added clone.
+//
+// Both declaration orders are checked, because the pre-fix behaviour was
+// order-independent in the wrong direction: the template ran either way.
+class TemplateFirst {
+public:
+    int tag{};
+    template<typename U>
+    TemplateFirst(U source) { tag = static_cast<int>(source) + 200; }
+    TemplateFirst(int source) { tag = source + 100; }
+    virtual ~TemplateFirst() = default;
+};
+
+class NonTemplateFirst {
+public:
+    int tag{};
+    NonTemplateFirst(int source) { tag = source + 100; }
+    template<typename U>
+    NonTemplateFirst(U source) { tag = static_cast<int>(source) + 200; }
+    virtual ~NonTemplateFirst() = default;
+};
+
+int main() {
+    TemplateFirst a{1};
+    NonTemplateFirst b{1};
+    return a.tag == 101 && b.tag == 101 ? 7 : 0;
+}
