@@ -37,6 +37,24 @@
   每一次转换都在调用处清清楚楚可见，顺带的效果是函数重载决议
   （[§5.10](ch05-static-checks.md)）被简化成了纯粹的类型精确匹配。
 
+- **`nullptr_t`** —— 空指针字面量 `nullptr` 的类型，并且刻意**不**属于
+  上面那张标量表。真实 C++ 本身不给这个类型任何可直接书写的名字，只在库里
+  提供 `std::nullptr_t` 这个 `decltype(nullptr)` 的别名；scpp 则直接给它一个
+  关键字写法，就像已经对 `size_t`/`ptrdiff_t` 所做的那样，于是不 import 任何
+  模块也照样知道 `nullptr` 是什么类型。`nullptr_t` 和 `std::nullptr_t` 都指
+  同一个类型。它只有一个值。
+
+  它可以转换成**任意指针类型**（包括 `void*` 和指向 `const` 的指针）、
+  **任意函数指针类型**、它自己，以及**声明了接受它的构造函数的类类型**
+  （`std::unique_ptr<T> p = nullptr;` 就是这么工作的）。除此之外**什么都
+  不转**——尤其是不转任何整数类型，也**不转 `bool`**。真实 C++ 确实允许
+  直接初始化写法 `bool b(nullptr)`，但 scpp 根本没有"指针转 `bool`"这条
+  转换（对指针 `p` 来说 `if (p)` 和 `static_cast<bool>(p)` 都被拒绝），
+  所以单独为空指针字面量开这个口子，只会让 `nullptr` 比它所要表示的指针
+  本身更容易转成 `bool`——何况 C++ 用的那个带圆括号的写法在 scpp 里本来
+  就不合法。判断指针是否为空，写比较式：`p == nullptr`。规范条文见
+  [spec 16](../../spec/zh/13-null-pointer-conversions.md)。
+
 - `struct`（规则见 [§4.1](ch04-struct-vs-class.md)；仅含受支持类型的
   字段）。
 - `class`（见

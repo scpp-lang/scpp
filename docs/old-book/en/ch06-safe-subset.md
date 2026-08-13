@@ -44,6 +44,28 @@ distinct from an ordinary type/borrow-check error):
   direct side effect, makes function-overload resolution
   ([§5.10](ch05-static-checks.md)) reduce to plain exact-type matching.
 
+- **`nullptr_t`** -- the type of the null pointer literal `nullptr`, and
+  deliberately *not* a member of the scalar family above. Real C++ leaves
+  the type itself unspellable and offers only the library alias
+  `std::nullptr_t` over `decltype(nullptr)`; scpp gives it a keyword
+  spelling instead, exactly as it already does for `size_t`/`ptrdiff_t`,
+  so `nullptr`'s type is known with no module imported at all. Both
+  `nullptr_t` and `std::nullptr_t` name it. It has exactly one value.
+
+  It converts to **any pointer type** (including `void*` and a
+  pointer-to-`const`), to **any function pointer type**, to itself, and
+  to a **class type declaring a constructor that takes it** (which is how
+  `std::unique_ptr<T> p = nullptr;` works). It converts to **nothing
+  else** -- in particular to no integer type, and **not to `bool`**.
+  Real C++ does allow `bool b(nullptr)` under direct-initialization, but
+  scpp has no pointer-to-`bool` conversion at all (`if (p)` and
+  `static_cast<bool>(p)` are both rejected for a pointer `p`), so
+  admitting it only for the null literal would make `nullptr` more
+  `bool`-convertible than the pointers it exists to denote -- and the
+  parenthesized spelling C++ uses for it is not valid scpp anyway. Test a
+  pointer by comparing it: `p == nullptr`. Normatively specified in
+  [spec 16](../../spec/en/13-null-pointer-conversions.md).
+
 - `struct` (rules in [§4.1](ch04-struct-vs-class.md); fields of supported
   types only).
 - `class` (see

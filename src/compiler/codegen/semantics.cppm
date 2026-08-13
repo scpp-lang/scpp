@@ -72,7 +72,7 @@ namespace {
 }
 
 [[nodiscard]] bool is_nullptr_literal(const Expr& expr) {
-    return expr.kind == ExprKind::Identifier && expr.name == "nullptr" && !expr.explicit_global_qualification;
+    return expr.kind == ExprKind::NullptrLiteral;
 }
 
 } // namespace
@@ -130,6 +130,7 @@ namespace {
             case ExprKind::IntegerLiteral: return named_type("int");
             case ExprKind::FloatLiteral: return named_type("double");
             case ExprKind::BoolLiteral: return named_type("bool");
+            case ExprKind::NullptrLiteral: return nullptr_named_type();
             case ExprKind::Alignof:
             case ExprKind::Sizeof:
                 return named_type("size_t");

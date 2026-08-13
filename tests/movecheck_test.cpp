@@ -654,13 +654,32 @@ void test_same_type_initializer_still_requires_copy_constructibility() {
            "diagnostic, got '" + error.value_or(std::string("<no error>")) + "'");
 }
 
-// A conversion that would need *two* user-defined constructors chained
-// (nullptr -> std::shared_ptr<Cell> via shared_ptr(T*), then
-// std::shared_ptr<Cell> -> std::expected<...> via expected(T)) is still
-// rejected, exactly as C++ rejects two user-defined conversions in one
-// implicit conversion sequence -- and it must be rejected identically at
-// every boundary, which is the property the shared helper guarantees.
-void test_two_step_conversion_is_rejected_at_every_boundary() {
+// `test_two_step_conversion_is_rejected_at_every_boundary` used to sit
+// here. It asserted that a conversion needing two user-defined
+// constructors chained in one implicit conversion sequence is rejected
+// at every boundary -- a real rule, but not one movecheck adjudicates:
+// movecheck accepts every such shape and defers to codegen. It passed
+// only because its example was `return nullptr;` into
+// `std::expected<std::shared_ptr<Cell>, Err>`, and `nullptr` was an
+// untyped Identifier expression that matched nothing anywhere. It
+// never exercised conversion chaining at all.
+//
+// Now that `nullptr` has type `nullptr_t`, that example is
+// legitimately accepted -- see the test below. The two-step rule
+// itself did not go untested: it moved to
+// tests/codegentest_source/two_step_conversion_is_rejected_at_the_*_boundary,
+// which uses an example that really is two-step and a harness that
+// runs the phase enforcing it.
+
+// The shape the case above used to claim was two-step. It is not, and
+// it must be accepted at every boundary, matching real C++: an
+// `expected` whose value type is a smart pointer is constructible from
+// `nullptr`, yielding a *value*-state `expected` holding an empty
+// pointer -- not an error-state one. Getting the state wrong here
+// would be silent, so the acceptance alone is not enough to assert;
+// the corresponding runtime behavior is pinned by the codegen case
+// files.
+void test_expected_of_a_smart_pointer_accepts_nullptr() {
     cases_run++;
     const std::string preamble =
         "import std;\n"
@@ -682,8 +701,9 @@ void test_two_step_conversion_is_rejected_at_every_boundary() {
         "std::expected<std::shared_ptr<Cell>, Err> make() {\n"
         "    return nullptr;\n"
         "}\n");
-    expect(returned.has_value(),
-           "two_step_conversion_is_rejected_at_every_boundary: expected the return boundary to reject it");
+    expect(!returned.has_value(),
+           "expected_of_a_smart_pointer_accepts_nullptr: expected the return boundary to accept it" +
+               (returned.has_value() ? std::string(", got '") + *returned + "'" : ""));
 
     std::optional<std::string> initialized = move_error_message(
         preamble +
@@ -691,8 +711,9 @@ void test_two_step_conversion_is_rejected_at_every_boundary() {
         "    std::expected<std::shared_ptr<Cell>, Err> e = nullptr;\n"
         "    return;\n"
         "}\n");
-    expect(initialized.has_value(),
-           "two_step_conversion_is_rejected_at_every_boundary: expected the initializer boundary to reject it");
+    expect(!initialized.has_value(),
+           "expected_of_a_smart_pointer_accepts_nullptr: expected the initializer boundary to accept it" +
+               (initialized.has_value() ? std::string(", got '") + *initialized + "'" : ""));
 
     std::optional<std::string> passed = move_error_message(
         preamble +
@@ -703,8 +724,9 @@ void test_two_step_conversion_is_rejected_at_every_boundary() {
         "    sink(nullptr);\n"
         "    return;\n"
         "}\n");
-    expect(passed.has_value(),
-           "two_step_conversion_is_rejected_at_every_boundary: expected the argument boundary to reject it");
+    expect(!passed.has_value(),
+           "expected_of_a_smart_pointer_accepts_nullptr: expected the argument boundary to accept it" +
+               (passed.has_value() ? std::string(", got '") + *passed + "'" : ""));
 }
 
 // The residual "this initializer is not allowed" diagnostic used to
@@ -1315,6 +1337,97 @@ void test_out_of_scope_diagnostic_prints_the_declared_name() {
            "out_of_scope_diagnostic_prints_the_declared_name: expected the local's declared name in " + *message);
 }
 
+// spec 16.2: `nullptr_t` converts to pointer types, function pointer
+// types, and class types declaring a constructor that takes it -- and
+// to nothing else. The rejection is asserted here rather than in
+// codegen_test because that harness does not run check_moves at all,
+// and the *point* of this change is that the rejection moved into
+// movecheck. Before it did, the check happened in codegen's
+// `check_store_type`, which sees only lowered LLVM types and so
+// reported the destination as one of several "distinct scalar types"
+// and advised `static_cast<T>(...)`. Both halves were wrong:
+// `nullptr_t` is not a scalar, and scpp rejects that cast too -- so a
+// user following the advice hit a second error. A diagnostic that
+// cannot be acted on is the defect being fixed, which is why this
+// asserts on the message text and not merely on rejection.
+void test_nullptr_cannot_initialize_a_non_pointer_and_says_why() {
+    cases_run++;
+    for (std::string_view destination : {"bool", "int", "char", "size_t", "double"}) {
+        std::string source = "int main() {\n    " + std::string(destination) +
+                             " not_a_pointer = nullptr;\n    return 0;\n}\n";
+        std::optional<std::string> message = move_error_message(source);
+        std::string label =
+            "nullptr_cannot_initialize_a_non_pointer_and_says_why[" + std::string(destination) + "]";
+        expect(message.has_value(), label + ": expected the initialization to be rejected");
+        if (!message.has_value()) continue;
+        expect(message->find("'nullptr_t'") != std::string::npos,
+               label + ": expected the source type to be named in " + *message);
+        expect(message->find("'" + std::string(destination) + "'") != std::string::npos,
+               label + ": expected the destination type to be named in " + *message);
+        expect(message->find("static_cast") == std::string::npos,
+               label + ": expected no advice to use a cast scpp itself rejects, got " + *message);
+    }
+}
+
+// The other side of the same rule: every destination `nullptr_t` *does*
+// convert to must still be accepted, including the two that were
+// outright broken before. A null function pointer was rejected with
+// "expected a function or function pointer with matching signature"
+// even though a function pointer is a pointer; and a class-typed
+// destination has to reach ordinary constructor overload resolution
+// rather than being pre-empted by the new scalar check, which is what
+// makes `std::unique_ptr<T> p = nullptr;` work.
+void test_nullptr_initializes_every_pointer_shaped_destination() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "import std;\n"
+        "int identity(int value) {\n"
+        "    return value;\n"
+        "}\n"
+        "int main() {\n"
+        "    int* raw = nullptr;\n"
+        "    const int* to_const = nullptr;\n"
+        "    void* opaque = nullptr;\n"
+        "    nullptr_t bare = nullptr;\n"
+        "    std::nullptr_t qualified = nullptr;\n"
+        "    int (*function_pointer)(int) = nullptr;\n"
+        "    std::unique_ptr<int> owned = nullptr;\n"
+        "    std::shared_ptr<int> shared = nullptr;\n"
+        "    return 0;\n"
+        "}\n");
+    expect(!error.has_value(),
+           "nullptr_initializes_every_pointer_shaped_destination: expected every destination to be "
+           "accepted" +
+               (error.has_value() ? std::string(", got '") + *error + "'" : ""));
+}
+
+// `nullptr` borrows nothing, so it can never dangle. That was already
+// the behavior, but it was keyed on the *spelling* -- movecheck
+// compared an Identifier expression's name against "nullptr", so a
+// local actually named `nullptr` would have been indistinguishable.
+// It is now keyed on the expression kind. Returning a reference
+// parameter's pointee is the shape that makes the lifetime machinery
+// run, so this proves the null literal survives it.
+void test_nullptr_return_is_not_treated_as_a_borrow() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "int* pick(int* candidate, bool use_it) {\n"
+        "    if (use_it) {\n"
+        "        return candidate;\n"
+        "    }\n"
+        "    return nullptr;\n"
+        "}\n"
+        "int main() {\n"
+        "    int value = 1;\n"
+        "    int* chosen = pick(&value, true);\n"
+        "    return chosen == nullptr ? 1 : 0;\n"
+        "}\n");
+    expect(!error.has_value(),
+           "nullptr_return_is_not_treated_as_a_borrow: expected the null return to introduce no "
+           "lifetime constraint" +
+               (error.has_value() ? std::string(", got '") + *error + "'" : ""));
+}
+
 } // namespace
 
 
@@ -1342,7 +1455,7 @@ int main() {
     test_converting_constructor_is_accepted_as_a_constructor_argument();
     test_converting_constructor_is_selected_among_constructor_overloads();
     test_same_type_initializer_still_requires_copy_constructibility();
-    test_two_step_conversion_is_rejected_at_every_boundary();
+    test_expected_of_a_smart_pointer_accepts_nullptr();
     test_rejected_initializer_diagnostic_advises_a_syntax_that_parses();
     test_move_of_a_member_reports_the_same_reason_at_every_boundary();
     test_overload_failure_distinguishes_arity_from_argument_type();
@@ -1369,6 +1482,9 @@ int main() {
     test_auto_namesakes_infer_independently();
     test_diagnostics_print_the_declared_name();
     test_out_of_scope_diagnostic_prints_the_declared_name();
+    test_nullptr_cannot_initialize_a_non_pointer_and_says_why();
+    test_nullptr_initializes_every_pointer_shaped_destination();
+    test_nullptr_return_is_not_treated_as_a_borrow();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

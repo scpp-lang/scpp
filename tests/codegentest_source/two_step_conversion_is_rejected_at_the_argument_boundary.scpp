@@ -1,0 +1,41 @@
+// A conversion needing *two* user-defined constructors chained in one
+// implicit conversion sequence (`int` -> `Inner` via `Inner(int)`, then
+// `Inner` -> `Outer` via `Outer(Inner)`) is rejected, exactly as C++
+// rejects two user-defined conversions in one implicit conversion
+// sequence -- and it must be rejected identically at every boundary.
+//
+// This lives here rather than in movecheck_test because movecheck does
+// not adjudicate the rule at all: it accepts every one of these four
+// shapes and defers to codegen. The movecheck-side version of this
+// test passed only because its example used `nullptr`, which was an
+// untyped Identifier expression and so matched nothing anywhere -- it
+// never exercised conversion chaining. Now that `nullptr` has type
+// `nullptr_t`, that example is legitimately accepted (real C++ accepts
+// it too), so the real rule needed a real example and a harness that
+// runs the phase enforcing it.
+import std;
+
+class Inner {
+  public:
+    int v;
+    virtual ~Inner() = default;
+    Inner(int value) : v{value} {}
+    Inner(const Inner& other) : v{other.v} {}
+};
+
+class Outer {
+  public:
+    int v;
+    virtual ~Outer() = default;
+    Outer(Inner inner) : v{inner.v} {}
+    Outer(double unused, int value) : v{value} {}
+};
+
+void sink(Outer o) {
+    return;
+}
+
+int main() {
+    sink(7);
+    return 0;
+}

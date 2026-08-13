@@ -1,0 +1,2 @@
+contains: define ptr @make_null()
+contains: define i8 @accepts_null(ptr %marker)

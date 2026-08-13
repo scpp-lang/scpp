@@ -277,6 +277,27 @@ class AlignmentSpecifier {
     return type;
 }
 
+// ch06 §6: the canonical internal spelling of `nullptr`'s type. Source
+// may write it either bare (`nullptr_t`) or `std::`-qualified
+// (`std::nullptr_t`, the spelling real C++ exposes) -- the parser
+// normalizes both to this single name, so every later phase compares
+// against one string rather than two. Mirrors the way `size_t` is
+// stored unqualified even when written `std::size_t`.
+[[nodiscard]] inline std::string nullptr_type_name() { return "nullptr_t"; }
+
+// `nullptr_t` as a ready-made Type -- the form most callers actually
+// want (type inference returns one, the parser stores one).
+[[nodiscard]] inline Type nullptr_named_type() { return named_type(nullptr_type_name()); }
+
+// Whether `type` is `nullptr`'s own type -- the type of the null
+// pointer literal, whose only value is that literal. It converts to any
+// raw pointer type and to any class declaring a converting constructor
+// that takes it; it converts to nothing else (in particular to no
+// integer type and to no `bool` -- see ch06 §6).
+[[nodiscard]] inline bool is_nullptr_type(const Type& type) {
+    return type.kind == TypeKind::Named && type.name == nullptr_type_name();
+}
+
 class Param {
   public:
     virtual ~Param() = default;
@@ -388,6 +409,18 @@ enum class ExprKind {
     // -- see codegen's codegen_value_for_target).
     FloatLiteral,
     BoolLiteral,
+    // `nullptr` (ch06 §6) -- the null pointer literal. Its type is the
+    // builtin `nullptr_t` (spelled `std::nullptr_t` too), which converts
+    // to any raw pointer type and to any class type that declares a
+    // converting constructor taking it, and to nothing else. Carries no
+    // payload: `nullptr_t` has exactly one value, so there is no
+    // int_value/bool_value analogue to store.
+    //
+    // A dedicated kind rather than an Identifier named "nullptr" (which
+    // is what this used to be): as a bare Identifier the literal had no
+    // type at all, so every consumer either special-cased the spelling
+    // or reported it as an undeclared variable.
+    NullptrLiteral,
     CharLiteral, // 'a', '\n', ... -- ordinal value stored in `int_value`
                  // (same field as IntegerLiteral; see Expr below)
     StringLiteral, // "hello\n" -- decoded byte content stored in `name`

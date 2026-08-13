@@ -107,7 +107,7 @@ void rewrite_type_alias_constructor_call(Expr& expr, const Body& body) {
 }
 
 [[nodiscard]] bool is_nullptr_literal(const Expr& expr) {
-    return expr.kind == ExprKind::Identifier && expr.name == "nullptr" && !expr.explicit_global_qualification;
+    return expr.kind == ExprKind::NullptrLiteral;
 }
 
 // `std::nullopt` -- parsed as a plain (non globally-qualified)
@@ -199,6 +199,8 @@ struct NodiscardInfo {
 [[nodiscard]] std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& target_type, const Expr& expr, const Body& body,
                                   const Signatures& signatures, SourceLocation loc,
                                   const std::string& target_name, bool report_errors);
+[[nodiscard]] std::expected<void, DataflowError> check_nullptr_assignment(const Type& target_type, const Expr& expr,
+                                  SourceLocation loc, const std::string& target_name, bool report_errors);
 [[nodiscard]] bool assignment_target_is_read_only(const Expr& expr, const Body& body,
                                                   const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> validate_sizeof_operand(const Expr& expr, const Body& body, const Signatures& signatures,
@@ -1151,6 +1153,11 @@ std::expected<void, DataflowError> check_function_pointer_assignment(const Type&
                                        const Signatures& signatures, SourceLocation loc, const std::string& target_name,
                                        bool report_errors) {
     if (!report_errors || !is_function_pointer(target_type)) return {};
+    // ch06 §6: `nullptr` initializes a function pointer just as it does
+    // any other pointer -- a function pointer *is* a pointer type, so
+    // excluding it here would have made `nullptr_t` convert to every
+    // pointer type but one.
+    if (is_nullptr_literal(expr)) return {};
     std::optional<Type> source_type = resolve_function_designator_type(expr, target_type, body, signatures);
     if (!source_type) source_type = infer_expr_type(expr, body, signatures);
     if (!source_type || !is_function_pointer(*source_type)) {
@@ -1171,6 +1178,38 @@ std::expected<void, DataflowError> check_function_pointer_assignment(const Type&
             loc));
     }
     return {};
+}
+
+// ch06 §6: `nullptr` (type `nullptr_t`) converts to any raw pointer
+// type, to any function pointer type, to `nullptr_t` itself, and -- via
+// an ordinary converting constructor -- to a class type that declares
+// one taking it. It converts to nothing else: not to `bool`, and not to
+// any integer type.
+//
+// Checked here, where both scpp types are still in hand, rather than
+// left to codegen's check_store_type -- that one sees only the lowered
+// LLVM types, so it could say no more than "no implicit conversion
+// between distinct scalar types ... use an explicit static_cast<T>",
+// which names a category `nullptr_t` is not in and advises a cast the
+// language does not accept for it either.
+std::expected<void, DataflowError> check_nullptr_assignment(const Type& target_type, const Expr& expr,
+                                                            SourceLocation loc, const std::string& target_name,
+                                                            bool report_errors) {
+    if (!report_errors || !is_nullptr_literal(expr)) return {};
+    if (target_type.kind == TypeKind::Pointer || target_type.kind == TypeKind::FunctionPointer) return {};
+    if (is_nullptr_type(target_type)) return {};
+    // A class destination is decided by constructor overload resolution,
+    // not here -- `std::unique_ptr<T> u = nullptr;` is a converting-
+    // constructor call, and reporting it as an invalid conversion would
+    // pre-empt the better message the constructor machinery already
+    // produces when no such constructor exists.
+    if (target_type.kind != TypeKind::Named || !is_scalar_type_name(target_type.name)) return {};
+    return std::unexpected(DataflowError("cannot initialize or assign '" + target_name + "' of type '" +
+                                             describe_type_brief(target_type) +
+                                             "' from 'nullptr': 'nullptr_t' converts only to a pointer type, to a "
+                                             "function pointer type, or to a class type declaring a constructor that "
+                                             "takes it -- never to 'bool' and never to an integer type (spec ch06 §6)",
+                                         loc));
 }
 
 std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& target_type, const Expr& expr, const Body& body,
@@ -1513,6 +1552,12 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
         case ExprKind::IntegerLiteral: return named_type("int");
         case ExprKind::FloatLiteral: return named_type("double");
         case ExprKind::BoolLiteral: return named_type("bool");
+        // ch06 §6: `nullptr` finally has a type of its own. Before
+        // `nullptr_t` existed this fell through to the Identifier case
+        // and produced no type at all, which is why every consumer
+        // needing one either special-cased the spelling or reported the
+        // literal as an undeclared variable.
+        case ExprKind::NullptrLiteral: return nullptr_named_type();
         case ExprKind::CharLiteral: return named_type("char");
         case ExprKind::Sizeof:
         case ExprKind::Alignof:
