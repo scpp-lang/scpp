@@ -1,0 +1,32 @@
+// A call is a *construction* only when the callee spelling names the
+// class. monomorphize asked instead whether the call's inferred type --
+// which for an ordinary call is simply its return type -- named a known
+// class, and if so treated the call's own arguments as that class's
+// constructor arguments. `describe(3, 4)` returning a `Boxed` therefore
+// became `Boxed{3, 4}`: a two-argument construction of a class whose
+// constructor takes one.
+//
+// That was inert only while no such class had a constructor *template*,
+// since the instantiation loop then found nothing to build. With one,
+// the bogus construction deduced the template parameter from an
+// unrelated argument and emitted a clone whose body could not be
+// checked at all -- which is how it first showed up, as
+// libs/scpp/rand/scpp_rand.scpp's `uniform_int_distribution<int>::make`
+// failing inside std::expected's constructor once that constructor
+// became a template.
+import std;
+
+class Boxed {
+public:
+    std::string text{};
+    template<typename U>
+    Boxed(U source) { text = std::string(source); }
+    virtual ~Boxed() = default;
+};
+
+Boxed describe(int width, int height) {
+    Boxed result{"box"};
+    return result;
+}
+
+int main() { return static_cast<int>(describe(3, 4).text.length()); }

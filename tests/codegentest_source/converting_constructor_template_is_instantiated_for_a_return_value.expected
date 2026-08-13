@@ -1,0 +1,2 @@
+sequence: define %class.Message @greet() | call void @Message_new.char_cptr(ptr %classtmp, ptr @str)
+contains: define void @Message_new.char_cptr(ptr %this, ptr %source)

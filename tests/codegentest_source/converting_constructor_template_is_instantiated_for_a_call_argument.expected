@@ -1,0 +1,2 @@
+sequence: define i32 @main | call void @Wrap_new.int(ptr %classtmp, i32 3) | call i32 @sink(%class.Wrap %classtmp.value)
+contains: define void @Wrap_new.int(ptr %this, i32 %source)

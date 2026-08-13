@@ -1,0 +1,4 @@
+contains: call void @TemplateFirst_new.TemplateFirst_ref.int(ptr %a, i32 1)
+contains: call void @NonTemplateFirst_new.NonTemplateFirst_ref.int(ptr %b, i32 1)
+contains: define void @TemplateFirst_new.TemplateFirst_ref.int(ptr %this, i32 %source)
+contains: define void @NonTemplateFirst_new.NonTemplateFirst_ref.int(ptr %this, i32 %source)

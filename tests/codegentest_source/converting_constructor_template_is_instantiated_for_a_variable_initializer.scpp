@@ -1,0 +1,20 @@
+// The variable-initializer boundary for a converting constructor
+// *template*. movecheck accepted this all along -- its
+// find_single_argument_converting_constructor_signature selects template
+// candidates -- but nothing ever created the instantiation, so codegen
+// found no constructor and check_store_type reported the type error
+// "scpp has no implicit conversion between distinct scalar types": a
+// message about the language having no such conversion, for a
+// conversion the language does have and had already accepted.
+class Wrap {
+public:
+    int value{};
+    template<typename U>
+    Wrap(U source) { value = static_cast<int>(source) + 1; }
+    virtual ~Wrap() = default;
+};
+
+int main() {
+    Wrap w = 3;
+    return w.value;
+}

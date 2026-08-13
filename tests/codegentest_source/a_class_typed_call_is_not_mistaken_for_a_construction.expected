@@ -1,0 +1,2 @@
+sequence: define %class.Boxed @describe(i32 %width, i32 %height) | call void @Boxed_new.char_cptr(ptr %result, ptr @str)
+contains: define void @Boxed_new.char_cptr(ptr %this, ptr %source)

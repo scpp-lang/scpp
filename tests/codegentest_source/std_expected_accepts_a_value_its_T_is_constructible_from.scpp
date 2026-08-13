@@ -1,0 +1,34 @@
+// The fidelity gap this change closes. libs/std/expected/std_expected.scpp
+// declared its value constructor as `expected(T value)`, where the real
+// std::expected declares `template<class U = T> expected(U&&)`. The
+// difference is visible the moment `T` is not the type you have in
+// hand: `return "hi";` from a function returning
+// `std::expected<std::string, int>` is *one* user-defined conversion in
+// real C++ (const char* -> expected, through expected's own converting
+// constructor), and scpp instead demanded two chained ones
+// (const char* -> std::string -> expected) and rejected the code.
+//
+// scpp has member constructor templates, but cannot put a `requires`
+// clause on one, so the constructor here is unconstrained -- which is
+// only safe because a non-template constructor now outranks it. The
+// second function below is the test of that: `std::unexpected<int>`
+// must still reach `expected(const std::unexpected<E>&)` rather than
+// being swallowed by the greedy template and stored as a *value*.
+import std;
+
+std::expected<std::string, int> greeting() { return "hi"; }
+
+std::expected<std::string, int> failure() {
+    std::unexpected<int> error_value{7};
+    return error_value;
+}
+
+int main() {
+    std::expected<std::string, int> ok = greeting();
+    std::expected<std::string, int> bad = failure();
+    if (!ok.has_value()) { return 1; }
+    if (ok.value() != "hi") { return 2; }
+    if (bad.has_value()) { return 3; }
+    if (bad.error() != 7) { return 4; }
+    return 5;
+}

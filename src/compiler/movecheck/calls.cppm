@@ -152,6 +152,14 @@ struct NodiscardInfo {
         [[nodiscard]] bool is_named_class_type(const Type& type, const Body& body);
 [[nodiscard]] bool is_named_record_type_for_call_binding(const Type& type, const Body& body);
 [[nodiscard]] bool compile_time_dependency_visible_in_body(const FunctionSignature& candidate, const Body& body);
+
+// Whether `sig` can be called with `arg_count` arguments, accounting for
+// trailing defaulted parameters and varargs. Shared by constructor and
+// ordinary-call selection (dataflow.cppm) and by monomorphize.cppm's own
+// non-template-constructor preference check, so all three agree on what
+// "this overload has the right arity" means.
+[[nodiscard]] bool function_signature_accepts_argument_count(const FunctionSignature& sig, std::size_t arg_count,
+                                                             std::size_t param_offset);
 [[nodiscard]] bool is_copyable_class_lvalue_boundary_source(const Expr& expr, const Type& target_type,
                                                             const Body& body,
                                                             const Signatures& signatures);
@@ -489,6 +497,19 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
         if (def.name == type.name) return true;
     }
     return false;
+}
+
+[[nodiscard]] bool function_signature_accepts_argument_count(const FunctionSignature& sig, std::size_t arg_count,
+                                                             std::size_t param_offset) {
+    if (sig.param_types.size() < param_offset) return false;
+    std::size_t fixed_param_count = sig.param_types.size() - param_offset;
+    std::size_t min_required = fixed_param_count;
+    while (min_required > 0 && sig.param_default_exprs[param_offset + min_required - 1] != nullptr) {
+        min_required--;
+    }
+    if (arg_count < min_required) return false;
+    if (!sig.has_varargs && arg_count > fixed_param_count) return false;
+    return sig.has_varargs || arg_count <= fixed_param_count;
 }
 
 [[nodiscard]] bool compile_time_dependency_visible_in_body(const FunctionSignature& candidate, const Body& body) {
