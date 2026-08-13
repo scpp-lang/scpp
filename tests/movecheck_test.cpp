@@ -301,6 +301,247 @@ void test_non_const_method_call_through_const_reference_reports_clear_diagnostic
 // including the two cases where that sentence is factually wrong: an
 // argument-*count* mismatch is not a type problem, and telling the reader
 // to look at their types sends them to the wrong place entirely.
+// The borrow checker used to make the *safer* spelling of a loop the
+// illegal one. `for (Item& item : items)` could pass `item` to a
+// `const Item&` parameter; `for (const Item& item : items)` could not,
+// because only a *mutable* lender was recognized as reborrowing rather
+// than borrowing afresh. Every assertion below is on the accepting side:
+// the point of the fix is that sound code stops being rejected.
+void test_shared_reference_can_be_lent_on_to_a_const_parameter() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "import std;\n"
+        "class Item {\n"
+        "  public:\n"
+        "    virtual ~Item() = default;\n"
+        "    int weight{};\n"
+        "};\n"
+        "int score(const Item& item) {\n"
+        "    return item.weight;\n"
+        "}\n"
+        "int total() {\n"
+        "    std::vector<Item> items{};\n"
+        "    int sum = 0;\n"
+        "    for (const Item& item : items) {\n"
+        "        sum += score(item);\n"
+        "    }\n"
+        "    return sum;\n"
+        "}\n");
+    expect(!error.has_value(),
+           "shared_reference_can_be_lent_on_to_a_const_parameter: expected acceptance, got '" +
+              error.value_or(std::string()) + "'");
+}
+
+// The same reborrow, one step removed: a shared alias bound from a
+// mutable loop variable, then lent on. `alias` is derived from an access
+// that has already been accounted for, so it cannot conflict with it.
+void test_shared_alias_of_a_mutable_reference_can_be_lent_on() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "import std;\n"
+        "class Item {\n"
+        "  public:\n"
+        "    virtual ~Item() = default;\n"
+        "    int weight{};\n"
+        "};\n"
+        "int score(const Item& item) {\n"
+        "    return item.weight;\n"
+        "}\n"
+        "int total() {\n"
+        "    std::vector<Item> items{};\n"
+        "    int sum = 0;\n"
+        "    for (Item& item : items) {\n"
+        "        const Item& alias = item;\n"
+        "        sum += score(alias);\n"
+        "    }\n"
+        "    return sum;\n"
+        "}\n");
+    expect(!error.has_value(), "shared_alias_of_a_mutable_reference_can_be_lent_on: expected acceptance, got '" +
+                                   error.value_or(std::string()) + "'");
+}
+
+// A shared lender still cannot satisfy a `T&` parameter: the reborrow
+// path must not become a way to manufacture a mutable alias out of a
+// read-only one.
+void test_shared_reference_still_cannot_satisfy_a_mutable_parameter() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "import std;\n"
+        "class Item {\n"
+        "  public:\n"
+        "    virtual ~Item() = default;\n"
+        "    int weight{};\n"
+        "};\n"
+        "void bump(Item& item) {\n"
+        "    item.weight = item.weight + 1;\n"
+        "    return;\n"
+        "}\n"
+        "void run() {\n"
+        "    std::vector<Item> items{};\n"
+        "    for (const Item& item : items) {\n"
+        "        bump(item);\n"
+        "    }\n"
+        "    return;\n"
+        "}\n");
+    expect(error.has_value(), "shared_reference_still_cannot_satisfy_a_mutable_parameter: expected rejection");
+}
+
+// A read-only loop must not take a *mutable* borrow of the container it
+// walks: the synthesized range storage only ever needs the access the
+// loop variable needs.
+void test_read_only_range_for_still_allows_reading_the_container() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "import std;\n"
+        "class Item {\n"
+        "  public:\n"
+        "    virtual ~Item() = default;\n"
+        "    int weight{};\n"
+        "};\n"
+        "int total() {\n"
+        "    std::vector<Item> items{};\n"
+        "    int sum = 0;\n"
+        "    for (const Item& item : items) {\n"
+        "        sum += item.weight;\n"
+        "        sum += static_cast<int>(items.size());\n"
+        "    }\n"
+        "    return sum;\n"
+        "}\n");
+    expect(!error.has_value(), "read_only_range_for_still_allows_reading_the_container: expected acceptance, got '" +
+                                   error.value_or(std::string()) + "'");
+}
+
+// A by-value loop variable needs no more than read access either -- and
+// here the range expression is *itself* a reference (`at()` on a member
+// in a non-const method), the shape that adopted that reference's
+// mutability verbatim and so blocked any further borrow from `this`.
+void test_by_value_range_for_over_a_member_accessor_allows_other_member_borrows() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "import std;\n"
+        "class Item {\n"
+        "  public:\n"
+        "    virtual ~Item() = default;\n"
+        "    int weight{};\n"
+        "};\n"
+        "class Probe {\n"
+        "  public:\n"
+        "    virtual ~Probe() = default;\n"
+        "    std::unordered_map<std::string, std::vector<std::size_t>> index_{};\n"
+        "    std::vector<Item> items_{};\n"
+        "    int find(const std::string& name) {\n"
+        "        if (!index_.contains(name)) return 0;\n"
+        "        int sum = 0;\n"
+        "        for (std::size_t i : index_.at(name)) {\n"
+        "            const Item& item = items_[i];\n"
+        "            sum += item.weight;\n"
+        "        }\n"
+        "        return sum;\n"
+        "    }\n"
+        "};\n");
+    expect(!error.has_value(),
+           "by_value_range_for_over_a_member_accessor_allows_other_member_borrows: expected acceptance, got '" +
+              error.value_or(std::string()) + "'");
+}
+
+// The cap is on what the loop *needs*, not a blanket demotion: a
+// mutable loop variable still takes a mutable borrow, so it still both
+// permits mutation through the loop variable and excludes any other use
+// of the container while the loop runs.
+void test_mutable_range_for_still_borrows_the_container_exclusively() {
+    cases_run++;
+    std::optional<std::string> accepted = move_error_message(
+        "import std;\n"
+        "class Item {\n"
+        "  public:\n"
+        "    virtual ~Item() = default;\n"
+        "    int weight{};\n"
+        "};\n"
+        "void run() {\n"
+        "    std::vector<Item> items{};\n"
+        "    for (Item& item : items) {\n"
+        "        item.weight = 3;\n"
+        "    }\n"
+        "    return;\n"
+        "}\n");
+    expect(!accepted.has_value(), "mutable_range_for_still_borrows_the_container_exclusively: expected mutation "
+                                  "through a mutable loop variable to be accepted, got '" +
+                                      accepted.value_or(std::string()) + "'");
+
+    std::optional<std::string> rejected = move_error_message(
+        "import std;\n"
+        "class Item {\n"
+        "  public:\n"
+        "    virtual ~Item() = default;\n"
+        "    int weight{};\n"
+        "};\n"
+        "int total() {\n"
+        "    std::vector<Item> items{};\n"
+        "    int sum = 0;\n"
+        "    for (Item& item : items) {\n"
+        "        sum += static_cast<int>(items.size());\n"
+        "    }\n"
+        "    return sum;\n"
+        "}\n");
+    expect(rejected.has_value(), "mutable_range_for_still_borrows_the_container_exclusively: expected reading the "
+                                 "container inside a mutable loop to stay rejected");
+}
+
+// A `const` loop variable must not become a mutation channel just
+// because the range storage behind it was demoted to a shared binding.
+void test_read_only_range_for_still_rejects_mutation_through_the_loop_variable() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "import std;\n"
+        "class Item {\n"
+        "  public:\n"
+        "    virtual ~Item() = default;\n"
+        "    int weight{};\n"
+        "};\n"
+        "void run() {\n"
+        "    std::vector<Item> items{};\n"
+        "    for (const Item& item : items) {\n"
+        "        item.weight = 3;\n"
+        "    }\n"
+        "    return;\n"
+        "}\n");
+    expect(error.has_value(),
+           "read_only_range_for_still_rejects_mutation_through_the_loop_variable: expected rejection");
+}
+
+// The range storage's constness is recorded by the parser and consumed
+// by monomorphize, so it has to survive the body clone that a template
+// instantiation goes through -- the exact class of omission that dropped
+// `const`/`static` from every instantiation before #434.
+void test_read_only_range_for_survives_generic_instantiation() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "import std;\n"
+        "class Item {\n"
+        "  public:\n"
+        "    virtual ~Item() = default;\n"
+        "    int weight{};\n"
+        "};\n"
+        "int score(const Item& item) {\n"
+        "    return item.weight;\n"
+        "}\n"
+        "template <typename T>\n"
+        "int total(const std::vector<T>& values) {\n"
+        "    int sum = 0;\n"
+        "    for (const T& value : values) {\n"
+        "        sum += score(value);\n"
+        "        sum += static_cast<int>(values.size());\n"
+        "    }\n"
+        "    return sum;\n"
+        "}\n"
+        "int run() {\n"
+        "    std::vector<Item> items{};\n"
+        "    return total<Item>(items);\n"
+        "}\n");
+    expect(!error.has_value(), "read_only_range_for_survives_generic_instantiation: expected acceptance, got '" +
+                                   error.value_or(std::string()) + "'");
+}
+
 void test_overload_failure_distinguishes_arity_from_argument_type() {
     cases_run++;
     std::optional<std::string> too_few = move_error_message(
@@ -837,6 +1078,14 @@ int main() {
     test_range_for_mutable_reference_over_span_is_accepted();
     test_range_for_const_reference_over_span_rejects_mutation();
     test_non_const_method_call_through_const_reference_reports_clear_diagnostic();
+    test_shared_reference_can_be_lent_on_to_a_const_parameter();
+    test_shared_alias_of_a_mutable_reference_can_be_lent_on();
+    test_shared_reference_still_cannot_satisfy_a_mutable_parameter();
+    test_read_only_range_for_still_allows_reading_the_container();
+    test_by_value_range_for_over_a_member_accessor_allows_other_member_borrows();
+    test_mutable_range_for_still_borrows_the_container_exclusively();
+    test_read_only_range_for_still_rejects_mutation_through_the_loop_variable();
+    test_read_only_range_for_survives_generic_instantiation();
     test_overload_failure_distinguishes_arity_from_argument_type();
     test_overload_failure_names_the_offending_argument_and_types();
     test_std_string_const_reference_mutation_reports_clear_diagnostic();

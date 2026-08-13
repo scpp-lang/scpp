@@ -5054,6 +5054,7 @@ private:
                     // copy-constructible, and otherwise keep the existing
                     // by-value behavior unchanged for freely-copyable Named
                     // ranges (ordinary `std::vector<int>`-shaped loops).
+                    Type resolved{};
                     bool range_needs_reference =
                         inferred->kind == TypeKind::Array || inferred->kind == TypeKind::Span ||
                         (inferred->kind == TypeKind::Named && body.program != nullptr &&
@@ -5070,6 +5071,16 @@ private:
                         // `expr.args` through a `const Expr&` parameter) --
                         // same idiom as apply_call's own by-reference
                         // argument passing just below in this file.
+                        //
+                        // Either way the binding is capped by what the
+                        // loop itself needs, which desugar_range_for
+                        // recorded as `is_const` from the loop
+                        // variable's own declared type: a read-only loop
+                        // must not take a *mutable* borrow of the
+                        // container, or `for (const T& x : v)` cannot so
+                        // much as call `v.size()` in its own body while
+                        // `for (T& x : v)` can -- a borrow rule that
+                        // punishes the safer spelling.
                         if (inferred->kind == TypeKind::Span) {
                             inferred_ref.is_mutable_ref = inferred->is_mutable_ref;
                         } else if (inferred->kind == TypeKind::Named) {
@@ -5077,12 +5088,26 @@ private:
                         } else {
                             inferred_ref.is_mutable_ref = true;
                         }
-                        stmt.type = inferred_ref;
-                        refine_declared_type(stmt, body, inferred_ref);
+                        resolved = inferred_ref;
                     } else {
-                        stmt.type = *inferred;
-                        refine_declared_type(stmt, body, *inferred);
+                        resolved = *inferred;
                     }
+                    // Whichever branch produced it, a synthesized range
+                    // storage never needs more access than the loop
+                    // variable does -- desugar_range_for recorded that as
+                    // `is_const`. Applied here, after both branches,
+                    // because a range expression that is *itself* already
+                    // a reference (`m.at(k)` in a non-const method, whose
+                    // inferred type is `std::vector<T>&`) takes the
+                    // second branch and would otherwise adopt that
+                    // reference's mutability verbatim, holding a mutable
+                    // borrow of the container for a loop that only reads
+                    // it.
+                    if (is_synthesized_for_range_storage(stmt.var_name) && stmt.is_const) {
+                        resolved.is_mutable_ref = false;
+                    }
+                    stmt.type = resolved;
+                    refine_declared_type(stmt, body, resolved);
                 } else if (stmt.type.kind == TypeKind::Reference && stmt.type.pointee != nullptr &&
                            stmt.type.pointee->kind == TypeKind::Named && stmt.type.pointee->name == "auto") {
                     if (!stmt.init) {

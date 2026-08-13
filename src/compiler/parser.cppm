@@ -1592,11 +1592,29 @@ private:
 
         auto outer_block = make_block_stmt(loc);
 
+        // The synthesized range storage is only ever used to read the
+        // range's size and to initialize the loop variable, so the access
+        // it needs is exactly the access the loop variable needs: a
+        // mutable `T&` loop variable requires a mutable binding, and
+        // every other spelling (`const T&`, `const auto&`, or a by-value
+        // copy) only ever reads. Recording that here, where the loop
+        // variable's declared type is still in hand, keeps monomorphize
+        // from having to infer it from the range expression alone --
+        // which over-approximated, taking a *mutable* borrow of the
+        // container for a read-only loop and so rejecting sound code:
+        //
+        //     for (const Item& item : items) { total += items.size(); }
+        //
+        // was "cannot use 'items' while it is mutably borrowed", purely
+        // because `items` itself happened to be mutable.
+        bool loop_var_needs_mutable_range = loop_var->type.kind == TypeKind::Reference && loop_var->type.is_mutable_ref;
+
         auto range_decl = std::make_unique<Stmt>();
         range_decl->kind = StmtKind::VarDecl;
         range_decl->loc = loc;
         range_decl->type = named_type("auto");
         range_decl->var_name = range_name;
+        range_decl->is_const = !loop_var_needs_mutable_range;
         range_decl->init = std::move(range_expr);
         outer_block->statements.push_back(std::move(range_decl));
 
