@@ -602,22 +602,22 @@ namespace scpp {
     // rejected by apply_reference_binding/this same function's
     // persistent-conflict check below), so temporarily re-lending that
     // same access to a callee can't create a new conflict. Only the
-    // mutability has to be checked: a shared (`const T&`) reference can't
-    // satisfy a `T&` parameter (that would manufacture a mutable alias
-    // out of a shared one), but a mutable reference may always be lent
-    // out as either mutable or shared.
+    // mutability has to be checked, which validate_reborrow_lender does:
+    // a shared (`const T&`) reference can't satisfy a `T&` parameter
+    // (that would manufacture a mutable alias out of a shared one), but
+    // a mutable reference may always be lent out as either mutable or
+    // shared, and a shared one as shared.
     std::optional<LocalId> lender = resolve_reborrow_lender(arg, body, signatures);
-    bool lender_is_mutable = lender.has_value() && is_reborrowable_local_type(body.type_of(*lender)) &&
-                             body.type_of(*lender).is_mutable_ref;
-    if (lender.has_value() && lender_is_mutable) {
+    if (reborrow_is_tracked_against_lender(lender, body)) {
         if (auto _r = validate_reborrow_lender(*lender, is_mutable, state, body, report_errors); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
     } else {
-        // The general case: `arg` isn't itself a directly-named, locally-
-        // bound reference (that narrower case is handled above), so it
-        // may instead be a `.field`/`[index]` projection or a plain
-        // *parameter* (never entered into `ref_targets`, since a
+        // The general case: `arg` doesn't reach a locally-bound
+        // reference/span lender at all (that case is handled above), so
+        // it may instead be a `.field`/`[index]` projection rooted at an
+        // owned local, or a plain *parameter* (never entered into
+        // `ref_targets`, since a
         // parameter is never processed through BindReference -- see
         // apply_reference_binding) whose own declared type is `const T&`/
         // `std::span<const T>`, or a chain that dereferences a `const T*`
@@ -2012,9 +2012,7 @@ namespace scpp {
 
     bool is_mutable = stmt.type.is_mutable_ref;
     std::optional<LocalId> lender = resolve_reborrow_lender(*stmt.expr, body, signatures);
-    bool lender_is_mutable = lender.has_value() && is_reborrowable_local_type(body.type_of(*lender)) &&
-                             body.type_of(*lender).is_mutable_ref;
-    bool uses_lender_suspension = lender.has_value() && lender_is_mutable;
+    bool uses_lender_suspension = reborrow_is_tracked_against_lender(lender, body);
     if (uses_lender_suspension) {
         if (auto _r = validate_reborrow_lender(*lender, is_mutable, state, body, report_errors); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());

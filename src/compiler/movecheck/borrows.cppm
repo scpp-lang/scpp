@@ -17,6 +17,7 @@ using LiveSet = std::unordered_set<LocalId>;
 
 RootSet resolve_root_place(LocalId local, const DataflowState& state);
 std::optional<LocalId> resolve_reborrow_lender(const Expr& expr, const Body& body, const Signatures& signatures);
+[[nodiscard]] bool reborrow_is_tracked_against_lender(const std::optional<LocalId>& lender, const Body& body);
 [[nodiscard]] std::expected<void, DataflowError> validate_reborrow_lender(LocalId lender, bool child_is_mutable,
                               const DataflowState& state, const Body& body, bool report_errors);
 [[nodiscard]] std::expected<void, DataflowError> validate_reborrow_lender_write(LocalId lender, const DataflowState& state,
@@ -172,6 +173,37 @@ std::optional<LocalId> resolve_reborrow_lender(const Expr& expr, const Body& bod
         default:
             return std::nullopt;
     }
+}
+
+// Whether a borrow derived from `lender` is tracked against `lender`
+// itself (suspended_reborrows) rather than against the root it
+// ultimately reaches (borrows). It is, whenever the lender is a
+// reference/span local at all: `lender` already holds the one live
+// access to that root along this path, so a borrow derived from it is a
+// *reborrow* of an access that has already been accounted for, and can
+// only ever conflict with another borrow also derived from `lender` --
+// which is exactly what suspended_reborrows tracks.
+//
+// This used to additionally require the lender to be *mutable*, which
+// made the safer spelling of a program the illegal one. Given
+//
+//     for (const Item& item : items) { total += score(item); }
+//
+// passing `item` (a shared lender) to a `const Item&` parameter fell
+// through to the root-level check, saw the mutable borrow the range-for
+// desugaring holds on `items`, and was rejected -- while the very same
+// loop written `for (Item& item : items)` was accepted, because a
+// mutable lender took this path. A borrow rule that rejects `const`
+// where it accepts non-`const` is answering the wrong question.
+//
+// The rest of the machinery was already written for shared lenders:
+// validate_reborrow_lender's "it is itself only a shared (const)
+// reference/view" escalation error could not fire at all under the old
+// gate, ReborrowSuspension carries a shared_count beside its
+// mutable_suspended flag, and release_reference_borrow already releases
+// either. Only the gate was wrong.
+[[nodiscard]] bool reborrow_is_tracked_against_lender(const std::optional<LocalId>& lender, const Body& body) {
+    return lender.has_value() && is_reborrowable_local_type(body.type_of(*lender));
 }
 
 std::expected<void, DataflowError> validate_reborrow_lender(LocalId lender, bool child_is_mutable, const DataflowState& state,
