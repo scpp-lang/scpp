@@ -1,4 +1,4 @@
-// ch05 §5.14 (Generic Types): `new T(...)`'s "dotted clone"
+// [undocumented rule; was old-book ch05 §5.14] (Generic Types): `new T(...)`'s "dotted clone"
 // constructor-selection rule used to only check whether a candidate's
 // mangled name *ended with* ".T_new" -- a monomorphized generic
 // instantiation mangles its own type argument into its name, so

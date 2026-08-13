@@ -1,7 +1,8 @@
 import std;
-// ch05 §5.1's `std::move(x)` operation is about ownership/value-category, not
-// about classes specifically: moving a primitive local is just as valid as
-// moving a class local and produces the same value in the destination.
+// spec §6.2(1)-(6)'s `std::move(x)` operation is about
+// ownership/value-category, not about classes specifically: moving a primitive
+// local is just as valid as moving a class local and produces the same value
+// in the destination.
 int main() {
     int x = 7;
     int y = std::move(x);

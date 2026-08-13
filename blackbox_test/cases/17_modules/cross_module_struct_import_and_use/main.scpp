@@ -1,6 +1,6 @@
-// ch11 §11.9: "Struct layout carries over the same way ... an imported
+// spec §10.4(4): Struct layout carries over the same way ... an imported
 // struct's field list, recovered from the interface, is all codegen
-// needs to reproduce a byte-identical layout." An exported struct is
+// needs to reproduce a byte-identical layout. An exported struct is
 // usable in the importer exactly like a locally-defined one.
 import geometry;
 

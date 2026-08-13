@@ -1,4 +1,4 @@
-// PR #391 / ch05 §5.3: a member function still hides a namespace-scope
+// PR #391 / spec §6.2(8): a member function still hides a namespace-scope
 // free function of the same name -- an unqualified call to `identify()`
 // inside `Thing::run` means the class's own instance method, not the
 // free function `identify()` at global scope, even though scpp's

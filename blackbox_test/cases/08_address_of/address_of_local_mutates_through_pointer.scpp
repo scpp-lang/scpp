@@ -1,4 +1,4 @@
-// ch05 §5.7: "&expr evaluates to ... T* if it's reachable mutably" -- a
+// spec §5.1(5.1): &expr evaluates to ... T* if it's reachable mutably -- a
 // plain mutable local produces a writable T*, and writing through it is
 // visible via the original variable name.
 int f() {

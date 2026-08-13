@@ -1,4 +1,4 @@
-// ch11 §11.7: "extern without a "C" string declares a function with
+// [undocumented rule; was old-book ch11 §11.7]: "extern without a "C" string declares a function with
 // ordinary scpp linkage (not C ABI), whose implementation lives in a
 // separate implementation unit or a separately-distributed `.scppo`
 // object file." This module's bare, bodyless `extern int square(int x);`

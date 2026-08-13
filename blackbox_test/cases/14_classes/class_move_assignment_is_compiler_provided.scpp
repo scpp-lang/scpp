@@ -1,7 +1,7 @@
-// ch04 §4.2/ch08 Q14: symmetric to
+// book ch05-01/spec §6.4: symmetric to
 // class_move_construction_is_compiler_provided.scpp -- every class gets
 // a compiler-synthesized move assignment operator unconditionally, even
-// `Counter` (not copy-eligible at all, ch08 Q15).
+// `Counter` (not copy-eligible at all, spec §6.5).
 class Counter {
 private:
     int value{};

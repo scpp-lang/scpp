@@ -1,4 +1,4 @@
-// ch06 scalar table: `uint8_t`/`uint16_t`/`uint32_t`/`uint64_t` "same as
+// spec §16.3(4): `uint8_t`/`uint16_t`/`uint32_t`/`uint64_t` "same as
 // above [int8_t family] -- no uint128_t for the same reason", i.e. these
 // are likewise core, unconditionally-guaranteed builtin scalar types.
 // None of the four currently parse as a type name.

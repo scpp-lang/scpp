@@ -1,4 +1,4 @@
-// ch06 scalar table: "`long` | alias for `int64_t` | deliberately fixed"
+// docs/missings.md: "`long` | alias for `int64_t` | deliberately fixed"
 // -- a core builtin scalar type, not a backlog item. Currently rejected
 // as a type name ("expected ';' but found 'x'").
 long identity(long x) {

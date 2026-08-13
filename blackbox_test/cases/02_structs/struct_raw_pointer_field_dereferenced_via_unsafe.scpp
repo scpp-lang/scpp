@@ -1,5 +1,6 @@
-// ch04 §4.1: raw pointers `T*` are allowed as struct fields ("carry no
-// compiler-tracked lifetime; dereferencing still requires [[scpp::unsafe]] {}").
+// book ch05-01: raw pointers `T*` are allowed as struct fields ("carry no
+// compiler-tracked lifetime; dereferencing still requires [[scpp::unsafe]]
+// {}").
 struct Node {
     int value;
     Node* next;

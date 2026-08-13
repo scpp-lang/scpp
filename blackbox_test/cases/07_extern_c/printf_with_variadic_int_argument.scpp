@@ -1,4 +1,4 @@
-// ch02 §2.1: variadic parameters ("...", for printf-family functions) are
+// spec §5.1(5.6): variadic parameters ("...", for printf-family functions) are
 // parsed and carry a has_varargs flag; this exercises an actual variadic
 // call site with a real `int` argument, not just the fixed `fmt`
 // parameter. Calling `printf` (an extern "C" function) always needs

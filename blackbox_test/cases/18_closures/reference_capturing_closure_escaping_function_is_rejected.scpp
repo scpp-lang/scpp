@@ -1,4 +1,4 @@
-// ch05 §5.12 + §5.3: a by-reference-capturing closure is a
+// book ch11-01 + spec §6.2: a by-reference-capturing closure is a
 // lifetime-tracked value exactly like a class holding a `T&` field --
 // returning one out of the function whose local it captures must be
 // rejected, since `local` is destroyed at `make_bad`'s exit while the

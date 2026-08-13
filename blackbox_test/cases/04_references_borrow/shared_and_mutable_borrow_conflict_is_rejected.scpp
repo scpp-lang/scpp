@@ -1,5 +1,5 @@
-// ch05 §5.2: a shared borrow and a mutable borrow of the same object can
-// never coexist.
+// spec §6.2(7)-(10): a shared borrow and a mutable borrow of the same object
+// can never coexist.
 int f() {
     int x = 5;
     const int& r1 = x;

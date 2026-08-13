@@ -1,4 +1,4 @@
-// ch03: `T&` (mutable borrow) parameters let a callee mutate the
+// book ch04-02: `T&` (mutable borrow) parameters let a callee mutate the
 // caller's variable.
 void increment(int& r) {
     r = r + 1;

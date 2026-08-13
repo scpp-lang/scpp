@@ -1,4 +1,4 @@
-// ch05 §5.14 (Generic Types) / §5.2 (Borrow & Aliasing): this was a real
+// [undocumented rule; was old-book ch05 §5.14] (Generic Types) / §5.2 (Borrow & Aliasing): this was a real
 // soundness hole -- because a generic type's substituted reference
 // stayed `is_mutable_ref=true` even when its own type argument was
 // const-qualified, a write through a `T&` parameter of a `T = const

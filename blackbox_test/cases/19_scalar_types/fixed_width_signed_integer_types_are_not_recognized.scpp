@@ -1,4 +1,4 @@
-// ch06 scalar table: `int8_t`/`int16_t`/`int32_t`/`int64_t` "reuse real
+// docs/missings.md: `int8_t`/`int16_t`/`int32_t`/`int64_t` "reuse real
 // C++ `<cstdint>` names verbatim, all already-standardized... scpp
 // guarantees all of these unconditionally on every target." These are
 // core builtin scalar types, not a backlog item -- but none of the four

@@ -1,5 +1,5 @@
-// ch06 scalar table: "No implicit conversions between any two distinct
-// scalar types above, ever, full stop." `?:`'s relaxed arm-typing rule
+// spec §16.3(1): No implicit conversions between any two distinct
+// scalar types above, ever, full stop. `?:`'s relaxed arm-typing rule
 // (PR #392: an untyped literal adopting the other arm's scalar type, a
 // scalar lvalue arm read as a value) still rejects two genuinely
 // distinct scalar types outright -- an `int` arm and a `std::uint64_t`

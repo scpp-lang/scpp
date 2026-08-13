@@ -1,4 +1,4 @@
-// ch05 §5.14: "Each method (including a constructor) may add its own
+// [undocumented rule; was old-book ch05 §5.14]: "Each method (including a constructor) may add its own
 // `requires Concept<T>` clause ... unlocking whatever that concept
 // additionally guarantees for that one method's own body, checked once
 // at that method's own definition ... A caller using Vec<SomeType> may

@@ -9,7 +9,7 @@
 // rejection case in
 // concept_probe_lifetime_any_tag_rejects_untagged_candidate.scpp --
 // just through a closure's compiler-synthesized operator() instead of a
-// hand-written method (ch05 §5.12).
+// hand-written method (book ch11-01).
 class Token {
     public:
         virtual ~Token() { return; }

@@ -1,6 +1,6 @@
-// ch05 §5.15: a closure with no by-reference capture at all, whose every
-// by-value-captured member's type is itself thread-movable (a plain
-// `int`, here), is thread-movable.
+// docs/spec/en/04-thread-safety-properties.md §8.1-§8.4: a closure with no
+// by-reference capture at all, whose every by-value-captured member's type is
+// itself thread-movable (a plain `int`, here), is thread-movable.
 template<typename T>
 void spawn(T&& f [[scpp::thread_movable]]) {
     return;

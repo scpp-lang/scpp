@@ -1,4 +1,4 @@
-// ch05 §5.14: a bare (unconstrained) generic type parameter means "it is
+// [undocumented rule; was old-book ch05 §5.14]: a bare (unconstrained) generic type parameter means "it is
 // not enough to call any method on the type or apply any operator to
 // it" -- calling a method on a bare-`T`-typed field should be a compile
 // error at the generic type's own definition, regardless of what any
@@ -6,7 +6,8 @@
 // method) would allow. Currently this is accepted instead -- no error
 // at `Holder`'s own definition even though `T` is completely
 // unconstrained there, contradicting the once-at-definition checking
-// principle §5.11/§5.14 both establish.
+// principle book ch10-02 and the [undocumented rule; was old-book ch05
+// §5.14] both establish.
 class Num {
     public:
         virtual ~Num() { return; }

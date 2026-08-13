@@ -1,4 +1,4 @@
-// ch06 scalar table: `char` supports equality comparison (producing a
+// spec §16.3(4): `char` supports equality comparison (producing a
 // `bool`), same as any other scalar.
 int main() {
     char a = 'x';

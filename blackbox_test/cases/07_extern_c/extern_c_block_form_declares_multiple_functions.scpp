@@ -1,4 +1,4 @@
-// ch02 §2.1: the `extern "C" { ... }` block form is sugar for repeating
+// spec §5.1(5.6): the `extern "C" { ... }` block form is sugar for repeating
 // `extern "C"` on every declaration inside it. Calling `puts` still needs
 // [[scpp::unsafe]] { }, same as any other extern "C" call.
 extern "C" {

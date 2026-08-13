@@ -1,4 +1,4 @@
-// `if` / `else if` / `else` (ch06 supported statement list).
+// `if` / `else if` / `else` (spec §1(2)).
 int classify(int x) {
     if (x < 0) {
         return -1;

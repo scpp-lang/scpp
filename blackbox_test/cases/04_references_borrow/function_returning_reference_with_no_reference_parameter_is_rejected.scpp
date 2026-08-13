@@ -1,4 +1,4 @@
-// ch05 §5.3: a function returning a reference with no reference
+// spec §6.2(8): a function returning a reference with no reference
 // parameter to elide the lifetime from must be rejected -- otherwise the
 // returned reference could dangle (here, to a local that dies at
 // function exit).

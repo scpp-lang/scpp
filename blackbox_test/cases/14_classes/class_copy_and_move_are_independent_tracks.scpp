@@ -1,8 +1,8 @@
-// ch04 §4.2/ch08 Q14-15: copy and move are two independent, separately
+// book ch05-01/spec §6.4, §6.5: copy and move are two independent, separately
 // governed mechanisms -- declaring a user-defined copy constructor
-// (which is licensed, ch08 Q15) does not disturb the compiler-provided
+// (which is licensed, spec §6.5) does not disturb the compiler-provided
 // move constructor (which is unconditional and never user-overridable,
-// ch08 Q14): `Widget` here has its own copy constructor, yet
+// spec §6.4): `Widget` here has its own copy constructor, yet
 // `std::move` still works on it via the compiler-synthesized move
 // constructor.
 class Widget {

@@ -1,6 +1,6 @@
 // src/ast.cppm regression: `layout_of_type` previously never accounted for
 // the implicit vtable pointer every polymorphic class carries (every scpp
-// `class` mandates an explicit virtual destructor, ch11 §11.5(1)), so
+// `class` mandates an explicit virtual destructor, spec §10.1(1)), so
 // `sizeof`/`alignof` silently under-reported size and alignment for
 // essentially any `class` with fields following the vtable slot. `CharOnly`
 // isolates the purest case of this: its only data member (`char`, alignment

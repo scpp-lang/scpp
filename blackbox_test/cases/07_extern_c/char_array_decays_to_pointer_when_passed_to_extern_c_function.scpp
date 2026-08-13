@@ -1,6 +1,6 @@
-// ch03/ch06: a fixed-size char array decays to a pointer, both on an
-// ordinary call (passing `msg` to `print_buffer`) and at the `extern "C"`
-// boundary (passing it onward to real libc `puts`).
+// book ch08-02/spec §16.3: a fixed-size char array decays to a pointer, both
+// on an ordinary call (passing `msg` to `print_buffer`) and at the `extern
+// "C"` boundary (passing it onward to real libc `puts`).
 extern "C" int puts(const char* s);
 
 void print_buffer(char* msg) {

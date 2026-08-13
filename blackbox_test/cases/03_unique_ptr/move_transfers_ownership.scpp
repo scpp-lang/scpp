@@ -1,5 +1,5 @@
 import std;
-// ch05 §5.1: `std::move(x)` marks `x` moved-out and transfers ownership;
+// spec §6.2(1)-(6): `std::move(x)` marks `x` moved-out and transfers ownership;
 // the new owner can be dereferenced normally.
 int main() {
     std::unique_ptr<int> a = std::make_unique<int>(9);

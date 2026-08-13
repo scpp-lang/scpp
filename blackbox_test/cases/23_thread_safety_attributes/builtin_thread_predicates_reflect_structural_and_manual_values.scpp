@@ -1,8 +1,8 @@
-// ch05 §5.15/spec §8.3: `scpp::is_thread_movable(T)` and
-// `scpp::is_thread_shareable(T)` are builtin predicates over a *type
-// name* in parentheses, reflecting either a manual override or the
-// structural rules. Scalars are both true; a raw-pointer field is false
-// by default; a manual override can make such a wrapper true.
+// docs/spec/en/04-thread-safety-properties.md §8.1-§8.4/spec §8.3:
+// `scpp::is_thread_movable(T)` and `scpp::is_thread_shareable(T)` are builtin
+// predicates over a *type name* in parentheses, reflecting either a manual
+// override or the structural rules. Scalars are both true; a raw-pointer field
+// is false by default; a manual override can make such a wrapper true.
 struct RawPtrBox {
     int* p;
 };

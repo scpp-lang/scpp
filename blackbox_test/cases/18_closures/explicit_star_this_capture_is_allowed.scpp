@@ -1,4 +1,4 @@
-// ch05 §5.12: "write [this], [*this], [=, this], or [&, this] instead."
+// book ch11-01: write [this], [*this], [=, this], or [&, this] instead.
 // `[*this]` captures a copy of the whole receiver object by value
 // (distinct from `[this]`'s by-reference/pointer capture) -- accepted
 // explicit syntax. Only reading (never mutating) the captured value, so

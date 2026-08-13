@@ -1,4 +1,4 @@
-// ch06: comparison operators work when both operands already have the
+// spec §16.3(1): comparison operators work when both operands already have the
 // same scalar type.
 int main() {
     if (3 < 5) {

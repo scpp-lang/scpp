@@ -1,4 +1,4 @@
-// ch06 scalar table: "`unsigned int` | alias for `uint32_t`" and
+// spec §16.1 Table 1: "`unsigned int` | alias for `uint32_t`" and
 // "`unsigned long` | alias for `uint64_t`" -- both core builtin scalar
 // types (only the bare single-word `unsigned` shorthand is meant to be
 // rejected; the full two-word spellings are supposed to be valid). Both

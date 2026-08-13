@@ -1,6 +1,6 @@
-// ch05 §5.16: "One-directional implicit conversion: not-unsafe-
+// spec §5.2: One-directional implicit conversion: not-unsafe-
 // qualified -> unsafe-qualified only... it only ever *widens* the
-// caller's obligation, never removes a real one." `add` is an ordinary
+// caller's obligation, never removes a real one. `add` is an ordinary
 // (not-unsafe-qualified) function, yet it may still be stored in an
 // `[[scpp::unsafe]]`-qualified pointer variable. Calling through that
 // variable still requires `[[scpp::unsafe]] { }` regardless -- the

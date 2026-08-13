@@ -1,4 +1,4 @@
-// ch06 scalar table: "if/while conditions must already be bool" -- no
+// spec §16.3(4): if/while conditions must already be bool -- no
 // implicit int-to-bool conversion in a condition, unlike real C++.
 int main() {
     if (5) {

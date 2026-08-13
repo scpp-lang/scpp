@@ -1,4 +1,4 @@
-// ch05 §5.8: subtraction is checked too. INT_MIN - 1 overflows.
+// book ch09-01: subtraction is checked too. INT_MIN - 1 overflows.
 int f(int a, int b) {
     return a - b;
 }

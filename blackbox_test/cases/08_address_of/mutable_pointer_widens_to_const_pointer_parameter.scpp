@@ -1,5 +1,5 @@
-// ch05 §5.7/§8 Q9: "T* converts implicitly to const T* (widening --
-// always legal, matching real C++'s own rule)."
+// spec §5.1(5.1)/§8 Q9: T* converts implicitly to const T* (widening --
+// always legal, matching real C++'s own rule).
 int f(const int* p) {
     [[scpp::unsafe]] {
         return *p;

@@ -1,5 +1,5 @@
 import std;
-// ch05 §5.18: `std::move_only_function<Sig>` accepts move-only targets.
+// [undocumented rule; was old-book ch05 §5.18]: `std::move_only_function<Sig>` accepts move-only targets.
 class MoveOnlyAdder {
 private:
     std::unique_ptr<int> delta{};

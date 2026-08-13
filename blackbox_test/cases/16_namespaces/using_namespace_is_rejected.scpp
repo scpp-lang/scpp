@@ -1,6 +1,6 @@
-// ch11 §11.5: "No using namespace, anywhere -- not even function-local.
+// spec §10.5(2): No using namespace, anywhere -- not even function-local.
 // The only import form is a single-name using-declaration, using
-// foo::bar;" -- a permanent restriction, not a temporary gap.
+// foo::bar; -- a permanent restriction, not a temporary gap.
 namespace foo {
     int helper() {
         return 5;

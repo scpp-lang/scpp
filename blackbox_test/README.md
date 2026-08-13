@@ -10,12 +10,47 @@ invoking the built `scpp` CLI binary as an external tool, exactly the way any
 user of the language would -- there is no dependency on, or knowledge of,
 scpp's internal compiler modules.
 
+## Citation convention
+
+Comments in this suite cite the language documentation. Because the spec and
+the book both number things, citations are written so the target is
+unambiguous:
+
+| Form | Means | Example |
+|---|---|---|
+| `spec §C.S(p)` | clause `C`, subclause `S`, paragraph `p` of `docs/spec/en/` | `spec §6.2(13.1)` |
+| `docs/spec/en/<file>.md §C.S` | same, but written out in full | `docs/spec/en/05-unions-and-packed-layout.md §9.4` |
+| `book chNN-MM` | the file `docs/book/en/chNN-MM-*.md` | `book ch09-03` |
+| `[undocumented rule; was old-book chNN §N.M]` | a rule the compiler still enforces that no current document specifies | see below |
+
+**Always write out the full path for spec clauses 7, 8 and 9.** The spec
+currently reuses each of those three clause numbers in two different files
+(clause 7 = both `03-dereference-and-member-access.md` and
+`06-constant-evaluation.md`; clause 8 = both `04-thread-safety-properties.md`
+and `10-iteration-statements.md`; clause 9 = both
+`05-unions-and-packed-layout.md` and `07-constexpr-and-consteval.md`), so a
+bare `spec §9.1` does not identify a unique paragraph. Note also that a
+spec **file** number is not its **clause** number -- `01-unsafe.md` is
+clause 5, `02-ownership-and-move.md` is clause 6, and so on.
+
+The `[undocumented rule; ...]` marker records a behaviour that is pinned by a
+fixture here and still enforced by the compiler, but whose only written
+statement was in `docs/old-book/`, deleted in PR #441. Grep for it to find
+every such gap:
+
+```sh
+grep -rn "\[undocumented rule" cases/
+```
+
+Those markers are **not** a licence to invent a clause number -- they exist so
+the specification work can be routed deliberately.
+
 ## How it works
 
 - `cases/<NN_category>/<name>.scpp` -- a small scpp program illustrating one
   documented language rule (cited in a comment at the top of the file,
   pointing at the relevant `docs/book/` or `docs/spec/` section). scpp
-  source files use the `.scpp` extension, not `.cpp` (ch08 Q7/Q13): since
+  source files use the `.scpp` extension, not `.cpp`: since
   every function is checked unconditionally by default now, an ordinary
   `.cpp` file must never be silently fed to the scpp compiler and checked
   without its author asking for that.
@@ -31,7 +66,7 @@ scpp's internal compiler modules.
      never checked -- the spec doesn't pin down wording.
   3. **`NO_ABORT`**: used only for the handful of cases where a
      scpp-inserted runtime check (span bounds, overflow) is deliberately
-     *skipped* inside an `[[scpp::unsafe]] { }` block (ch01 §1.1), so the resulting
+     *skipped* inside an `[[scpp::unsafe]] { }` block (spec §5.1(5)), so the resulting
      value is genuine, unspecified garbage that can't be pinned down --
      but the process must still terminate normally, not be killed by a
      signal.
@@ -49,7 +84,7 @@ scpp's internal compiler modules.
     it must *not* exist
   - `<name>.stderr` / `main.stderr` -- exact expected stderr from the CLI
     command; `$TEMP` expands to the per-case temp directory
-- **Multi-file (ch11 module) cases**: some rules (import/export across
+- **Multi-file (module) cases**: some rules (import/export across
   files, partitions, ...) genuinely need more than one source file. A
   directory containing a `main.scpp` file is instead treated as one
   *module test case*, named after the directory:
@@ -58,7 +93,7 @@ scpp's internal compiler modules.
     forms as above).
   - `main.imports` (optional) -- one `module_name=relative_path` mapping
     per non-blank, non-`#`-comment line, passed to `scpp` as
-    `--import module_name=path` (ch11 §11.14) -- list every module
+    `--import module_name=path` (spec §10.1-§10.5) -- list every module
     `main.scpp` needs, direct or transitive, since `main.scpp` is the only
     file actually compiled as the entry point.
   - any other `.scpp` files in the directory -- the modules referenced by
@@ -104,7 +139,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `03_unique_ptr` | `std::make_unique`/`std::move`, move-out checking, arrow sugar |
 | `04_references_borrow` | `T&`/`const T&`, alias-XOR-mutability, NLL release, lifetime elision |
 | `05_span` | `std::span<T>` construction/indexing/bounds checks |
-| `06_unsafe_blocks` | `[[scpp::unsafe]] { }` gating and scoping rules; §5.1-§5.4 staying active inside it; function-level `[[scpp::unsafe]]` marker (ch01 §1.2, scpp's `unsafe fn`) |
+| `06_unsafe_blocks` | `[[scpp::unsafe]] { }` gating and scoping rules; spec §6.1-§6.2 staying active inside it; function-level `[[scpp::unsafe]]` marker (spec §5.1(1.2), scpp's `unsafe fn`) |
 | `07_extern_c` | `extern "C"` declarations/definitions, real libc interop |
 | `08_address_of` | `&expr`, `const T*`/`T*` distinction |
 | `09_integer_overflow` | checked-abort by default, wrapping in `[[scpp::unsafe]]`, div/mod special cases |
@@ -115,14 +150,14 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `15_function_overloading` | exact-type-match resolution, by-value/by-reference axis, const/non-const methods |
 | `16_namespaces` | basic `namespace` declaration, qualified calls, nesting, same-namespace unqualified class lookup, and leading `::` global-scope lookup; `using namespace` rejected |
 | `17_modules` | `export module`/`import`, exported type aliases, `export namespace { ... }` blocks, relaxed exported-namespace placement, cross-module import/export/re-export, bare `extern`, partitions, and a workspace/path-dependency build whose cross-module `.scppm` binary artifact must correctly round-trip a still-generic exported class's template-parameter-dependent array bound |
-| `18_closures` | lambda expressions (ch05 §5.12): by-value/by-reference/init capture, blanket/mixed captures, lifetime-tracking of reference-capturing closures, explicit `this`/`*this` capture, `mutable`, trailing return types, generic lambdas |
-| `19_scalar_types` | the full scalar family beyond `bool`/`int`/`char` (ch06), explicit scalar-to-scalar casts, comparison rules for same-type vs mixed-type scalars, and `?:`'s matching arm-typing rules (literal/wider-scalar-lvalue acceptance, distinct-scalar-type rejection) |
-| `20_generic_functions` | ch05 §5.11 revisions: full header form (bare/concept-constrained/multi-param/return-type-only), abbreviated bare `auto`, concept-constrained parameter packs |
-| `21_generic_types` | generic `struct`/`class` types (ch05 §5.14): bare/concept-constrained type parameters, per-method `requires`, variadic types via recursive inheritance, non-type template parameters, base-class-deduction indexed access, a const-qualified type argument correctly binding/rejecting-writes-through its substituted reference, and `new T(...)` selecting its own class's constructor rather than a foreign monomorphized generic clone |
-| `22_lifetime_any_parameters` | `[[scpp::lifetime(any)]]` (ch05 §5.13): reserved lifetime group, call-site exemption for closures accepting a callee-chosen lifetime, and `[[scpp::lifetime(...)]]` on `requires(...)` probe parameters constraining concept satisfaction (any/named-group matching, untagged no-op, non-reference rejection) |
-| `23_thread_safety_attributes` | `[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]` (ch05 §5.15): structural derivation and manual override |
-| `24_function_pointers` | function pointers (ch05 §5.16): real C/C++ syntax, the unsafe-qualified/not-unsafe-qualified type split, automatic address-type selection (ordinary / `[[scpp::unsafe]]` / bodyless `extern "C"` / with-body `extern "C"`), one-directional conversion, struct-member legality, copyability, `&overloaded_name` target-type resolution |
-| `25_function_wrappers` | `std::function` / `std::move_only_function` (ch05 §5.18): copyable vs move-only targets, cv/ref-qualified signatures, moved-from behavior |
+| `18_closures` | lambda expressions (book ch11-01): by-value/by-reference/init capture, blanket/mixed captures, lifetime-tracking of reference-capturing closures, explicit `this`/`*this` capture, `mutable`, trailing return types, generic lambdas |
+| `19_scalar_types` | the full scalar family beyond `bool`/`int`/`char` (spec §16.1 Table 1), explicit scalar-to-scalar casts, comparison rules for same-type vs mixed-type scalars, and `?:`'s matching arm-typing rules (literal/wider-scalar-lvalue acceptance, distinct-scalar-type rejection) |
+| `20_generic_functions` | generic functions (book ch10-01, book ch10-02): full header form (bare/concept-constrained/multi-param/return-type-only), abbreviated bare `auto`, concept-constrained parameter packs |
+| `21_generic_types` | generic `struct`/`class` types (book ch10-02; the bare-type-parameter restriction is an `[undocumented rule; was old-book ch05 §5.14]`): bare/concept-constrained type parameters, per-method `requires`, variadic types via recursive inheritance, non-type template parameters, base-class-deduction indexed access, a const-qualified type argument correctly binding/rejecting-writes-through its substituted reference, and `new T(...)` selecting its own class's constructor rather than a foreign monomorphized generic clone |
+| `22_lifetime_any_parameters` | `[[scpp::lifetime(any)]]` (spec §6.2(13.1)): reserved lifetime group, call-site exemption for closures accepting a callee-chosen lifetime, and `[[scpp::lifetime(...)]]` on `requires(...)` probe parameters constraining concept satisfaction (any/named-group matching, untagged no-op, non-reference rejection) |
+| `23_thread_safety_attributes` | `[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]` (docs/spec/en/04-thread-safety-properties.md §8.1-§8.4): structural derivation and manual override |
+| `24_function_pointers` | function pointers (spec §5.2): real C/C++ syntax, the unsafe-qualified/not-unsafe-qualified type split, automatic address-type selection (ordinary / `[[scpp::unsafe]]` / bodyless `extern "C"` / with-body `extern "C"`), one-directional conversion, struct-member legality, copyability, `&overloaded_name` target-type resolution |
+| `25_function_wrappers` | `std::function` / `std::move_only_function` (`[undocumented rule; was old-book ch05 §5.18]`): copyable vs move-only targets, cv/ref-qualified signatures, moved-from behavior |
 | `26_threads` | `std::thread` / `std::jthread`: thread-movable constructor constraint, join/detach/joinable transitions, `jthread` destructor auto-join |
 | `27_unions_packed_layout` | union member unsafe-gating and `[[scpp::packed]]` layout/FFI behavior, including the Linux `epoll_event` / `epoll_data_t` pattern |
 | `28_cli_invocation` | CLI surface: direct `scpp file.scpp` builds, default/custom output names, removed `build` keyword, and surviving `lex`/`parse`/`build-module` subcommands |
@@ -139,7 +174,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `39_ordinary_virtual_dispatch` | ordinary virtual dispatch: override selection across base/derived references and pointers, including chained forwarding through helpers |
 | `40_operator_arrow` | `operator->`: recursive arrow chaining, cv-correct selection, ordinary-vs-unsafe call gating, and raw-pointer leaf requirements |
 | `41_global_variables` | file-scope/global variable declarations: plain globals, const globals, cross-function mutation, and `alignas` acceptance/rejection rules |
-| `42_array_bound_expressions` | array declarators (ch05 §9.4): literal/`sizeof`/`alignof`/arithmetic/global-`constexpr`-named-constant bounds applied uniformly at local-variable, struct/class-field, and function-parameter sites; rejection of non-constant, zero, negative, and self-referential-incomplete-type bounds; a generic type's `sizeof(T)`-dependent bound resolved independently per instantiation; a ternary bound over two template parameters' `sizeof`s resolving correctly for both branches (each selected by a different instantiation); and the current local-`constexpr`-as-later-local-bound scope boundary |
+| `42_array_bound_expressions` | array declarators (docs/spec/en/05-unions-and-packed-layout.md §9.4): literal/`sizeof`/`alignof`/arithmetic/global-`constexpr`-named-constant bounds applied uniformly at local-variable, struct/class-field, and function-parameter sites; rejection of non-constant, zero, negative, and self-referential-incomplete-type bounds; a generic type's `sizeof(T)`-dependent bound resolved independently per instantiation; a ternary bound over two template parameters' `sizeof`s resolving correctly for both branches (each selected by a different instantiation); and the current local-`constexpr`-as-later-local-bound scope boundary |
 | `43_forward_declarations` | ordinary function forward declarations at namespace/module scope, exported-forward-declaration reconciliation, struct/class forward declarations, tag-kind mismatch diagnostics, and the deliberate permissive by-value-use-before-later-definition behavior |
 | `44_switch_and_operators` | `switch`/`case`, explicit `[[fallthrough]]`, namespaced enum `case` labels, braced case bodies ending in an explicit terminator (and the shapes that still don't -- empty `{ }`, a trailing `if`/`else`, a trailing loop, a non-final `break`, a nested `[[fallthrough]]`), per-case local name scoping (a case's local does not leak into a later case), switch-exit-block reachability under nested `break`s, prefix/postfix `++`/`--`, compound assignment operators, and member `operator==`/`operator!=` |
 | `45_aliases_local_types_and_defaults` | `using` type aliases, function-local `struct`/`class` definitions and scoping, out-of-line member definitions, function-local `static` variables, and non-trivial default-argument evaluation |
@@ -166,24 +201,23 @@ Pass `--scpp-bin <path>` to point at a different build.
   `return` statement -- scpp currently has no implicit fall-off-the-end
   return, even though this isn't called out explicitly in `docs/book/`.
 - There is **no `safe` keyword** -- every function is checked
-  unconditionally by default (ch01/ch08 Q13); `[[scpp::unsafe]]` is the
-  only safety-context construct (an attribute, not a keyword -- see ch01
-  §1.3, "redesigned from a bare `unsafe { }` block to
-  `[[scpp::unsafe]] { }`" this round), and it only relaxes ch05 §5.5's
+  unconditionally by default (spec §1(2)-(3), spec §5.1); `[[scpp::unsafe]]` is the
+  only safety-context construct (an attribute, not a keyword -- see spec
+  §5.1), and it only relaxes spec §5.1's
   fixed operation list (raw pointer deref, calling an `extern "C"`
   function, etc.) plus span-bounds/overflow checking -- ownership/move/
-  alias/lifetime checking (§5.1-§5.4) keeps running unconditionally even
+  alias/lifetime checking (spec §6.1-§6.2) keeps running unconditionally even
   inside `[[scpp::unsafe]] { }`. Calling an `extern "C"` function always
   needs `[[scpp::unsafe]] { }` regardless of the caller *and regardless
   of whether that function has a body* -- extern "C" linkage itself
-  marks the FFI boundary (ch02's boundary table draws no distinction); a
+  marks the FFI boundary (spec §5.1(5.6) draws no distinction); a
   with-body extern "C" function's own internals are otherwise checked
   exactly like any other function (e.g. a raw-pointer dereference inside
   it still needs its own `[[scpp::unsafe]] { }`). A *new* mechanism this
   round: attaching `[[scpp::unsafe]]` directly to a function's own
   declaration (before its return type) makes the whole body an unsafe
   context *and* makes calling that function itself one of §5.5's gated
-  operations -- scpp's equivalent of Rust's `unsafe fn` (ch01 §1.2).
+  operations -- scpp's equivalent of Rust's `unsafe fn` (spec §5.1(1.2)).
 - **`17_modules`'s `--import name=path` mechanics are now verified**:
   `path` does point directly at a module's raw `.scpp` interface source,
   compiled on the fly -- no separate "compile a module to `.scppm` first"
@@ -272,7 +306,7 @@ re-run via `./build/run_tests`:
   forms; and reborrows now directly cover the lender-read-allowed rule, the
   lender-write/further-reborrow rejections, and lender reuse after the
   child borrow's last use
-- **Thread-trait overrides now cover the rewritten §5.15/§8 docs**:
+- **Thread-trait overrides now cover the rewritten thread-safety docs (docs/spec/en/04-thread-safety-properties.md)**:
   builtin trait predicates, conditional overrides on generic classes,
   unconditional generic override propagation, and `std::unique_ptr<T>`'s
   trait forwarding behavior
@@ -318,7 +352,7 @@ re-run via `./build/run_tests`:
   `-p` package selection, direct-only compile-time visibility, and
   rejection of still-deferred manifest features like registry deps,
   `[workspace.dependencies]`, and `[native]`
-- **Array bound constant-expressions (ch05 §9.4) now have dedicated
+- **Array bound constant-expressions (docs/spec/en/05-unions-and-packed-layout.md §9.4) now have dedicated
   black-box coverage**: literal/`sizeof`/`alignof`/arithmetic/global-named-
   constant bounds accepted uniformly across local-variable, struct/class-
   field, and function-parameter declarator sites; non-constant (not a

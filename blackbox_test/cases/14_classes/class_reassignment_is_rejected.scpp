@@ -1,4 +1,4 @@
-// ch04 §4.2 / ch08 Q15: `Counter` declares a destructor and nothing
+// book ch05-01 / spec §6.5: `Counter` declares a destructor and nothing
 // else copy-related, so it gets *neither* a compiler-provided copy
 // constructor nor a compiler-provided copy assignment operator (no
 // "mixed" state where one is silently auto-generated) -- and since it

@@ -1,5 +1,5 @@
-// ch05 §5.16: "`fp(args)` (or the equivalent `(*fp)(args)`, also legal,
-// exactly as in real C++)" -- both calling syntaxes are accepted and
+// spec §5.2: `fp(args)` (or the equivalent `(*fp)(args)`, also legal,
+// exactly as in real C++) -- both calling syntaxes are accepted and
 // behave identically.
 int add(int a, int b) {
     return a + b;

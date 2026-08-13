@@ -1,7 +1,8 @@
-// ch05 §5.10: "By-value vs. by-reference is a separate, orthogonal axis
-// ... a bare lvalue argument is only ever viable against a T&/const T&
-// parameter, never a T one; conversely std::move(x) (or an ordinary
-// prvalue/temporary) is only viable against a T parameter." A literal
+// [undocumented rule; was old-book ch05 §5.10]: by-value vs. by-reference
+// is a separate, orthogonal axis -- a bare lvalue argument is only ever
+// viable against a T&/const T& parameter, never a T one; conversely
+// std::move(x) (or an ordinary prvalue/temporary) is only viable against
+// a T parameter. A literal
 // (prvalue) can only match f(int); a named variable (lvalue) can only
 // match f(int&).
 int f(int x) {

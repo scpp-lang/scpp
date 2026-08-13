@@ -1,5 +1,5 @@
 import std;
-// ch05 §5.18: moving a wrapper follows ordinary class move rules; the
+// [undocumented rule; was old-book ch05 §5.18]: moving a wrapper follows ordinary class move rules; the
 // destination owns the callable target and remains invocable.
 class Adder {
     public:

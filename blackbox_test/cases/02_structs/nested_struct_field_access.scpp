@@ -1,5 +1,5 @@
-// ch04 §4.1: "Other struct types that themselves satisfy this rule
-// (recursively)" are allowed as struct fields -- a struct-typed field
+// book ch05-01: Other struct types that themselves satisfy this rule
+// (recursively) are allowed as struct fields -- a struct-typed field
 // nested inside another struct.
 struct Inner {
     int value;

@@ -1,4 +1,4 @@
-// ch05 §5.16: both `fp(args)` and `(*fp)(args)` are legal real-C++
+// spec §5.2: both `fp(args)` and `(*fp)(args)` are legal real-C++
 // function-pointer call syntaxes, and an unsafe-qualified pointer call
 // is permitted inside `[[scpp::unsafe]] { }`. This also exercises the
 // explicit `&function-name` address-taking form for an

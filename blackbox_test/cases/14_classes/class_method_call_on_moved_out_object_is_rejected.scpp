@@ -1,5 +1,5 @@
-// KNOWN FAILURE (found incidentally while testing ch04 §4.2's new class
-// move rules): ch05 §5.1 says a moved-out value must not be used, full
+// KNOWN FAILURE (found incidentally while testing book ch05-01's new class
+// move rules): spec §6.2(1)-(6) says a moved-out value must not be used, full
 // stop -- this is correctly enforced for a *direct field read* of a
 // moved-out object (class_move_construction_use_after_move_is_rejected.scpp),
 // but calling a method on a moved-out class object -- even a `const`,

@@ -1,4 +1,4 @@
-// ch02 §2.1: extern "C" block form (sugar for repeating `extern "C"` on
+// spec §5.1(5.6): extern "C" block form (sugar for repeating `extern "C"` on
 // each declaration) declaring real libc allocator functions; `void*`
 // converts implicitly to another pointer type on initialization.
 extern "C" {

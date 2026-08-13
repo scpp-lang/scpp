@@ -1,15 +1,15 @@
-// ch05 §5.12: "Passing a closure to another function uses a
-// concept-constrained generic parameter ([§5.11]), not std::function --
-// monomorphized per concrete closure type, zero-cost." Adapted from the
-// spec's own example (ch05 §5.12), substituting a `while` loop for the
+// book ch11-01: Passing a closure to another function uses a
+// concept-constrained generic parameter (book ch10-02), not std::function --
+// monomorphized per concrete closure type, zero-cost. Adapted from the
+// spec's own example (book ch11-01), substituting a `while` loop for the
 // spec's `for` loop since range-for/`for` itself is out of scope for v0.1
-// (ch06) and not part of what this test is exercising.
+// (spec §16.3) and not part of what this test is exercising.
 //
 // NOTE: as of this test's writing, generic functions/concepts are not
 // yet implemented (see 13_unsupported_robustness/
 // concept_and_generic_functions_are_rejected_not_crashed.scpp) -- this
 // case exercises BOTH closures (this section) and generic functions
-// (§5.11) at once, so it may only start passing once both land, not
+// (book ch10-02) at once, so it may only start passing once both land, not
 // purely as a closures-specific fix.
 template<typename T>
 concept IntConsumer = requires(T f, int x) { f(x); };

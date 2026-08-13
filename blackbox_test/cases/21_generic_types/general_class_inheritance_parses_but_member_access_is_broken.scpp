@@ -1,6 +1,6 @@
-// ch04 §4.2: "No inheritance in v0.1 (deferred, not a permanent
-// exclusion)" -- general class inheritance, as distinct from ch05
-// §5.14's narrow variadic-generic-type recursive-inheritance pattern
+// book ch05-01: "No inheritance in v0.1 (deferred, not a permanent
+// exclusion)" -- general class inheritance, as distinct from spec §6.2
+// the narrow variadic-generic-type recursive-inheritance pattern
 // (Tuple/TupleImpl), should still be out of scope. `class Derived :
 // public Base { ... }` unrelated to any generic/variadic type is
 // currently accepted at the declaration, but produces confusing/wrong

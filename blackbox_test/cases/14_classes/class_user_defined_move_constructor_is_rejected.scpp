@@ -1,4 +1,4 @@
-// ch04 §4.2/ch08 Q14: "a program that declares its own
+// book ch05-01/spec §6.4: "a program that declares its own
 // `ClassName(ClassName&&)`... is rejected, for *every* `class` type,
 // unconditionally" -- the compiler always provides the move
 // constructor instead, so authors have no hook to get it wrong (real

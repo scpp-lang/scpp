@@ -1,7 +1,8 @@
-// ch05 §5.16/ch08 Q16: "This also resolves §5.10's own deferred item:
+// spec §5.2(4),(5): This also resolves the deferred item from the
+// overload-resolution rules:
 // `&overloaded_name` now picks the one overload whose type exactly
 // matches the target pointer-to-function type, real C++'s own
-// target-type-driven rule, reused verbatim." `describe` is overloaded
+// target-type-driven rule, reused verbatim. `describe` is overloaded
 // on `int` vs `bool`; the target type `int (*)(int)` must select the
 // `int` overload, never the `bool` one.
 int describe(int x) {

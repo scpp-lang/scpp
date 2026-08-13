@@ -1,4 +1,4 @@
-// ch05 §5.11: "A concept is optional, not mandatory, on a constrained
+// book ch10-02: "A concept is optional, not mandatory, on a constrained
 // parameter. Writing bare auto (no concept name in front of it) is
 // legal -- it means the parameter's type is treated as fully opaque:
 // the body may move it, store it, pass it to another function accepting

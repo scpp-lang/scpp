@@ -1,8 +1,8 @@
-// ch05 §5.15: "Raw pointer T*: neither, by default ... vouch by wrapping
-// it in a struct/class marked [[scpp::thread_movable]]/
-// [[scpp::thread_shareable]]." A struct containing a raw pointer field,
-// with no manual override, must fail a `[[scpp::thread_movable]]`
-// constraint.
+// docs/spec/en/04-thread-safety-properties.md §8.1-§8.4: Raw pointer T*:
+// neither, by default ... vouch by wrapping it in a struct/class marked
+// [[scpp::thread_movable]]/ [[scpp::thread_shareable]]. A struct containing a
+// raw pointer field, with no manual override, must fail a
+// `[[scpp::thread_movable]]` constraint.
 struct RawBufferHandle {
     int* data;
     int len;

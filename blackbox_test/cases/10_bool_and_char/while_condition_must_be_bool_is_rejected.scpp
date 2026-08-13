@@ -1,4 +1,4 @@
-// ch06 scalar table: same rule applies to `while` conditions.
+// spec §16.3(4): same rule applies to `while` conditions.
 int main() {
     while (1) {
     }

@@ -1,7 +1,7 @@
-// ch01 §1.2: calling a function marked `[[scpp::unsafe]]` on its own
-// declaration is one of §5.5's gated operations -- wrapping the call
-// site in `[[scpp::unsafe]] { }` vouches for it, exactly like vouching
-// for a raw pointer dereference or an `extern "C"` call.
+// spec §5.1(1.2),(3),(5.7): calling a function marked `[[scpp::unsafe]]` on
+// its own declaration is one of spec §5.1's gated operations -- wrapping the call
+// site in `[[scpp::unsafe]] { }` vouches for it, exactly like vouching for a
+// raw pointer dereference or an `extern "C"` call.
 [[scpp::unsafe]] int get_unchecked(int* p) {
     return *p;
 }

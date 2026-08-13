@@ -1,4 +1,4 @@
-// ch06 scalar table: "No implicit conversion to or from any other
+// spec §16.3(4): "No implicit conversion to or from any other
 // type... scpp requires an explicit cast in both directions" (stated for
 // `bool`, and "now applies uniformly across the entire numeric family").
 // This implies an explicit cast is the sanctioned way to convert between

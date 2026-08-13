@@ -1,5 +1,5 @@
 import std;
-// ch05 §5.18: an `Sig &&` wrapper promises an rvalue-callable target.
+// [undocumented rule; was old-book ch05 §5.18]: an `Sig &&` wrapper promises an rvalue-callable target.
 class Adder {
     public:
         virtual ~Adder() { return; }

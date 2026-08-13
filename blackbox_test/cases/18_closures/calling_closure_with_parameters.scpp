@@ -1,4 +1,4 @@
-// ch05 §5.12: a closure's parameter list works exactly like an ordinary
+// book ch11-01: a closure's parameter list works exactly like an ordinary
 // function's -- "calling a closure is an ordinary call to its
 // (compiler-synthesized) operator()."
 int main() {

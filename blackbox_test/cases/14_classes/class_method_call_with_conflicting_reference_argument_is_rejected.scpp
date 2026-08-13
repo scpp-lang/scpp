@@ -1,5 +1,5 @@
-// ch05 §5.9: "Calling a method borrows the receiver, exactly like passing
-// a reference argument to an ordinary function" -- and an ordinary
+// book ch05-03: Calling a method borrows the receiver, exactly like passing
+// a reference argument to an ordinary function -- and an ordinary
 // reference-typed method *parameter* is borrow-checked exactly like any
 // other reference parameter. Here `y` is already mutably borrowed by `r`
 // (still live -- used in the final `return`), so passing it by mutable

@@ -1,7 +1,7 @@
-// ch01 §1.2: "the function's entire body becomes an unsafe context...
-// because of the attribute on the declaration" -- no *nested*
-// `[[scpp::unsafe]] { }` block is needed inside the body itself for a
-// raw pointer dereference, unlike an ordinary function.
+// spec §5.1(1.2),(3),(5.7): the function's entire body becomes an unsafe
+// context... because of the attribute on the declaration -- no *nested*
+// `[[scpp::unsafe]] { }` block is needed inside the body itself for a raw
+// pointer dereference, unlike an ordinary function.
 [[scpp::unsafe]] int get_unchecked(int* p) {
     return *p;
 }

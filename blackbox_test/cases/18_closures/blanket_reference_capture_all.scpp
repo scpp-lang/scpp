@@ -1,4 +1,4 @@
-// ch05 §5.12: "`[&]` (whole-scope implicit capture)... accepted as-is."
+// book ch11-01: `[&]` (whole-scope implicit capture)... accepted as-is.
 // Every captured name becomes a reference-typed member, so mutating
 // through the closure mutates the original locals.
 int main() {

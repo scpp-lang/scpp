@@ -1,4 +1,4 @@
-// ch05 §5.11: the full header form (`template<Concept T> ...`) unlocks
+// book ch10-02: the full header form (`template<Concept T> ...`) unlocks
 // whatever the concept's requires-expression guarantees, checked once at
 // the generic function's own definition -- exactly like the abbreviated
 // `Concept auto` form, just spelled differently.

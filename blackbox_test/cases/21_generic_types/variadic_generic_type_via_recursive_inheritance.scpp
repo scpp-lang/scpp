@@ -1,4 +1,4 @@
-// ch05 §5.14: "Parameter packs (typename... Ts) are supported ... but
+// [undocumented rule; was old-book ch05 §5.14]: "Parameter packs (typename... Ts) are supported ... but
 // only via recursive inheritance ... Exactly two, fixed patterns are
 // supported for a variadic generic type": the empty-pack base case
 // (`template<> class Tuple<> { };`) and the recursive head-and-tail case

@@ -1,4 +1,4 @@
-// ch05 §5.14: "Indexed access into a recursively-defined variadic type
+// [undocumented rule; was old-book ch05 §5.14]: "Indexed access into a recursively-defined variadic type
 // reuses deduction from a base class ... Threading a scalar, non-type
 // index through the recursive definition ... lets an accessor deduce, in
 // one step, exactly which level of the inheritance chain holds the

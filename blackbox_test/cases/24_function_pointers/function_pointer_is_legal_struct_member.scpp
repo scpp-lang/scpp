@@ -1,6 +1,6 @@
-// ch04 §4.1: "Function pointers... likewise carry no compiler-tracked
+// book ch05-01: "Function pointers... likewise carry no compiler-tracked
 // lifetime" and are listed alongside raw pointers among the trivial
-// types a `struct` may hold as a member (ch05 §5.16: "freely copyable
+// types a `struct` may hold as a member (spec §5.2: "freely copyable
 // and a legal `struct` member").
 int add(int a, int b) {
     return a + b;

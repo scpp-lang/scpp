@@ -1,6 +1,6 @@
 import std;
-// ch02 §2.1: "Rejected: ... std::unique_ptr, ... none of these have a
-// defined C representation."
+// spec §5.1(5.6): Rejected: ... std::unique_ptr, ... none of these have a
+// defined C representation.
 extern "C" void f(std::unique_ptr<int> x);
 
 int main() {

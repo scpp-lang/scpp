@@ -1,9 +1,9 @@
 import std;
-// ch04 §4.2/ch08 Q14: "self-move-assignment (`x = std::move(x)`) needs
+// book ch05-01/spec §6.4: self-move-assignment (`x = std::move(x)`) needs
 // no defensive `this != &other` check the way real C++ does: evaluating
 // `std::move(x)` places `x` in the moved-out state before the
 // assignment's own 'destroy the old value' step runs, so that step is
-// always a no-op for this case." Proof: `a = std::move(a);` must leave
+// always a no-op for this case. Proof: `a = std::move(a);` must leave
 // `a` fully valid and destructible -- both its post-assignment read
 // (`a.get()`) and its destructor at scope-exit must behave normally
 // (the destructor's `printf` must fire exactly once, not zero times

@@ -1,12 +1,12 @@
-// ch05 §5.13: the overall "thread::scope-shaped" pattern this section
-// targets -- a wrapper function invents a value internally (here,
+// spec §6.2(16),(22)-(24): the overall "thread::scope-shaped" pattern this
+// section targets -- a wrapper function invents a value internally (here,
 // `tok`, a function-local `Token`) and calls a passed-in closure with a
 // reference to it; the closure's own parameter is tagged
-// `[[scpp::lifetime(any)]]`, matching how the spec's own example is
-// written. The concept's own probe parameter is any-tagged too (see
-// concept_probe_parameter_lifetime_any_tag_is_accepted.scpp), so per
-// spec §6.2(22.3) this concept now genuinely requires an any-tagged
-// candidate parameter, not just plain callability.
+// `[[scpp::lifetime(any)]]`, matching how the spec's own example is written.
+// The concept's own probe parameter is any-tagged too (see
+// concept_probe_parameter_lifetime_any_tag_is_accepted.scpp), so per spec
+// §6.2(22.3) this concept now genuinely requires an any-tagged candidate
+// parameter, not just plain callability.
 class Token {
     public:
         virtual ~Token() { return; }

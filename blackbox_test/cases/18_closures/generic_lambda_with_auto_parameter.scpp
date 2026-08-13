@@ -1,7 +1,7 @@
-// ch05 §5.12: "Reuses real C++ lambda syntax verbatim ... including
-// generic (C++14, `auto` parameter) lambdas." A generic lambda's
+// book ch11-01: Reuses real C++ lambda syntax verbatim ... including
+// generic (C++14, `auto` parameter) lambdas. A generic lambda's
 // `operator()` is itself a function template, monomorphized per
-// call-site argument type -- the same underlying mechanism as §5.11's
+// call-site argument type -- the same underlying mechanism as book ch10-02's
 // concept-constrained generic functions.
 //
 // NOTE: as of this test's writing, generic functions/concepts are not

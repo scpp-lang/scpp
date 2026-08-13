@@ -1,7 +1,7 @@
-// ch04 §4.2/ch08 Q14: every class gets a compiler-synthesized move
+// book ch05-01/spec §6.4: every class gets a compiler-synthesized move
 // constructor unconditionally -- even `Counter`, which (having a
 // user-declared destructor and no copy constructor/assignment of its
-// own) is *not* copy-eligible at all (ch08 Q15). Move and copy are
+// own) is *not* copy-eligible at all (spec §6.5). Move and copy are
 // independent tracks: `Counter y(std::move(x));` still works here.
 class Counter {
 private:

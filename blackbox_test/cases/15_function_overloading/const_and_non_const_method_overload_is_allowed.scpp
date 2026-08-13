@@ -1,6 +1,7 @@
-// ch05 §5.9/§5.10: "T& beats const T& for a mutable lvalue when both are
+// book ch05-03; [undocumented rule; was old-book ch05 §5.10]: T& beats
+// const T& for a mutable lvalue when both are
 // viable ... this is what makes const/non-const method overloading
-// (get()/get() const) work." Calling through a `const Counter&` can only
+// (get()/get() const) work. Calling through a `const Counter&` can only
 // see the `const` overload (no mutation); calling through a plain
 // `Counter&` prefers the non-`const` overload.
 class Counter {

@@ -1,4 +1,4 @@
-// ch05 §5.14: "Non-type template parameters are supported, restricted to
+// [undocumented rule; was old-book ch05 §5.14]: "Non-type template parameters are supported, restricted to
 // scalar types" -- real C++ template syntax verbatim
 // (`template<int N> class X { ... };`). This is a genuine finding: a
 // generic type with a SOLE non-type parameter (no accompanying type

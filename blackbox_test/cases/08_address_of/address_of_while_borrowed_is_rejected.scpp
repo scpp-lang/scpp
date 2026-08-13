@@ -1,7 +1,7 @@
-// ch05 §5.7: "What is checked at the moment &expr is evaluated: ... the
+// spec §5.1(5.1): What is checked at the moment &expr is evaluated: ... the
 // root must have no existing borrow at all (shared or mutable) at this
 // instant, or &expr is rejected the same way taking a second T& would
-// be." `x` already has a live mutable borrow (`r`) when `&x` is
+// be. `x` already has a live mutable borrow (`r`) when `&x` is
 // evaluated.
 int f() {
     int x = 5;

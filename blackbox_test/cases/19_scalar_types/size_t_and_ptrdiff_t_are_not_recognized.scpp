@@ -1,4 +1,4 @@
-// ch06 scalar table: "`size_t` | unsigned, pointer-width | matches real
+// spec §16.1 Table 1: "`size_t` | unsigned, pointer-width | matches real
 // C++/Rust (`usize`) semantics" and "`ptrdiff_t` | signed, pointer-width
 // | same target-triple-following semantics as `size_t`" -- both core
 // builtin scalar types (e.g. `std::span::size` and array indexing

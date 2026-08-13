@@ -1,4 +1,4 @@
-// ch04 §4.1: "Fixed-size arrays of trivial types" are allowed as struct
+// book ch05-01: Fixed-size arrays of trivial types are allowed as struct
 // fields.
 struct Buffer {
     int values[4];

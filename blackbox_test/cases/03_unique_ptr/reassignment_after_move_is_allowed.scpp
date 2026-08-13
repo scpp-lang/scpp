@@ -1,5 +1,5 @@
 import std;
-// ch05 §5.1: "Reassignment returns a variable to the initialized state" --
+// spec §6.2(1)-(6): Reassignment returns a variable to the initialized state --
 // a previously-moved-from unique_ptr can be reassigned and used again.
 int main() {
     std::unique_ptr<int> a = std::make_unique<int>(1);

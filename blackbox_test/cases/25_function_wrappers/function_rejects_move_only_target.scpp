@@ -1,5 +1,5 @@
 import std;
-// ch05 §5.18: `std::function<Sig>` stores a target only when that target
+// [undocumented rule; was old-book ch05 §5.18]: `std::function<Sig>` stores a target only when that target
 // is copy-constructible; a move-only callable must therefore be rejected.
 class MoveOnlyAdder {
 private:

@@ -1,5 +1,5 @@
-// ch03/ch08 Q1: "Subscript s[i] carries a runtime bounds check by
-// default, calling abort() on failure." Checking is unconditional now --
+// book ch04-02/book ch09-01: Subscript s[i] carries a runtime bounds check by
+// default, calling abort() on failure. Checking is unconditional now --
 // no annotation is needed to enable it.
 int oob(std::span<int> s) {
     return s[10];

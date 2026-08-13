@@ -8,11 +8,42 @@
 当作外部工具来调用——就像语言的普通使用者一样，不依赖、也不需要了解 scpp
 编译器的内部模块。
 
+## 引用约定
+
+本套件的注释会引用语言文档。由于规范（spec）和书（book）各自都有编号，
+引用一律写成不会产生歧义的形式：
+
+| 形式 | 含义 | 示例 |
+|---|---|---|
+| `spec §C.S(p)` | `docs/spec/en/` 的第 `C` 章第 `S` 节第 `p` 段 | `spec §6.2(13.1)` |
+| `docs/spec/en/<file>.md §C.S` | 同上，但写出完整路径 | `docs/spec/en/05-unions-and-packed-layout.md §9.4` |
+| `book chNN-MM` | 文件 `docs/book/en/chNN-MM-*.md` | `book ch09-03` |
+| `[undocumented rule; was old-book chNN §N.M]` | 编译器仍在强制、但当前没有任何文档规定的规则 | 见下 |
+
+**引用规范第 7、8、9 章时必须写出完整路径。** 目前规范中这三个章号各自
+被两个不同文件重复使用（第 7 章 = `03-dereference-and-member-access.md`
+与 `06-constant-evaluation.md`；第 8 章 = `04-thread-safety-properties.md`
+与 `10-iteration-statements.md`；第 9 章 = `05-unions-and-packed-layout.md`
+与 `07-constexpr-and-consteval.md`），因此裸写 `spec §9.1` 无法唯一确定
+一个段落。另外，规范的**文件编号**不等于**章号**——`01-unsafe.md` 是第 5
+章，`02-ownership-and-move.md` 是第 6 章，依此类推。
+
+`[undocumented rule; ...]` 标记记录的是：本目录有 fixture 钉住、编译器
+也仍在强制，但唯一的成文出处是已在 PR #441 中删除的 `docs/old-book/`
+的行为。用下面的命令可以列出全部这类缺口：
+
+```sh
+grep -rn "\[undocumented rule" cases/
+```
+
+这些标记**不是**编造章节号的许可——它们的存在是为了让规范撰写工作能够
+被有意识地安排。
+
 ## 工作原理
 
 - `cases/<NN_category>/<name>.scpp` —— 一段展示某条文档化语言规则的小 scpp
   程序（文件顶部注释会引用对应的 `docs/book/` 或 `docs/spec/` 章节）。scpp
-  源文件用 `.scpp` 后缀，不用 `.cpp`（ch08 Q7/Q13）：既然现在每个函数默认都
+  源文件用 `.scpp` 后缀，不用 `.cpp`：既然现在每个函数默认都
   无条件被检查，就绝不能让一个普通的 `.cpp` 文件被悄悄喂给 scpp 编译器、在
   作者没有要求的情况下被检查。
 - `cases/<NN_category>/<name>.expected` —— 如果 `scpp` 正确实现了规范，这段
@@ -26,7 +57,7 @@
      锁定措辞。
   3. **`NO_ABORT`**：仅用于极少数场景——某个 scpp 插入的运行时检查（span
      边界检查、溢出检查）在一个 `[[scpp::unsafe]] { }` 块内被有意地*跳过*了（见
-     ch01 §1.1），因此读到/算出的值本身就是不确定的垃圾值，没法固定下来
+     spec §5.1(5)），因此读到/算出的值本身就是不确定的垃圾值，没法固定下来
      断言——但进程仍必须正常终止（return/exit），而不是被信号杀死。
 - **可选 CLI 用例辅助文件**：用于黑盒验证 CLI 表面本身：
   - `<name>.argv` / `main.argv` —— 每个非空行一个 argv token，支持
@@ -39,14 +70,14 @@
     若以前缀 `!` 开头，则表示该路径必须*不存在*
   - `<name>.stderr` / `main.stderr` —— CLI 命令期望的精确 stderr；`$TEMP`
     会展开成该用例的临时目录
-- **多文件（ch11 模块）用例**：有些规则（跨文件的 import/export、
+- **多文件（模块）用例**：有些规则（跨文件的 import/export、
   partition……）确实需要不止一个源文件。一个包含 `main.scpp` 文件的目录会被
   当成*一个*模块测试用例，以该目录名命名：
   - `main.scpp` —— 入口文件，编译并运行方式和普通单文件用例完全一样；
     `main.expected` 是它的期望结果（形式同上面三种）。
   - `main.imports`（可选）——每个非空、非 `#` 注释行是一条
     `module_name=relative_path` 映射，会被转成 `scpp` 的
-    `--import module_name=path`（ch11 §11.14）——把 `main.scpp` 需要的每个
+    `--import module_name=path`（spec §10.1-§10.5）——把 `main.scpp` 需要的每个
     模块都列出来，不管是直接依赖还是间接依赖，因为只有 `main.scpp` 本身会
     被当作入口编译。
   - 目录里其它的 `.scpp` 文件——就是 `main.imports` 里引用的那些模块，不会
@@ -90,7 +121,7 @@ cmake --build build
 | `03_unique_ptr` | `std::make_unique`/`std::move`、移出检查、箭头语法糖 |
 | `04_references_borrow` | `T&`/`const T&`、alias-XOR-mutability、NLL 借用释放、生命周期省略 |
 | `05_span` | `std::span<T>` 的构造/下标/边界检查 |
-| `06_unsafe_blocks` | `[[scpp::unsafe]] { }` 的门控与作用域规则；§5.1-§5.4 在其内部依然生效；函数级 `[[scpp::unsafe]]` 标记（ch01 §1.2，scpp 版的 `unsafe fn`） |
+| `06_unsafe_blocks` | `[[scpp::unsafe]] { }` 的门控与作用域规则；spec §6.1-§6.2 在其内部依然生效；函数级 `[[scpp::unsafe]]` 标记（spec §5.1(1.2)，scpp 版的 `unsafe fn`） |
 | `07_extern_c` | `extern "C"` 声明/定义、真实 libc 互操作 |
 | `08_address_of` | `&expr`、`const T*`/`T*` 的区分 |
 | `09_integer_overflow` | 默认检查并 abort、`[[scpp::unsafe]]` 下环绕、除法/取模的特殊情形 |
@@ -100,15 +131,15 @@ cmake --build build
 | `14_classes` | 构造/析构函数、默认成员初始化器与构造成员初始化列表、私有成员访问控制、编译器提供/用户自定义的拷贝构造与拷贝赋值、只能由编译器提供的移动构造与移动赋值、方法调用的借用检查、`this` |
 | `15_function_overloading` | 按精确类型匹配解析重载、by-value/by-reference 独立轴、const/非-const 方法 |
 | `16_namespaces` | 基本的 `namespace` 声明、限定调用、嵌套、同一命名空间内类名的非限定查找，以及前缀 `::` 的全局作用域查找；`using namespace` 被拒绝 |
-| `17_modules` | `export module`/`import`、命名空间与模块名匹配（ch11 §11.6）、跨模块 import/export/重新导出、裸 `extern`、partition，以及一个 workspace/path-dependency 构建——其跨模块 `.scppm` 二进制产物必须正确往返一个仍是泛型的导出类、依赖模板参数的数组边界 |
-| `18_closures` | lambda 表达式（ch05 §5.12）：按值/按引用/初始化捕获、笼统/混合捕获、引用捕获闭包的生命周期跟踪、显式 `this`/`*this` 捕获、`mutable`、尾置返回类型、泛型 lambda |
-| `19_scalar_types` | `bool`/`int`/`char` 之外的完整标量家族（ch06）、标量间的显式转换，以及同类型/混合类型标量比较规则 |
-| `20_generic_functions` | ch05 §5.11 的修订：完整 header 形式（裸/概念约束/多参数/仅返回类型）、缩写形式的裸 `auto`、概念约束的参数包 |
-| `21_generic_types` | 泛型 `struct`/`class` 类型（ch05 §5.14）：裸/概念约束的类型参数、逐方法 `requires`、通过递归继承实现的 variadic 类型、非类型模板参数、基于基类推导的下标访问 |
-| `22_lifetime_any_parameters` | `[[scpp::lifetime(any)]]`（ch05 §5.13）：预留的生命周期分组、闭包接受"被调用方选择的生命周期"时的调用点豁免，以及 `requires(...)` 探测参数上的 `[[scpp::lifetime(...)]]` 对概念满足性的约束（any/具名分组匹配、未标注不产生约束、非引用类型被拒绝） |
-| `23_thread_safety_attributes` | `[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]`（ch05 §5.15）：结构化推导与手动覆盖 |
-| `24_function_pointers` | 函数指针（ch05 §5.16）：真实 C/C++ 语法、unsafe-qualified/非-unsafe-qualified 的类型区分、取地址时的自动类型选择（普通函数 / `[[scpp::unsafe]]` / 无函数体 `extern "C"` / 有函数体 `extern "C"`）、单向转换、作为 struct 成员的合法性、可拷贝性、`&overloaded_name` 按目标类型解析 |
-| `25_function_wrappers` | `std::function` / `std::move_only_function`（ch05 §5.18）：可拷贝/仅可移动 target、cv/ref-qualified 签名、moved-from 行为 |
+| `17_modules` | `export module`/`import`、命名空间与模块名匹配（spec §10.2）、跨模块 import/export/重新导出、裸 `extern`、partition，以及一个 workspace/path-dependency 构建——其跨模块 `.scppm` 二进制产物必须正确往返一个仍是泛型的导出类、依赖模板参数的数组边界 |
+| `18_closures` | lambda 表达式（book ch11-01）：按值/按引用/初始化捕获、笼统/混合捕获、引用捕获闭包的生命周期跟踪、显式 `this`/`*this` 捕获、`mutable`、尾置返回类型、泛型 lambda |
+| `19_scalar_types` | `bool`/`int`/`char` 之外的完整标量家族（spec §16.1 表 1）、标量间的显式转换，以及同类型/混合类型标量比较规则 |
+| `20_generic_functions` | 泛型函数（book ch10-01、book ch10-02）：完整 header 形式（裸/概念约束/多参数/仅返回类型）、缩写形式的裸 `auto`、概念约束的参数包 |
+| `21_generic_types` | 泛型 `struct`/`class` 类型（book ch10-02；其中「裸类型参数」限制属于 `[undocumented rule; was old-book ch05 §5.14]`）：裸/概念约束的类型参数、逐方法 `requires`、通过递归继承实现的 variadic 类型、非类型模板参数、基于基类推导的下标访问 |
+| `22_lifetime_any_parameters` | `[[scpp::lifetime(any)]]`（spec §6.2(13.1)）：预留的生命周期分组、闭包接受"被调用方选择的生命周期"时的调用点豁免，以及 `requires(...)` 探测参数上的 `[[scpp::lifetime(...)]]` 对概念满足性的约束（any/具名分组匹配、未标注不产生约束、非引用类型被拒绝） |
+| `23_thread_safety_attributes` | `[[scpp::thread_movable]]`/`[[scpp::thread_shareable]]`（docs/spec/en/04-thread-safety-properties.md §8.1-§8.4）：结构化推导与手动覆盖 |
+| `24_function_pointers` | 函数指针（spec §5.2）：真实 C/C++ 语法、unsafe-qualified/非-unsafe-qualified 的类型区分、取地址时的自动类型选择（普通函数 / `[[scpp::unsafe]]` / 无函数体 `extern "C"` / 有函数体 `extern "C"`）、单向转换、作为 struct 成员的合法性、可拷贝性、`&overloaded_name` 按目标类型解析 |
+| `25_function_wrappers` | `std::function` / `std::move_only_function`（`[undocumented rule; was old-book ch05 §5.18]`）：可拷贝/仅可移动 target、cv/ref-qualified 签名、moved-from 行为 |
 | `26_threads` | `std::thread` / `std::jthread`：thread-movable 构造约束、join/detach/joinable 状态变化、`jthread` 析构时自动 join |
 | `27_unions_packed_layout` | union 成员的 unsafe 门控，以及 `[[scpp::packed]]` 的布局/FFI 行为，包括 Linux `epoll_event` / `epoll_data_t` 形态 |
 | `28_cli_invocation` | CLI 表面：直接 `scpp file.scpp` 构建、默认/自定义输出名、移除的 `build` 关键字，以及仍保留的 `lex`/`parse`/`build-module` 子命令 |
@@ -125,7 +156,7 @@ cmake --build build
 | `39_ordinary_virtual_dispatch` | 普通虚派发：基类/派生类引用与指针上的 override 选择，以及经由辅助函数转发后的分派 |
 | `40_operator_arrow` | `operator->`：递归箭头链、cv 正确性的重载选择、普通/unsafe 调用门控，以及原始指针叶子要求 |
 | `41_global_variables` | 文件作用域 / 全局变量声明：普通全局变量、`const` 全局变量、跨函数读写，以及 `alignas` 的接受/拒绝规则 |
-| `42_array_bound_expressions` | 数组声明符（ch05 §9.4）：字面量 / `sizeof` / `alignof` / 算术组合 / 全局 `constexpr` 命名常量作为数组边界，在局部变量、struct/class 字段、函数参数三种声明位置一致生效；拒绝非常量、零、负数以及自引用不完整类型边界；泛型类型中依赖 `sizeof(T)` 的边界在每次实例化时各自独立正确解析；两个模板参数的 `sizeof` 构成的三目边界，在两个分支各自被不同实例化选中时都能正确解析；以及当前关于「同一函数内局部 `constexpr` 常量用作后续局部数组边界」的既定能力边界 |
+| `42_array_bound_expressions` | 数组声明符（docs/spec/en/05-unions-and-packed-layout.md §9.4）：字面量 / `sizeof` / `alignof` / 算术组合 / 全局 `constexpr` 命名常量作为数组边界，在局部变量、struct/class 字段、函数参数三种声明位置一致生效；拒绝非常量、零、负数以及自引用不完整类型边界；泛型类型中依赖 `sizeof(T)` 的边界在每次实例化时各自独立正确解析；两个模板参数的 `sizeof` 构成的三目边界，在两个分支各自被不同实例化选中时都能正确解析；以及当前关于「同一函数内局部 `constexpr` 常量用作后续局部数组边界」的既定能力边界 |
 
 ## 测试理念
 
@@ -141,20 +172,19 @@ cmake --build build
   被刻意**不予使用**，因为它们不属于文档记载的语言表面。
 - 每个函数体（包括返回 `void` 的）都需要显式的 `return` 语句——scpp 目前没有
   隐式地"落到函数末尾就返回"这回事，尽管 `docs/book/` 里并没有明确点出这一点。
-- **没有 `safe` 关键字**——每个函数默认都无条件被检查（ch01/ch08 Q13）；
+- **没有 `safe` 关键字**——每个函数默认都无条件被检查（spec §1(2)-(3)、spec §5.1）；
   `[[scpp::unsafe]]` 是语言里唯一的安全上下文构造（一个 attribute，不是关键字
-  ——见 ch01 §1.3，这一轮从裸的 `unsafe { }` 块重新设计成了
-  `[[scpp::unsafe]] { }`），且只放松 ch05 §5.5 里那一小串固定的操作（裸指针
+  ——见 spec §5.1），且只放松 spec §5.1 里那一小串固定的操作（裸指针
   解引用、调用 `extern "C"` 函数等）外加 span 边界检查/溢出检查——所有权/
-  移动/别名/生命周期检查（§5.1-§5.4）即便在 `[[scpp::unsafe]] { }` 内部也
+  移动/别名/生命周期检查（spec §6.1-§6.2）即便在 `[[scpp::unsafe]] { }` 内部也
   无条件持续生效。调用 `extern "C"` 函数永远都需要 `[[scpp::unsafe]] { }`，
   跟调用方是谁无关，**也跟这个函数有没有函数体无关**——`extern "C"` 这个
-  链接方式本身就标记了 FFI 边界（ch02 的边界表并没有区分这两种情况）；一个
+  链接方式本身就标记了 FFI 边界（spec §5.1(5.6) 并没有区分这两种情况）；一个
   带函数体的 `extern "C"` 函数自己内部依然按普通函数一样被检查（例如它内部
   的裸指针解引用照样需要自己的 `[[scpp::unsafe]] { }`）。这一轮新增的机制：
   把 `[[scpp::unsafe]]` 直接标注在函数自己的声明上（返回类型之前），会让
-  整个函数体变成 unsafe 上下文，*同时*让调用这个函数本身也变成 §5.5 的
-  受控操作之一——相当于 scpp 版的 Rust `unsafe fn`（ch01 §1.2）。
+  整个函数体变成 unsafe 上下文，*同时*让调用这个函数本身也变成 spec §5.1 的
+  受控操作之一——相当于 scpp 版的 Rust `unsafe fn`（spec §5.1(1.2)）。
 - **`17_modules` 里 `--import name=path` 的具体行为现在已经验证过了**：
   `path` 确实直接指向该模块的原始 `.scpp` 接口源码，即时编译，不需要"先把
   模块编译成 `.scppm`"这一独立步骤——由 10 个通过的多文件用例实证确认。
@@ -224,7 +254,7 @@ cmake --build build
   `auto&` / `const auto&` 三种形式；reborrow 则直接覆盖“允许经由 lender 读取、
   但禁止经由 lender 写入/再次 reborrow”，以及 child 最后一次使用之后 lender
   可恢复使用的规则
-- **线程 trait override** 现在覆盖了重写后的 §5.15/§8 文档：
+- **线程 trait override** 现在覆盖了重写后的线程安全文档（docs/spec/en/04-thread-safety-properties.md）：
   内建 trait 谓词、泛型类上的条件 override、无条件泛型 override 的传播，以及
   `std::unique_ptr<T>` 的 trait 转发行为
 - **函数/线程 wrapper** 现在也有直接黑盒覆盖：
@@ -261,7 +291,7 @@ cmake --build build
   单包 lib/bin 构建、workspace/path dependency 构建、`-p` 选包、
   仅直接依赖可见的编译期规则，以及对 registry 依赖、
   `[workspace.dependencies]`、`[native]` 等延期特性的拒绝路径
-- **数组边界常量表达式（ch05 §9.4）现在也有专门的黑盒覆盖**：
+- **数组边界常量表达式（docs/spec/en/05-unions-and-packed-layout.md §9.4）现在也有专门的黑盒覆盖**：
   字面量 / `sizeof` / `alignof` / 算术组合 / 全局命名常量边界在局部变量、
   struct/class 字段、函数参数三种声明位置上一致地被接受；非常量（不是
   VLA）、零、负数，以及直接/间接的自引用不完整类型边界都以清晰的诊断信息

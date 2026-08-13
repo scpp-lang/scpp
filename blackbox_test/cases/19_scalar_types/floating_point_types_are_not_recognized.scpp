@@ -1,4 +1,4 @@
-// ch06 scalar table: `float32_t`/`float64_t` "reuse real,
+// docs/missings.md: `float32_t`/`float64_t` "reuse real,
 // already-standardized C++23 `<stdfloat>` names verbatim"; `float`/
 // `double` are their respective aliases, "matches how real C++ already
 // behaves everywhere in practice." All four are core builtin scalar

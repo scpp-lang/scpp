@@ -24,7 +24,7 @@
 // 3. Compile + run, but the exact value is unspecified: the file contains
 //    exactly the sentinel `NO_ABORT` on its first line. Used for the
 //    handful of cases where a scpp-inserted runtime check (span bounds,
-//    overflow) is *skipped* inside an `unsafe { }` block (ch01 §1.1), so
+//    overflow) is *skipped* inside an `unsafe { }` block (spec §5.1(5)), so
 //    the read/computed value is genuine, unspecified garbage --
 //    not something a test can pin down -- but the process must still
 //    terminate normally (return/exit) rather than being killed by a
@@ -51,7 +51,7 @@
 //     command; `$TEMP` expands to the per-case temp directory so diagnostics
 //     mentioning copied fixture paths can still be asserted exactly.
 //
-// Multi-file (ch11 module) cases: some language rules (import/export
+// Multi-file (module) cases: some language rules (import/export
 // across files, partitions, ...) genuinely need more than one source
 // file. A directory containing a `main.scpp` file is instead treated as
 // one *module test case*, named after the directory:
@@ -61,7 +61,7 @@
 //   - `main.imports` (optional) -- one `module_name=relative_path` mapping
 //     per non-blank, non-`#`-comment line, resolved relative to the test
 //     case directory and passed to `scpp` as
-//     `--import module_name=path` (ch11 §11.14) -- list every module
+//     `--import module_name=path` (spec §10.1-§10.5) -- list every module
 //     `main.scpp` needs, direct or transitive (re-exported), since only
 //     `main.scpp` itself is ever the compiled entry point.
 //   - any other `.scpp` files in the directory -- the modules referenced
@@ -509,8 +509,8 @@ bool path_is_within(const fs::path& path, const fs::path& ancestor) {
 // Parses a module test case directory's `main.imports`, if present: each
 // non-blank, non-`#`-comment line is `module_name=relative_path`,
 // resolved relative to `dir`, and turned into a `--import
-// module_name=absolute_path` pair of arguments for `scpp` (ch11
-// §11.14).
+// module_name=absolute_path` pair of arguments for `scpp` (spec
+// §10.1-§10.5).
 std::vector<std::string> parse_imports_file(const fs::path& dir) {
     std::vector<std::string> args;
     fs::path imports_path = dir / "main.imports";

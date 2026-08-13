@@ -1,6 +1,6 @@
-// ch05 §5.10: "scpp allows multiple functions (free functions or methods)
-// to share a name, distinguished by parameter list only ... Resolution
-// rule: exact type match only." f(int) and f(bool) share a name; each
+// spec §16.3(3): in overload resolution an argument of scalar type matches
+// a parameter of scalar type only if the two types are the same, so no
+// implicit conversion sequence other than identity exists. f(int) and f(bool) share a name; each
 // call resolves to whichever overload's parameter type exactly matches
 // the argument's type.
 int f(int x) {

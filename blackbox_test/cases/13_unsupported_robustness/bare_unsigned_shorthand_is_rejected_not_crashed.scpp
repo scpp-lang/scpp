@@ -1,4 +1,4 @@
-// ch06 scalar table: bare single-word `unsigned` is intentionally *not*
+// spec §16.1 Table 1: bare single-word `unsigned` is intentionally *not*
 // valid scpp; only the full two-word spelling `unsigned int` is accepted.
 int main() {
     unsigned x = 0;

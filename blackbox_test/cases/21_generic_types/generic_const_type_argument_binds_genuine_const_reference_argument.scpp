@@ -1,4 +1,4 @@
-// ch05 §5.14 (Generic Types): a generic type instantiated with a
+// [undocumented rule; was old-book ch05 §5.14] (Generic Types): a generic type instantiated with a
 // const-qualified type argument correctly binds a genuine `const T&`
 // argument to its `T&`-typed constructor parameter. Generic
 // substitution (PR #390) now folds a substitution-introduced pointee

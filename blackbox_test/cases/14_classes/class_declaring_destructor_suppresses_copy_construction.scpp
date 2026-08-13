@@ -1,4 +1,4 @@
-// ch04 §4.2/ch08 Q15: a class declaring a destructor (and no copy
+// book ch05-01/spec §6.5: a class declaring a destructor (and no copy
 // constructor/assignment of its own) gets *neither* a compiler-provided
 // copy constructor nor a compiler-provided copy assignment operator --
 // complements class_reassignment_is_rejected.scpp, which covers the

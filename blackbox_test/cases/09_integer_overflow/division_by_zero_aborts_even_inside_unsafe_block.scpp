@@ -1,5 +1,5 @@
-// ch05 §5.8: unlike +/-/*, which merely wrap inside [[scpp::unsafe]] { }, division
-// by zero has no wrapped result to fall back on and still aborts even
+// book ch09-01: unlike +/-/*, which merely wrap inside [[scpp::unsafe]] { },
+// division by zero has no wrapped result to fall back on and still aborts even
 // when the operation itself is wrapped in [[scpp::unsafe]] { }.
 int divide(int a, int b) {
     [[scpp::unsafe]] {

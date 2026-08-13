@@ -1,4 +1,4 @@
-// ch04 §4.2/ch08 Q15: a class declaring none of a copy constructor, a
+// book ch05-01/spec §6.5: a class declaring none of a copy constructor, a
 // copy assignment operator, or a destructor gets a compiler-provided
 // copy assignment operator -- `b = a;` (bare reassignment) is licensed.
 // Same independence proof as the copy-construction case: mutating `b`

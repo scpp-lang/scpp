@@ -1,5 +1,5 @@
-// ch02 §2.1: "Rejected: T&/const T&, ... none of these have a defined C
-// representation."
+// spec §5.1(5.6): Rejected: T&/const T&, ... none of these have a defined C
+// representation.
 extern "C" void f(int& x);
 
 int main() {

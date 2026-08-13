@@ -1,4 +1,4 @@
-// ch03: `T&` is a mutable/exclusive borrow -- writing through it is
+// book ch04-02: `T&` is a mutable/exclusive borrow -- writing through it is
 // visible through the original variable name too (they're the same
 // storage).
 int f() {

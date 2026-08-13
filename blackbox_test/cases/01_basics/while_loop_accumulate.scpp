@@ -1,4 +1,4 @@
-// `while` loop with mutation of locals (ch06 supported statement list).
+// `while` loop with mutation of locals (spec §1(2)).
 // Sums 1..10 == 55.
 int main() {
     int i = 1;

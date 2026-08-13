@@ -1,4 +1,4 @@
-// ch05 §5.11: "A concept-constrained parameter may also be a pack
+// book ch10-02: "A concept-constrained parameter may also be a pack
 // (Concept auto&... args), usable only through a fold expression ...
 // covers variadic call patterns (e.g. a std::format-style function)."
 // This is explicitly documented syntax, but currently rejected

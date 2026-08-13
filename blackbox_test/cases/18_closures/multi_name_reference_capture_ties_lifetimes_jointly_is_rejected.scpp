@@ -1,7 +1,7 @@
-// ch05 §5.12: "Capturing more than one name by reference (`[&a, &b]`)
+// book ch11-01: Capturing more than one name by reference (`[&a, &b]`)
 // ties the closure's own lifetime to all of them jointly -- the same
-// conservative default-grouping treatment §5.3 already gives a function
-// with several ungrouped reference parameters." `f`'s body only reads
+// conservative default-grouping treatment spec §6.2(9)-(12) already gives a function
+// with several ungrouped reference parameters. `f`'s body only reads
 // `a`, but `b` is also captured by reference -- writing to `b` (never
 // even used inside the closure body) while `f` is still alive must still
 // be rejected, proving the closure's live borrow jointly covers every

@@ -1,10 +1,10 @@
-// ch02 boundary table: "Calling an extern "C" function | Must be wrapped
-// in [[scpp::unsafe]] { } ... No scpp compiler ever sees the C implementation to
-// check it" -- this applies uniformly, even when the function has a body
-// right here: extern "C" linkage itself is what marks the FFI boundary,
-// regardless of whether the implementation happens to be visible in this
-// translation unit. The body itself is still checked like any other
-// function when it's *defined* (ch02 §2.1) -- it's *calling* it that
+// spec §5.1(5.6) boundary table: Calling an extern "C" function | Must be
+// wrapped in [[scpp::unsafe]] { } ... No scpp compiler ever sees the C
+// implementation to check it -- this applies uniformly, even when the function
+// has a body right here: extern "C" linkage itself is what marks the FFI
+// boundary, regardless of whether the implementation happens to be visible in
+// this translation unit. The body itself is still checked like any other
+// function when it's *defined* (spec §5.1(5.6)) -- it's *calling* it that
 // needs [[scpp::unsafe]] { }.
 extern "C" int add(int a, int b) {
     return a + b;

@@ -1,9 +1,9 @@
-// ch05 §5.16/ch08 Q16: "the address of... a bodyless extern "C"
-// declaration ([§2.1], already gated the same way [§5.5]), is a value
-// of the unsafe-qualified pointer type." Taking `abs`'s address and
+// spec §5.2(4),(5): the address of... a bodyless extern "C"
+// declaration (already gated the same way by spec §5.1), is a value
+// of the unsafe-qualified pointer type. Taking `abs`'s address and
 // calling through the resulting unsafe-qualified pointer needs
 // `[[scpp::unsafe]] { }`, exactly like a directly-named bodyless
-// extern "C" call already does (ch02 §2.1).
+// extern "C" call already does (spec §5.1(5.6)).
 extern "C" int abs(int x);
 
 int main() {

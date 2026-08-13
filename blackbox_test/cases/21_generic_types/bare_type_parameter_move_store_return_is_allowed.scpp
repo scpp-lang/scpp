@@ -1,5 +1,5 @@
-// ch05 §5.14: "A generic type's own type parameter(s) may be left bare
-// -- exactly like a bare generic-function parameter (§5.11), this means
+// [undocumented rule; was old-book ch05 §5.14]: "A generic type's own type parameter(s) may be left bare
+// -- exactly like a bare generic-function parameter (book ch10-02), this means
 // 'no operations guaranteed beyond the universal baseline every scpp
 // type already has' (move, store as a field, pass to a compatible
 // parameter, return)." Real C++ template syntax verbatim

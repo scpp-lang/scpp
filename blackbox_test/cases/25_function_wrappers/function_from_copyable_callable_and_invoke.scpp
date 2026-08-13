@@ -1,5 +1,5 @@
 import std;
-// ch05 §5.18: `std::function<Sig>` stores a copy-constructible target.
+// [undocumented rule; was old-book ch05 §5.18]: `std::function<Sig>` stores a copy-constructible target.
 // A plainly copyable callable class should therefore be constructible and
 // invocable through the wrapper.
 class Adder {

@@ -1,4 +1,4 @@
-// ch06 scalar table / PR #392: `&&`/`||` require both operands to
+// spec §16.3(4) / PR #392: `&&`/`||` require both operands to
 // already be `bool` -- scpp has no implicit conversion to `bool`, so a
 // class-typed right operand like `flag && someSharedPtr` must be
 // rejected. Before PR #392, `codegen_short_circuit` fed its right

@@ -1,5 +1,5 @@
-// ch05 §5.12: "Reuses real C++ lambda syntax verbatim ... including
-// `mutable`." By default a closure's `operator()` is const (a by-value
+// book ch11-01: Reuses real C++ lambda syntax verbatim ... including
+// `mutable`. By default a closure's `operator()` is const (a by-value
 // capture can't be reassigned inside the body); `mutable` opts out,
 // matching real C++. Mutating the closure's own copy must not affect the
 // outer `x` (a separate, by-value-captured member) -- computed as

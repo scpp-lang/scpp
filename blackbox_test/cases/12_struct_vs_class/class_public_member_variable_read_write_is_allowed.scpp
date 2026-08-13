@@ -1,9 +1,9 @@
-// ch04 §4.2: "real, unrestricted C++ access control -- a member variable
+// book ch05-01: "real, unrestricted C++ access control -- a member variable
 // or member function may be public or private in any combination,
 // exactly like real C++" (reversed from an earlier round's "member
 // variables can never be public" rule). Direct external access to a
 // public member variable is checked exactly like a struct field access
-// (whole-root conservative, ch05 §5.2).
+// (whole-root conservative, spec §6.2(7)-(10)).
 class Widget {
     public:
         virtual ~Widget() { return; }

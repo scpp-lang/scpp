@@ -1,6 +1,6 @@
-// spec §6.2(22.4): "a probe parameter with no scpp::lifetime attribute
+// spec §6.2(22.4): a probe parameter with no scpp::lifetime attribute
 // imposes no lifetime-group constraint beyond the ordinary
-// well-formedness and type requirements of the probe" -- a
+// well-formedness and type requirements of the probe -- a
 // no-regression check for the probe_lifetime_groups_match code path
 // added alongside (22.1)-(22.3): every requirement now runs through it
 // (ConceptRequirement::arg_lifetimes is populated in parallel with
@@ -9,7 +9,7 @@
 // parameter *does* carry a tag. TaggedReader::read is any-tagged,
 // yet ReadsTokenPlain's own probe never mentions
 // [[scpp::lifetime(...)]] at all, so that tag is simply irrelevant to
-// satisfaction -- ordinary structural concept-checking (ch05 §5.11)
+// satisfaction -- ordinary structural concept-checking (book ch10-02)
 // keeps working exactly as it did before this feature existed.
 class Token {
     public:
