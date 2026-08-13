@@ -542,6 +542,256 @@ void test_read_only_range_for_survives_generic_instantiation() {
                                    error.value_or(std::string()) + "'");
 }
 
+// A single-argument converting constructor has to be honoured at every
+// value-to-declared-class-type boundary, not just some of them. These
+// four cases are the same conversion (a string literal to std::string,
+// via std::string's own converting constructor) written in the four
+// syntactic positions that exist; before the fix the first two were
+// accepted and the last two rejected.
+void test_converting_constructor_is_accepted_as_a_call_argument() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "import std;\n"
+        "void sink(std::string s) {\n"
+        "    return;\n"
+        "}\n"
+        "void caller() {\n"
+        "    sink(\"hi\");\n"
+        "    return;\n"
+        "}\n");
+    expect(!error.has_value(), "converting_constructor_is_accepted_as_a_call_argument: expected acceptance, got '" +
+                                   error.value_or(std::string()) + "'");
+}
+
+void test_converting_constructor_is_accepted_as_a_return_operand() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "import std;\n"
+        "std::string make() {\n"
+        "    return \"hi\";\n"
+        "}\n");
+    expect(!error.has_value(), "converting_constructor_is_accepted_as_a_return_operand: expected acceptance, got '" +
+                                   error.value_or(std::string()) + "'");
+}
+
+void test_converting_constructor_is_accepted_as_a_variable_initializer() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "import std;\n"
+        "void caller() {\n"
+        "    std::string s = \"hi\";\n"
+        "    return;\n"
+        "}\n");
+    expect(!error.has_value(), "converting_constructor_is_accepted_as_a_variable_initializer: expected acceptance, got '" +
+                                   error.value_or(std::string()) + "'");
+}
+
+void test_converting_constructor_is_accepted_as_a_constructor_argument() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "import std;\n"
+        "class Holder {\n"
+        "public:\n"
+        "    std::string s;\n"
+        "    virtual ~Holder() = default;\n"
+        "    Holder(std::string v) : s{std::move(v)} {}\n"
+        "};\n"
+        "void caller() {\n"
+        "    Holder h{\"hi\"};\n"
+        "    return;\n"
+        "}\n");
+    expect(!error.has_value(), "converting_constructor_is_accepted_as_a_constructor_argument: expected acceptance, got '" +
+                                   error.value_or(std::string()) + "'");
+}
+
+// The converting constructor must still be *selected*, not merely
+// tolerated: with a second overload present the checker has to pick the
+// one whose parameter the literal actually converts to.
+void test_converting_constructor_is_selected_among_constructor_overloads() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "import std;\n"
+        "class Holder {\n"
+        "public:\n"
+        "    std::string s;\n"
+        "    int n;\n"
+        "    virtual ~Holder() = default;\n"
+        "    Holder(std::string v) : s{std::move(v)}, n{0} {}\n"
+        "    Holder(int v) : s{\"\"}, n{v} {}\n"
+        "};\n"
+        "void caller() {\n"
+        "    Holder h{\"hi\"};\n"
+        "    Holder i{7};\n"
+        "    return;\n"
+        "}\n");
+    expect(!error.has_value(), "converting_constructor_is_selected_among_constructor_overloads: expected acceptance, got '" +
+                                   error.value_or(std::string()) + "'");
+}
+
+// Widening the variable-initializer boundary must not weaken the
+// same-type copy rule it sits next to: a class with a user-declared
+// destructor has no copy constructor (spec §6.5(2)), and `Foo b = a;`
+// stays ill-formed. `find_single_argument_converting_constructor_signature`
+// skips same-type constructors precisely so this case cannot leak
+// through as a "conversion".
+void test_same_type_initializer_still_requires_copy_constructibility() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "import std;\n"
+        "class Foo {\n"
+        "public:\n"
+        "    int v;\n"
+        "    virtual ~Foo() = default;\n"
+        "    Foo() : v{0} {}\n"
+        "};\n"
+        "void caller() {\n"
+        "    Foo a{};\n"
+        "    Foo b = a;\n"
+        "    return;\n"
+        "}\n");
+    expect(error.has_value() && error->find("not copy-constructible") != std::string::npos,
+           "same_type_initializer_still_requires_copy_constructibility: expected a copy-constructibility "
+           "diagnostic, got '" + error.value_or(std::string("<no error>")) + "'");
+}
+
+// A conversion that would need *two* user-defined constructors chained
+// (nullptr -> std::shared_ptr<Cell> via shared_ptr(T*), then
+// std::shared_ptr<Cell> -> std::expected<...> via expected(T)) is still
+// rejected, exactly as C++ rejects two user-defined conversions in one
+// implicit conversion sequence -- and it must be rejected identically at
+// every boundary, which is the property the shared helper guarantees.
+void test_two_step_conversion_is_rejected_at_every_boundary() {
+    cases_run++;
+    const std::string preamble =
+        "import std;\n"
+        "class Cell {\n"
+        "public:\n"
+        "    int v;\n"
+        "    virtual ~Cell() = default;\n"
+        "    Cell() : v{0} {}\n"
+        "};\n"
+        "class Err {\n"
+        "public:\n"
+        "    int code;\n"
+        "    virtual ~Err() = default;\n"
+        "    Err() : code{0} {}\n"
+        "    Err(const Err& o) : code{o.code} {}\n"
+        "};\n";
+    std::optional<std::string> returned = move_error_message(
+        preamble +
+        "std::expected<std::shared_ptr<Cell>, Err> make() {\n"
+        "    return nullptr;\n"
+        "}\n");
+    expect(returned.has_value(),
+           "two_step_conversion_is_rejected_at_every_boundary: expected the return boundary to reject it");
+
+    std::optional<std::string> initialized = move_error_message(
+        preamble +
+        "void caller() {\n"
+        "    std::expected<std::shared_ptr<Cell>, Err> e = nullptr;\n"
+        "    return;\n"
+        "}\n");
+    expect(initialized.has_value(),
+           "two_step_conversion_is_rejected_at_every_boundary: expected the initializer boundary to reject it");
+
+    std::optional<std::string> passed = move_error_message(
+        preamble +
+        "void sink(std::expected<std::shared_ptr<Cell>, Err> e) {\n"
+        "    return;\n"
+        "}\n"
+        "void caller() {\n"
+        "    sink(nullptr);\n"
+        "    return;\n"
+        "}\n");
+    expect(passed.has_value(),
+           "two_step_conversion_is_rejected_at_every_boundary: expected the argument boundary to reject it");
+}
+
+// The residual "this initializer is not allowed" diagnostic used to
+// advise `T v(args);` -- a spelling the parser categorically rejects
+// ("parenthesized direct-initialization is not allowed for object
+// declarations"), so following the advice produced a second error. It
+// must name brace-init, which is the syntax the language actually has.
+void test_rejected_initializer_diagnostic_advises_a_syntax_that_parses() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "import std;\n"
+        "class Foo {\n"
+        "public:\n"
+        "    int v;\n"
+        "    virtual ~Foo() = default;\n"
+        "    Foo() : v{0} {}\n"
+        "};\n"
+        "int side() {\n"
+        "    return 1;\n"
+        "}\n"
+        "void caller() {\n"
+        "    Foo b = side();\n"
+        "    return;\n"
+        "}\n");
+    expect(error.has_value() && error->find("brace-init") != std::string::npos,
+           "rejected_initializer_diagnostic_advises_a_syntax_that_parses: expected brace-init advice, got '" +
+              error.value_or(std::string("<no error>")) + "'");
+    expect(error.has_value() && error->find("(args);") == std::string::npos,
+           "rejected_initializer_diagnostic_advises_a_syntax_that_parses: the diagnostic still advises "
+           "parenthesized direct-initialization, which the parser rejects: '" +
+              error.value_or(std::string("<no error>")) + "'");
+}
+
+// The same restriction -- `std::move(E)` records move state per named
+// object (spec §6.2(3)), so a member or element has nowhere to record it
+// -- used to surface as three different messages depending on which
+// boundary noticed first, and two of them never mentioned std::move at
+// all. The call-argument one was the worst: it advised "a fresh value
+// such as std::move(x)", which is exactly what the reader wrote.
+void test_move_of_a_member_reports_the_same_reason_at_every_boundary() {
+    cases_run++;
+    const std::string preamble =
+        "import std;\n"
+        "class Box {\n"
+        "public:\n"
+        "    std::vector<int> data{};\n"
+        "    virtual ~Box() = default;\n"
+        "    Box() {}\n"
+        "};\n"
+        "void sink(std::vector<int> v) {\n"
+        "    return;\n"
+        "}\n";
+    const std::string expected = "std::move currently only supports a plain local variable";
+
+    std::optional<std::string> as_argument = move_error_message(
+        preamble +
+        "void caller() {\n"
+        "    Box b{};\n"
+        "    sink(std::move(b.data));\n"
+        "    return;\n"
+        "}\n");
+    expect(as_argument.has_value() && as_argument->find(expected) != std::string::npos,
+           "move_of_a_member_reports_the_same_reason_at_every_boundary: argument boundary gave '" +
+              as_argument.value_or(std::string("<no error>")) + "'");
+
+    std::optional<std::string> as_initializer = move_error_message(
+        preamble +
+        "void caller() {\n"
+        "    Box b{};\n"
+        "    std::vector<int> local = std::move(b.data);\n"
+        "    return;\n"
+        "}\n");
+    expect(as_initializer.has_value() && as_initializer->find(expected) != std::string::npos,
+           "move_of_a_member_reports_the_same_reason_at_every_boundary: initializer boundary gave '" +
+              as_initializer.value_or(std::string("<no error>")) + "'");
+
+    std::optional<std::string> as_return = move_error_message(
+        preamble +
+        "std::vector<int> caller() {\n"
+        "    Box b{};\n"
+        "    return std::move(b.data);\n"
+        "}\n");
+    expect(as_return.has_value() && as_return->find(expected) != std::string::npos,
+           "move_of_a_member_reports_the_same_reason_at_every_boundary: return boundary gave '" +
+              as_return.value_or(std::string("<no error>")) + "'");
+}
+
 void test_overload_failure_distinguishes_arity_from_argument_type() {
     cases_run++;
     std::optional<std::string> too_few = move_error_message(
@@ -1086,6 +1336,15 @@ int main() {
     test_mutable_range_for_still_borrows_the_container_exclusively();
     test_read_only_range_for_still_rejects_mutation_through_the_loop_variable();
     test_read_only_range_for_survives_generic_instantiation();
+    test_converting_constructor_is_accepted_as_a_call_argument();
+    test_converting_constructor_is_accepted_as_a_return_operand();
+    test_converting_constructor_is_accepted_as_a_variable_initializer();
+    test_converting_constructor_is_accepted_as_a_constructor_argument();
+    test_converting_constructor_is_selected_among_constructor_overloads();
+    test_same_type_initializer_still_requires_copy_constructibility();
+    test_two_step_conversion_is_rejected_at_every_boundary();
+    test_rejected_initializer_diagnostic_advises_a_syntax_that_parses();
+    test_move_of_a_member_reports_the_same_reason_at_every_boundary();
     test_overload_failure_distinguishes_arity_from_argument_type();
     test_overload_failure_names_the_offending_argument_and_types();
     test_std_string_const_reference_mutation_reports_clear_diagnostic();

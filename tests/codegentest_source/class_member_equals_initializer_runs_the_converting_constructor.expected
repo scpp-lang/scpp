@@ -1,0 +1,1 @@
+sequence: define void @EqInit_new | %s = getelementptr inbounds nuw %class.EqInit | call void @"_scppM3_stdF10_string_newQ0_P2_12_std::string&11_const char*"(ptr %classtmp, ptr @str) | store %"class.std::string" %classtmp.value, ptr %s

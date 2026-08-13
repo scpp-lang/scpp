@@ -1,0 +1,21 @@
+// A default member initializer written with `=` (rather than braces)
+// reaches initialize_storage_from_expr, which used to ask
+// codegen_class_value_for_boundary *not* to consider a converting
+// constructor. The raw `const char*` was then stored straight into
+// std::string-shaped storage, so this class compiled with no diagnostic
+// at all and then crashed at run time when ~std::string freed a string
+// literal. The member must be built by std::string's converting
+// constructor, exactly as `std::string s{"echo"};` already was.
+import std;
+
+class EqInit {
+public:
+    std::string s = "echo";
+    virtual ~EqInit() = default;
+    EqInit() {}
+};
+
+int main() {
+    EqInit e{};
+    return e.s.length() == 4 ? 4 : 0;
+}
