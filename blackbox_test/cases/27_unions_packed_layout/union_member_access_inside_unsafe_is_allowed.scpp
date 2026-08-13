@@ -1,4 +1,4 @@
-// docs/book/en/ch01-safety-context.md §1.1 and docs/spec/en/05-unions-and-packed-layout.md §9.1:
+// docs/spec/en/05-unions-and-packed-layout.md §9.1(4)(5):
 // union member access becomes legal inside [[scpp::unsafe]].
 union IntOrChar {
     int number;
