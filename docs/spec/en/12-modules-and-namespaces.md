@@ -328,4 +328,4 @@ int use(ns::Tag t) {
 
 ---
 
-[← Previous: Inheritance and Interfaces](11-inheritance-and-interfaces.md) · [Table of Contents](README.md)
+[← Previous: Inheritance and Interfaces](11-inheritance-and-interfaces.md) · [Table of Contents](README.md) · [Next: The null pointer type →](13-null-pointer-type.md)

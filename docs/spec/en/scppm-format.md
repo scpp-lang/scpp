@@ -8,10 +8,6 @@ archive of `.scppo` objects), one per target triple, referenced from an
 enclosing `.scppkg` package (see
 [The `.scppkg` Package Format](scppkg-format.md)).
 
-`.scppm` is referenced from
-[ch11 §11.12](../../book/en/ch11-modules-and-libraries.md#1112-the-scppm-scppa-and-scppkg-formats)
-of the language specification.
-
 Unlike `.scppkg` (a package bundling an arbitrary number of named files), a
 `.scppm` file always holds exactly the same two possible pieces of
 content -- so it is not a tar archive. Its bytes are a fixed header,
@@ -97,7 +93,7 @@ symbol.
 
 ### 2.1 Generic (concept-constrained) functions
 
-A generic function ([§5.11](../../book/en/ch05-static-checks.md)) is
+A generic function is
 monomorphized separately for each concrete type it is called with, at the
 call site's own build -- unlike an ordinary function, no single
 per-target compiled artifact can serve every caller, since callers may use
@@ -115,8 +111,7 @@ The generics block holds a scpp-internal serialized representation (not
 `.scpp` source text) of every generic function's body, sufficient for a
 consumer to monomorphize and generate code for whatever concrete types and
 target triple it needs. This keeps monomorphization zero-cost (no vtable,
-no runtime dispatch -- consistent with
-[§5.11](../../book/en/ch05-static-checks.md)) without requiring the
+no runtime dispatch) without requiring the
 function's logic to be distributed as readable source. The internal
 encoding of the generics block is not specified by this document.
 

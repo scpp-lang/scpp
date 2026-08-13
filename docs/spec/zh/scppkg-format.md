@@ -5,17 +5,13 @@
 [`.scppm` 模块接口格式](scppm-format.md)）配上每个 target triple 一份
 `.scppa` 归档，或者两者混合。
 
-`.scppkg` 被
-[ch11 §11.12](../../book/zh/ch11-modules-and-libraries.md#1112-scppm-scppa-scppkg-三个格式)
-引用。
-
 `.scppkg` manifest（第 3 节）里提到的 `.scppa` 文件，不是本文档定义的
 格式：它就是目标平台自己的原生静态库归档格式（Unix 是 `ar` 格式的
 `.a`，Windows 是 `.lib`），里面打包了这个 module 每个贡献代码的文件——
-它的主接口单元、某个实现单元、或者某个 partition（见 ch11
-[§11.3](../../book/zh/ch11-modules-and-libraries.md#113-导出面与接口实现单元的拆分)
+它的主接口单元、某个实现单元、或者某个 partition（见
+[§10.3](12-modules-and-namespaces.md#103-导出声明与所需命名空间-moduleinterface)
 和
-[§11.4](../../book/zh/ch11-modules-and-libraries.md#114-module-partition)）
+[§10.2](12-modules-and-namespaces.md#102-模块声明形式与-partition-moduleunit)）
 ——针对某个 target triple 各自编译出的一份 `.scppo` 目标文件成员。因为
 它是原生归档，系统 linker 会直接读取一个 `.scppa` 文件，跟处理任何别的
 静态库完全一样；除了里面具体包含哪些 `.scppo` 成员之外，没有任何
@@ -150,10 +146,10 @@ domain 的 LZMA SDK 自带的简单编码器（`LzmaCompress`）产出的格式�
 | `path` | 这份 `.scppa` 文件的 tar 内部路径。 |
 
 一个 module 就算由好几个文件贡献代码（它的主接口单元、一个或多个实现
-单元、一个或多个 partition——见 ch11
-[§11.3](../../book/zh/ch11-modules-and-libraries.md#113-导出面与接口实现单元的拆分)
+单元、一个或多个 partition——见
+[§10.3](12-modules-and-namespaces.md#103-导出声明与所需命名空间-moduleinterface)
 和
-[§11.4](../../book/zh/ch11-modules-and-libraries.md#114-module-partition)），
+[§10.2](12-modules-and-namespaces.md#102-模块声明形式与-partition-moduleunit)），
 每个 target triple 依然只有**一条** `archives` 条目：`.scppa` 文件本身
 就是一份原生归档，里面打包了这个 module 在那个 triple 下需要的所有
 `.scppo` 成员，所以这份 manifest 不需要逐个列出它们。
