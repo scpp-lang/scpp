@@ -1,5 +1,6 @@
 int f() {
     char a = 'x';
     char b = a;
-    return b == a;
+    if (b == a) { return 1; }
+    return 0;
 }

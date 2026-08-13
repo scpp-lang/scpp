@@ -3357,15 +3357,6 @@ private:
         return {};
     }
 
-    // ch05 §5.15: is `name` one of the scalar type names this version
-    // actually implements? (Only `int`/`bool`/`char` exist as real scpp
-    // types so far -- see this file's own earlier notes on `size_t`/
-    // fixed-width integers/`float32_t`/`float64_t` not existing yet;
-    // every scalar is both thread-movable and thread-shareable.)
-    [[nodiscard]] static bool is_scalar_type_name(const std::string& name) {
-        return name == "int" || name == "bool" || name == "char";
-    }
-
     // ch05 §5.15: recursively computes whether `type` is thread-movable
     // (mirrors Rust's `Send`) -- see this document's own §5.15 for the
     // full structural-derivation rules. `visiting` guards against

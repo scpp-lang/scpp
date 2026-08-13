@@ -1,0 +1,15 @@
+// spec §6: a negated literal is still a literal. The parser leaves -128
+// as unary minus over 128, so a check that matched only on
+// ExprKind::IntegerLiteral would call this an `int`-to-int8_t
+// conversion, which it is not: -128 names an int8_t value.
+int f() {
+    int8_t a = -128;
+    int16_t b = -32768;
+    int32_t c = -2147483648;
+    double d = -1.5;
+    if (a == -128) { return 1; }
+    if (b == -32768) { return 1; }
+    if (c == -2147483648) { return 1; }
+    if (d < 0.0) { return 1; }
+    return 0;
+}

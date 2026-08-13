@@ -201,6 +201,9 @@ struct NodiscardInfo {
                                   const std::string& target_name, bool report_errors);
 [[nodiscard]] std::expected<void, DataflowError> check_nullptr_assignment(const Type& target_type, const Expr& expr,
                                   SourceLocation loc, const std::string& target_name, bool report_errors);
+[[nodiscard]] std::expected<void, DataflowError> check_scalar_conversion(const Type& target_type, const Expr& expr,
+                                  const Body& body, const Signatures& signatures, SourceLocation loc,
+                                  const std::string& target_name, bool report_errors);
 [[nodiscard]] bool assignment_target_is_read_only(const Expr& expr, const Body& body,
                                                   const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> validate_sizeof_operand(const Expr& expr, const Body& body, const Signatures& signatures,
@@ -1212,6 +1215,79 @@ std::expected<void, DataflowError> check_nullptr_assignment(const Type& target_t
                                          loc));
 }
 
+// spec §6: scpp has no implicit conversion between *any* two distinct
+// scalar types. That rule is the language's headline guarantee, but it
+// was only half enforced: comparison, overload resolution and `?:`
+// compared type *names*, while an initializer, an assignment and a
+// `return` were only ever checked by codegen's check_store_type /
+// check_return_type, which compare the *lowered LLVM* types. Two names
+// that lower alike were therefore interconvertible in silence --
+// `bool` into `char`, `int8_t` into `uint8_t`, `int` into
+// `unsigned int`, `size_t` into `ptrdiff_t`, `int` into `int32_t`.
+// Signedness, and the distinction between a fixed-width name and its
+// same-width counterpart, were simply lost.
+//
+// So this checks by name, at the one phase that still has the scpp
+// types. It is deliberately *additive*: codegen's representation checks
+// stay exactly as they are, because they are the backstop for
+// everything movecheck cannot type -- infer_expr_type gives up on
+// Member/Subscript chains (it has no Program-level field-type
+// information), which is precisely the `return value->tag;` shape
+// check_return_type was introduced for. Replacing one with the other
+// would trade a false-accept for a false-reject; the two together
+// cover the boundary.
+//
+// Only scalar-to-scalar is judged here. A non-scalar destination, an
+// unknown source type, or a literal source is left to the machinery
+// that already handles it -- a literal has no type of its own to
+// convert *from* (`int8_t x = 1;` is a valid initialization of an
+// `int8_t`, not an `int`-to-`int8_t` conversion), and that judgment
+// belongs to literal_compatible_with_type.
+std::expected<void, DataflowError> check_scalar_conversion(const Type& target_type, const Expr& expr, const Body& body,
+                                                           const Signatures& signatures, SourceLocation loc,
+                                                           const std::string& target_name, bool report_errors) {
+    if (!report_errors) return {};
+    const Type& target_operand = binary_operand_type(target_type);
+    if (target_operand.kind != TypeKind::Named || !is_scalar_type_name(target_operand.name)) return {};
+    // spec §6: an untyped integer literal adopts the type of the place
+    // it initializes, but only when the value it spells is one of that
+    // type's values. `int8_t x = 300;` and `unsigned int x = -5;` used
+    // to be accepted for the same reason every other conversion hole on
+    // this path was: the literal was matched on *shape* and never on
+    // value. Reported here rather than left to fall through to the
+    // conversion diagnostic below, because a literal has no source type
+    // to name and "cannot convert an int to int8_t" would be a
+    // misleading description of what is wrong.
+    const Expr* integer_literal = &expr;
+    std::int64_t literal_sign = 1;
+    if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Neg && expr.lhs != nullptr) {
+        integer_literal = expr.lhs.get();
+        literal_sign = -1;
+    }
+    if (integer_literal->kind == ExprKind::IntegerLiteral && integer_literal_compatible_with_type(target_operand) &&
+        !integer_literal_value_fits(literal_sign * integer_literal->int_value, target_operand.name)) {
+        return std::unexpected(DataflowError(
+            "integer literal " + std::to_string(literal_sign * integer_literal->int_value) +
+                " is out of range for " + target_name + " of type '" + target_operand.name + "' (spec §6)",
+            loc));
+    }
+    if (integer_literal->kind == ExprKind::IntegerLiteral && integer_literal_compatible_with_type(target_operand)) {
+        return {};
+    }
+    if (literal_compatible_with_type(expr, target_operand)) return {};
+    std::optional<Type> source_type = infer_expr_type(expr, body, signatures);
+    if (!source_type.has_value()) return {};
+    const Type& source_operand = binary_operand_type(*source_type);
+    if (source_operand.kind != TypeKind::Named || !is_scalar_type_name(source_operand.name)) return {};
+    if (source_operand.name == target_operand.name) return {};
+    return std::unexpected(DataflowError(
+        "cannot convert a '" + source_operand.name + "' value to '" + target_operand.name + "' for " + target_name +
+            ": scpp has no implicit conversion between distinct scalar types, not even between two of the same width "
+            "(spec §6) -- use an explicit 'static_cast<" +
+            target_operand.name + ">(...)' if the conversion is intended",
+        loc));
+}
+
 std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& target_type, const Expr& expr, const Body& body,
                                    const Signatures& signatures, SourceLocation loc, const std::string& target_name,
                                    bool report_errors) {
@@ -1761,6 +1837,22 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
                 case BinaryOp::MulAssign:
                 case BinaryOp::DivAssign:
                 case BinaryOp::Assign:
+                    // spec §6: in `2 * len`, the `2` has no type of its
+                    // own -- it adopts `len`'s, so the product is a
+                    // `size_t`, not an `int`. Taking the lhs type
+                    // unconditionally reported `int` for exactly that
+                    // shape, which was invisible while nothing compared
+                    // the result against its destination and became a
+                    // spurious "cannot convert 'int' to 'size_t'" the
+                    // moment something did. The compound-assignment and
+                    // plain-assignment forms are excluded deliberately:
+                    // their type is the type of the place being written,
+                    // whatever the right-hand side spells.
+                    if ((expr.binary_op == BinaryOp::Add || expr.binary_op == BinaryOp::Sub ||
+                         expr.binary_op == BinaryOp::Mul || expr.binary_op == BinaryOp::Div) &&
+                        is_untyped_numeric_literal(*expr.lhs) && !is_untyped_numeric_literal(*expr.rhs)) {
+                        return infer_expr_type(*expr.rhs, body, signatures);
+                    }
                     return infer_expr_type(*expr.lhs, body, signatures);
                 case BinaryOp::Eq:
                 case BinaryOp::Ne:

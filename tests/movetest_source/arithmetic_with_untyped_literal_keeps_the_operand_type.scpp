@@ -1,0 +1,19 @@
+// spec §6: in `2 * len` the literal adopts `len`'s type, so the product
+// is a size_t. Inferring the *lhs* type unconditionally reported `int`
+// for this shape, which became a spurious conversion error the moment
+// the result met a declared type.
+int f() {
+    size_t len = 3;
+    size_t doubled = 2 * len;
+    size_t plus = len + 1;
+    size_t minus = len - 1;
+    int8_t narrow = 3;
+    int8_t bumped = narrow + 1;
+    int8_t docked = narrow + -1;
+    if (doubled == 6) { return 1; }
+    if (plus == 4) { return 1; }
+    if (minus == 2) { return 1; }
+    if (bumped == 4) { return 1; }
+    if (docked == 2) { return 1; }
+    return 0;
+}

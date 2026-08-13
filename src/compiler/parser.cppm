@@ -5582,7 +5582,7 @@ private:
         struct_names_.insert(def.name);
 
         if (auto _r = expect(TokenKind::LBrace, "'{'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
-        long next_value = 0;
+        std::int64_t next_value = 0;
         bool first = true;
         while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
             if (!first) { if (auto _r = expect(TokenKind::Comma, "','"); !_r.has_value()) return std::unexpected(std::move(_r).error()); }

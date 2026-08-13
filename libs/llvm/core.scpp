@@ -185,6 +185,11 @@ export enum class LLVMRealPredicate {
     LLVMRealOLT = 4,
     LLVMRealOLE = 5,
     LLVMRealONE = 6,
+    // Unordered-or-not-equal: true when either operand is NaN. Needed by
+    // the cast-to-bool lowering, where a NaN must convert to `true` (it
+    // compares unequal to 0.0), which the ordered ONE would report as
+    // false.
+    LLVMRealUNE = 14,
 };
 export constexpr llvm::LLVMRealPredicate LLVMRealOEQ = llvm::LLVMRealPredicate::LLVMRealOEQ;
 export constexpr llvm::LLVMRealPredicate LLVMRealOGT = llvm::LLVMRealPredicate::LLVMRealOGT;
@@ -192,6 +197,7 @@ export constexpr llvm::LLVMRealPredicate LLVMRealOGE = llvm::LLVMRealPredicate::
 export constexpr llvm::LLVMRealPredicate LLVMRealOLT = llvm::LLVMRealPredicate::LLVMRealOLT;
 export constexpr llvm::LLVMRealPredicate LLVMRealOLE = llvm::LLVMRealPredicate::LLVMRealOLE;
 export constexpr llvm::LLVMRealPredicate LLVMRealONE = llvm::LLVMRealPredicate::LLVMRealONE;
+export constexpr llvm::LLVMRealPredicate LLVMRealUNE = llvm::LLVMRealPredicate::LLVMRealUNE;
 
 export enum class LLVMModuleFlagBehavior {
     LLVMModuleFlagBehaviorWarning = 1,

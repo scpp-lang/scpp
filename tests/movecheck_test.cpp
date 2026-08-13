@@ -1428,6 +1428,85 @@ void test_nullptr_return_is_not_treated_as_a_borrow() {
                (error.has_value() ? std::string(", got '") + *error + "'" : ""));
 }
 
+
+// spec §6: the diagnostic has to name both types and point at the cast
+// that fixes it -- these conversions are rejected on purpose, so the
+// message is the entire user-facing product of the rule.
+void test_scalar_conversion_diagnostic_names_both_types_and_the_cast() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "int main() {\n"
+        "    int a = 1;\n"
+        "    unsigned int b = a;\n"
+        "    if (b == 1) { return 1; }\n"
+        "    return 0;\n"
+        "}\n");
+    expect(error.has_value(),
+           "scalar_conversion_diagnostic_names_both_types_and_the_cast: expected int -> unsigned int to be "
+           "rejected");
+    if (!error.has_value()) return;
+    expect(error->find("'int'") != std::string::npos,
+           "scalar_conversion_diagnostic_names_both_types_and_the_cast: expected the source type to be named, got: " +
+               *error);
+    expect(error->find("'unsigned int'") != std::string::npos,
+           "scalar_conversion_diagnostic_names_both_types_and_the_cast: expected the target type to be named, got: " +
+               *error);
+    expect(error->find("static_cast<unsigned int>") != std::string::npos,
+           "scalar_conversion_diagnostic_names_both_types_and_the_cast: expected the suggested cast to be spelled "
+           "out, got: " +
+               *error);
+}
+
+// The return boundary names the function, so a diagnostic reported from
+// a deeply nested call site still says which one is at fault.
+void test_scalar_conversion_return_diagnostic_names_the_function() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "int32_t widen() {\n"
+        "    int a = 1;\n"
+        "    return a;\n"
+        "}\n"
+        "int main() {\n"
+        "    if (widen() == 1) { return 1; }\n"
+        "    return 0;\n"
+        "}\n");
+    expect(error.has_value(),
+           "scalar_conversion_return_diagnostic_names_the_function: expected the int -> int32_t return to be "
+           "rejected");
+    if (!error.has_value()) return;
+    expect(error->find("widen") != std::string::npos,
+           "scalar_conversion_return_diagnostic_names_the_function: expected the offending function to be named, "
+           "got: " +
+               *error);
+}
+
+// An out-of-range literal gets its own diagnostic rather than the
+// conversion one: a literal has no source type to name, so "cannot
+// convert an int to int8_t" would misdescribe what is wrong.
+void test_out_of_range_literal_reports_the_value_not_a_conversion() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "int main() {\n"
+        "    int8_t x = 300;\n"
+        "    if (x == 0) { return 1; }\n"
+        "    return 0;\n"
+        "}\n");
+    expect(error.has_value(),
+           "out_of_range_literal_reports_the_value_not_a_conversion: expected 300 to be rejected for int8_t");
+    if (!error.has_value()) return;
+    expect(error->find("300") != std::string::npos,
+           "out_of_range_literal_reports_the_value_not_a_conversion: expected the offending value to be quoted, "
+           "got: " +
+               *error);
+    expect(error->find("out of range") != std::string::npos,
+           "out_of_range_literal_reports_the_value_not_a_conversion: expected an out-of-range diagnostic, got: " +
+               *error);
+    expect(error->find("no implicit conversion") == std::string::npos,
+           "out_of_range_literal_reports_the_value_not_a_conversion: a literal has no source type, so the "
+           "conversion wording is wrong here, got: " +
+               *error);
+}
+
 } // namespace
 
 
@@ -1485,6 +1564,10 @@ int main() {
     test_nullptr_cannot_initialize_a_non_pointer_and_says_why();
     test_nullptr_initializes_every_pointer_shaped_destination();
     test_nullptr_return_is_not_treated_as_a_borrow();
+
+    test_scalar_conversion_diagnostic_names_both_types_and_the_cast();
+    test_scalar_conversion_return_diagnostic_names_the_function();
+    test_out_of_range_literal_reports_the_value_not_a_conversion();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

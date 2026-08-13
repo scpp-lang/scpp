@@ -598,6 +598,16 @@ private:
 
     [[nodiscard]] static const Type& binary_operand_type(const Type& type);
 
+    // `-100`/`-1.5` reaches here as ExprKind::Unary/Neg over a bare
+    // literal, but is just as untyped as the bare literal itself --
+    // codegen_value_for_target already folds the negation for exactly
+    // that reason. Returns the inner literal so *classification* agrees
+    // with that folding; matching only on ExprKind::IntegerLiteral made
+    // the binary-operator path treat `-1` as a typed `int`, so `c == -1`
+    // on an int8_t was reported as a type mismatch while `c == 1` was
+    // fine.
+    [[nodiscard]] static const Expr& unwrap_negated_numeric_literal(const Expr& expr);
+
     [[nodiscard]] static bool is_pointer_arithmetic_offset_type(const Type& type);
 
     [[nodiscard]] bool pointer_supports_arithmetic(const Type& type) const;

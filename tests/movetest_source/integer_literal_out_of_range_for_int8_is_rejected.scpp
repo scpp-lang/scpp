@@ -1,0 +1,8 @@
+// spec §6: an untyped literal adopts the destination's type, but only
+// when the value it spells is one of that type's values. 300 is not an
+// int8_t.
+int f() {
+    int8_t x = 300;
+    if (x == 0) { return 1; }
+    return 0;
+}

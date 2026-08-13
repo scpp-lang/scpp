@@ -52,6 +52,7 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred);
 [[nodiscard]] bool is_pointer_arithmetic_offset_type(const Type& type);
 [[nodiscard]] bool pointer_supports_arithmetic(const Type& type);
 [[nodiscard]] std::optional<Type> pointer_arithmetic_result_type(BinaryOp op, const Type& lhs, const Type& rhs);
+[[nodiscard]] bool is_untyped_numeric_literal(const Expr& expr);
 [[nodiscard]] bool literal_compatible_with_type(const Expr& literal, const Type& type);
 [[nodiscard]] bool conditional_arm_types_agree(const Expr& then_arm, const Type& then_type, const Expr& else_arm,
                                                const Type& else_type);
@@ -149,6 +150,49 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
         "ptrdiff_t",
     };
     return integral_scalar_names.contains(name);
+}
+
+[[nodiscard]] bool is_unsigned_scalar_type_name(const std::string& name) {
+    static const std::unordered_set<std::string> unsigned_names = {
+        "unsigned int", "unsigned long", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "size_t"};
+    return unsigned_names.contains(name);
+}
+
+// spec §6: the width, in bits, of an integral scalar type name. Only
+// meaningful for names is_integral_scalar_type_name accepts.
+[[nodiscard]] int integral_scalar_bit_width(const std::string& name) {
+    if (name == "int8_t" || name == "uint8_t" || name == "char") return 8;
+    if (name == "int16_t" || name == "uint16_t") return 16;
+    if (name == "int" || name == "int32_t" || name == "unsigned int" || name == "uint32_t") return 32;
+    return 64;
+}
+
+// spec §6: does the untyped integer literal `value` name a value of
+// `type_name`? A literal has no type of its own -- it adopts the type of
+// the place it initializes -- but that only works when the value it
+// spells is actually one of that type's values. `int8_t x = 300;` does
+// not spell an int8_t, and `unsigned int x = 4294967296;` does not spell
+// an unsigned int, so treating them as compatible would smuggle in
+// exactly the silent, lossy conversion the rest of this file exists to
+// forbid.
+//
+// A 64-bit unsigned target is deliberately unconstrained on the high
+// end: literal values are carried as std::int64_t, so a literal above
+// INT64_MAX has already wrapped to a negative by the time it arrives and
+// cannot be told apart from a genuinely negative one. Rejecting on that
+// basis would reject the legitimate spelling; the narrower unsigned
+// types have no such ambiguity and are checked normally.
+[[nodiscard]] bool integer_literal_value_fits(std::int64_t value, const std::string& type_name) {
+    int bits = integral_scalar_bit_width(type_name);
+    if (is_unsigned_scalar_type_name(type_name)) {
+        if (value < 0) return bits >= 64;
+        if (bits >= 64) return true;
+        return static_cast<std::uint64_t>(value) <= ((std::uint64_t{1} << bits) - 1);
+    }
+    if (bits >= 64) return true;
+    std::int64_t max_value = (std::int64_t{1} << (bits - 1)) - 1;
+    std::int64_t min_value = -(std::int64_t{1} << (bits - 1));
+    return value >= min_value && value <= max_value;
 }
 
 [[nodiscard]] const EnumDef* find_enum_def(const Program* program, const std::string& name) {
@@ -344,10 +388,34 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
     return std::nullopt;
 }
 
+[[nodiscard]] bool is_untyped_numeric_literal(const Expr& expr) {
+    const Expr& folded =
+        expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Neg && expr.lhs != nullptr ? *expr.lhs : expr;
+    return folded.kind == ExprKind::IntegerLiteral || folded.kind == ExprKind::FloatLiteral;
+}
+
 [[nodiscard]] bool literal_compatible_with_type(const Expr& literal, const Type& type) {
     const Type& operand_type = binary_operand_type(type);
+    // A negated numeric literal is still a literal. The parser leaves
+    // `-128` as a unary minus applied to `128`, so matching only on
+    // ExprKind::IntegerLiteral would see a Unary here and conclude the
+    // expression has to carry a type of its own -- making `int8_t x =
+    // -128;` a conversion from `int`, which it is not: -128 names an
+    // int8_t value directly. Unwrapping one level of negation keeps
+    // every consumer of this predicate (declarations, binary operands,
+    // `?:` arms) agreeing on that.
+    if (literal.kind == ExprKind::Unary && literal.unary_op == UnaryOp::Neg && literal.lhs != nullptr) {
+        if (literal.lhs->kind == ExprKind::FloatLiteral) return is_float_named_type(operand_type);
+        if (literal.lhs->kind == ExprKind::IntegerLiteral) {
+            return integer_literal_compatible_with_type(operand_type) &&
+                   integer_literal_value_fits(-literal.lhs->int_value, operand_type.name);
+        }
+        return false;
+    }
     switch (literal.kind) {
-        case ExprKind::IntegerLiteral: return integer_literal_compatible_with_type(operand_type);
+        case ExprKind::IntegerLiteral:
+            return integer_literal_compatible_with_type(operand_type) &&
+                   integer_literal_value_fits(literal.int_value, operand_type.name);
         case ExprKind::FloatLiteral: return is_float_named_type(operand_type);
         case ExprKind::BoolLiteral: return operand_type.kind == TypeKind::Named && operand_type.name == "bool";
         case ExprKind::CharLiteral: return operand_type.kind == TypeKind::Named && operand_type.name == "char";

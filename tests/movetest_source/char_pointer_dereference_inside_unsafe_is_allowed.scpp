@@ -1,5 +1,6 @@
 int f(char* p) {
     [[scpp::unsafe]] {
-        return *p == 'a';
+        if (*p == 'a') { return 1; }
+        return 0;
     }
 }

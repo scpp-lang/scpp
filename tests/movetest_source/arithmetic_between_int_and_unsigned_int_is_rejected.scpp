@@ -1,0 +1,7 @@
+// spec §6: signed/unsigned arithmetic mixing is rejected too.
+int f() {
+    int a = 1;
+    unsigned int b = 2;
+    if (a * b == 2) { return 1; }
+    return 0;
+}

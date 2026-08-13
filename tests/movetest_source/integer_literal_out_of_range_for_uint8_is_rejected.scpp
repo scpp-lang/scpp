@@ -1,0 +1,6 @@
+// spec §6: 256 is one past uint8_t's range.
+int f() {
+    uint8_t x = 256;
+    if (x == 0) { return 1; }
+    return 0;
+}

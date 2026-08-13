@@ -1,0 +1,7 @@
+// spec §6: signed/unsigned of the same width do not convert implicitly.
+int f() {
+    int a = 1;
+    unsigned int b = a;
+    if (b == 1) { return 1; }
+    return 0;
+}
