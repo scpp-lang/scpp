@@ -659,7 +659,20 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             return initialize_span_storage(target, expr);
         }
         if (is_named_record_type(target.type)) {
-            auto value_result = codegen_class_value_for_boundary(expr, target.type);
+            // /*allow_implicit_converting_ctor=*/true, to match every
+            // other value-to-class-type boundary (codegen_value_for_target
+            // already passes true, and dataflow.cppm now accepts a
+            // converting constructor uniformly via
+            // resolve_converting_constructor_binding). Without it a
+            // source of some other type was stored into class-shaped
+            // storage verbatim: a default member initializer spelled
+            // with `=` -- `class C { std::string s = "hi"; };` -- reaches
+            // here, and used to compile with no diagnostic at all and
+            // then crash at run time when ~std::string freed a string
+            // literal. The brace-spelled `std::string s{"hi"};` never
+            // came through here, which is why the two spellings of the
+            // same member disagreed.
+            auto value_result = codegen_class_value_for_boundary(expr, target.type, /*allow_implicit_converting_ctor=*/true);
             if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
             create_store(std::move(value_result).value(), target.ptr, target.alignment);
             if (class_has_ordinary_vtable(target.type.name)) {

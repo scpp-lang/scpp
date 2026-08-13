@@ -1,0 +1,11 @@
+// The variable-initializer boundary must actually *emit* the target
+// class's converting constructor, not just accept the source: movecheck
+// accepts `std::string s = "hi";` via std::string's converting
+// constructor, so codegen has to construct a std::string rather than
+// storing the raw `const char*` into std::string-shaped storage.
+import std;
+
+int main() {
+    std::string s = "hi";
+    return s.length() == 2 ? 2 : 0;
+}

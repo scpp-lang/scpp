@@ -683,6 +683,86 @@ namespace scpp {
            (!state.lexical_access_context_class.empty() && state.lexical_access_context_class == target_class);
 }
 
+// The result of asking "may `source` initialize a by-value destination of
+// class type `T` through one of `T`'s single-argument converting
+// constructors?" -- the question every *value-to-declared-class-type
+// boundary* has to ask, and which four separate places in this file used
+// to answer differently.
+//
+// The boundaries are: a by-value class function parameter
+// (check_call_arguments), a by-value class *constructor* parameter
+// (check_constructor_arguments), a `return` operand whose function
+// returns a class by value (check_terminator), and a class-typed
+// variable's own initializer (check_var_decl). Only the first two of
+// those consulted a converting constructor at all, so the exact same
+// conversion was accepted or rejected depending purely on which of the
+// four syntactic positions it appeared in:
+//
+//     void sink(std::string s);
+//     sink("hi");                    // accepted
+//     std::string make() { return "hi"; }   // accepted
+//     std::string s = "hi";          // REJECTED (check_var_decl)
+//     Holder h{"hi"};                // REJECTED (Holder(std::string))
+//
+// `std::string s = "hi";` is about as ordinary a line as exists, and
+// nothing in spec §6.5-§6.7 distinguishes these positions -- the two
+// rejections were drift between near-duplicate checks, not a rule. All
+// four now route through this one function, so a future change to what
+// counts as a converting conversion cannot apply to only some of them.
+//
+// `ctor` is null when no converting constructor applies (the caller then
+// reports its own boundary-specific "requires a fresh value" error).
+// `effective_param_type` is that constructor's own parameter type with
+// the `T&&`-binding-an-rvalue normalization already applied, so callers
+// can dispatch the operand the same way an ordinary argument would be.
+struct ConvertingConstructorBinding {
+    const FunctionSignature* ctor = nullptr;
+    Type effective_param_type{};
+};
+
+[[nodiscard]] std::expected<ConvertingConstructorBinding, DataflowError> resolve_converting_constructor_binding(
+    const Type& destination_type, const Expr& source, const DataflowState& state, const Body& body,
+    const Signatures& signatures, bool report_errors) {
+    ConvertingConstructorBinding binding;
+    if (!is_named_record_type_for_call_binding(destination_type, body)) return binding;
+    binding.ctor = find_single_argument_converting_constructor_signature(destination_type, source, body, signatures);
+    if (binding.ctor == nullptr) return binding;
+    if (report_errors && binding.ctor->is_unsafe && state.unsafe_depth == 0) {
+        return std::unexpected(DataflowError("cannot use '" + destination_type.name +
+                             "'s converting constructor outside '[[scpp::unsafe]] { }': its own declaration is "
+                             "marked '[[scpp::unsafe]]', so its soundness depends on a precondition only the "
+                             "caller can guarantee (ch01 §1.2/§1.3)",
+            state.current_loc));
+    }
+    binding.effective_param_type = binding.ctor->param_types[1];
+    if (!binding.ctor->is_generic_template && is_reference(binding.effective_param_type) &&
+        binding.effective_param_type.is_rvalue_ref && binding.effective_param_type.pointee != nullptr &&
+        produces_rvalue_of_type(source, *binding.effective_param_type.pointee, body, signatures)) {
+        binding.effective_param_type = *binding.effective_param_type.pointee;
+    }
+    return binding;
+}
+
+// Why a class-typed boundary cannot accept `source`, when the reason is
+// more specific than "this isn't a fresh value".
+//
+// `std::move(E)` is only a move when `E` is an *id-expression* (spec
+// §6.2(3)); move state is recorded per named object, so a member,
+// element, or other projection has nowhere to record it and is rejected
+// (apply_expr's own ExprKind::Move case says exactly that). But three of
+// the four class-value boundaries never got that far: they tested
+// `produces_rvalue_of_type` first, which quietly answers "no" for
+// `std::move(obj.field)`, and reported the generic
+// "...requires ... a fresh value such as std::move(x)" instead -- a
+// message that advises precisely what the reader already wrote. Give the
+// real reason wherever the boundary is the first to notice.
+[[nodiscard]] std::optional<std::string> explain_unusable_class_value_source(const Expr& source) {
+    if (source.kind != ExprKind::Move || source.lhs == nullptr) return std::nullopt;
+    if (source.lhs->kind == ExprKind::Identifier) return std::nullopt;
+    return std::string("std::move currently only supports a plain local variable "
+                       "(not a member, subscript, or other expression)");
+}
+
 // Checks every argument of a Call expression against its callee's
 // signature (if known), exactly the same way regardless of context --
 // shared by apply_expr's own Call case (a call used as a plain
@@ -898,31 +978,27 @@ namespace scpp {
                 class_value_param && is_copyable_class_lvalue_boundary_source(arg, sig->param_types[param_index], body, signatures);
             bool freely_copyable_value_source =
                 class_value_param && is_freely_copyable_class_value_source(arg, sig->param_types[param_index], body, signatures);
-            const FunctionSignature* converting_ctor =
-                class_value_param ? find_single_argument_converting_constructor_signature(sig->param_types[param_index], arg, body,
-                                                                                         signatures)
-                                  : nullptr;
+            const FunctionSignature* converting_ctor = nullptr;
+            Type converting_ctor_param_type{};
+            if (class_value_param) {
+                auto binding = resolve_converting_constructor_binding(sig->param_types[param_index], arg, state, body, signatures,
+                                                                     report_errors);
+                if (!binding.has_value()) return std::unexpected(std::move(binding).error());
+                converting_ctor = binding->ctor;
+                converting_ctor_param_type = binding->effective_param_type;
+            }
             if (report_errors && class_value_param && !copyable_lvalue_source && !freely_copyable_value_source &&
                 !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures) && converting_ctor == nullptr) {
+                if (std::optional<std::string> why = explain_unusable_class_value_source(arg); why.has_value()) {
+                    return std::unexpected(DataflowError(*why, state.current_loc));
+                }
                 return std::unexpected(DataflowError("passing class '" + sig->param_types[param_index].name +
                                      "' by value requires either an implicitly copyable same-type source or "
                                      "a fresh value such as std::move(x) or a call returning by value",
                     state.current_loc));
             }
             if (converting_ctor != nullptr) {
-                if (report_errors && converting_ctor->is_unsafe && state.unsafe_depth == 0) {
-                    return std::unexpected(DataflowError("cannot use '" + sig->param_types[param_index].name +
-                                         "'s converting constructor outside '[[scpp::unsafe]] { }': its own declaration is "
-                                         "marked '[[scpp::unsafe]]', so its soundness depends on a precondition only the "
-                                         "caller can guarantee (ch01 §1.2/§1.3)",
-                        state.current_loc));
-                }
-                Type ctor_param_type = converting_ctor->param_types[1];
-                if (!converting_ctor->is_generic_template && is_reference(ctor_param_type) &&
-                    ctor_param_type.is_rvalue_ref && ctor_param_type.pointee != nullptr &&
-                    produces_rvalue_of_type(arg, *ctor_param_type.pointee, body, signatures)) {
-                    ctor_param_type = *ctor_param_type.pointee;
-                }
+                Type ctor_param_type = converting_ctor_param_type;
                 if (is_reference(ctor_param_type) && ctor_param_type.is_rvalue_ref) {
                     if (report_errors && !produces_rvalue_of_type(arg, *ctor_param_type.pointee, body, signatures)) {
                         return std::unexpected(DataflowError(
@@ -1206,14 +1282,52 @@ namespace scpp {
             bool freely_copyable_value_source =
                 class_value_param && is_freely_copyable_class_value_source(arg, sig->param_types[param_index], body, signatures);
             if (arg.kind == ExprKind::Lambda) freely_copyable_value_source = class_value_param;
+            const FunctionSignature* converting_ctor = nullptr;
+            Type converting_ctor_param_type{};
+            if (class_value_param) {
+                auto binding = resolve_converting_constructor_binding(sig->param_types[param_index], arg, state, body, signatures,
+                                                                     report_errors);
+                if (!binding.has_value()) return std::unexpected(std::move(binding).error());
+                converting_ctor = binding->ctor;
+                converting_ctor_param_type = binding->effective_param_type;
+            }
             if (report_errors && class_value_param && !copyable_lvalue_source && !freely_copyable_value_source &&
-                !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures)) {
+                !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures) && converting_ctor == nullptr) {
+                if (std::optional<std::string> why = explain_unusable_class_value_source(arg); why.has_value()) {
+                    return std::unexpected(DataflowError(*why, state.current_loc));
+                }
                 return std::unexpected(DataflowError("passing class '" + sig->param_types[param_index].name +
                                      "' by value requires either an implicitly copyable same-type source or "
                                      "a fresh value such as std::move(x) or a call returning by value",
                     state.current_loc));
             }
-            if (auto _r = apply_expr(arg, /*is_move_target_context=*/!(copyable_lvalue_source || freely_copyable_value_source), state,
+            if (converting_ctor != nullptr) {
+                if (is_reference(converting_ctor_param_type) && converting_ctor_param_type.is_rvalue_ref) {
+                    if (report_errors &&
+                        !produces_rvalue_of_type(arg, *converting_ctor_param_type.pointee, body, signatures)) {
+                        return std::unexpected(DataflowError(
+                            "argument to an rvalue-reference ('T&&') parameter must be a fresh value -- "
+                            "std::move(x), std::make_unique<T>(...), a literal, or a call returning by value; "
+                            "an existing named variable must be moved explicitly (spec ch03/ch05 §5.11)",
+                            state.current_loc));
+                    }
+                    if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                } else if (is_reference(converting_ctor_param_type)) {
+                    if (auto _r = apply_reference_argument(arg, converting_ctor_param_type, state, in_call_borrows, body,
+                                                          signatures, report_errors);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                } else {
+                    if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
+            } else if (auto _r = apply_expr(arg, /*is_move_target_context=*/!(copyable_lvalue_source || freely_copyable_value_source), state,
                        body, signatures, report_errors); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
@@ -2473,16 +2587,56 @@ namespace scpp {
                     // an entirely unchecked, silent bitwise copy for
                     // *any* expression shape at all (a real gap, closed
                     // as part of implementing this feature).
+                    //
+                    // A source of some *other* type that the declared
+                    // class has a single-argument converting constructor
+                    // from (`std::string s = "hi";`) is neither of those
+                    // two shapes and is not a copy at all -- it builds a
+                    // fresh object. This boundary used to be the only one
+                    // of the four that never asked the question (see
+                    // resolve_converting_constructor_binding), which made
+                    // `std::string s = "hi";` ill-formed while the very
+                    // same conversion was accepted as a call argument and
+                    // as a `return` operand.
+                    auto init_converting_ctor =
+                        resolve_converting_constructor_binding(*local_type, *stmt.expr, state, body, signatures, report_errors);
+                    if (!init_converting_ctor.has_value()) {
+                        return std::unexpected(std::move(init_converting_ctor).error());
+                    }
+                    if (init_converting_ctor->ctor != nullptr) {
+                        bool converts_via_reference_parameter = is_reference(init_converting_ctor->effective_param_type);
+                        if (auto _r = apply_expr(*stmt.expr, /*is_move_target_context=*/!converts_via_reference_parameter, state,
+                                                 body, signatures, report_errors);
+                            !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
+                        state.locals[stmt.local] = LocalState::Initialized;
+                        return {};
+                    }
                     if (report_errors) {
                         bool freely_copyable_init_source =
                             is_freely_copyable_class_value_source(*stmt.expr, (*local_type), body, signatures);
                         if (!is_bare_same_type_copy_source(*stmt.expr, (*local_type), body, signatures) &&
                             !freely_copyable_init_source) {
+                            // The advice here used to name "constructor-
+                            // call syntax ('T v(args);')" -- a spelling
+                            // parse_variable_declaration categorically
+                            // rejects ("parenthesized direct-initialization
+                            // is not allowed for object declarations; use
+                            // brace-init instead"), so a reader who
+                            // followed this message landed straight on
+                            // that one. Name the syntax the language
+                            // actually has.
+                            if (std::optional<std::string> why = explain_unusable_class_value_source(*stmt.expr);
+                                why.has_value()) {
+                                return std::unexpected(DataflowError(*why, state.current_loc));
+                            }
                             return std::unexpected(DataflowError(
                                 "class '" + (*local_type).name + "'-typed variable '" + target_name +
-                                    "' can only be initialized via constructor-call syntax ('" +
+                                    "' can only be initialized via brace-init ('" +
                                     (*local_type).name + " " + target_name +
-                                    "(args);'), std::move of the same type, or (if the class is copy-"
+                                    "{args};'), std::move of the same type, a converting constructor of '" +
+                                    (*local_type).name + "', or (if the class is copy-"
                                     "constructible, spec §6.5) an implicitly copyable source of another '" +
                                     (*local_type).name + "' value",
                                 state.current_loc));
@@ -2851,10 +3005,13 @@ namespace scpp {
             // Without this, only a same-type source could ever be
             // returned, even though the exact same conversion is already
             // accepted when passed as a call *argument*.
-            const FunctionSignature* return_converting_ctor =
-                return_is_class_value ? find_single_argument_converting_constructor_signature(
-                                             fn.return_type, *term.return_value, body, signatures)
-                                       : nullptr;
+            const FunctionSignature* return_converting_ctor = nullptr;
+            if (return_is_class_value) {
+                auto binding = resolve_converting_constructor_binding(fn.return_type, *term.return_value, state, body, signatures,
+                                                                     /*report_errors=*/true);
+                if (!binding.has_value()) return std::unexpected(std::move(binding).error());
+                return_converting_ctor = binding->ctor;
+            }
             bool move_target_context =
                 (return_is_class_value && !freely_copyable_return_source) || term.return_value->kind == ExprKind::Move;
             if (auto _r = apply_expr(*term.return_value, move_target_context, state, body, signatures, /*report_errors=*/true); !_r.has_value()) {
@@ -2863,16 +3020,12 @@ namespace scpp {
             if (return_is_class_value && !implicit_move_source && !freely_copyable_return_source &&
                 !produces_rvalue_of_type(*term.return_value, fn.return_type, body, signatures) &&
                 return_converting_ctor == nullptr) {
+                if (std::optional<std::string> why = explain_unusable_class_value_source(*term.return_value); why.has_value()) {
+                    return std::unexpected(DataflowError(*why, state.current_loc));
+                }
                 return std::unexpected(DataflowError("returning class '" + fn.return_type.name +
                                      "' by value requires either an implicitly copyable same-type source or "
                                      "a fresh value such as std::move(x) or a call returning by value",
-                    state.current_loc));
-            }
-            if (return_converting_ctor != nullptr && return_converting_ctor->is_unsafe && state.unsafe_depth == 0) {
-                return std::unexpected(DataflowError("cannot use '" + fn.return_type.name +
-                                     "'s converting constructor outside '[[scpp::unsafe]] { }': its own declaration is "
-                                     "marked '[[scpp::unsafe]]', so its soundness depends on a precondition only the "
-                                     "caller can guarantee (ch01 §1.2/§1.3)",
                     state.current_loc));
             }
             return {};

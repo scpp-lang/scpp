@@ -1,0 +1,1 @@
+sequence: %s = alloca %"class.std::string" | call void @"_scppM3_stdF10_string_newQ0_P2_12_std::string&11_const char*" | store %"class.std::string" %classtmp.value, ptr %s
