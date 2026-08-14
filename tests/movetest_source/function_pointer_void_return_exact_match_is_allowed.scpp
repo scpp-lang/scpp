@@ -1,0 +1,11 @@
+// spec ch05 §5.16: a `void` return matches a `void` return.
+void noop(int x) {
+    int unused = x;
+    unused = unused;
+}
+
+int main() {
+    void (*fp)(int) = &noop;
+    fp(7);
+    return 0;
+}

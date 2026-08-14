@@ -1,0 +1,11 @@
+// spec ch06 §6: `int` and `int32_t` are distinct scalar types of equal
+// width, so a parameter spelled one way does not match the other -- the
+// same rule the direct call boundary already enforced.
+int wrong(int32_t x) {
+    return static_cast<int>(x);
+}
+
+int main() {
+    int (*fp)(int) = &wrong;
+    return fp(7);
+}

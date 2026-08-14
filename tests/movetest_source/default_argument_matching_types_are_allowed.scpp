@@ -1,0 +1,12 @@
+// spec §6: the accepted shape at a default argument.
+int right(int x) {
+    return x;
+}
+
+int use(uint8_t u = 200, int (*fp)(int) = &right) {
+    return static_cast<int>(u) + fp(0);
+}
+
+int main() {
+    return use() - 200;
+}

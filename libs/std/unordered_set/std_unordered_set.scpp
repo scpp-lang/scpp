@@ -32,10 +32,10 @@ private:
     size_t slot_count_{8};
     size_t size_{};
     size_t tombstones_{};
-    uint64_t slot_size_{sizeof(T)};
-    uint64_t slot_align_{alignof(T)};
-    uint64_t state_size_{sizeof(int)};
-    uint64_t state_align_{alignof(int)};
+    uint64_t slot_size_{static_cast<uint64_t>(sizeof(T))};
+    uint64_t slot_align_{static_cast<uint64_t>(alignof(T))};
+    uint64_t state_size_{static_cast<uint64_t>(sizeof(int))};
+    uint64_t state_align_{static_cast<uint64_t>(alignof(int))};
 
     uint64_t __hash(const T& value) const {
         std::hash<T> hasher{};

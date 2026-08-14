@@ -1,0 +1,6 @@
+// spec ch05 §5.7 at a global declaration.
+int g_n = nullptr;
+
+int main() {
+    return g_n;
+}

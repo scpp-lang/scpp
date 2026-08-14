@@ -1,0 +1,18 @@
+// spec §6: the accepted shape in a default member initializer.
+int right(int x) {
+    return x;
+}
+
+int8_t g_a = -56;
+
+class Holder {
+public:
+    int8_t a = g_a;
+    int (*fp)(int) = &right;
+    virtual ~Holder() = default;
+};
+
+int main() {
+    Holder h{};
+    return static_cast<int>(h.a) + 56 + h.fp(0);
+}

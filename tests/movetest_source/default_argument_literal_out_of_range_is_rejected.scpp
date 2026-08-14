@@ -1,0 +1,8 @@
+// spec §6: literal range checking at a default argument.
+int use(uint8_t u = -5) {
+    return static_cast<int>(u);
+}
+
+int main() {
+    return use();
+}

@@ -1,0 +1,9 @@
+// spec ch05 §5.16: the return type participates in signature matching.
+bool wrong(int x) {
+    return x > 0;
+}
+
+int main() {
+    int (*fp)(int) = &wrong;
+    return fp(7);
+}

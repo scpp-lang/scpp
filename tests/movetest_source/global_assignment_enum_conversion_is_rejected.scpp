@@ -1,0 +1,11 @@
+// spec ch06 §6: the global-assignment path ran four of the five checks
+// and skipped this one.
+enum class Mode { A, B };
+enum class Other { X, Y };
+
+Mode g_mode = Mode::A;
+
+int main() {
+    g_mode = Other::X;
+    return g_mode == Mode::A ? 0 : 1;
+}

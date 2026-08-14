@@ -1,0 +1,16 @@
+// spec ch06 §6 in a member-initializer list.
+enum class Mode { A, B };
+enum class Other { X, Y };
+
+class Holder {
+public:
+    Mode mode;
+
+    Holder(Other other) : mode{other} {}
+    virtual ~Holder() = default;
+};
+
+int main() {
+    Holder h{Other::X};
+    return h.mode == Mode::A ? 0 : 1;
+}

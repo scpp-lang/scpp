@@ -1,0 +1,19 @@
+// spec §6: the accepted shape in a member-initializer list, including a
+// field initialized from a constructor parameter of the same type.
+int right(int x) {
+    return x;
+}
+
+class Holder {
+public:
+    uint8_t u;
+    int (*fp)(int);
+
+    Holder(uint8_t value) : u{value}, fp{&right} {}
+    virtual ~Holder() = default;
+};
+
+int main() {
+    Holder h{200};
+    return static_cast<int>(h.u) - 200 + h.fp(0);
+}

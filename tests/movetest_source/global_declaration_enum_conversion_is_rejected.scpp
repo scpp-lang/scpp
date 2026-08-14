@@ -1,0 +1,9 @@
+// spec ch06 §6 at a global declaration.
+enum class Mode { A, B };
+enum class Other { X, Y };
+
+Mode g_mode = Other::X;
+
+int main() {
+    return g_mode == Mode::A ? 0 : 1;
+}

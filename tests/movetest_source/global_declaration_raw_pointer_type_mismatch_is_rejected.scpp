@@ -1,0 +1,8 @@
+// spec ch05 §5.7: a global declaration's initializer ran none of the
+// conversion checks, so this bound a `bool*` to an `int*`.
+bool g_flag = true;
+int* g_p = &g_flag;
+
+int main() {
+    return g_p == nullptr ? 0 : 1;
+}

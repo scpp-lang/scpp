@@ -1,0 +1,9 @@
+// spec §6: a global variable's own initializer ran none of the
+// conversion checks, so this was accepted where the identical local
+// declaration is rejected -- and the program printed 200.
+int8_t g_a = -56;
+uint8_t g_u = g_a;
+
+int main() {
+    return static_cast<int>(g_u);
+}

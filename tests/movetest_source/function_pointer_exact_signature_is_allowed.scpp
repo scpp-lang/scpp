@@ -1,0 +1,12 @@
+// spec ch05 §5.16: an exactly matching signature is the accepted case,
+// and tightening the mismatch rule must not disturb it.
+int right(int x) {
+    return x + 1;
+}
+
+int main() {
+    int (*fp)(int) = &right;
+    int (*bare)(int) = right;
+    fp = bare;
+    return fp(7) - 8;
+}
