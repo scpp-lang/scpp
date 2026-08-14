@@ -1,0 +1,12 @@
+class Base {
+  public:
+    virtual ~Base() = default;
+    Base(int v) : v_{v} {}
+    int v_;
+};
+class Derived : public Base {
+  public:
+    ~Derived() override = default;
+    Derived() : Base{this->q_}, q_{1} {}
+    int q_;
+};

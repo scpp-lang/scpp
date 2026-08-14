@@ -1,0 +1,7 @@
+class Holder {
+  public:
+    virtual ~Holder() = default;
+    Holder() : p_{&this->b_}, b_{1} {}
+    int* p_;
+    int b_;
+};

@@ -1,0 +1,13 @@
+int g_seen = 0;
+class Base {
+  public:
+    virtual ~Base() = default;
+    Base(int v) : v_{v} {}
+    int v_;
+};
+class Derived : public Base {
+  public:
+    ~Derived() override { g_seen = this->v_ + this->q_; }
+    Derived() : Base{7}, q_{1} {}
+    int q_;
+};

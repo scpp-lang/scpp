@@ -1,0 +1,8 @@
+class Holder {
+  public:
+    virtual ~Holder() = default;
+    Holder() : a_{this->compute()}, b_{1} {}
+    int compute() const { return this->b_; }
+    int a_;
+    int b_;
+};
