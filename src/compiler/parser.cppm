@@ -1405,15 +1405,15 @@ private:
         return stmt;
     }
 
+    // Both derive from `scpp.ast`'s scalar type model -- see
+    // `scalar_type_info` for why that is the only place the twenty
+    // names of ch06 §6 are listed.
     [[nodiscard]] bool is_integral_scalar_type_name(std::string_view name) {
-        return name == "char" || name == "int" || name == "long" || name == "unsigned int" ||
-               name == "unsigned long" || name == "int8_t" || name == "int16_t" || name == "int32_t" ||
-               name == "int64_t" || name == "uint8_t" || name == "uint16_t" || name == "uint32_t" ||
-               name == "uint64_t" || name == "size_t" || name == "ptrdiff_t";
+        return scpp::is_integral_scalar_type_name(name);
     }
 
     [[nodiscard]] bool is_float_scalar_type_name(std::string_view name) {
-        return name == "float" || name == "double" || name == "float32_t" || name == "float64_t";
+        return scpp::is_float_scalar_type_name(name);
     }
 
     [[nodiscard]] ExprPtr make_value_initialized_expr(SourceLocation loc, const Type& type) {
@@ -1690,6 +1690,15 @@ private:
         // is deliberately not a scalar (it must never convert to an
         // integer), so it has no builtin_scalar_keyword_type_name entry.
         if (peek_at(offset + 2).kind == TokenKind::KwNullptrT) return nullptr_type_name();
+        // Deliberately not derived from `scpp.ast`'s scalar type model,
+        // unlike every other scalar question in this file: which scalars
+        // may be written `std::`-qualified is a fact about spelling, not
+        // about the type. These are the ones real C++ declares in
+        // <cstdint>/<cstddef>; `int`, `char`, `bool`, `unsigned long`
+        // and the rest are keywords, and no C++ program can write
+        // `std::int`. The model answers what a type *is*; the lexer
+        // keyword table just above and this list answer how it may be
+        // written.
         std::string_view name = builtin_scalar_keyword_type_name(peek_at(offset + 2).kind);
         if (name == "size_t" || name == "ptrdiff_t" || name == "int8_t" || name == "uint8_t" ||
             name == "int16_t" || name == "uint16_t" || name == "int32_t" || name == "uint32_t" ||
@@ -5497,13 +5506,12 @@ private:
         }
     }
 
+    // An enum's underlying type is exactly the integral scalars: not
+    // `bool` (an enum needs more than two values) and not the floating
+    // ones (an enumerator is an integer).
     [[nodiscard]] bool is_valid_enum_underlying_type(const Type& type) const {
-        return type.kind == TypeKind::Named &&
-               (type.name == "char" || type.name == "int" || type.name == "long" || type.name == "unsigned int" ||
-                type.name == "unsigned long" || type.name == "int8_t" || type.name == "int16_t" ||
-                type.name == "int32_t" || type.name == "int64_t" || type.name == "uint8_t" ||
-                type.name == "uint16_t" || type.name == "uint32_t" || type.name == "uint64_t" ||
-                type.name == "size_t" || type.name == "ptrdiff_t");
+        std::string_view name{type.name};
+        return type.kind == TypeKind::Named && scpp::is_integral_scalar_type_name(name);
     }
 
     // The recursive helper behind parse_enum_constant_expr, below --

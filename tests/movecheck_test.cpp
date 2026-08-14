@@ -1637,8 +1637,199 @@ void test_pointer_write_wrong_after_substitution_is_still_rejected() {
 } // namespace
 
 
+// ---------------------------------------------------------------------
+// The scalar type model's tripwire.
+//
+// ch06 §6 fixes scpp's scalar types at exactly twenty names, and
+// `scpp::scalar_type_info` (src/compiler/ast.cppm) is the single place
+// in the compiler that lists them -- every other answer about a scalar
+// derives from it. That is what stops the phases drifting apart, as they
+// repeatedly did: `char` was signed to six sites and unsigned to two
+// until recently, and the width answers disagreed about `size_t`.
+//
+// One list can still be edited wrongly, so this table restates the model
+// independently. Adding a scalar type, or changing one's category, width
+// or signedness, now has to be a deliberate edit in two places that
+// agree -- and every derived answer below (the predicates, the layout,
+// the value range, the literal-range check) is checked to follow from
+// the model rather than being spot-checked on its own.
+struct ScalarExpectation {
+    const char* name;
+    scpp::ScalarCategory category;
+    int bit_width;
+    bool is_unsigned;
+    bool is_pointer_sized;
+};
+
+constexpr ScalarExpectation kExpectedScalars[] = {
+    {"bool", scpp::ScalarCategory::Bool, 8, true, false},
+    {"char", scpp::ScalarCategory::Integral, 8, false, false},
+    {"int8_t", scpp::ScalarCategory::Integral, 8, false, false},
+    {"uint8_t", scpp::ScalarCategory::Integral, 8, true, false},
+    {"int16_t", scpp::ScalarCategory::Integral, 16, false, false},
+    {"uint16_t", scpp::ScalarCategory::Integral, 16, true, false},
+    {"int", scpp::ScalarCategory::Integral, 32, false, false},
+    {"int32_t", scpp::ScalarCategory::Integral, 32, false, false},
+    {"unsigned int", scpp::ScalarCategory::Integral, 32, true, false},
+    {"uint32_t", scpp::ScalarCategory::Integral, 32, true, false},
+    {"long", scpp::ScalarCategory::Integral, 64, false, false},
+    {"int64_t", scpp::ScalarCategory::Integral, 64, false, false},
+    {"unsigned long", scpp::ScalarCategory::Integral, 64, true, false},
+    {"uint64_t", scpp::ScalarCategory::Integral, 64, true, false},
+    {"size_t", scpp::ScalarCategory::Integral, 64, true, true},
+    {"ptrdiff_t", scpp::ScalarCategory::Integral, 64, false, true},
+    {"float", scpp::ScalarCategory::Floating, 32, false, false},
+    {"float32_t", scpp::ScalarCategory::Floating, 32, false, false},
+    {"double", scpp::ScalarCategory::Floating, 64, false, false},
+    {"float64_t", scpp::ScalarCategory::Floating, 64, false, false},
+};
+
+void test_scalar_model_lists_exactly_the_twenty_names() {
+    cases_run++;
+    expect(std::size(kExpectedScalars) == 20,
+           "scalar_model: ch06 §6 defines exactly twenty scalar types");
+
+    // Names that must NOT be scalars: C++ spellings scpp deliberately
+    // does not have, the non-scalar builtins, and a user-defined name.
+    // `TypeKind::Named` covers all of these, which is exactly why the
+    // model checks a closed set rather than the type's own kind.
+    const char* non_scalars[] = {"void",        "nullptr_t", "short",     "signed char", "unsigned char",
+                                 "long long",   "unsigned",  "signed",    "wchar_t",     "int128_t",
+                                 "float16_t",   "uint128_t", "intptr_t",  "std::string", "Widget"};
+    for (const char* name : non_scalars) {
+        expect(!scpp::is_scalar_type_name(name),
+               std::string("scalar_model: '") + name + "' must not be a scalar type");
+    }
+}
+
+void test_scalar_model_matches_expected_shape() {
+    cases_run++;
+    for (const ScalarExpectation& expected : kExpectedScalars) {
+        std::optional<scpp::ScalarTypeInfo> info = scpp::scalar_type_info(expected.name);
+        if (!info.has_value()) {
+            expect(false, std::string("scalar_model: '") + expected.name + "' is missing from scalar_type_info");
+            continue;
+        }
+        const std::string where = std::string("scalar_model: '") + expected.name + "' ";
+        expect(info->category == expected.category, where + "category");
+        expect(info->bit_width == expected.bit_width, where + "bit_width");
+        expect(info->is_unsigned == expected.is_unsigned, where + "is_unsigned");
+        expect(info->is_pointer_sized == expected.is_pointer_sized, where + "is_pointer_sized");
+    }
+}
+
+void test_scalar_predicates_derive_from_the_model() {
+    cases_run++;
+    for (const ScalarExpectation& expected : kExpectedScalars) {
+        const std::string where = std::string("scalar_model: '") + expected.name + "' ";
+        bool integral = expected.category == scpp::ScalarCategory::Integral;
+        bool floating = expected.category == scpp::ScalarCategory::Floating;
+
+        expect(scpp::is_scalar_type_name(expected.name), where + "is a scalar");
+        expect(scpp::is_integral_scalar_type_name(expected.name) == integral, where + "integral predicate");
+        expect(scpp::is_float_scalar_type_name(expected.name) == floating, where + "floating predicate");
+
+        // The two signedness questions differ only in domain: the
+        // integral one drives icmp/sdiv/negation and so excludes `bool`,
+        // while the widening one covers every scalar and so includes it
+        // (an i8 holding 0 or 1 must zero-extend). Both read the model's
+        // single is_unsigned field.
+        expect(scpp::is_unsigned_scalar_type_name(expected.name) == (integral && expected.is_unsigned),
+               where + "integral signedness");
+        expect(scpp::scalar_widens_unsigned(expected.name) == expected.is_unsigned, where + "widening signedness");
+    }
+    expect(!scpp::is_unsigned_scalar_type_name("bool"), "scalar_model: bool is not an unsigned *integral* scalar");
+    expect(scpp::scalar_widens_unsigned("bool"), "scalar_model: bool must zero-extend when widened");
+    expect(!scpp::scalar_widens_unsigned("char"), "scalar_model: char must sign-extend when widened");
+}
+
+void test_scalar_width_and_layout_agree() {
+    cases_run++;
+    const int pointer_bits = scpp::host_pointer_bit_width();
+    scpp::Program empty_program{};
+    for (const ScalarExpectation& expected : kExpectedScalars) {
+        const std::string where = std::string("scalar_model: '") + expected.name + "' ";
+        int width = scpp::scalar_bit_width(expected.name, pointer_bits);
+        expect(width == (expected.is_pointer_sized ? pointer_bits : expected.bit_width), where + "width");
+
+        scpp::Type type{};
+        type.kind = scpp::TypeKind::Named;
+        type.name = expected.name;
+        std::optional<scpp::TypeLayoutInfo> layout = scpp::layout_of_type(empty_program, type);
+        if (!layout.has_value()) {
+            expect(false, where + "has no layout");
+            continue;
+        }
+        expect(layout->size_bytes == static_cast<std::uint64_t>(width) / 8, where + "layout size follows width");
+    }
+}
+
+void test_scalar_value_ranges_follow_width_and_signedness() {
+    cases_run++;
+    const int pointer_bits = scpp::host_pointer_bit_width();
+    for (const ScalarExpectation& expected : kExpectedScalars) {
+        const std::string where = std::string("scalar_model: '") + expected.name + "' ";
+        std::optional<scpp::ScalarValueRange> range = scpp::scalar_value_range(expected.name, pointer_bits);
+
+        if (expected.category == scpp::ScalarCategory::Floating) {
+            expect(!range.has_value(), where + "floating types have no integer range");
+            continue;
+        }
+        if (!range.has_value()) {
+            expect(false, where + "has no value range");
+            continue;
+        }
+        if (expected.category == scpp::ScalarCategory::Bool) {
+            expect(range->min_value == 0 && range->max_value == 1, where + "bool range is {0, 1}");
+            continue;
+        }
+
+        int width = scpp::scalar_bit_width(expected.name, pointer_bits);
+        if (expected.is_unsigned) {
+            expect(range->min_value == 0, where + "unsigned range starts at 0");
+            // A 64-bit unsigned type cannot state its real maximum in an
+            // std::int64_t carrier, so it clamps to INT64_MAX.
+            if (width < 64) {
+                expect(range->max_value == (std::int64_t{1} << width) - 1, where + "unsigned maximum");
+            } else {
+                expect(range->max_value == std::numeric_limits<std::int64_t>::max(), where + "clamped unsigned maximum");
+            }
+        } else if (width < 64) {
+            expect(range->min_value == -(std::int64_t{1} << (width - 1)), where + "signed minimum");
+            expect(range->max_value == (std::int64_t{1} << (width - 1)) - 1, where + "signed maximum");
+        } else {
+            expect(range->min_value == std::numeric_limits<std::int64_t>::min(), where + "64-bit signed minimum");
+            expect(range->max_value == std::numeric_limits<std::int64_t>::max(), where + "64-bit signed maximum");
+        }
+
+        // The literal-range check must agree with the range at both
+        // edges, and reject just outside them -- except that a 64-bit
+        // unsigned type accepts negatives, because a literal above
+        // INT64_MAX has already wrapped by the time it arrives and
+        // cannot be told apart from a genuinely negative one.
+        expect(scpp::integer_literal_value_fits(range->min_value, expected.name, pointer_bits),
+               where + "accepts its minimum");
+        expect(scpp::integer_literal_value_fits(range->max_value, expected.name, pointer_bits),
+               where + "accepts its maximum");
+        if (width < 64) {
+            expect(!scpp::integer_literal_value_fits(range->max_value + 1, expected.name, pointer_bits),
+                   where + "rejects one above its maximum");
+            expect(!scpp::integer_literal_value_fits(range->min_value - 1, expected.name, pointer_bits),
+                   where + "rejects one below its minimum");
+        } else if (expected.is_unsigned) {
+            expect(scpp::integer_literal_value_fits(-1, expected.name, pointer_bits),
+                   where + "accepts a wrapped 64-bit unsigned literal");
+        }
+    }
+}
+
 int main() {
     run_test_case_files();
+    test_scalar_model_lists_exactly_the_twenty_names();
+    test_scalar_model_matches_expected_shape();
+    test_scalar_predicates_derive_from_the_model();
+    test_scalar_width_and_layout_agree();
+    test_scalar_value_ranges_follow_width_and_signedness();
     test_mutable_reborrow_is_allowed_while_nested();
     test_mutable_reborrow_allows_parent_read_while_live();
     test_mutable_reborrow_rejects_parent_write_while_live();

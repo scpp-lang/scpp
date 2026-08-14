@@ -44,11 +44,7 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
 
 [[nodiscard]] bool Codegen::is_scalar_type_name(const std::string& name)
 {
-    static const std::unordered_set<std::string> scalar_names = {
-        "bool", "char", "int", "long", "unsigned int", "unsigned long", "int8_t", "int16_t", "int32_t",
-        "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "float", "double", "float32_t", "float64_t",
-        "size_t", "ptrdiff_t"};
-    return scalar_names.contains(name);
+    return scpp::is_scalar_type_name(std::string_view{name});
 }
 
 
@@ -447,54 +443,37 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
                 // of a pointer, so it lowers to an opaque pointer whose
                 // only ever value is null.
                 if (is_nullptr_type(type)) return llvm::LLVMPointerTypeInContext(context_, 0);
-                if (type.name == "int") return llvm::LLVMInt32TypeInContext(context_);
-                // A full byte (i8), matching real C++'s sizeof(bool)==1
-                // and the spec's false=0/true=1 invariant (ch06) -- not
-                // i1, even though llvm::LLVM's own icmp/br/select instructions
-                // require i1. See bool_to_i1/i1_to_bool below for the
-                // narrow choke point that bridges the two: every
-                // consumer that needs a branch/select condition truncates
-                // down to i1 first, and every comparison/logical result
-                // gets zext'd back up to i8 before being stored, passed,
-                // or returned as an ordinary bool value.
-                if (type.name == "bool") return llvm::LLVMInt8TypeInContext(context_);
-                // A signed 8-bit scalar. ch06 §6 makes `char` one of 20
-                // distinct scalar types, separate from both `int8_t` and
-                // `uint8_t`, so its signedness is scpp's own to define
-                // rather than something inherited from a C++ platform
-                // default -- and it is defined as signed, uniformly:
-                // widening casts sign-extend, `<` uses a signed icmp,
-                // `/` uses sdiv, constant evaluation bounds it at
-                // -128..127, and DWARF describes it as
-                // DW_ATE_signed_char. No implicit promotion to/from
-                // `int` exists (matching the same pre-existing lack of
-                // promotion between `bool` and `int`), so this is the
-                // type's only representation.
-                if (type.name == "char") return llvm::LLVMInt8TypeInContext(context_);
-                // ch06 §6: the rest of the numeric family -- llvm::LLVM natively
-                // supports arbitrary-width integers, so every fixed-width
-                // signed/unsigned pair just maps to the same-width
-                // integer type (llvm::LLVM itself draws no signed/unsigned
-                // distinction at the type level, only at the
-                // instruction level -- see is_unsigned_scalar_type/
-                // codegen_checked_arith's own signedness dispatch).
-                // `long`/`unsigned long` are always 64-bit regardless of
-                // target (ch06's own deliberate anti-LP64/LLP64-pitfall
-                // fix), unlike `size_t`/`ptrdiff_t` below, which are
-                // meant to track the pointer width.
-                if (type.name == "int8_t" || type.name == "uint8_t") return llvm::LLVMInt8TypeInContext(context_);
-                if (type.name == "int16_t" || type.name == "uint16_t") return llvm::LLVMInt16TypeInContext(context_);
-                if (type.name == "int32_t" || type.name == "uint32_t" || type.name == "unsigned int") {
-                    return llvm::LLVMInt32TypeInContext(context_);
-                }
-                if (type.name == "int64_t" || type.name == "uint64_t" || type.name == "long" ||
-                    type.name == "unsigned long") {
-                    return llvm::LLVMInt64TypeInContext(context_);
-                }
-                if (type.name == "float" || type.name == "float32_t") return llvm::LLVMFloatTypeInContext(context_);
-                if (type.name == "double" || type.name == "float64_t") return llvm::LLVMDoubleTypeInContext(context_);
-                if (type.name == "size_t" || type.name == "ptrdiff_t") {
-                    return llvm::LLVMIntTypeInContext(context_, 8 * llvm::LLVMPointerSizeForAS(data_layout_ref(module_), 0));
+                // Every scalar's LLVM type follows from `scpp.ast`'s
+                // scalar type model -- see `scalar_type_info`, which is
+                // the only place the twenty names of ch06 §6 are listed.
+                // This file supplies the one thing that model cannot
+                // know: the target's pointer width, which `size_t` and
+                // `ptrdiff_t` track. (`long`/`unsigned long` are always
+                // 64-bit regardless of target -- ch06's deliberate
+                // anti-LP64/LLP64-pitfall fix -- so they are not
+                // pointer-sized and need nothing from here.)
+                //
+                // LLVM draws no signed/unsigned distinction at the type
+                // level, only at the instruction level, so each
+                // signed/unsigned pair maps to the same integer type;
+                // see is_unsigned_scalar_type_name and
+                // codegen_checked_arith for where signedness is actually
+                // consulted. `bool` is a full byte (i8), matching real
+                // C++'s sizeof(bool)==1 and ch06's false=0/true=1
+                // invariant -- not i1, even though LLVM's icmp/br/select
+                // require i1; see bool_to_i1/i1_to_bool below for the
+                // narrow choke point that bridges the two. `char` is a
+                // signed 8-bit scalar distinct from both `int8_t` and
+                // `uint8_t`, with no implicit promotion to or from
+                // `int`, so i8 is its only representation.
+                if (std::optional<ScalarTypeInfo> scalar = scalar_type_info(std::string_view{type.name}); scalar.has_value()) {
+                    int width = scalar->is_pointer_sized
+                                    ? static_cast<int>(8 * llvm::LLVMPointerSizeForAS(data_layout_ref(module_), 0))
+                                    : scalar->bit_width;
+                    if (scalar->category == ScalarCategory::Floating) {
+                        return width == 32 ? llvm::LLVMFloatTypeInContext(context_) : llvm::LLVMDoubleTypeInContext(context_);
+                    }
+                    return llvm::LLVMIntTypeInContext(context_, static_cast<unsigned>(width));
                 }
                 if (const EnumDef* enum_def = find_enum_def(program_, type.name)) {
                     return to_llvm_type(enum_def->underlying_type);

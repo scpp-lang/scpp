@@ -2161,25 +2161,24 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     }
 
 
+    // These three, and is_unsigned_for_cast below, all derive from
+    // `scpp.ast`'s scalar type model -- see `scalar_type_info` for why
+    // that is the only place the twenty names of ch06 §6 are listed.
     [[nodiscard]] bool Codegen::is_float_scalar_type_name(const std::string& name)
 {
-        return name == "float" || name == "double" || name == "float32_t" || name == "float64_t";
+        return scpp::is_float_scalar_type_name(std::string_view{name});
     }
 
 
     [[nodiscard]] bool Codegen::is_integral_scalar_type_name(const std::string& name)
 {
-        return name == "char" || name == "int" || name == "long" || name == "unsigned int" ||
-               name == "unsigned long" || name == "int8_t" || name == "int16_t" || name == "int32_t" ||
-               name == "int64_t" || name == "uint8_t" || name == "uint16_t" || name == "uint32_t" ||
-               name == "uint64_t" || name == "size_t" || name == "ptrdiff_t";
+        return scpp::is_integral_scalar_type_name(std::string_view{name});
     }
 
 
     [[nodiscard]] bool Codegen::is_unsigned_scalar_type_name(const std::string& name)
 {
-        return name == "unsigned int" || name == "unsigned long" || name == "uint8_t" || name == "uint16_t" ||
-               name == "uint32_t" || name == "uint64_t" || name == "size_t";
+        return scpp::is_unsigned_scalar_type_name(std::string_view{name});
     }
 
 
@@ -2189,24 +2188,24 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     }
 
 
+    // Whether widening this scalar zero-extends. `bool` answers yes
+    // where is_unsigned_scalar_type_name answers no, and that is not a
+    // contradiction but a difference of domain: a bool is an i8 holding
+    // exactly 0 or 1 (ch06's false=0/true=1 invariant, see to_llvm_type)
+    // and must widen to 1 rather than -1, but it is not an integral
+    // scalar, so it never reaches the `icmp`/`sdiv`/negation paths the
+    // other predicate selects. Both read the single `is_unsigned` field
+    // of `scpp.ast`'s scalar type model; see `scalar_type_info`.
+    //
+    // `char` used to be listed here as unsigned, which was the sole
+    // place in the compiler answering "is char unsigned" with yes --
+    // against layout.cppm's i8 comment, both copies of
+    // is_unsigned_scalar_type_name and debug.cppm's DW_ATE_signed_char.
+    // With one model there is no longer anywhere for such a
+    // disagreement to live.
     [[nodiscard]] bool Codegen::is_unsigned_for_cast(const std::string& name)
 {
-        // `bool` is the one deliberate departure from
-        // is_unsigned_scalar_type_name, and it is not really a
-        // signedness claim: a bool is an i8 holding exactly 0 or 1
-        // (ch06's false=0/true=1 invariant, see to_llvm_type), so
-        // widening it must zero-extend or `true` would read as -1.
-        //
-        // `char` used to be listed here too, which was the sole place
-        // in the compiler that answered "is char unsigned" with yes --
-        // against layout.cppm's own i8 comment, both copies of
-        // is_unsigned_scalar_type_name (which drive icmp, sdiv and
-        // unary negation), and debug.cppm's DW_ATE_signed_char. The
-        // result contradicted itself inside a single expression:
-        // `c < 0` was true for a char holding 0xC8 while
-        // `static_cast<int>(c)` reported 200. char is signed, so it
-        // gets no exception here.
-        return name == "bool" || is_unsigned_scalar_type_name(name);
+        return scpp::scalar_widens_unsigned(std::string_view{name});
     }
 
 
