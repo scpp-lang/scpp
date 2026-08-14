@@ -4,7 +4,7 @@ class Pair {
     int x{};
     int y{4};
 public:
-    Pair(int seed) : y{seed + 1}, x{seed} { return; }
+    Pair(int seed) : x{seed}, y{seed + 1} { return; }
     int sum() { return this->x + this->y; }
 };
 

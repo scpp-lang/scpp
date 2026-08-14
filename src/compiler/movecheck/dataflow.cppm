@@ -3005,6 +3005,25 @@ struct ConvertingConstructorBinding {
             }
             return {};
 
+        // One expression of one entry of a constructor's member-
+        // initializer list (mir.cppm's lower_member_initializers), which
+        // used to reach no dataflow check at all -- the list was never
+        // lowered, so `: p_{std::move(p)} { use(p); }` and
+        // `: a_{std::move(p)}, b_{std::move(p)}` were both accepted.
+        //
+        // The move-target context matches MirStatementKind::Assign's:
+        // `x_{std::move(p)}` moves out of `p` exactly as `T x =
+        // std::move(p);` does. Unlike Eval, no discarded-[[nodiscard]]
+        // check -- the value initializes a member, it is not thrown away.
+        //
+        // The member's own declared type is checked against this
+        // expression by check_member_initializer_conversions, which asks
+        // a pure type question and so needs no dataflow state; this
+        // statement carries the state half of the same position.
+        case MirStatementKind::MemberInit:
+            return apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body,
+                              signatures, report_errors);
+
         case MirStatementKind::Drop:
             // Purely a codegen-facing marker (no-op until heap-allocated
             // owning types exist); no dataflow state effect here.
@@ -3699,6 +3718,13 @@ struct SwitchCaseKey {
     for (const ClassDef& def : program.classes) {
         for (const Function& fn : program.functions) {
             if (auto _r = validate_constructor_member_initialization(fn, def, program); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+    }
+    for (const StructDef& def : program.structs) {
+        for (const Function& fn : program.functions) {
+            if (auto _r = validate_struct_constructor_member_initialization(fn, def); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
         }

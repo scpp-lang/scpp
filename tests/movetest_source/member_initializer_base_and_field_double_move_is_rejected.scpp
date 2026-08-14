@@ -1,0 +1,18 @@
+class Res {
+  public:
+    virtual ~Res() = default;
+    Res() {}
+    int v_ = 1;
+};
+class Base {
+  public:
+    virtual ~Base() = default;
+    Base(Res p) : r_{std::move(p)} {}
+    Res r_;
+};
+class Derived : public Base {
+  public:
+    ~Derived() override = default;
+    Derived(Res p) : Base{std::move(p)}, extra_{std::move(p)} {}
+    Res extra_;
+};

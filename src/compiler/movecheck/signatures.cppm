@@ -104,6 +104,7 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
                                                                            const ClassDef& interface_def);
 [[nodiscard]] const MemberInitializer* find_explicit_base_initializer(const Function& ctor, const ClassDef& def);
 [[nodiscard]] std::expected<void, DataflowError> validate_constructor_member_initialization(const Function& ctor, const ClassDef& def, const Program& program);
+[[nodiscard]] std::expected<void, DataflowError> validate_struct_constructor_member_initialization(const Function& ctor, const StructDef& def);
 [[nodiscard]] bool is_copy_constructible(const std::string& class_name, const Program& program);
 [[nodiscard]] bool is_copy_assignable(const std::string& class_name, const Program& program);
 [[nodiscard]] bool is_freely_copyable_value_type(const Type& type, const Program& program);
@@ -288,6 +289,123 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
     return nullptr;
 }
 
+// The order in which a constructor's member-initializer entries actually
+// run, as a rank per entry (nullopt for an entry naming nothing this
+// class has -- validate_constructor_member_initialization rejects those
+// separately, with a better message).
+//
+// Not a model invented here: it is read straight off what codegen emits.
+// emit_complete_object_interface_initializers runs the virtual interface
+// bases first, in collect_virtual_interface_bases_in_construction_order
+// order; emit_constructor_member_initializers then runs the direct
+// ordinary base, and then walks `class_def->fields` in declaration
+// order, selecting each field's initializer by *name*. The order the
+// entries were written in is never consulted.
+[[nodiscard]] std::vector<std::optional<std::size_t>> member_initializer_execution_ranks(
+    const Function& ctor, const ClassDef& def, const std::vector<const ClassDef*>& interface_bases) {
+    std::vector<std::optional<std::size_t>> ranks;
+    ranks.reserve(ctor.member_initializers.size());
+    for (const MemberInitializer& init : ctor.member_initializers) {
+        std::optional<std::size_t> rank;
+        for (std::size_t i = 0; i < interface_bases.size(); i++) {
+            const ClassDef* interface_def = interface_bases[i];
+            if (interface_def == nullptr) continue;
+            if (init.member_name == interface_def->name ||
+                init.member_name == unqualified_template_base_name(interface_def->name)) {
+                rank = i;
+                break;
+            }
+        }
+        if (!rank.has_value() && names_direct_base(init.member_name, def)) rank = interface_bases.size();
+        if (!rank.has_value()) {
+            for (std::size_t i = 0; i < def.fields.size(); i++) {
+                if (def.fields[i].name == init.member_name) {
+                    rank = interface_bases.size() + 1 + i;
+                    break;
+                }
+            }
+        }
+        ranks.push_back(rank);
+    }
+    return ranks;
+}
+
+// spec §6.1: a member-initializer-list must be written in the order it
+// runs -- interface bases, then the direct base, then fields in
+// declaration order.
+//
+// scpp rejects this rather than silently reordering (which is what
+// codegen does today, and what C++ does with a warning) because the two
+// disagree observably: for `: b_{trace(2)}, a_{trace(1)}` the program
+// prints 1 then 2. A list that says one thing and does another is the
+// same defect as a diagnostic that names nothing in the program -- the
+// text is not describing the program. The language has no warnings, so
+// its options are to accept a misleading spelling or reject it, and it
+// rejects everywhere else it can't tell what was meant (ch06 §6's
+// scalar conversions, ch05 §5.10's exact-match overload resolution).
+//
+// Requiring it also earns something structural: mir.cppm can lower the
+// list in written order and be *identical* to codegen's declaration
+// order, instead of carrying a second implementation of codegen's field
+// walk that is free to drift from it.
+//
+// Repeating a member -- or a base -- is already rejected by the parser
+// (parser.cppm:6337), which has the better message, so equal ranks are
+// unreachable in practice; the comparison is still `<=` rather than `<`
+// so the rule states a total order rather than depending on that.
+[[nodiscard]] std::expected<void, DataflowError> check_member_initializer_order(
+    const Function& ctor, const std::string& owner_name, const std::vector<std::optional<std::size_t>>& ranks) {
+    std::size_t previous_index = 0;
+    std::optional<std::size_t> previous;
+    for (std::size_t i = 0; i < ranks.size(); i++) {
+        if (!ranks[i].has_value()) continue;
+        if (previous.has_value() && *ranks[i] <= *previous) {
+            const MemberInitializer& earlier = ctor.member_initializers[previous_index];
+            const MemberInitializer& later = ctor.member_initializers[i];
+            std::string reason = *ranks[i] == *previous
+                                     ? "'" + later.member_name + "' is initialized twice"
+                                     : "'" + later.member_name + "' runs before '" + earlier.member_name +
+                                           "' but is written after it";
+            return std::unexpected(DataflowError(
+                "member-initializer-list for class '" + owner_name + "' is not in initialization order: " + reason +
+                    " -- entries must be written in the order they run (base classes first, then fields in "
+                    "declaration order), because that is the order they are evaluated in (spec §6.1)",
+                later.loc.is_known() ? later.loc : ctor.loc));
+        }
+        previous = ranks[i];
+        previous_index = i;
+    }
+    return {};
+}
+
+// spec §6.1: the same initialization-order rule for a struct
+// constructor. A struct has no bases, so the ranks are just the field
+// declaration indices -- but codegen's struct branch of
+// emit_constructor_member_initializers walks `struct_def->fields` in
+// declaration order exactly as the class branch does, so writing them
+// out of order reorders them just as silently.
+[[nodiscard]] std::expected<void, DataflowError> validate_struct_constructor_member_initialization(const Function& ctor,
+                                                                                                  const StructDef& def) {
+    if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || def.is_forward_declaration ||
+        is_defaulted_special_member_equivalent_to_implicit_omission(ctor)) {
+        return {};
+    }
+    if (!ctor.body) return {};
+    std::vector<std::optional<std::size_t>> ranks;
+    ranks.reserve(ctor.member_initializers.size());
+    for (const MemberInitializer& init : ctor.member_initializers) {
+        std::optional<std::size_t> rank;
+        for (std::size_t i = 0; i < def.fields.size(); i++) {
+            if (def.fields[i].name == init.member_name) {
+                rank = i;
+                break;
+            }
+        }
+        ranks.push_back(rank);
+    }
+    return check_member_initializer_order(ctor, def.name, ranks);
+}
+
 [[nodiscard]] std::expected<void, DataflowError> validate_constructor_member_initialization(const Function& ctor, const ClassDef& def, const Program& program) {
     if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || def.is_forward_declaration ||
         is_defaulted_special_member_equivalent_to_implicit_omission(ctor)) {
@@ -352,7 +470,7 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
                                 "initializer (spec §6.1(4))",
                             ctor.loc));
     }
-    return {};
+    return check_member_initializer_order(ctor, def.name, member_initializer_execution_ranks(ctor, def, interface_bases));
 }
 
 [[nodiscard]] const FunctionSignature* resolve_constructor_signature(const std::string& class_name,

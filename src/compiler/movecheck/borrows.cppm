@@ -455,6 +455,7 @@ LiveSet reference_uses(const MirStatement& stmt, const Body& body) {
     switch (stmt.kind) {
         case MirStatementKind::BindReference:
         case MirStatementKind::Eval:
+        case MirStatementKind::MemberInit:
             collect_reference_uses(stmt.expr, body, uses);
             return uses;
         case MirStatementKind::Assign: {
