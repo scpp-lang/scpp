@@ -3724,7 +3724,7 @@ struct SwitchCaseKey {
     }
     for (const StructDef& def : program.structs) {
         for (const Function& fn : program.functions) {
-            if (auto _r = validate_struct_constructor_member_initialization(fn, def); !_r.has_value()) {
+            if (auto _r = validate_struct_constructor_member_initialization(fn, def, program); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
         }

@@ -1,0 +1,8 @@
+int g_out = 0;
+class Holder {
+  public:
+    virtual ~Holder() = default;
+    Holder() : b_{7} {}
+    void run() { auto f = [this]() -> int { return this->b_; }; g_out = f(); }
+    int b_;
+};

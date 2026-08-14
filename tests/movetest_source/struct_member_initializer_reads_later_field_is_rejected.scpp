@@ -1,0 +1,5 @@
+struct Pair {
+    Pair() : a_{this->b_}, b_{1} {}
+    int a_;
+    int b_;
+};

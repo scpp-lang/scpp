@@ -104,7 +104,7 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
                                                                            const ClassDef& interface_def);
 [[nodiscard]] const MemberInitializer* find_explicit_base_initializer(const Function& ctor, const ClassDef& def);
 [[nodiscard]] std::expected<void, DataflowError> validate_constructor_member_initialization(const Function& ctor, const ClassDef& def, const Program& program);
-[[nodiscard]] std::expected<void, DataflowError> validate_struct_constructor_member_initialization(const Function& ctor, const StructDef& def);
+[[nodiscard]] std::expected<void, DataflowError> validate_struct_constructor_member_initialization(const Function& ctor, const StructDef& def, const Program& program);
 [[nodiscard]] bool is_copy_constructible(const std::string& class_name, const Program& program);
 [[nodiscard]] bool is_copy_assignable(const std::string& class_name, const Program& program);
 [[nodiscard]] bool is_freely_copyable_value_type(const Type& type, const Program& program);
@@ -330,6 +330,203 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
     return ranks;
 }
 
+// Whether `def`, or anything it inherits from, declares a data member
+// called `name`.
+[[nodiscard]] bool class_or_bases_declare_field(const Program& program, const ClassDef& def, const std::string& name) {
+    for (const ClassField& field : def.fields) {
+        if (field.name == name) return true;
+    }
+    for (const BaseSpecifier& base : def.base_specifiers) {
+        const ClassDef* base_def = find_class_def(program, base.base_type.name);
+        if (base_def == nullptr || base_def->is_forward_declaration) continue;
+        if (class_or_bases_declare_field(program, *base_def, name)) return true;
+    }
+    return false;
+}
+
+// The construction rank at which the data member `name` becomes alive,
+// on the same scale member_initializer_execution_ranks uses: a field
+// declared by `def` itself gets its own declaration rank, and a field
+// inherited from a base gets *that base's* rank, because a base
+// subobject is constructed all at once.
+//
+// nullopt means `name` is not a data member reachable from here, which
+// is somebody else's diagnostic rather than a construction-order one.
+[[nodiscard]] std::optional<std::size_t> member_construction_rank(const Program& program, const ClassDef& def,
+                                                                 const std::vector<const ClassDef*>& interface_bases,
+                                                                 const std::string& name) {
+    for (std::size_t i = 0; i < def.fields.size(); i++) {
+        if (def.fields[i].name == name) return interface_bases.size() + 1 + i;
+    }
+    for (std::size_t i = 0; i < interface_bases.size(); i++) {
+        const ClassDef* interface_def = interface_bases[i];
+        if (interface_def != nullptr && class_or_bases_declare_field(program, *interface_def, name)) return i;
+    }
+    auto base = def.direct_ordinary_base();
+    if (base.has_value()) {
+        const ClassDef* base_def = find_class_def(program, base->get().base_type.name);
+        if (base_def != nullptr && !base_def->is_forward_declaration &&
+            class_or_bases_declare_field(program, *base_def, name)) {
+            return interface_bases.size();
+        }
+    }
+    return std::nullopt;
+}
+
+// What check_this_usage_in_expr needs to know about the class or struct
+// under construction, so that both get the same walker and the same
+// answer to "when does this member become alive". A struct is the
+// degenerate case: no bases, so a field's rank is just its declaration
+// index.
+struct ConstructedOwner {
+    const Program* program = nullptr;
+    const ClassDef* class_def = nullptr;
+    const StructDef* struct_def = nullptr;
+    const std::vector<const ClassDef*>* interface_bases = nullptr;
+
+    [[nodiscard]] const std::string& name() const { return class_def != nullptr ? class_def->name : struct_def->name; }
+
+    [[nodiscard]] std::optional<std::size_t> rank_of_member(const std::string& member_name) const {
+        if (class_def != nullptr) {
+            return member_construction_rank(*program, *class_def, *interface_bases, member_name);
+        }
+        for (std::size_t i = 0; i < struct_def->fields.size(); i++) {
+            if (struct_def->fields[i].name == member_name) return i;
+        }
+        return std::nullopt;
+    }
+};
+
+// spec §6.1: inside a member-initializer, `this` denotes an object that
+// does not exist yet. Only the part of it already constructed may be
+// touched, and by the time the entry at rank `rank` runs that is exactly
+// the bases and fields whose own rank is lower -- a fact that is now
+// positional rather than a dataflow property, because
+// check_member_initializer_order forces the written order to be the
+// construction order.
+//
+// So `this` may appear only as the immediate base of a member access
+// naming an already-constructed data member. Everything else is
+// rejected, and has to be: `this->compute()`, `peek(this)` and
+// `peek(*this)` all hand the whole object to code free to read any
+// field, including ones that are still raw storage, so permitting them
+// would let the direct read be restated and trivially defeat the rule.
+// There is no point inside the list at which the object is complete --
+// even the last field's initializer runs before that field exists --
+// so no escape can be allowed anywhere in the list rather than only
+// early in it.
+//
+// Reading a member is not distinguished from taking its address: both
+// name a field that is not yet an object, and `&this->b_` outlives the
+// initializer that formed it.
+[[nodiscard]] std::expected<void, DataflowError> check_this_usage_in_expr(const Expr& expr, std::size_t rank,
+                                                                         const ConstructedOwner& owner,
+                                                                         const std::string& entry_description) {
+    if (expr.kind == ExprKind::Identifier && expr.name == "this") {
+        return std::unexpected(DataflowError(
+            "'this' escapes the member-initializer for " + entry_description + " of '" + owner.name() +
+                "', where the object is still under construction -- inside a member-initializer-list 'this' may only "
+                "be used to read an already-initialized member as 'this->member' (spec §6.1)",
+            expr.loc));
+    }
+    if (expr.kind == ExprKind::Call && expr.lhs != nullptr && expr.lhs->kind == ExprKind::Identifier &&
+        expr.lhs->name == "this") {
+        // parse_member_or_method_call stores the receiver of `this->m()`
+        // directly in the Call's lhs, so this is the shape a method call
+        // on the object under construction actually takes -- naming that
+        // rather than letting it fall through to the generic escape below.
+        return std::unexpected(DataflowError(
+            "member-initializer for " + entry_description + " of '" + owner.name() + "' calls method '" + expr.name +
+                "' on an object that is still under construction; a method may read any member, including ones not "
+                "initialized yet, so no method may be called before the last member-initializer has run (spec §6.1)",
+            expr.loc));
+    }
+    if (expr.kind == ExprKind::Member && expr.lhs != nullptr && expr.lhs->kind == ExprKind::Identifier &&
+        expr.lhs->name == "this") {
+        std::optional<std::size_t> member_rank = owner.rank_of_member(expr.name);
+        if (member_rank.has_value() && *member_rank >= rank) {
+            return std::unexpected(DataflowError(
+                "member-initializer for " + entry_description + " of '" + owner.name() + "' uses member '" +
+                    expr.name + "', which is not initialized until later; members are constructed in declaration "
+                    "order, so an initializer may only use members declared before the one it initializes "
+                    "(spec §6.1)",
+                expr.loc));
+        }
+        // A name that is not a data member of this class is somebody
+        // else's diagnostic (a bare `this->m` naming a method is already
+        // rejected as an unknown field); saying anything about
+        // construction order here would name a member that does not
+        // exist.
+        return {};
+    }
+    for (const Expr* child : {expr.lhs.get(), expr.rhs.get(), expr.third.get()}) {
+        if (child == nullptr) continue;
+        if (auto _r = check_this_usage_in_expr(*child, rank, owner, entry_description);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    }
+    for (const ExprPtr& arg : expr.args) {
+        if (arg == nullptr) continue;
+        if (auto _r = check_this_usage_in_expr(*arg, rank, owner, entry_description);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    }
+    for (const LambdaCapture& capture : expr.lambda_captures) {
+        if (capture.name == "this") {
+            return std::unexpected(DataflowError(
+                "member-initializer for " + entry_description + " of '" + owner.name() +
+                    "' captures 'this' in a lambda, but the object is still under construction (spec §6.1)",
+                expr.loc));
+        }
+        if (capture.init == nullptr) continue;
+        if (auto _r = check_this_usage_in_expr(*capture.init, rank, owner, entry_description);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    }
+    // Deliberately not descending into expr.lambda_body: a lambda body
+    // can only reach an enclosing member through a capture of `this`,
+    // which the loop above rejects outright, so the capture list is the
+    // choke point and walking the body would be a second answer to the
+    // same question rather than extra reach.
+    return {};
+}
+
+[[nodiscard]] std::expected<void, DataflowError> check_member_initializer_this_usage(
+    const Function& ctor, const ConstructedOwner& owner, const std::vector<std::optional<std::size_t>>& ranks) {
+    // A lambda that captures `this` desugars to a closure class with a
+    // field named "this" and a constructor taking a *second* parameter
+    // named "this" holding the enclosing object, which shadows the
+    // receiver in params[0] (monomorphize.cppm's closure synthesis).
+    // In such a constructor the name `this` in a member-initializer
+    // denotes that parameter, not the object being constructed, so
+    // nothing here has anything to say about it -- the enclosing `this`
+    // is a fully constructed object being passed in by value.
+    for (std::size_t i = 1; i < ctor.params.size(); i++) {
+        if (ctor.params[i].name == "this") return {};
+    }
+    for (std::size_t i = 0; i < ranks.size(); i++) {
+        if (!ranks[i].has_value()) continue;
+        const MemberInitializer& init = ctor.member_initializers[i];
+        std::string description = "'" + init.member_name + "'";
+        if (init.initializer.expr != nullptr) {
+            if (auto _r = check_this_usage_in_expr(*init.initializer.expr, *ranks[i], owner, description);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        for (const ExprPtr& arg : init.initializer.brace_args) {
+            if (arg == nullptr) continue;
+            if (auto _r = check_this_usage_in_expr(*arg, *ranks[i], owner, description); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+    }
+    return {};
+}
+
 // spec §6.1: a member-initializer-list must be written in the order it
 // runs -- interface bases, then the direct base, then fields in
 // declaration order.
@@ -385,7 +582,8 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 // declaration order exactly as the class branch does, so writing them
 // out of order reorders them just as silently.
 [[nodiscard]] std::expected<void, DataflowError> validate_struct_constructor_member_initialization(const Function& ctor,
-                                                                                                  const StructDef& def) {
+                                                                                                  const StructDef& def,
+                                                                                                  const Program& program) {
     if (!is_constructor_function(ctor) || ctor.member_owner_class != def.name || def.is_forward_declaration ||
         is_defaulted_special_member_equivalent_to_implicit_omission(ctor)) {
         return {};
@@ -403,7 +601,10 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
         }
         ranks.push_back(rank);
     }
-    return check_member_initializer_order(ctor, def.name, ranks);
+    if (auto _r = check_member_initializer_order(ctor, def.name, ranks); !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
+    return check_member_initializer_this_usage(ctor, ConstructedOwner{&program, nullptr, &def, nullptr}, ranks);
 }
 
 [[nodiscard]] std::expected<void, DataflowError> validate_constructor_member_initialization(const Function& ctor, const ClassDef& def, const Program& program) {
@@ -470,7 +671,12 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
                                 "initializer (spec §6.1(4))",
                             ctor.loc));
     }
-    return check_member_initializer_order(ctor, def.name, member_initializer_execution_ranks(ctor, def, interface_bases));
+    std::vector<std::optional<std::size_t>> ranks = member_initializer_execution_ranks(ctor, def, interface_bases);
+    if (auto _r = check_member_initializer_order(ctor, def.name, ranks); !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
+    return check_member_initializer_this_usage(
+        ctor, ConstructedOwner{&program, &def, nullptr, &interface_bases}, ranks);
 }
 
 [[nodiscard]] const FunctionSignature* resolve_constructor_signature(const std::string& class_name,

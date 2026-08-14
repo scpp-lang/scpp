@@ -1,0 +1,10 @@
+class Holder;
+int peek(const Holder& h);
+class Holder {
+  public:
+    virtual ~Holder() = default;
+    Holder() : a_{peek(*this)}, b_{1} {}
+    int a_;
+    int b_;
+};
+int peek(const Holder& h) { return 0; }
