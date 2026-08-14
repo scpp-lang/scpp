@@ -1,0 +1,11 @@
+// ch06 §6: `char` is a signed 8-bit type, distinct from both int8_t and
+// uint8_t. Widening it to a larger integer therefore sign-extends -- the
+// cast path used to zero-extend, which was the only place in the
+// compiler that answered "is char unsigned" with yes and which made
+// `static_cast<int>(c)` disagree with the signed `<` and `/` applied to
+// that same c.
+int main() {
+    char c = 'A';
+    int w = static_cast<int>(c);
+    return w;
+}

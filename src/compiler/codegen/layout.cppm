@@ -458,11 +458,18 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
                 // gets zext'd back up to i8 before being stored, passed,
                 // or returned as an ordinary bool value.
                 if (type.name == "bool") return llvm::LLVMInt8TypeInContext(context_);
-                // A signed 8-bit scalar, matching the common (e.g.
-                // x86-64 Linux/Clang) default for plain `char` -- no
-                // implicit promotion to/from `int` exists yet (matching
-                // the same pre-existing lack of promotion between `bool`
-                // and `int`), so this is the type's only representation.
+                // A signed 8-bit scalar. ch06 §6 makes `char` one of 20
+                // distinct scalar types, separate from both `int8_t` and
+                // `uint8_t`, so its signedness is scpp's own to define
+                // rather than something inherited from a C++ platform
+                // default -- and it is defined as signed, uniformly:
+                // widening casts sign-extend, `<` uses a signed icmp,
+                // `/` uses sdiv, constant evaluation bounds it at
+                // -128..127, and DWARF describes it as
+                // DW_ATE_signed_char. No implicit promotion to/from
+                // `int` exists (matching the same pre-existing lack of
+                // promotion between `bool` and `int`), so this is the
+                // type's only representation.
                 if (type.name == "char") return llvm::LLVMInt8TypeInContext(context_);
                 // ch06 §6: the rest of the numeric family -- llvm::LLVM natively
                 // supports arbitrary-width integers, so every fixed-width
