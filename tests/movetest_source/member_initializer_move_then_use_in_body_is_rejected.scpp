@@ -1,0 +1,12 @@
+class Res {
+  public:
+    virtual ~Res() = default;
+    Res() {}
+    int v_ = 1;
+};
+class Holder {
+  public:
+    virtual ~Holder() = default;
+    Holder(Res p) : r_{std::move(p)} { int unused = p.v_; }
+    Res r_;
+};

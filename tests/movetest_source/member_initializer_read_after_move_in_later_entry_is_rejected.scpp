@@ -1,0 +1,13 @@
+class Res {
+  public:
+    virtual ~Res() = default;
+    Res() {}
+    int v_ = 1;
+};
+class Holder {
+  public:
+    virtual ~Holder() = default;
+    Holder(Res p) : a_{std::move(p)}, n_{p.v_} {}
+    Res a_;
+    int n_;
+};

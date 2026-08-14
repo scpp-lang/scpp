@@ -1,0 +1,11 @@
+class Res {
+  public:
+    virtual ~Res() = default;
+    Res() {}
+    int v_ = 1;
+};
+int run() {
+    Res r{};
+    auto f = [captured = std::move(r)]() -> int { return captured.v_; };
+    return f();
+}

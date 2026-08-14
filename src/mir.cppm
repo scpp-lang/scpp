@@ -132,6 +132,22 @@ enum class MirStatementKind {
     // statement, or an assignment into a member/subscript place rather
     // than a whole local).
     Eval,
+    // Evaluates `expr` and binds it into a member of the object being
+    // constructed: one expression of one entry of a constructor's
+    // `: base{...}, field{...}` list, emitted into the entry block ahead
+    // of the body because that is when it runs.
+    //
+    // Distinct from Eval because the value is *consumed*, not discarded:
+    // Eval reports a discarded [[nodiscard]] result, which `x_{make()}`
+    // must not, and `x_{std::move(p)}` is a move-target context exactly
+    // as the Assign of a declaration with an initializer is.
+    //
+    // The member itself is not named here. A field is not a local, so
+    // there is no LocalId to record and no per-field state to update --
+    // this statement exists to make the *reads and moves* the expression
+    // performs visible to the analysis, which is precisely what the list
+    // being absent from the MIR hid.
+    MemberInit,
     // Marks that `local`'s owned resource (if any) should be released
     // here. Inserted at each function-exit point for unique_ptr locals.
     // No-op in codegen until heap-allocated owning types exist (tracked
@@ -274,6 +290,14 @@ struct BasicBlock {
 struct Body {
     std::vector<BasicBlock> blocks;
     StmtPtr owned_body;
+    // A constructor's own `: base{...}, field{...}` list, deep-copied for
+    // the same reason `owned_body` is: the LocalResolver run below writes
+    // each identifier's resolved id into the expression it reads, and the
+    // Function this Body was built from is const here. Copying an
+    // Initializer deep-clones its expressions (see Initializer's copy
+    // constructor), so the MemberInit statements below point at nodes
+    // this Body owns, not at ones some other copy of the program shares.
+    std::vector<MemberInitializer> owned_member_initializers;
     // Indexed by LocalId.
     std::vector<LocalDecl> local_decls;
     // The owning program this MIR came from, so later movecheck passes can
@@ -606,6 +630,7 @@ class MirBuilder {
 public:
     explicit MirBuilder(const Function& fn) : fn_(fn), owned_params_(fn.params) {
         body_.owned_body = deep_clone_stmt(*fn.body);
+        body_.owned_member_initializers = fn.member_initializers;
     }
 
     Body build() {
@@ -620,10 +645,16 @@ public:
         // Function it came from. Both runs assign the same ids (the
         // numbering depends only on declaration order), so a use found in
         // any other copy of this body still names the same entry here.
+        // The member-initializer list is passed for the same reason
+        // resolve_locals passes it: its expressions read the
+        // constructor's parameters, and a read only knows which
+        // declaration it names once resolved. It declares nothing, so
+        // including it cannot shift any id.
         LocalResolver resolver{owned_params_, body_.owned_body.get()};
-        resolver.run();
+        resolver.run(&body_.owned_member_initializers);
         body_.local_decls = resolver.take_decls();
         current_block_ = new_block();
+        lower_member_initializers();
         lower_stmt(*body_.owned_body);
         insert_drops_before_returns();
         return std::move(body_);
@@ -722,6 +753,38 @@ private:
         stmt.expr = expr;
         stmt.loc = loc;
         return stmt;
+    }
+
+    // A constructor's member-initializer list, lowered into the entry
+    // block ahead of the body because that is when it runs. Without this
+    // the list was invisible to every dataflow check: `Holder(P p) :
+    // p_{std::move(p)} { use(p); }` was accepted, and so was
+    // `: a_{std::move(p)}, b_{std::move(p)}`.
+    //
+    // Lowered in *written* order, which is sound only because
+    // validate_constructor_member_initialization now requires the written
+    // order to be the execution order (interface bases, then the direct
+    // base, then fields in declaration order -- what codegen's
+    // emit_constructor_member_initializers actually emits, since it
+    // selects each field's initializer by name while walking
+    // `class_def->fields`). Deriving the order here instead would mean a
+    // second implementation of codegen's walk, free to drift from it;
+    // requiring the two to be equal makes them equal by construction.
+    //
+    // Every expression of every entry is lowered, so a base initializer's
+    // arguments (`: Base{std::move(p)}`) are seen exactly like a field's.
+    void lower_member_initializers() {
+        for (const MemberInitializer& init : body_.owned_member_initializers) {
+            const SourceLocation& loc = init.loc.is_known() ? init.loc : fn_.loc;
+            if (init.initializer.expr != nullptr) {
+                current().statements.push_back(
+                    plain_stmt(MirStatementKind::MemberInit, init.initializer.expr.get(), loc));
+            }
+            for (const ExprPtr& arg : init.initializer.brace_args) {
+                if (arg == nullptr) continue;
+                current().statements.push_back(plain_stmt(MirStatementKind::MemberInit, arg.get(), loc));
+            }
+        }
     }
 
     std::size_t new_block() {
