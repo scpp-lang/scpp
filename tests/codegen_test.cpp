@@ -1562,11 +1562,17 @@ void run_constexpr_object_field_order_tests() {
 }
 
 void run_constexpr_string_literal_byte_tests() {
-    // The string-literal cell builder used to iterate `for (unsigned char ch :
-    // expr.name)`. scpp cannot spell that loop, so it is now an index loop that
-    // casts through std::uint8_t. Bytes >= 0x80 must therefore still widen as
-    // unsigned; a plain `static_cast<std::int64_t>(expr.name.at(i))` would
-    // sign-extend `char` and turn 0xE2 into -30.
+    // ch06 §6: `char` is signed, so a string-literal byte >= 0x80 names a
+    // negative char value -- 0xE2 is -30, not 226. The cell builder casts
+    // through std::int8_t to say exactly that. It used to cast through
+    // std::uint8_t, which was one of the two places in the compiler that
+    // answered "is char unsigned" with yes, and which let constant
+    // evaluation hold char values the rest of the compiler cannot
+    // represent (integer_bounds_for_type bounded char at 0..255 to match).
+    //
+    // What must not change is the byte content: the values below are the
+    // signed readings of the very same bytes, and the round-trip
+    // assertion after the value check is what pins that down.
     struct ByteCase {
         std::string case_name;
         std::vector<int> bytes;
@@ -1576,11 +1582,11 @@ void run_constexpr_string_literal_byte_tests() {
     // scpp's lexer supports only \n \t \r \\ \' \" \0, so the high bytes are
     // embedded literally rather than as \x escapes.
     const std::vector<ByteCase> byte_cases = {
-        {"string_literal_high_byte_stays_unsigned_first", {0xE2, 0x82, 0xAC}, 0, 226},
-        {"string_literal_high_byte_stays_unsigned_middle", {0xE2, 0x82, 0xAC}, 1, 130},
-        {"string_literal_high_byte_stays_unsigned_last", {0xE2, 0x82, 0xAC}, 2, 172},
+        {"string_literal_high_byte_reads_signed_first", {0xE2, 0x82, 0xAC}, 0, -30},
+        {"string_literal_high_byte_reads_signed_middle", {0xE2, 0x82, 0xAC}, 1, -126},
+        {"string_literal_high_byte_reads_signed_last", {0xE2, 0x82, 0xAC}, 2, -84},
         {"string_literal_ascii_byte_unchanged", {0x41, 0x7F}, 1, 127},
-        {"string_literal_max_byte_stays_unsigned", {0xFF}, 0, 255},
+        {"string_literal_max_byte_reads_signed", {0xFF}, 0, -1},
         {"string_literal_nul_terminator_present", {0xFF}, 1, 0},
     };
 
@@ -1606,6 +1612,17 @@ void run_constexpr_string_literal_byte_tests() {
         expect(snapshot.value().int_value == byte_case.expected,
                byte_case.case_name + ": expected byte " + std::to_string(byte_case.expected) + " but got " +
                    std::to_string(snapshot.value().int_value));
+        // The signedness question is about how the byte is *read*, never
+        // about which byte is stored: whatever the value, truncating it
+        // back to 8 bits has to reproduce the literal's own byte.
+        const std::int64_t source_byte =
+            byte_case.index < static_cast<std::int64_t>(byte_case.bytes.size())
+                ? static_cast<std::int64_t>(byte_case.bytes[static_cast<std::size_t>(byte_case.index)])
+                : 0;
+        expect(static_cast<std::int64_t>(static_cast<std::uint8_t>(snapshot.value().int_value)) == source_byte,
+               byte_case.case_name + ": expected the stored byte to survive as " + std::to_string(source_byte) +
+                   " but got " +
+                   std::to_string(static_cast<std::int64_t>(static_cast<std::uint8_t>(snapshot.value().int_value))));
     }
 }
 

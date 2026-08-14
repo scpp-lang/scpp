@@ -1307,7 +1307,13 @@ private:
     }
 
     [[nodiscard]] IntegerBounds integer_bounds_for_type(const Type& type) const {
-        if (is_named_type(type, "char")) return IntegerBounds{0, 255};
+        // ch06 §6: `char` is a signed 8-bit type, exactly like its
+        // distinct sibling `int8_t` -- see layout.cppm's i8 mapping,
+        // codegen's is_unsigned_for_cast, and debug.cppm's
+        // DW_ATE_signed_char. These bounds used to read {0, 255}, which
+        // made constant evaluation the only part of the compiler that
+        // would accept `char` values above 127.
+        if (is_named_type(type, "char")) return IntegerBounds{-128, 127};
         if (is_named_type(type, "bool")) return IntegerBounds{0, 1};
         if (is_named_type(type, "int")) {
             return IntegerBounds{int32_min_value, int32_max_value};
@@ -1526,13 +1532,16 @@ private:
         ArrayValue array{};
         array.element_type = named_type("char");
         for (std::size_t i = 0; i < expr.name.size(); ++i) {
-            // Index loop rather than a range-for, and std::uint8_t rather
-            // than the bare `unsigned char` shorthand: scpp's range-for
+            // Index loop rather than a range-for, and std::int8_t rather
+            // than the bare `signed char` shorthand: scpp's range-for
             // takes a fixed-size array, std::span or std::vector (not a
             // std::string), and requires `unsigned` be followed by
-            // `int`/`long` (ch06 §6). The cast through std::uint8_t keeps
-            // bytes >= 0x80 positive, exactly as `unsigned char` did.
-            std::int64_t ch = static_cast<std::int64_t>(static_cast<std::uint8_t>(expr.name.at(i)));
+            // `int`/`long` (ch06 §6). The cast through std::int8_t
+            // sign-extends bytes >= 0x80 to the negative `char` values
+            // they name -- `char` is signed (ch06 §6), so a 0xC8 byte is
+            // -56, which is also the only reading that fits the char
+            // bounds integer_bounds_for_type reports.
+            std::int64_t ch = static_cast<std::int64_t>(static_cast<std::int8_t>(expr.name.at(i)));
             array.elements.push_back(make_scalar_cell(named_type("char"), ch));
         }
         array.elements.push_back(make_scalar_cell(named_type("char"), 0));

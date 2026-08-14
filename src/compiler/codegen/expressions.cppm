@@ -2191,7 +2191,22 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
     [[nodiscard]] bool Codegen::is_unsigned_for_cast(const std::string& name)
 {
-        return name == "bool" || name == "char" || is_unsigned_scalar_type_name(name);
+        // `bool` is the one deliberate departure from
+        // is_unsigned_scalar_type_name, and it is not really a
+        // signedness claim: a bool is an i8 holding exactly 0 or 1
+        // (ch06's false=0/true=1 invariant, see to_llvm_type), so
+        // widening it must zero-extend or `true` would read as -1.
+        //
+        // `char` used to be listed here too, which was the sole place
+        // in the compiler that answered "is char unsigned" with yes --
+        // against layout.cppm's own i8 comment, both copies of
+        // is_unsigned_scalar_type_name (which drive icmp, sdiv and
+        // unary negation), and debug.cppm's DW_ATE_signed_char. The
+        // result contradicted itself inside a single expression:
+        // `c < 0` was true for a char holding 0xC8 while
+        // `static_cast<int>(c)` reported 200. char is signed, so it
+        // gets no exception here.
+        return name == "bool" || is_unsigned_scalar_type_name(name);
     }
 
 

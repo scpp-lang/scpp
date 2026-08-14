@@ -1,0 +1,8 @@
+// The same signedness answer has to drive the integer/floating
+// conversions, or a negative char round-trips through double as a large
+// positive value.
+int main() {
+    char c = 'A';
+    double d = static_cast<double>(c);
+    return d > 0.0 ? 0 : 1;
+}
