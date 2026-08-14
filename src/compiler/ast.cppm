@@ -2668,8 +2668,8 @@ public:
 }
 
 struct TargetLayoutInfo {
-    std::uint64_t pointer_size_bytes = sizeof(void*);
-    std::uint64_t pointer_align_bytes = alignof(void*);
+    std::uint64_t pointer_size_bytes = static_cast<std::uint64_t>(sizeof(void*));
+    std::uint64_t pointer_align_bytes = static_cast<std::uint64_t>(alignof(void*));
 };
 
 // The width of a scalar in bits, given the target's pointer width. Only

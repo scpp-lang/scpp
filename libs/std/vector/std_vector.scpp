@@ -37,8 +37,8 @@ private:
     T* data_{};
     size_t size_{};
     size_t capacity_{};
-    uint64_t elem_size_{sizeof(T)};
-    uint64_t elem_align_{alignof(T)};
+    uint64_t elem_size_{static_cast<uint64_t>(sizeof(T))};
+    uint64_t elem_align_{static_cast<uint64_t>(alignof(T))};
 
     void __check_index(size_t index) const {
         if (index >= this->size_) {

@@ -1,0 +1,15 @@
+// spec §6: a constructor's member-initializer list binds a value to a
+// field's declared type and ran none of the conversion checks, so `: u{a}`
+// accepted what `s.u = a;` rejects.
+class Holder {
+public:
+    uint8_t u;
+
+    Holder(int8_t a) : u{a} {}
+    virtual ~Holder() = default;
+};
+
+int main() {
+    Holder h{-56};
+    return static_cast<int>(h.u);
+}

@@ -1,0 +1,12 @@
+// spec ch05 §5.16 at a default argument.
+int wrong(bool b) {
+    return b ? 1 : 2;
+}
+
+int use(int (*fp)(int) = &wrong) {
+    return fp(7);
+}
+
+int main() {
+    return use();
+}

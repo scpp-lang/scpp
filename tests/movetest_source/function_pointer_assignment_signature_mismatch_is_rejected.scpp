@@ -1,0 +1,15 @@
+// spec ch05 §5.16: the rule holds for an assignment, not just a
+// declaration with an initializer.
+int right(int x) {
+    return x;
+}
+
+int wrong(bool b) {
+    return b ? 1 : 2;
+}
+
+int main() {
+    int (*fp)(int) = &right;
+    fp = &wrong;
+    return fp(7);
+}

@@ -1,0 +1,11 @@
+// spec ch05 §5.16: `int&` and `int` are different parameter types, and
+// the difference is exactly what the borrow checker reasons about at an
+// indirect call.
+int takes_ref(int& x) {
+    return x;
+}
+
+int main() {
+    int (*fp)(int) = &takes_ref;
+    return fp(7);
+}

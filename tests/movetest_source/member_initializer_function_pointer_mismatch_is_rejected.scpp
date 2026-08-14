@@ -1,0 +1,17 @@
+// spec ch05 §5.16 in a member-initializer list.
+int wrong(bool b) {
+    return b ? 1 : 2;
+}
+
+class Holder {
+public:
+    int (*fp)(int);
+
+    Holder() : fp{&wrong} {}
+    virtual ~Holder() = default;
+};
+
+int main() {
+    Holder h{};
+    return h.fp(7);
+}

@@ -29,12 +29,22 @@ namespace scpp {
                                                                 const DataflowState& state,
                                                                 const Signatures& signatures);
 [[nodiscard]] std::string describe_assignment_place(const Expr& place);
+[[nodiscard]] std::expected<void, DataflowError> check_value_binding_conversions(const Type& target_type,
+                                                                                const Expr& value, const Body& body,
+                                                                                const Signatures& signatures,
+                                                                                const SourceLocation& loc,
+                                                                                const std::string& target_name,
+                                                                                bool report_errors);
 [[nodiscard]] std::expected<void, DataflowError> check_assignment_target_conversions(const Expr& place, const Expr& value,
                                                                                      const Body& body,
                                                                                      const DataflowState& state,
                                                                                      const Signatures& signatures,
                                                                                      const SourceLocation& loc,
                                                                                      bool report_errors);
+[[nodiscard]] std::expected<void, DataflowError> check_member_initializer_conversions(
+    const Function& fn, const Body& body, const Signatures& signatures, const ClassFieldTypes& class_field_types);
+[[nodiscard]] std::expected<void, DataflowError> check_initializer_scope_conversions(const Program& program,
+                                                                                     const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
                          const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> apply_deref(const Expr& expr, const DataflowState& state, const Body& body, const Signatures& signatures,
@@ -494,15 +504,61 @@ namespace scpp {
     return place.name;
 }
 
-// spec §6: the complete set of conversion rules an assignment's value
-// must satisfy against its target's declared type, applied uniformly to
-// every place shape.
+// spec §6: the complete set of conversion rules a value must satisfy
+// against the declared type of the place it is bound to. The single
+// definition of that question, so that every position which binds a
+// value to a declared type gets the same answer.
 //
-// These five checks already existed, but only the
-// MirStatementKind::Assign *statement* path ran all of them, and that
-// path only exists for a bare-name target: mir.cppm lowers `x = v;` to
-// an Assign node and everything else -- `s.f = v;`, `a[i] = v;` -- to an
-// opaque Eval of the whole expression, which is sound for the
+// The five checks existed before this was extracted, but each position
+// that ran them spelled the sequence out by hand, and no two spellings
+// agreed: the local declaration/assignment path ran all five, the global
+// assignment path ran four (no enum), the expression-level assignment
+// path ran five, and four positions -- a global declaration's own
+// initializer, a constructor's member-initializer list, a field's
+// default member initializer, and a parameter's default argument -- ran
+// none at all. So `uint8_t u = a;` was rejected as a local and accepted
+// as a global; `S() : u{a} {}` accepted what `s.u = a;` rejected. A
+// hand-copied sequence is exactly the shape that drifts, so it is now
+// one function called from every position rather than a convention to
+// be re-followed at the next one.
+[[nodiscard]] std::expected<void, DataflowError> check_value_binding_conversions(const Type& target_type,
+                                                                                const Expr& value, const Body& body,
+                                                                                const Signatures& signatures,
+                                                                                const SourceLocation& loc,
+                                                                                const std::string& target_name,
+                                                                                bool report_errors) {
+    if (auto _r = check_function_pointer_assignment(target_type, value, body, signatures, loc, target_name,
+                                                    report_errors);
+        !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
+    if (auto _r = check_raw_pointer_assignment(target_type, value, body, signatures, loc, target_name, report_errors);
+        !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
+    if (auto _r = check_nullptr_assignment(target_type, value, loc, target_name, report_errors); !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
+    if (auto _r = check_scalar_conversion(target_type, value, body, signatures, loc, "'" + target_name + "'",
+                                          report_errors);
+        !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
+    if (report_errors) {
+        if (auto _r = check_enum_conversion_compatibility(target_type, value, body, signatures, loc); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    }
+    return {};
+}
+
+// spec §6: the conversion rules above, applied to an assignment whose
+// target is written as an arbitrary place expression.
+//
+// Only the MirStatementKind::Assign *statement* path used to run them,
+// and that path only exists for a bare-name target: mir.cppm lowers `x =
+// v;` to an Assign node and everything else -- `s.f = v;`, `a[i] = v;`
+// -- to an opaque Eval of the whole expression, which is sound for the
 // initialization tracking that choice was made for (a field write never
 // changes the enclosing local's own state) but leaves this expression
 // handler as the only place those assignments are ever seen. It checked
@@ -526,27 +582,146 @@ namespace scpp {
                                                                                      bool report_errors) {
     std::optional<Type> target_type = resolve_assignment_place_type(place, body, state, signatures);
     if (!target_type.has_value()) return {};
-    std::string target_name = describe_assignment_place(place);
-    if (auto _r = check_function_pointer_assignment(*target_type, value, body, signatures, loc, target_name,
-                                                    report_errors);
-        !_r.has_value()) {
-        return std::unexpected(std::move(_r).error());
-    }
-    if (auto _r = check_raw_pointer_assignment(*target_type, value, body, signatures, loc, target_name, report_errors);
-        !_r.has_value()) {
-        return std::unexpected(std::move(_r).error());
-    }
-    if (auto _r = check_nullptr_assignment(*target_type, value, loc, target_name, report_errors); !_r.has_value()) {
-        return std::unexpected(std::move(_r).error());
-    }
-    if (auto _r = check_scalar_conversion(*target_type, value, body, signatures, loc, "'" + target_name + "'",
-                                          report_errors);
-        !_r.has_value()) {
-        return std::unexpected(std::move(_r).error());
-    }
-    if (report_errors) {
-        if (auto _r = check_enum_conversion_compatibility(*target_type, value, body, signatures, loc); !_r.has_value()) {
+    return check_value_binding_conversions(*target_type, value, body, signatures, loc, describe_assignment_place(place),
+                                           report_errors);
+}
+
+// The one value an initializer binds, or nullptr when it binds none or
+// more than one. `{}` zero-initializes and binds nothing; `{a, b, ...}`
+// is a constructor argument list, which check_constructor_arguments
+// already checks against the constructor's own parameters. A single
+// brace argument is deliberately treated as a bound value: for a scalar,
+// pointer, function pointer or enum target -- the only kinds the five
+// checks look at -- `x{v}` *is* direct initialization, and a class
+// target makes every one of them a no-op anyway.
+[[nodiscard]] const Expr* single_bound_value(const ExprPtr& assigned, const std::vector<ExprPtr>& brace_args) {
+    if (assigned != nullptr) return assigned.get();
+    if (brace_args.size() == 1) return brace_args[0].get();
+    return nullptr;
+}
+
+// A Body for an initializer that has no enclosing function: a global
+// variable's own initializer, a field's default member initializer, or a
+// parameter's default argument. None of them can name a local, so
+// `local_decls` stays empty and `local_of` correctly answers "not a
+// local" for every identifier in them; the module/namespace fields carry
+// the visibility context the checks need to decide which declarations
+// this initializer is allowed to see.
+[[nodiscard]] Body make_initializer_scope_body(const Program& program, const std::string& owning_module,
+                                               const std::string& visibility_module,
+                                               const std::vector<std::string>& namespace_path,
+                                               const std::string& source_path) {
+    Body body;
+    body.program = &program;
+    body.function_owning_module = owning_module;
+    body.function_visibility_module = visibility_module;
+    body.function_namespace_path = namespace_path;
+    body.function_source_path = source_path;
+    return body;
+}
+
+// spec §6: a constructor's member-initializer list binds a value to a
+// field's declared type, so it is checked exactly like an assignment to
+// that field would be. It was checked by nothing at all before: `S() :
+// u{a} {}` accepted an `int8_t` into a `uint8_t` field that `s.u = a;`
+// rejects, and `fp{&wrong}` bound a mismatched function pointer.
+//
+// The expressions are checked against `body`, the constructor's own,
+// because they may name its parameters -- resolve_locals deliberately
+// walks the member-initializer list alongside the body for that reason,
+// so a parameter use in `fp{f}` already knows which declaration it
+// refers to.
+//
+// An entry naming a direct base class rather than a field is skipped:
+// its arguments are the base constructor's, checked by that call.
+[[nodiscard]] std::expected<void, DataflowError> check_member_initializer_conversions(
+    const Function& fn, const Body& body, const Signatures& signatures, const ClassFieldTypes& class_field_types) {
+    if (fn.member_initializers.empty() || fn.member_owner_class.empty()) return {};
+    auto fields = class_field_types.find(fn.member_owner_class);
+    if (fields == class_field_types.end()) return {};
+    for (const MemberInitializer& init : fn.member_initializers) {
+        auto field = fields->second.find(init.member_name);
+        if (field == fields->second.end()) continue;
+        const Expr* value = single_bound_value(init.initializer.expr, init.initializer.brace_args);
+        if (value == nullptr) continue;
+        if (auto _r = check_value_binding_conversions(field->second, *value, body, signatures, init.loc,
+                                                      init.member_name, /*report_errors=*/true);
+            !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
+        }
+    }
+    return {};
+}
+
+// spec §6: the three remaining positions that bind a value to a declared
+// type outside any function body -- a global variable's initializer, a
+// field's default member initializer, and a parameter's default argument
+// -- none of which ran a single one of the five checks before. A global
+// `uint8_t u = a;` was accepted where the identical local declaration is
+// rejected, `int* g_p = &g_b;` bound a `bool*`, and a default argument
+// converted whatever it liked at every call site that took it.
+[[nodiscard]] std::expected<void, DataflowError> check_initializer_scope_conversions(const Program& program,
+                                                                                     const Signatures& signatures) {
+    for (const GlobalVar& global : program.globals) {
+        if (global.decl == nullptr) continue;
+        const Expr* value = single_bound_value(global.decl->init, global.decl->ctor_args);
+        if (value == nullptr) continue;
+        Body body = make_initializer_scope_body(program, global.owning_module, global.owning_module,
+                                                global.namespace_path, global.decl->loc.source_path_text());
+        if (auto _r = check_value_binding_conversions(global.decl->type, *value, body, signatures, global.decl->loc,
+                                                      global.decl->var_name, /*report_errors=*/true);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    }
+    // The field walks report at the *initializer expression's* location,
+    // not at `field.loc`: the parser stamps a field's loc with the token
+    // that follows the declaration (for `class S { uint8_t u = g_a;
+    // virtual ~S() = default; };` field.loc lands on `virtual`), so
+    // `field.loc` would point past the thing being complained about.
+    // That mis-stamping is a separate parser defect; pointing at the
+    // value also matches what the local-declaration path already does.
+    for (const ClassDef& def : program.classes) {
+        for (const ClassField& field : def.fields) {
+            if (!field.default_initializer.has_value()) continue;
+            const Expr* value =
+                single_bound_value(field.default_initializer->expr, field.default_initializer->brace_args);
+            if (value == nullptr) continue;
+            Body body = make_initializer_scope_body(program, def.owning_module, def.owning_module, def.namespace_path,
+                                                    value->loc.source_path_text());
+            if (auto _r = check_value_binding_conversions(field.type, *value, body, signatures, value->loc, field.name,
+                                                          /*report_errors=*/true);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+    }
+    for (const StructDef& def : program.structs) {
+        for (const StructField& field : def.fields) {
+            if (!field.default_initializer.has_value()) continue;
+            const Expr* value =
+                single_bound_value(field.default_initializer->expr, field.default_initializer->brace_args);
+            if (value == nullptr) continue;
+            Body body = make_initializer_scope_body(program, def.owning_module, def.owning_module, def.namespace_path,
+                                                    value->loc.source_path_text());
+            if (auto _r = check_value_binding_conversions(field.type, *value, body, signatures, value->loc, field.name,
+                                                          /*report_errors=*/true);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+    }
+    for (const Function& fn : program.functions) {
+        for (const Param& param : fn.params) {
+            if (param.default_expr == nullptr) continue;
+            Body body = make_initializer_scope_body(program, fn.owning_module, fn.visibility_module,
+                                                    fn.namespace_path, fn.loc.source_path_text());
+            if (auto _r = check_value_binding_conversions(param.type, *param.default_expr, body, signatures,
+                                                          param.default_expr->loc, param.name,
+                                                          /*report_errors=*/true);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
     }
     return {};
@@ -2499,23 +2674,8 @@ struct ConvertingConstructorBinding {
                 std::optional<Type> global_type =
                     find_visible_global_type(target_name, /*explicit_global_qualification=*/false, body);
                 if (!global_type.has_value()) return {};
-                if (auto _r = check_function_pointer_assignment(*global_type, *stmt.expr, body, signatures, state.current_loc, target_name,
-                                                  report_errors);
-                    !_r.has_value()) {
-                    return std::unexpected(std::move(_r).error());
-                }
-                if (auto _r = check_raw_pointer_assignment(*global_type, *stmt.expr, body, signatures, state.current_loc, target_name,
-                                             report_errors);
-                    !_r.has_value()) {
-                    return std::unexpected(std::move(_r).error());
-                }
-                if (auto _r = check_nullptr_assignment(*global_type, *stmt.expr, state.current_loc, target_name,
-                                                      report_errors);
-                    !_r.has_value()) {
-                    return std::unexpected(std::move(_r).error());
-                }
-                if (auto _r = check_scalar_conversion(*global_type, *stmt.expr, body, signatures, state.current_loc,
-                                                      "'" + target_name + "'", report_errors);
+                if (auto _r = check_value_binding_conversions(*global_type, *stmt.expr, body, signatures,
+                                                             state.current_loc, target_name, report_errors);
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
@@ -2791,32 +2951,10 @@ struct ConvertingConstructorBinding {
                 return std::unexpected(std::move(_r).error());
             }
             if (local_type != nullptr) {
-                if (auto _r = check_function_pointer_assignment((*local_type), *stmt.expr, body, signatures, state.current_loc,
-                                                  target_name, report_errors);
+                if (auto _r = check_value_binding_conversions((*local_type), *stmt.expr, body, signatures,
+                                                             state.current_loc, target_name, report_errors);
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
-                }
-                if (auto _r = check_raw_pointer_assignment((*local_type), *stmt.expr, body, signatures, state.current_loc,
-                                             target_name, report_errors);
-                    !_r.has_value()) {
-                    return std::unexpected(std::move(_r).error());
-                }
-                if (auto _r = check_nullptr_assignment((*local_type), *stmt.expr, state.current_loc, target_name,
-                                                      report_errors);
-                    !_r.has_value()) {
-                    return std::unexpected(std::move(_r).error());
-                }
-                if (auto _r = check_scalar_conversion((*local_type), *stmt.expr, body, signatures, state.current_loc,
-                                                      "'" + target_name + "'", report_errors);
-                    !_r.has_value()) {
-                    return std::unexpected(std::move(_r).error());
-                }
-                if (report_errors) {
-                    if (auto _r = check_enum_conversion_compatibility((*local_type), *stmt.expr, body, signatures,
-                                                        state.current_loc);
-                        !_r.has_value()) {
-                        return std::unexpected(std::move(_r).error());
-                    }
                 }
             }
 
@@ -2922,6 +3060,25 @@ struct ConvertingConstructorBinding {
             if (auto _r = check_scalar_conversion(fn.return_type, *term.return_value, body, signatures, term.loc,
                                                   "the return value of '" + fn.name + "'",
                                                   /*report_errors=*/true);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            // The fifth of check_value_binding_conversions' five
+            // questions, which the return position alone had no answer
+            // to: `A f(B b) { return b; }` between two distinct enum
+            // classes was accepted outright.
+            //
+            // Only this one is borrowed from that bundle rather than the
+            // whole of it. A function pointer cannot be spelled as a
+            // return type in this version at all, so that question
+            // cannot arise here; and the raw-pointer and `nullptr`
+            // questions are already answered below by the return-
+            // specific lifetime machinery, which knows what is being
+            // returned and says so ("returns a lifetime-tracked value
+            // from an incompatible source type") where the generic
+            // assignment-shaped message would not.
+            if (auto _r = check_enum_conversion_compatibility(fn.return_type, *term.return_value, body, signatures,
+                                                              term.loc);
                 !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
@@ -3314,6 +3471,9 @@ struct SwitchCaseKey {
                      [[maybe_unused]] const std::unordered_set<std::string>& witness_class_names) {
     Body body = build_mir(fn);
     body.program = &program;
+    if (auto _r = check_member_initializer_conversions(fn, body, signatures, class_field_types); !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
     if (fn.body) {
         if (auto _r = validate_switch_stmt_tree(*fn.body, body, signatures); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
@@ -3491,6 +3651,9 @@ struct SwitchCaseKey {
     if (!signatures_result.has_value()) return std::unexpected(std::move(signatures_result).error());
     Signatures signatures = std::move(signatures_result).value();
     if (auto _r = validate_class_semantics(program, signatures); !_r.has_value()) return std::unexpected(std::move(_r).error());
+    if (auto _r = check_initializer_scope_conversions(program, signatures); !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
     // ch04 §4.2: every class name in the program, so Member-access
     // checking (apply_expr's own Member case) can tell a class-typed
     // base (access-controlled) apart from a struct-typed one (never

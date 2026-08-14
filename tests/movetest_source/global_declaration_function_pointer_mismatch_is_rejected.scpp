@@ -1,0 +1,10 @@
+// spec ch05 §5.16 at a global declaration.
+int wrong(bool b) {
+    return b ? 1 : 2;
+}
+
+int (*g_fp)(int) = &wrong;
+
+int main() {
+    return g_fp(7);
+}

@@ -1,0 +1,12 @@
+// spec §6: a parameter's default argument ran none of the conversion
+// checks, so it converted whatever it liked at every call site that took
+// it.
+int8_t g_a = -56;
+
+int use(uint8_t u = g_a) {
+    return static_cast<int>(u);
+}
+
+int main() {
+    return use();
+}

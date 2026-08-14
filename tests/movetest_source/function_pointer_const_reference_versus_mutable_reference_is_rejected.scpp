@@ -1,0 +1,12 @@
+// spec ch05 §5.16: constness of a reference parameter participates --
+// accepting this would let an indirect call mutate through a pointer
+// whose type promises it will not.
+int takes_const_ref(const int& x) {
+    return x;
+}
+
+int main() {
+    int value = 7;
+    int (*fp)(int&) = &takes_const_ref;
+    return fp(value);
+}

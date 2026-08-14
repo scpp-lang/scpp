@@ -1,0 +1,10 @@
+// spec ch05 §5.16: a reference parameter matches a reference parameter.
+int takes_ref(int& x) {
+    return x;
+}
+
+int main() {
+    int value = 7;
+    int (*fp)(int&) = &takes_ref;
+    return fp(value) - 7;
+}

@@ -1,0 +1,13 @@
+// spec §6: the accepted shape at a global declaration.
+int8_t g_a = -56;
+int8_t g_b = g_a;
+
+int right(int x) {
+    return x;
+}
+
+int (*g_fp)(int) = &right;
+
+int main() {
+    return static_cast<int>(g_b) + 56 + g_fp(0);
+}

@@ -1,0 +1,14 @@
+// spec §6: a field's default member initializer ran none of the
+// conversion checks.
+int8_t g_a = -56;
+
+class Holder {
+public:
+    uint8_t u = g_a;
+    virtual ~Holder() = default;
+};
+
+int main() {
+    Holder h{};
+    return static_cast<int>(h.u);
+}

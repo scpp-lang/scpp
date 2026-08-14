@@ -1,0 +1,19 @@
+// spec ch06 §6: the enum rule is about enum<->integer and enum<->enum
+// conversions. Binding an enum to a class-typed target -- here
+// `std::expected<Mode, int>`, the shape parser.cppm returns from
+// parse_optional_function_eval_mode -- is constructor selection's
+// question, and must not be answered with a diagnostic about integers.
+import std;
+
+enum class Mode { A, B };
+
+std::expected<Mode, int> pick(bool second) {
+    Mode mode = Mode::A;
+    if (second) { mode = Mode::B; }
+    return mode;
+}
+
+int main() {
+    std::expected<Mode, int> result = pick(true);
+    return result.has_value() ? 0 : 1;
+}

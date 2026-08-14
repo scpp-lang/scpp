@@ -1,0 +1,12 @@
+// spec ch06 §6: the return boundary ran the scalar check but not the
+// enum one, so an enum could be returned where an integer was declared.
+enum class Mode { A, B };
+
+int mode_value() {
+    Mode mode = Mode::B;
+    return mode;
+}
+
+int main() {
+    return mode_value();
+}

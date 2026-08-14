@@ -1,0 +1,9 @@
+// spec ch05 §5.7 at a default argument. This used to escape movecheck
+// entirely and surface as "internal error: generated invalid IR".
+int use(int n = nullptr) {
+    return n;
+}
+
+int main() {
+    return use();
+}

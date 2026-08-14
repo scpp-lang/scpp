@@ -1,0 +1,11 @@
+// spec ch05 §5.16: function-pointer-to-function-pointer binding is
+// checked the same way as function-designator-to-function-pointer.
+int wrong(bool b) {
+    return b ? 1 : 2;
+}
+
+int main() {
+    int (*src)(bool) = &wrong;
+    int (*fp)(int) = src;
+    return fp(7);
+}

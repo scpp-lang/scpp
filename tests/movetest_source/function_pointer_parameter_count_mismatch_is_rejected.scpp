@@ -1,0 +1,9 @@
+// spec ch05 §5.16: arity participates in signature matching.
+int wrong(int a, int b) {
+    return a + b;
+}
+
+int main() {
+    int (*fp)(int) = &wrong;
+    return fp(7);
+}

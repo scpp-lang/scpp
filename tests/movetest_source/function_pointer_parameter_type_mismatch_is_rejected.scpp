@@ -1,0 +1,13 @@
+// spec ch05 §5.16/ch06 §6: a function pointer's parameter types must
+// match exactly. check_function_pointer_assignment reached its final
+// `return {};` for every shape that was not one of the two
+// unsafe-qualifier cases, so this bound an `int(bool)` to an
+// `int(*)(int)` and then called it with an `int`.
+int wrong(bool b) {
+    return b ? 1 : 2;
+}
+
+int main() {
+    int (*fp)(int) = &wrong;
+    return fp(7);
+}

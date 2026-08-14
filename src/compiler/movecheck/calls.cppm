@@ -223,6 +223,18 @@ std::expected<void, DataflowError> check_enum_conversion_compatibility(const Typ
     bool source_is_enum = is_enum_type(source_operand, body.program);
     if (!(target_is_enum || source_is_enum)) return {};
     if (types_equal(target_operand, source_operand)) return {};
+    // An enum value bound to a target that is neither an enum nor a scalar
+    // is not this rule's question. The rule is about enum<->integer and
+    // enum<->enum conversions (ch06 §6); binding `Mode` to a
+    // `std::expected<Mode, E>` return type, or to any other class/struct
+    // parameter, is constructor selection's question and is answered there
+    // (check_constructor_arguments' exact-type match). Firing here would
+    // reject `return mode;` from a function declared
+    // `std::expected<FunctionEvalMode, ParseError>` -- which parser.cppm
+    // does -- with a diagnostic about integers that names nothing in the
+    // program. The target-is-enum direction stays unconditional: nothing
+    // else answers "what may initialize an enum".
+    if (!target_is_enum && !is_scalar_named_type(target_operand)) return {};
     return std::unexpected(DataflowError("enum class values do not implicitly convert to or from integers (or other enum types) in "
                         "this version; use an explicit cast to the enum's underlying type",
                         loc));
@@ -1180,7 +1192,33 @@ std::expected<void, DataflowError> check_function_pointer_assignment(const Type&
                                  target_name + "'",
             loc));
     }
-    return {};
+    // Everything reaching here has a source signature that differs from
+    // the target's in the return type or in some parameter type -- the
+    // two cases above are the only ones where a *difference* is
+    // permitted, and both of them are a difference in the unsafe
+    // qualifier alone. Falling through to acceptance let `int (*fp)(int)
+    // = &wrong;` (with `int wrong(bool)`) through, and then called
+    // `wrong` with an `int` argument through a pointer typed to promise
+    // a `bool` one: a type confusion the language's whole no-implicit-
+    // conversion rule exists to prevent, just spelled indirectly. The
+    // comparison is `types_equal` per component, i.e. exact match, for
+    // the same reason overload resolution is exact match (ch05 §5.10):
+    // ch06 §6 gives scpp no implicit conversion between any two distinct
+    // scalar types, so there is no signature a call through this pointer
+    // could satisfy other than the one it names.
+    //
+    // Nothing about lifetimes participates: `[[scpp::lifetime]]` and the
+    // reference-return inference live on the Function/FunctionSignature,
+    // never on the FunctionPointer Type, so a signature cannot carry
+    // them. That is not an omission here -- an indirect call through a
+    // function pointer is already refused a borrow of its result
+    // ("doesn't return a reference with an inferrable lifetime"), which
+    // is the same answer #412 reached for a type-erased `std::function`.
+    return std::unexpected(DataflowError(
+        "cannot initialize or assign function pointer '" + target_name + "' of type '" +
+            describe_type_brief(target_type) + "' from a function of type '" + describe_type_brief(*source_type) +
+            "': a function pointer's return type and every parameter type must match exactly (spec ch05 §5.16/ch06 §6)",
+        loc));
 }
 
 // ch06 §6: `nullptr` (type `nullptr_t`) converts to any raw pointer
