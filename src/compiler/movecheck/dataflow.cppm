@@ -180,10 +180,12 @@ namespace scpp {
     }
 }
 
+// `++`/`--` apply to every scalar that can be added to, which is every
+// one but `bool` -- `is_scalar_type_name` already excludes the
+// non-numeric named types, so this needs no list of its own.
 [[nodiscard]] bool is_increment_decrement_numeric_type(const Type& type) {
     return type.kind == TypeKind::Named && type.name != "bool" &&
-           (is_integral_scalar_type_name(type.name) || type.name == "float" || type.name == "double" ||
-            type.name == "float32_t" || type.name == "float64_t");
+           scpp::is_scalar_type_name(std::string_view{type.name});
 }
 
 [[nodiscard]] std::expected<void, DataflowError> validate_increment_decrement_expr(const Expr& expr, DataflowState& state, const Body& body,

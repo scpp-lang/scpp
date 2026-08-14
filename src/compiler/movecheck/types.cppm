@@ -130,70 +130,35 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
     return capture_type;
 }
 
-// ch06 §6: the complete scalar/numeric family a `static_cast<T>(expr)`/
-// `(T)expr` may legally convert between (ExprKind::Cast's own apply_expr
-// case) -- `TypeKind::Named` alone isn't enough to tell a scalar apart
-// from a struct/class/witness name (all three share that TypeKind), so
-// this checks against the exact, closed set ch06 documents rather than
-// the type's own `kind`.
+// The scalar predicates below are thin re-exports of `scpp.ast`'s
+// scalar type model (see `scalar_type_info`), which is the single place
+// in the compiler that lists ch06 §6's twenty names. They exist as
+// `const std::string&` overloads because every caller here already holds
+// a `Type::name`, and because dropping them would churn several hundred
+// call sites for no gain -- but they answer nothing of their own.
+
 [[nodiscard]] bool is_scalar_type_name(const std::string& name) {
-    static const std::unordered_set<std::string> scalar_names = {
-        "bool", "char", "int", "long", "unsigned int", "unsigned long", "int8_t", "int16_t", "int32_t",
-        "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "float", "double", "float32_t", "float64_t",
-        "size_t", "ptrdiff_t"};
-    return scalar_names.contains(name);
+    return scpp::is_scalar_type_name(std::string_view{name});
 }
 
 [[nodiscard]] bool is_integral_scalar_type_name(const std::string& name) {
-    static const std::unordered_set<std::string> integral_scalar_names = {
-        "char",      "int",          "long",         "unsigned int", "unsigned long", "int8_t",  "int16_t",
-        "int32_t",   "int64_t",      "uint8_t",      "uint16_t",     "uint32_t",      "uint64_t", "size_t",
-        "ptrdiff_t",
-    };
-    return integral_scalar_names.contains(name);
+    return scpp::is_integral_scalar_type_name(std::string_view{name});
 }
 
 [[nodiscard]] bool is_unsigned_scalar_type_name(const std::string& name) {
-    static const std::unordered_set<std::string> unsigned_names = {
-        "unsigned int", "unsigned long", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "size_t"};
-    return unsigned_names.contains(name);
+    return scpp::is_unsigned_scalar_type_name(std::string_view{name});
 }
 
 // spec §6: the width, in bits, of an integral scalar type name. Only
-// meaningful for names is_integral_scalar_type_name accepts.
+// meaningful for names is_integral_scalar_type_name accepts. movecheck
+// has no target description of its own, so `size_t`/`ptrdiff_t` get the
+// host's pointer width -- the same default TargetLayoutInfo uses.
 [[nodiscard]] int integral_scalar_bit_width(const std::string& name) {
-    if (name == "int8_t" || name == "uint8_t" || name == "char") return 8;
-    if (name == "int16_t" || name == "uint16_t") return 16;
-    if (name == "int" || name == "int32_t" || name == "unsigned int" || name == "uint32_t") return 32;
-    return 64;
+    return scpp::scalar_bit_width(std::string_view{name}, scpp::host_pointer_bit_width());
 }
 
-// spec §6: does the untyped integer literal `value` name a value of
-// `type_name`? A literal has no type of its own -- it adopts the type of
-// the place it initializes -- but that only works when the value it
-// spells is actually one of that type's values. `int8_t x = 300;` does
-// not spell an int8_t, and `unsigned int x = 4294967296;` does not spell
-// an unsigned int, so treating them as compatible would smuggle in
-// exactly the silent, lossy conversion the rest of this file exists to
-// forbid.
-//
-// A 64-bit unsigned target is deliberately unconstrained on the high
-// end: literal values are carried as std::int64_t, so a literal above
-// INT64_MAX has already wrapped to a negative by the time it arrives and
-// cannot be told apart from a genuinely negative one. Rejecting on that
-// basis would reject the legitimate spelling; the narrower unsigned
-// types have no such ambiguity and are checked normally.
 [[nodiscard]] bool integer_literal_value_fits(std::int64_t value, const std::string& type_name) {
-    int bits = integral_scalar_bit_width(type_name);
-    if (is_unsigned_scalar_type_name(type_name)) {
-        if (value < 0) return bits >= 64;
-        if (bits >= 64) return true;
-        return static_cast<std::uint64_t>(value) <= ((std::uint64_t{1} << bits) - 1);
-    }
-    if (bits >= 64) return true;
-    std::int64_t max_value = (std::int64_t{1} << (bits - 1)) - 1;
-    std::int64_t min_value = -(std::int64_t{1} << (bits - 1));
-    return value >= min_value && value <= max_value;
+    return scpp::integer_literal_value_fits(value, std::string_view{type_name}, scpp::host_pointer_bit_width());
 }
 
 [[nodiscard]] const EnumDef* find_enum_def(const Program* program, const std::string& name) {
@@ -357,18 +322,11 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
 }
 
 [[nodiscard]] bool is_scalar_named_type(const Type& type) {
-    return type.kind == TypeKind::Named &&
-           (type.name == "int" || type.name == "bool" || type.name == "char" || type.name == "long" ||
-            type.name == "float" || type.name == "double" || type.name == "unsigned int" ||
-            type.name == "unsigned long" || type.name == "size_t" || type.name == "ptrdiff_t" ||
-            type.name == "int8_t" || type.name == "int16_t" || type.name == "int32_t" || type.name == "int64_t" ||
-            type.name == "uint8_t" || type.name == "uint16_t" || type.name == "uint32_t" || type.name == "uint64_t" ||
-            type.name == "float32_t" || type.name == "float64_t");
+    return type.kind == TypeKind::Named && scpp::is_scalar_type_name(std::string_view{type.name});
 }
 
 [[nodiscard]] bool is_float_named_type(const Type& type) {
-    return type.kind == TypeKind::Named &&
-           (type.name == "float" || type.name == "double" || type.name == "float32_t" || type.name == "float64_t");
+    return type.kind == TypeKind::Named && scpp::is_float_scalar_type_name(std::string_view{type.name});
 }
 
 [[nodiscard]] bool integer_literal_compatible_with_type(const Type& type) {

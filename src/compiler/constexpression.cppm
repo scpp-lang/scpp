@@ -548,11 +548,15 @@ bool ignore_result(std::expected<void, ConstexprError> result) { return result.h
 // std::string (a Type::name, an Expr::name, or a locally built name), so
 // taking one by reference removes both the view conversion and the
 // std::string round-trip several of these bodies used to do.
+// Deliberately wider than `scpp::is_integral_scalar_type_name`: this
+// asks "can constant evaluation read this as an integer", and a `bool`
+// cell stores its value in the same `int_value` field an integer does.
+// That is a different question from "is this an integral scalar type",
+// which is why it gets its own name -- but it is still derived, so it
+// cannot drift from the twenty-name set in `scalar_type_info`.
 [[nodiscard]] bool is_integral_named_type(const std::string& name) {
-    return name == "int" || name == "bool" || name == "char" || name == "long" || name == "unsigned int" ||
-           name == "unsigned long" || name == "size_t" || name == "ptrdiff_t" || name == "int8_t" ||
-           name == "int16_t" || name == "int32_t" || name == "int64_t" || name == "uint8_t" ||
-           name == "uint16_t" || name == "uint32_t" || name == "uint64_t";
+    std::string_view view{name};
+    return scpp::is_integral_scalar_type_name(view) || view == "bool";
 }
 
 [[nodiscard]] bool is_integer_like(const Type& type) {
@@ -560,8 +564,7 @@ bool ignore_result(std::expected<void, ConstexprError> result) { return result.h
 }
 
 [[nodiscard]] bool is_floating_like(const Type& type) {
-    return type.kind == TypeKind::Named &&
-           (type.name == "float" || type.name == "double" || type.name == "float32_t" || type.name == "float64_t");
+    return type.kind == TypeKind::Named && scpp::is_float_scalar_type_name(std::string_view{type.name});
 }
 
 [[nodiscard]] Type make_pointer_type_to(const Type& pointee, bool is_mutable_pointee) {
@@ -1306,32 +1309,38 @@ private:
         return std::unexpected(ConstexprError(loc, "switch requires an integral or enum constexpr value"));
     }
 
+    // The range of values a constant-evaluated integer of this type may
+    // hold, derived from `scpp.ast`'s scalar type model -- see
+    // `scalar_type_info`, the only place ch06 §6's twenty names are
+    // listed. This used to be a hand-written table, which had drifted
+    // twice: it gave `char` the range {0, 255} (the only part of the
+    // compiler that thought `char` unsigned), and it omitted `uint32_t`
+    // entirely, so a constant-evaluated `uint32_t` was bounded as a
+    // signed 64-bit integer and would silently accept a negative value.
+    //
+    // Anything that is not a scalar -- an enum, most importantly --
+    // keeps the full 64-bit signed range, which is what the old table's
+    // default arm gave it.
+    // The range of values a constant-evaluated integer of this type may
+    // hold. Delegates to `scpp.ast`'s `scalar_value_range`, so constant
+    // evaluation and movecheck's literal-range check share one
+    // derivation from one model rather than each carrying its own table
+    // -- see `scalar_type_info`.
+    //
+    // The table this replaced had drifted twice: it gave `char` the
+    // range {0, 255} (the only part of the compiler that thought `char`
+    // unsigned), and it omitted `uint32_t` entirely, so a
+    // constant-evaluated `uint32_t` was bounded as a signed 64-bit
+    // integer and would silently accept a negative value.
+    //
+    // Anything with no scalar range of its own -- an enum, or a floating
+    // type reached through an integer path -- keeps the full 64-bit
+    // signed range, which is what the old table's default arm gave it.
     [[nodiscard]] IntegerBounds integer_bounds_for_type(const Type& type) const {
-        // ch06 §6: `char` is a signed 8-bit type, exactly like its
-        // distinct sibling `int8_t` -- see layout.cppm's i8 mapping,
-        // codegen's is_unsigned_for_cast, and debug.cppm's
-        // DW_ATE_signed_char. These bounds used to read {0, 255}, which
-        // made constant evaluation the only part of the compiler that
-        // would accept `char` values above 127.
-        if (is_named_type(type, "char")) return IntegerBounds{-128, 127};
-        if (is_named_type(type, "bool")) return IntegerBounds{0, 1};
-        if (is_named_type(type, "int")) {
-            return IntegerBounds{int32_min_value, int32_max_value};
-        }
-        if (is_named_type(type, "int8_t")) return IntegerBounds{-128, 127};
-        if (is_named_type(type, "uint8_t")) return IntegerBounds{0, 255};
-        if (is_named_type(type, "int16_t")) return IntegerBounds{-32768, 32767};
-        if (is_named_type(type, "uint16_t")) return IntegerBounds{0, 65535};
-        if (is_named_type(type, "int32_t")) {
-            return IntegerBounds{int32_min_value, int32_max_value};
-        }
-        if (is_named_type(type, "unsigned int")) return IntegerBounds{0, uint32_max_value};
-        if (is_named_type(type, "size_t") || is_named_type(type, "uint64_t") || is_named_type(type, "unsigned long")) {
-            return IntegerBounds{0, int64_max_value};
-        }
-        // ptrdiff_t/int64_t/long fall through to the same 64-bit bounds the
-        // default returns, so they need no branch of their own.
-        return IntegerBounds{int64_min_value, int64_max_value};
+        if (type.kind != TypeKind::Named) return IntegerBounds{int64_min_value, int64_max_value};
+        std::optional<ScalarValueRange> range = scalar_value_range(std::string_view{type.name}, host_pointer_bit_width());
+        if (!range.has_value()) return IntegerBounds{int64_min_value, int64_max_value};
+        return IntegerBounds{range->min_value, range->max_value};
     }
 
     [[nodiscard]] std::expected<void, ConstexprError> checked_assign_integer(const std::shared_ptr<Cell>& target, std::int64_t value, const SourceLocation& loc) {

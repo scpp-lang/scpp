@@ -2499,10 +2499,289 @@ find_visible_global(std::optional<std::reference_wrapper<const Program [[scpp::l
     return nullptr;
 }
 
+// ch06 §6 fixes scpp's scalar types at exactly twenty distinct names,
+// and every phase asks the same small set of questions about them: is
+// this name a scalar at all, is it integral or floating or bool, is it
+// signed, how wide is it, which values fit in it.
+//
+// Those questions used to be answered independently in roughly twenty
+// places -- three separate copies of the twenty-name set (two of them in
+// the same file), six of "is this integral", six of "is this floating",
+// two each of signedness, width and bounds -- spread across the parser,
+// movecheck, constant evaluation and codegen. They agreed only by
+// coincidence and repeated repair: `char`'s signedness was answered
+// "signed" by six sites and "unsigned" by two until very recently, and
+// the width answers still disagree about `size_t` on any target whose
+// pointers are not 64 bits.
+//
+// `scalar_type_info` below is now the only place in the compiler that
+// lists the twenty names. Everything else derives from it: the
+// predicates immediately following, `named_scalar_layout`, movecheck's
+// literal-range check, constant evaluation's bounds, codegen's LLVM type
+// mapping and its DWARF encoding. Adding a scalar type, or changing one's
+// signedness or width, is a single edit here and cannot leave some other
+// phase behind.
+//
+// This lives in `scpp.ast` because that is the one module every other
+// one imports (movecheck, constexpression and codegen all do, directly
+// or through their primary interface), and because a lower layer would
+// have to depend on LLVM -- which the mapping deliberately does not.
+enum class ScalarCategory { Bool, Integral, Floating };
+
+class ScalarTypeInfo {
+public:
+    ScalarCategory category = ScalarCategory::Integral;
+
+    // Width in bits. For `size_t`/`ptrdiff_t` this is the width on a
+    // 64-bit target; `is_pointer_sized` marks that the real width is
+    // whatever the target's pointers are, and callers that know the
+    // target (see `named_scalar_layout` and codegen's `to_llvm_type`)
+    // substitute it. Callers that do not -- movecheck's literal-range
+    // check -- get the host's pointer width, matching TargetLayoutInfo's
+    // own default.
+    int bit_width = 0;
+
+    // `bool` is marked unsigned even though it is not an integral
+    // scalar: it is an i8 holding exactly 0 or 1 (ch06's false=0/true=1
+    // invariant), so widening it must zero-extend or `true` would read
+    // as -1. The two questions that consult this field ask it over
+    // different domains -- `is_unsigned_scalar_type_name` asks only of
+    // integral scalars, because it drives `icmp`/`sdiv`/negation, where
+    // `bool` never appears; the cast path asks of every scalar, because
+    // every scalar can be widened.
+    bool is_unsigned = false;
+
+    bool is_pointer_sized = false;
+
+    virtual ~ScalarTypeInfo() = default;
+    ScalarTypeInfo() = default;
+    ScalarTypeInfo(ScalarCategory category, int bit_width, bool is_unsigned, bool is_pointer_sized)
+        : category{category}, bit_width{bit_width}, is_unsigned{is_unsigned}, is_pointer_sized{is_pointer_sized} {
+        return;
+    }
+    ScalarTypeInfo(const ScalarTypeInfo&) = default;
+    ScalarTypeInfo(ScalarTypeInfo&&) = default;
+};
+
+// The twenty names of ch06 §6, grouped by width so the table can be
+// audited at a glance. Note that `int` is not an alias for `int32_t`,
+// nor `long` for `int64_t`, nor `float` for `float32_t`: they are
+// distinct types of equal width, which is exactly why the entries repeat
+// rather than collapse.
+[[nodiscard]] inline std::optional<ScalarTypeInfo> scalar_type_info(std::string_view name) {
+    if (name == "bool") {
+        ScalarTypeInfo info{ScalarCategory::Bool, 8, true, false};
+        return std::optional<ScalarTypeInfo>{info};
+    }
+    if (name == "char" || name == "int8_t") {
+        ScalarTypeInfo info{ScalarCategory::Integral, 8, false, false};
+        return std::optional<ScalarTypeInfo>{info};
+    }
+    if (name == "uint8_t") {
+        ScalarTypeInfo info{ScalarCategory::Integral, 8, true, false};
+        return std::optional<ScalarTypeInfo>{info};
+    }
+    if (name == "int16_t") {
+        ScalarTypeInfo info{ScalarCategory::Integral, 16, false, false};
+        return std::optional<ScalarTypeInfo>{info};
+    }
+    if (name == "uint16_t") {
+        ScalarTypeInfo info{ScalarCategory::Integral, 16, true, false};
+        return std::optional<ScalarTypeInfo>{info};
+    }
+    if (name == "int" || name == "int32_t") {
+        ScalarTypeInfo info{ScalarCategory::Integral, 32, false, false};
+        return std::optional<ScalarTypeInfo>{info};
+    }
+    if (name == "unsigned int" || name == "uint32_t") {
+        ScalarTypeInfo info{ScalarCategory::Integral, 32, true, false};
+        return std::optional<ScalarTypeInfo>{info};
+    }
+    if (name == "long" || name == "int64_t") {
+        ScalarTypeInfo info{ScalarCategory::Integral, 64, false, false};
+        return std::optional<ScalarTypeInfo>{info};
+    }
+    if (name == "unsigned long" || name == "uint64_t") {
+        ScalarTypeInfo info{ScalarCategory::Integral, 64, true, false};
+        return std::optional<ScalarTypeInfo>{info};
+    }
+    // `long`/`unsigned long` above are always 64-bit regardless of target
+    // (ch06's deliberate anti-LP64/LLP64-pitfall fix); only these two
+    // track the pointer width.
+    if (name == "ptrdiff_t") {
+        ScalarTypeInfo info{ScalarCategory::Integral, 64, false, true};
+        return std::optional<ScalarTypeInfo>{info};
+    }
+    if (name == "size_t") {
+        ScalarTypeInfo info{ScalarCategory::Integral, 64, true, true};
+        return std::optional<ScalarTypeInfo>{info};
+    }
+    if (name == "float" || name == "float32_t") {
+        ScalarTypeInfo info{ScalarCategory::Floating, 32, false, false};
+        return std::optional<ScalarTypeInfo>{info};
+    }
+    if (name == "double" || name == "float64_t") {
+        ScalarTypeInfo info{ScalarCategory::Floating, 64, false, false};
+        return std::optional<ScalarTypeInfo>{info};
+    }
+    return std::optional<ScalarTypeInfo>{};
+}
+
+// `TypeKind::Named` alone cannot tell a scalar apart from a struct,
+// class or witness name -- all four share that TypeKind -- so this
+// checks the closed set ch06 documents rather than the type's own kind.
+[[nodiscard]] inline bool is_scalar_type_name(std::string_view name) { return scalar_type_info(name).has_value(); }
+
+[[nodiscard]] inline bool is_integral_scalar_type_name(std::string_view name) {
+    std::optional<ScalarTypeInfo> info = scalar_type_info(name);
+    if (!info.has_value()) return false;
+    const ScalarTypeInfo& value = *info;
+    return value.category == ScalarCategory::Integral;
+}
+
+[[nodiscard]] inline bool is_float_scalar_type_name(std::string_view name) {
+    std::optional<ScalarTypeInfo> info = scalar_type_info(name);
+    if (!info.has_value()) return false;
+    const ScalarTypeInfo& value = *info;
+    return value.category == ScalarCategory::Floating;
+}
+
+// Asked only of integral scalars, because the instructions it selects --
+// `icmp slt` vs `ult`, `sdiv` vs `udiv`, negation -- are integral-only.
+// See ScalarTypeInfo::is_unsigned for why `bool` answers false here but
+// still zero-extends when widened.
+[[nodiscard]] inline bool is_unsigned_scalar_type_name(std::string_view name) {
+    std::optional<ScalarTypeInfo> info = scalar_type_info(name);
+    if (!info.has_value()) return false;
+    const ScalarTypeInfo& value = *info;
+    return value.category == ScalarCategory::Integral && value.is_unsigned;
+}
+
+// Does widening this scalar zero-extend? Unlike the predicate above this
+// is asked of every scalar, so `bool` answers true: it is an i8 holding
+// 0 or 1 and must widen to 1, not -1.
+[[nodiscard]] inline bool scalar_widens_unsigned(std::string_view name) {
+    std::optional<ScalarTypeInfo> info = scalar_type_info(name);
+    if (!info.has_value()) return false;
+    const ScalarTypeInfo& value = *info;
+    return value.is_unsigned;
+}
+
 struct TargetLayoutInfo {
     std::uint64_t pointer_size_bytes = sizeof(void*);
     std::uint64_t pointer_align_bytes = alignof(void*);
 };
+
+// The width of a scalar in bits, given the target's pointer width. Only
+// `size_t`/`ptrdiff_t` consult `pointer_bit_width`; everything else has
+// a fixed width. Returns 0 for a name that is not a scalar.
+[[nodiscard]] inline int scalar_bit_width(std::string_view name, int pointer_bit_width) {
+    std::optional<ScalarTypeInfo> info = scalar_type_info(name);
+    if (!info.has_value()) return 0;
+    const ScalarTypeInfo& value = *info;
+    if (value.is_pointer_sized && pointer_bit_width > 0) return pointer_bit_width;
+    return value.bit_width;
+}
+
+[[nodiscard]] inline int host_pointer_bit_width() { return static_cast<int>(sizeof(void*) * 8); }
+
+// 2**exponent, for 0 <= exponent <= 62. Written as a doubling loop
+// rather than `1 << exponent` because this file is self-hosted -- it is
+// compiled by scpp as well as by clang++ (see src/scpp.toml), and scpp
+// has no shift operator. Every caller below bounds `exponent` at 63
+// before calling, so the result always fits an std::int64_t.
+[[nodiscard]] inline std::int64_t two_to_the(int exponent) {
+    std::int64_t result = 1;
+    for (int i = 0; i < exponent; i = i + 1) {
+        result = result * 2;
+    }
+    return result;
+}
+
+// INT64_MAX/INT64_MIN as functions rather than named constants, and
+// INT64_MIN built by negation rather than spelled out, because this file
+// is self-hosted: scpp gives an untyped integer literal the type of the
+// place it initializes, so a bare literal in a return statement adopts
+// std::int64_t, but `-9223372036854775807 - 1` is an expression between
+// two literals and is evaluated as `int`.
+[[nodiscard]] inline std::int64_t scalar_int64_max() { return 9223372036854775807; }
+
+[[nodiscard]] inline std::int64_t scalar_int64_min() {
+    std::int64_t max_value = 9223372036854775807;
+    return -max_value - 1;
+}
+
+// The inclusive range of values a scalar can hold, as std::int64_t.
+//
+// A 64-bit unsigned type cannot state its true upper bound here, and
+// neither of its two consumers can represent one: movecheck carries
+// literal values as std::int64_t and so does constant evaluation, so
+// anything above INT64_MAX has already wrapped by the time it arrives
+// and cannot be told apart from a genuinely negative value. The two
+// resolve that the same way -- clamp the maximum to INT64_MAX -- and
+// differ only in what they do with a negative, which is each one's own
+// policy rather than a property of the type; see
+// `integer_literal_value_fits` below.
+class ScalarValueRange {
+public:
+    std::int64_t min_value = 0;
+    std::int64_t max_value = 0;
+
+    virtual ~ScalarValueRange() = default;
+    ScalarValueRange() = default;
+    ScalarValueRange(std::int64_t min_value, std::int64_t max_value) : min_value{min_value}, max_value{max_value} {
+        return;
+    }
+    ScalarValueRange(const ScalarValueRange&) = default;
+    ScalarValueRange(ScalarValueRange&&) = default;
+};
+
+[[nodiscard]] inline std::optional<ScalarValueRange> scalar_value_range(std::string_view name, int pointer_bit_width) {
+    std::optional<ScalarTypeInfo> info = scalar_type_info(name);
+    if (!info.has_value()) return std::optional<ScalarValueRange>{};
+    const ScalarTypeInfo& scalar = *info;
+    if (scalar.category == ScalarCategory::Bool) {
+        ScalarValueRange range{0, 1};
+        return std::optional<ScalarValueRange>{range};
+    }
+    if (scalar.category == ScalarCategory::Floating) return std::optional<ScalarValueRange>{};
+    int bits = scalar_bit_width(name, pointer_bit_width);
+    if (scalar.is_unsigned) {
+        std::int64_t max_value = bits >= 64 ? scalar_int64_max() : two_to_the(bits) - 1;
+        ScalarValueRange range{0, max_value};
+        return std::optional<ScalarValueRange>{range};
+    }
+    if (bits >= 64) {
+        ScalarValueRange range{scalar_int64_min(), scalar_int64_max()};
+        return std::optional<ScalarValueRange>{range};
+    }
+    ScalarValueRange range{-two_to_the(bits - 1), two_to_the(bits - 1) - 1};
+    return std::optional<ScalarValueRange>{range};
+}
+
+// ch06 §6: does the untyped integer literal `value` name a value of
+// `type_name`? A literal has no type of its own -- it adopts the type of
+// the place it initializes -- but that only works when the value it
+// spells is actually one of that type's values. `int8_t x = 300;` does
+// not spell an int8_t, and `unsigned int x = 4294967296;` does not spell
+// an unsigned int, so treating them as compatible would smuggle in
+// exactly the silent, lossy conversion the scalar-conversion rule exists
+// to forbid.
+//
+// A 64-bit unsigned target is deliberately unconstrained on the low end:
+// a literal above INT64_MAX has already wrapped to a negative by the
+// time it arrives (see `scalar_value_range`), so rejecting negatives
+// would reject the legitimate spelling. The narrower unsigned types have
+// no such ambiguity and are checked normally.
+[[nodiscard]] inline bool integer_literal_value_fits(std::int64_t value, std::string_view type_name, int pointer_bit_width) {
+    std::optional<ScalarValueRange> range = scalar_value_range(type_name, pointer_bit_width);
+    if (!range.has_value()) return true;
+    const ScalarValueRange& bounds = *range;
+    if (value < 0 && is_unsigned_scalar_type_name(type_name)) {
+        return scalar_bit_width(type_name, pointer_bit_width) >= 64;
+    }
+    return value >= bounds.min_value && value <= bounds.max_value;
+}
 
 class TypeLayoutInfo {
 public:
@@ -2591,31 +2870,23 @@ public:
             return forward_decl;
         }
 
+        // Derived entirely from `scalar_type_info` -- see its comment for
+        // why this file is the one place the twenty names are listed.
+        // Size follows the width; alignment equals size for every scalar
+        // scpp has, except that `size_t`/`ptrdiff_t` take the target's
+        // pointer alignment, which need not equal its pointer size.
         [[nodiscard]] std::optional<TypeLayoutInfo> named_scalar_layout(std::string_view name) const {
-            if (name == "bool" || name == "char" || name == "int8_t" || name == "uint8_t") {
-                TypeLayoutInfo layout{1, 1};
-                return std::optional<TypeLayoutInfo>{layout};
-            }
-            if (name == "int16_t" || name == "uint16_t") {
-                TypeLayoutInfo layout{2, 2};
-                return std::optional<TypeLayoutInfo>{layout};
-            }
-            if (name == "int" || name == "unsigned int" || name == "int32_t" || name == "uint32_t" ||
-                name == "float" || name == "float32_t") {
-                TypeLayoutInfo layout{4, 4};
-                return std::optional<TypeLayoutInfo>{layout};
-            }
-            if (name == "long" || name == "unsigned long" || name == "int64_t" || name == "uint64_t" ||
-                name == "double" || name == "float64_t") {
-                TypeLayoutInfo layout{8, 8};
-                return std::optional<TypeLayoutInfo>{layout};
-            }
-            if (name == "size_t" || name == "ptrdiff_t") {
+            std::optional<ScalarTypeInfo> info = scalar_type_info(name);
+            if (!info.has_value()) return std::optional<TypeLayoutInfo>{};
+            const ScalarTypeInfo& scalar = *info;
+            if (scalar.is_pointer_sized) {
                 std::uint64_t align = target.pointer_align_bytes < 1 ? static_cast<std::uint64_t>(1) : target.pointer_align_bytes;
                 TypeLayoutInfo layout{target.pointer_size_bytes, align};
                 return std::optional<TypeLayoutInfo>{layout};
             }
-            return std::optional<TypeLayoutInfo>{};
+            std::uint64_t size_bytes = static_cast<std::uint64_t>(scalar.bit_width) / 8;
+            TypeLayoutInfo layout{size_bytes, size_bytes};
+            return std::optional<TypeLayoutInfo>{layout};
         }
 
         [[nodiscard]] std::optional<TypeLayoutInfo> compute(const Type& current) {

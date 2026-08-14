@@ -27,16 +27,12 @@ namespace {
     return true;
 }
 
-[[nodiscard]] bool is_float_scalar_name(std::string_view name) {
-    return name == "float" || name == "double" || name == "float32_t" || name == "float64_t";
-}
+// Both derive from `scpp.ast`'s scalar type model -- see
+// `scalar_type_info` for why that is the only place the twenty names of
+// ch06 §6 are listed.
+[[nodiscard]] bool is_float_scalar_name(std::string_view name) { return scpp::is_float_scalar_type_name(name); }
 
-[[nodiscard]] bool is_integral_scalar_name(std::string_view name) {
-    return name == "char" || name == "int" || name == "long" || name == "unsigned int" ||
-           name == "unsigned long" || name == "int8_t" || name == "int16_t" || name == "int32_t" ||
-           name == "int64_t" || name == "uint8_t" || name == "uint16_t" || name == "uint32_t" ||
-           name == "uint64_t" || name == "size_t" || name == "ptrdiff_t";
-}
+[[nodiscard]] bool is_integral_scalar_name(std::string_view name) { return scpp::is_integral_scalar_type_name(name); }
 
 [[nodiscard]] bool function_accepts_argument_count(const Function& fn, std::size_t arg_count, std::size_t param_offset) {
     if (fn.params.size() < param_offset) return false;
