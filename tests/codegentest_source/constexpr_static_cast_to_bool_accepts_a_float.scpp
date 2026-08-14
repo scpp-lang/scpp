@@ -1,0 +1,15 @@
+// `static_cast<bool>` of a floating value had no answer during constant
+// evaluation -- `as_bool` handled bool and integral cells only -- so
+// this failed against a runtime `static_cast<bool>` that accepts it and
+// yields true. Testing `!= 0` is what codegen emits, so the two layers
+// now give the same answer for the same expression.
+int main() {
+    constexpr bool from_fraction = static_cast<bool>(1.5);
+    constexpr bool from_zero = static_cast<bool>(0.0);
+    bool runtime_from_fraction = static_cast<bool>(1.5);
+    bool runtime_from_zero = static_cast<bool>(0.0);
+    return (from_fraction == runtime_from_fraction && from_zero == runtime_from_zero && from_fraction &&
+            !from_zero)
+               ? 0
+               : 1;
+}

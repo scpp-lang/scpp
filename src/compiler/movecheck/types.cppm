@@ -53,7 +53,6 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred);
 [[nodiscard]] bool is_pointer_arithmetic_offset_type(const Type& type);
 [[nodiscard]] bool pointer_supports_arithmetic(const Type& type);
 [[nodiscard]] std::optional<Type> pointer_arithmetic_result_type(BinaryOp op, const Type& lhs, const Type& rhs);
-[[nodiscard]] bool is_untyped_numeric_literal(const Expr& expr);
 [[nodiscard]] bool literal_compatible_with_type(const Expr& literal, const Type& type);
 [[nodiscard]] bool conditional_arm_types_agree(const Expr& then_arm, const Type& then_type, const Expr& else_arm,
                                                const Type& else_type);
@@ -330,11 +329,11 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
 }
 
 [[nodiscard]] bool integer_literal_compatible_with_type(const Type& type) {
-    return type.kind == TypeKind::Named && type.name != "bool" && type.name != "char" && is_scalar_named_type(type);
+    return integer_literal_may_adopt_type(type);
 }
 
 [[nodiscard]] const Type& binary_operand_type(const Type& type) {
-    return type.kind == TypeKind::Reference ? *type.pointee : type;
+    return literal_adoption_target(type);
 }
 
 [[nodiscard]] bool is_pointer_arithmetic_offset_type(const Type& type) {
@@ -370,48 +369,14 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
     return std::nullopt;
 }
 
-[[nodiscard]] bool is_untyped_numeric_literal(const Expr& expr) {
-    const Expr& folded =
-        expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Neg && expr.lhs != nullptr ? *expr.lhs : expr;
-    return folded.kind == ExprKind::IntegerLiteral || folded.kind == ExprKind::FloatLiteral;
-}
-
+// Binds `scpp.ast`'s literal-adoption rule to the host's pointer width.
+// The rule lives there so that constant evaluation can ask the same
+// question and get the same answer -- see `literal_adopts_type`. Its
+// companion `is_untyped_numeric_literal` needs no such binding, so it
+// moved to `scpp.ast` outright; both declaration and definition are gone
+// from here and every caller now resolves to the `scpp.ast` one.
 [[nodiscard]] bool literal_compatible_with_type(const Expr& literal, const Type& type) {
-    const Type& operand_type = binary_operand_type(type);
-    // A negated numeric literal is still a literal. The parser leaves
-    // `-128` as a unary minus applied to `128`, so matching only on
-    // ExprKind::IntegerLiteral would see a Unary here and conclude the
-    // expression has to carry a type of its own -- making `int8_t x =
-    // -128;` a conversion from `int`, which it is not: -128 names an
-    // int8_t value directly. Unwrapping one level of negation keeps
-    // every consumer of this predicate (declarations, binary operands,
-    // `?:` arms) agreeing on that.
-    if (literal.kind == ExprKind::Unary && literal.unary_op == UnaryOp::Neg && literal.lhs != nullptr) {
-        if (literal.lhs->kind == ExprKind::FloatLiteral) return is_float_named_type(operand_type);
-        if (literal.lhs->kind == ExprKind::IntegerLiteral) {
-            return integer_literal_compatible_with_type(operand_type) &&
-                   integer_literal_value_fits(-literal.lhs->int_value, operand_type.name);
-        }
-        return false;
-    }
-    switch (literal.kind) {
-        case ExprKind::IntegerLiteral:
-            return integer_literal_compatible_with_type(operand_type) &&
-                   integer_literal_value_fits(literal.int_value, operand_type.name);
-        case ExprKind::FloatLiteral: return is_float_named_type(operand_type);
-        case ExprKind::BoolLiteral: return operand_type.kind == TypeKind::Named && operand_type.name == "bool";
-        case ExprKind::CharLiteral: return operand_type.kind == TypeKind::Named && operand_type.name == "char";
-        // ch06 §6: `nullptr` compares against any raw pointer type
-        // (`p == nullptr`), and against `nullptr_t` itself
-        // (`nullptr == nullptr`, and a `nullptr_t`-typed place compared
-        // with the literal). It is compatible with nothing else -- in
-        // particular with no integer type, so `i == nullptr` stays the
-        // error it has always been.
-        case ExprKind::NullptrLiteral:
-            return operand_type.kind == TypeKind::Pointer || operand_type.kind == TypeKind::FunctionPointer ||
-                   is_nullptr_type(operand_type);
-        default: return false;
-    }
+    return literal_adopts_type(literal, type, scpp::host_pointer_bit_width());
 }
 
 // ch05/ch06: `?:` yields a *value*, and its two arms have to agree on

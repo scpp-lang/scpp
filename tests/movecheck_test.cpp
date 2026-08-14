@@ -1823,8 +1823,108 @@ void test_scalar_value_ranges_follow_width_and_signedness() {
     }
 }
 
+// `literal_adopts_type` is the single authority for ch06 §6's
+// literal-adoption rule -- move checking and constant evaluation both
+// consult it, and before they did, they disagreed: move checking
+// accepted `int8_t v = 5;` while the constexpr evaluator rejected the
+// same initialization as an int-to-int8_t assignment, so a program's
+// validity depended on which layer looked at it. This restates the rule
+// independently of the implementation, so a change that quietly moves
+// one layer's answer has to move this table too.
+scpp::Expr integer_literal_expr(std::int64_t value) {
+    scpp::Expr expr{};
+    expr.kind = scpp::ExprKind::IntegerLiteral;
+    expr.int_value = value;
+    return expr;
+}
+
+scpp::Expr negated_integer_literal_expr(std::int64_t magnitude) {
+    scpp::Expr expr{};
+    expr.kind = scpp::ExprKind::Unary;
+    expr.unary_op = scpp::UnaryOp::Neg;
+    expr.lhs = std::make_unique<scpp::Expr>(integer_literal_expr(magnitude));
+    return expr;
+}
+
+scpp::Expr simple_literal_expr(scpp::ExprKind kind) {
+    scpp::Expr expr{};
+    expr.kind = kind;
+    return expr;
+}
+
+void test_literal_adoption_covers_every_scalar_type() {
+    cases_run++;
+    const int pointer_bits = scpp::host_pointer_bit_width();
+    const scpp::Expr five = integer_literal_expr(5);
+    const scpp::Expr one_point_five = simple_literal_expr(scpp::ExprKind::FloatLiteral);
+    const scpp::Expr yes = simple_literal_expr(scpp::ExprKind::BoolLiteral);
+    const scpp::Expr letter = simple_literal_expr(scpp::ExprKind::CharLiteral);
+
+    for (const ScalarExpectation& expected : kExpectedScalars) {
+        const std::string where = std::string("literal_adoption: '") + expected.name + "' ";
+        const scpp::Type type = scpp::named_type(expected.name);
+        const bool is_bool = expected.category == scpp::ScalarCategory::Bool;
+        const bool is_char = std::string_view{expected.name} == "char";
+        const bool is_float = expected.category == scpp::ScalarCategory::Floating;
+
+        // An integer literal names a value of every scalar type except
+        // `bool` and `char`: `true`/`false` and `'A'` are how those are
+        // written, so `bool b = 1;` and `char c = 65;` are conversions.
+        expect(scpp::literal_adopts_type(five, type, pointer_bits) == !(is_bool || is_char),
+               where + "integer literal adoption");
+        expect(scpp::literal_adopts_type(one_point_five, type, pointer_bits) == is_float,
+               where + "floating literal adoption");
+        expect(scpp::literal_adopts_type(yes, type, pointer_bits) == is_bool, where + "bool literal adoption");
+        expect(scpp::literal_adopts_type(letter, type, pointer_bits) == is_char, where + "char literal adoption");
+
+        // A place spelled `T&` is the place `T`.
+        scpp::Type reference_type{};
+        reference_type.kind = scpp::TypeKind::Reference;
+        reference_type.pointee = std::make_shared<scpp::Type>(type);
+
+        expect(scpp::literal_adopts_type(five, reference_type, pointer_bits) ==
+                   scpp::literal_adopts_type(five, type, pointer_bits),
+               where + "a reference place asks the same question as its referent");
+
+        if (is_bool || is_char || is_float) continue;
+
+        // Adoption is bounded by the type's own range, and a negated
+        // literal is still a literal -- `int8_t x = -128;` names an
+        // int8_t rather than converting one from `int`.
+        std::optional<scpp::ScalarValueRange> range = scpp::scalar_value_range(expected.name, pointer_bits);
+        if (!range.has_value()) {
+            expect(false, where + "integral type has no value range");
+            continue;
+        }
+        expect(scpp::literal_adopts_type(integer_literal_expr(range->max_value), type, pointer_bits),
+               where + "adopts its maximum");
+        if (scpp::scalar_bit_width(expected.name, pointer_bits) < 64) {
+            expect(!scpp::literal_adopts_type(integer_literal_expr(range->max_value + 1), type, pointer_bits),
+                   where + "rejects one above its maximum");
+        }
+        if (!expected.is_unsigned) {
+            expect(scpp::literal_adopts_type(negated_integer_literal_expr(-range->min_value), type, pointer_bits),
+                   where + "adopts its negated minimum");
+        }
+    }
+
+    // `nullptr` adopts pointer places and nothing else -- in particular
+    // no integer type, so `i == nullptr` stays an error.
+    const scpp::Expr null = simple_literal_expr(scpp::ExprKind::NullptrLiteral);
+    scpp::Type pointer_type{};
+    pointer_type.kind = scpp::TypeKind::Pointer;
+    pointer_type.pointee = std::make_shared<scpp::Type>(scpp::named_type("int"));
+    expect(scpp::literal_adopts_type(null, pointer_type, scpp::host_pointer_bit_width()),
+           "literal_adoption: nullptr adopts a pointer place");
+    expect(!scpp::literal_adopts_type(null, scpp::named_type("int"), scpp::host_pointer_bit_width()),
+           "literal_adoption: nullptr does not adopt an integer place");
+    expect(!scpp::literal_adopts_type(null, scpp::named_type("bool"), scpp::host_pointer_bit_width()),
+           "literal_adoption: nullptr does not adopt a bool place");
+}
+
 int main() {
     run_test_case_files();
+    test_literal_adoption_covers_every_scalar_type();
     test_scalar_model_lists_exactly_the_twenty_names();
     test_scalar_model_matches_expected_shape();
     test_scalar_predicates_derive_from_the_model();

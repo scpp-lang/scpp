@@ -1,0 +1,51 @@
+// ch06 §6 names twenty scalar types. Constant evaluation used to
+// implement four of them -- int, bool, char and double -- because every
+// integer literal became an `int` here and every floating literal a
+// `double`, so `constexpr int8_t v = 5;` was rejected as an
+// int-to-int8_t assignment by the one layer that could not see it was a
+// literal adopting its place's type. Move checking has always read the
+// rule the other way, so a program's validity depended on which layer
+// looked at it. Both now decide with scpp.ast's `literal_adopts_type`.
+constexpr bool b = true;
+constexpr char c = 'x';
+constexpr int8_t i8 = -128;
+constexpr uint8_t u8 = 255;
+constexpr int16_t i16 = -32768;
+constexpr uint16_t u16 = 65535;
+constexpr int i = 5;
+constexpr int32_t i32 = -2147483648;
+constexpr unsigned int ui = 4294967295;
+constexpr uint32_t u32 = 4000000000;
+constexpr long l = 5;
+constexpr int64_t i64 = 9007199254740993;
+constexpr unsigned long ul = 5;
+constexpr uint64_t u64 = 18446744073709551615;
+constexpr size_t sz = 4096;
+constexpr ptrdiff_t pd = -4096;
+constexpr float f = 1.5;
+constexpr float32_t f32 = 1.5;
+constexpr double d = 1.5;
+constexpr float64_t f64 = 1.5;
+
+constexpr int32_t sum_of_widths() {
+    int8_t a = 1;
+    int8_t doubled = a + 1;
+    uint32_t u = u32;
+    uint32_t bumped = u + 1;
+    size_t s = sz;
+    ptrdiff_t p = pd;
+    float32_t g = f32 + 1.5;
+    int32_t total = i32;
+    total = 0;
+    if (doubled == 2) total = total + 1;
+    if (bumped == 4000000001) total = total + 1;
+    if (s == 4096) total = total + 1;
+    if (p < 0) total = total + 1;
+    if (g == 3.0) total = total + 1;
+    return total;
+}
+
+int main() {
+    constexpr int32_t total = sum_of_widths();
+    return static_cast<int>(total);
+}

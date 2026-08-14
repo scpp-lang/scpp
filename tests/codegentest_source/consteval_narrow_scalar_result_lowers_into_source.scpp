@@ -1,0 +1,18 @@
+// An immediate function's result is written back into the AST as the
+// literal that spells it. That rewrite enumerated int/char/bool/double
+// and rejected everything else, so a `consteval float32_t` or
+// `consteval uint16_t` evaluated fine and then failed to lower. The
+// literal kind is now chosen from scpp.ast's scalar model.
+consteval float32_t half() {
+    float32_t a = 0.5;
+    return a;
+}
+consteval uint16_t tag() {
+    uint16_t a = 65535;
+    return a;
+}
+int main() {
+    float32_t f = half();
+    uint16_t t = tag();
+    return (f == 0.5 && t == 65535) ? 0 : 1;
+}

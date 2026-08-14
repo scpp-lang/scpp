@@ -1,0 +1,19 @@
+// A constant-evaluated float32_t has to hold the bits codegen's fptrunc
+// would produce, or a constexpr and a runtime computation of the same
+// expression disagree. Constant evaluation used to give every floating
+// cell the type `double` and never round, so a `float32_t` place could
+// not be initialized at all -- and once it could, 0.1 would have stayed
+// at double precision. The runtime form of this program returns the
+// same answer.
+constexpr double roundtrip() {
+    float32_t f = 0.1;
+    return static_cast<double>(f);
+}
+constexpr bool narrowed() {
+    double exact = 0.1;
+    return roundtrip() != exact;
+}
+int main() {
+    constexpr bool v = narrowed();
+    return v ? 0 : 1;
+}
