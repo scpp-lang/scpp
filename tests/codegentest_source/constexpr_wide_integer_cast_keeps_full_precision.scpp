@@ -1,0 +1,16 @@
+// `static_cast<T>` during constant evaluation used to route every
+// integral target through `double`. That was lossless only because the
+// two integral targets it supported -- `int` and `char` -- are narrower
+// than double's 53-bit mantissa. Extending the cast to int64_t/uint64_t
+// without changing the route would have silently rounded: 2^53 + 1 is
+// the smallest positive integer a double cannot represent, so this
+// subtraction would yield 0 rather than 1. An integral source is now
+// converted as an integer, and only a floating source truncates.
+constexpr int64_t big() {
+    int64_t a = 9007199254740993;
+    return static_cast<int64_t>(a);
+}
+int main() {
+    constexpr int64_t v = big();
+    return static_cast<int>(v - 9007199254740992);
+}

@@ -1,0 +1,17 @@
+// A literal above INT64_MAX has already wrapped to a negative by the
+// time move checking sees it, so `integer_literal_value_fits` lets a
+// 64-bit unsigned place take a negative literal -- `-5` and
+// 18446744073709551611 are the same int64 carrier. Constant evaluation
+// re-asked that question through `scalar_value_range`, which reports
+// {0, INT64_MAX} for those types, and rejected what move checking had
+// just accepted. The adoption predicate is the answer for a literal;
+// asking twice is what made the two layers disagree.
+int main() {
+    constexpr size_t s = -5;
+    constexpr uint64_t u = -5;
+    constexpr unsigned long l = -5;
+    size_t runtime_s = -5;
+    uint64_t runtime_u = -5;
+    unsigned long runtime_l = -5;
+    return (s == runtime_s && u == runtime_u && l == runtime_l) ? 0 : 1;
+}

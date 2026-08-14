@@ -2783,6 +2783,91 @@ public:
     return value >= bounds.min_value && value <= bounds.max_value;
 }
 
+// ch06 §6: which type does a literal take from the place it appears in?
+//
+// A literal has no type of its own, so it adopts the type of the place
+// that consumes it -- but only when the value it spells is one of that
+// type's values, and only for a place whose type that kind of literal
+// can name at all. These four predicates answer that, and they are here
+// rather than in move checking because two layers ask the question and
+// they used to answer it differently: move checking implemented the
+// rule, while constant evaluation gave every integer literal the type
+// `int` and every floating literal `double`. The layers therefore
+// disagreed about which programs are valid -- `constexpr int8_t v = 5;`
+// passed move checking and was then rejected by the constexpr evaluator
+// as an int-to-int8_t assignment, so a program's validity depended on
+// which layer looked at it. One question, one answer, one place.
+//
+// A place spelled `T&` is the place `T`; `int8_t& r = ...; r = 5;` is
+// the same adoption question as the unreferenced form.
+[[nodiscard]] inline const Type& literal_adoption_target(const Type& type) {
+    if (type.kind == TypeKind::Reference && type.pointee != nullptr) return *type.pointee;
+    return type;
+}
+
+// `bool` and `char` are excluded deliberately: they are scalars, but
+// neither is nameable by an integer literal. `bool b = 1;` and
+// `char c = 65;` are conversions, not spellings -- `true`/`false` and
+// `'A'` are how those values are written.
+[[nodiscard]] inline bool integer_literal_may_adopt_type(const Type& type) {
+    if (type.kind != TypeKind::Named) return false;
+    if (type.name == "bool" || type.name == "char") return false;
+    std::string_view spelled_name{type.name};
+    return is_scalar_type_name(spelled_name);
+}
+
+// The parser leaves `-128` as a unary minus applied to `128`, so a
+// consumer matching only on ExprKind::IntegerLiteral would see a Unary
+// here and conclude the expression carries a type of its own -- making
+// `int8_t x = -128;` a conversion from `int`, which it is not: -128
+// spells an int8_t value directly. Unwrapping one level of negation
+// keeps every consumer agreeing on that.
+[[nodiscard]] inline bool is_untyped_numeric_literal(const Expr& expr) {
+    if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Neg && expr.lhs != nullptr) {
+        return expr.lhs->kind == ExprKind::IntegerLiteral || expr.lhs->kind == ExprKind::FloatLiteral;
+    }
+    return expr.kind == ExprKind::IntegerLiteral || expr.kind == ExprKind::FloatLiteral;
+}
+
+[[nodiscard]] inline bool literal_adopts_type(const Expr& literal, const Type& type, int pointer_bit_width) {
+    const Type& target = literal_adoption_target(type);
+    if (literal.kind == ExprKind::Unary && literal.unary_op == UnaryOp::Neg && literal.lhs != nullptr) {
+        if (literal.lhs->kind == ExprKind::FloatLiteral) {
+            if (target.kind != TypeKind::Named) return false;
+            std::string_view float_name{target.name};
+            return is_float_scalar_type_name(float_name);
+        }
+        if (literal.lhs->kind == ExprKind::IntegerLiteral) {
+            if (!integer_literal_may_adopt_type(target)) return false;
+            std::string_view negated_name{target.name};
+            return integer_literal_value_fits(-literal.lhs->int_value, negated_name, pointer_bit_width);
+        }
+        return false;
+    }
+    if (literal.kind == ExprKind::IntegerLiteral) {
+        if (!integer_literal_may_adopt_type(target)) return false;
+        std::string_view integer_name{target.name};
+        return integer_literal_value_fits(literal.int_value, integer_name, pointer_bit_width);
+    }
+    if (literal.kind == ExprKind::FloatLiteral) {
+        if (target.kind != TypeKind::Named) return false;
+        std::string_view float_name{target.name};
+        return is_float_scalar_type_name(float_name);
+    }
+    if (literal.kind == ExprKind::BoolLiteral) return target.kind == TypeKind::Named && target.name == "bool";
+    if (literal.kind == ExprKind::CharLiteral) return target.kind == TypeKind::Named && target.name == "char";
+    // ch06 §6: `nullptr` compares against any raw pointer type
+    // (`p == nullptr`), and against `nullptr_t` itself
+    // (`nullptr == nullptr`, and a `nullptr_t`-typed place compared with
+    // the literal). It is compatible with nothing else -- in particular
+    // with no integer type, so `i == nullptr` stays the error it has
+    // always been.
+    if (literal.kind == ExprKind::NullptrLiteral) {
+        return target.kind == TypeKind::Pointer || target.kind == TypeKind::FunctionPointer || is_nullptr_type(target);
+    }
+    return false;
+}
+
 class TypeLayoutInfo {
 public:
     std::uint64_t size_bytes = 0;

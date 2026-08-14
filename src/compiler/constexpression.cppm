@@ -1081,10 +1081,64 @@ private:
     }
 
     [[nodiscard]] std::shared_ptr<Cell> make_double_cell(double value) {
+        return make_float_cell_as(named_type("double"), value);
+    }
+
+    // A floating cell carries its own type rather than always claiming
+    // `double`, so that a `float32_t` value stays a `float32_t` through
+    // arithmetic and assignment. The value is rounded to the type's own
+    // precision on the way in: constant evaluation of a 32-bit float has
+    // to produce the same bits codegen's fptrunc would, or a constexpr
+    // and a runtime computation of the same expression would disagree.
+    [[nodiscard]] std::shared_ptr<Cell> make_float_cell_as(const Type& type, double value) {
         auto cell = std::make_shared<Cell>();
-        cell->type = named_type("double");
-        cell->data.set_double(value);
+        cell->type = type;
+        cell->data.set_double(narrow_float_value(type, value));
         return cell;
+    }
+
+    [[nodiscard]] double narrow_float_value(const Type& type, double value) const {
+        if (type.kind != TypeKind::Named) return value;
+        if (scpp::scalar_bit_width(std::string_view{type.name}, scpp::host_pointer_bit_width()) == 32) {
+            return static_cast<double>(static_cast<float>(value));
+        }
+        return value;
+    }
+
+    // Builds the cell for a literal that has adopted `target`. The
+    // caller has already established adoption is legal, so this does not
+    // re-check the value's range: `literal_adopts_type` *is* the answer
+    // to that question for a literal, and asking again through
+    // `integer_bounds_for_type` gives a different one for a 64-bit
+    // unsigned target. Such a target deliberately accepts a negative
+    // literal, because a literal above INT64_MAX has already wrapped by
+    // the time it arrives and `-5` and `18446744073709551611` are the
+    // same int64 carrier, while `scalar_value_range` reports {0,
+    // INT64_MAX}. Running both checks made `constexpr size_t v = -5;` an
+    // overflow error against a move checker and a codegen that both
+    // accept it -- the same two-layer disagreement this path exists to
+    // remove. Arithmetic keeps the bounds check, which is right: scpp
+    // traps on unsigned underflow at runtime, so rejecting `size_t v = a
+    // - 5;` at compile time is the same answer given earlier.
+    //
+    // An integer literal adopting a floating type -- `double d = 5;`,
+    // which move checking accepts -- becomes a floating cell.
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> make_adopted_literal_cell(const Expr& literal, const Type& target) {
+        if (literal.kind == ExprKind::Unary && literal.lhs != nullptr) {
+            return make_adopted_literal_value_cell(*literal.lhs, target, /*negated=*/true);
+        }
+        return make_adopted_literal_value_cell(literal, target, /*negated=*/false);
+    }
+
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> make_adopted_literal_value_cell(const Expr& value_expr, const Type& target,
+                                                                            bool negated) {
+        if (value_expr.kind == ExprKind::FloatLiteral) {
+            double value = negated ? -value_expr.float_value : value_expr.float_value;
+            return make_float_cell_as(target, value);
+        }
+        std::int64_t value = negated ? -value_expr.int_value : value_expr.int_value;
+        if (is_floating_like(target)) return make_float_cell_as(target, static_cast<double>(value));
+        return make_scalar_cell(target, value);
     }
 
     [[nodiscard]] std::shared_ptr<Cell> make_bool_cell(bool value) {
@@ -1181,7 +1235,7 @@ private:
                 std::string message{};
                 message += "type '";
                 message += type.name;
-                message += "' is not constexpr-compatible in Phase D1";
+                message += "' is not supported during constant evaluation";
                 return std::unexpected(ConstexprError(loc, message));
             }
             case TypeKind::Pointer:
@@ -1202,7 +1256,7 @@ private:
             case TypeKind::Reference:
             case TypeKind::Function:
             case TypeKind::FunctionPointer:
-                return std::unexpected(ConstexprError(loc, "type is not yet supported by the constexpr evaluator in Phase D1"));
+                return std::unexpected(ConstexprError(loc, "references, functions and function pointers are not supported during constant evaluation"));
             case TypeKind::Span:
                 if (type.is_mutable_ref) {
                     return std::unexpected(ConstexprError(loc, "mutable std::span<T> is not supported during constant evaluation"));
@@ -1258,7 +1312,7 @@ private:
         globals_resolving_.insert(name);
         std::vector<std::unordered_map<std::string, Binding>> saved_frames = std::move(frames_);
         frames_.clear();
-        auto value_result = evaluate_expr(*global.decl->init);
+        auto value_result = evaluate_expr_in_context(*global.decl->init, &global.decl->type);
         frames_ = std::move(saved_frames);
         globals_resolving_.erase(name);
         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
@@ -1292,6 +1346,12 @@ private:
             if (!result.has_value()) return std::unexpected(std::move(result).error());
             return result.value() != 0;
         }
+        // A floating operand had no answer here, so
+        // `constexpr bool b = static_cast<bool>(1.5);` failed against a
+        // runtime `static_cast<bool>` that accepts it and yields true.
+        // `!= 0` is the same test codegen emits, and it gives NaN the
+        // same answer (true) that an fcmp-one against zero does.
+        if (is_floating_like(cell->type)) return cell->data.double_value != 0.0;
         return std::unexpected(ConstexprError(loc, "expected a boolean constexpr value"));
     }
 
@@ -1309,23 +1369,11 @@ private:
         return std::unexpected(ConstexprError(loc, "switch requires an integral or enum constexpr value"));
     }
 
-    // The range of values a constant-evaluated integer of this type may
-    // hold, derived from `scpp.ast`'s scalar type model -- see
-    // `scalar_type_info`, the only place ch06 §6's twenty names are
-    // listed. This used to be a hand-written table, which had drifted
-    // twice: it gave `char` the range {0, 255} (the only part of the
-    // compiler that thought `char` unsigned), and it omitted `uint32_t`
-    // entirely, so a constant-evaluated `uint32_t` was bounded as a
-    // signed 64-bit integer and would silently accept a negative value.
-    //
-    // Anything that is not a scalar -- an enum, most importantly --
-    // keeps the full 64-bit signed range, which is what the old table's
-    // default arm gave it.
-    // The range of values a constant-evaluated integer of this type may
-    // hold. Delegates to `scpp.ast`'s `scalar_value_range`, so constant
-    // evaluation and movecheck's literal-range check share one
-    // derivation from one model rather than each carrying its own table
-    // -- see `scalar_type_info`.
+    // The range of values this engine's int64 carrier may hold for a
+    // place of this type. Delegates to `scpp.ast`'s
+    // `scalar_value_range`, so constant evaluation and movecheck's
+    // literal-range check share one derivation from one model rather
+    // than each carrying its own table -- see `scalar_type_info`.
     //
     // The table this replaced had drifted twice: it gave `char` the
     // range {0, 255} (the only part of the compiler that thought `char`
@@ -1845,7 +1893,7 @@ private:
                     const Expr& arg_expr = *init.brace_args[i - 1];
                     if (param.type.kind == TypeKind::Reference) {
                         if (param.type.is_rvalue_ref) {
-                            auto value_result = evaluate_expr(arg_expr);
+                            auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
                             if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                             bindings.push_back(Binding{std::move(value_result).value(), false});
                         } else if (param.type.is_mutable_ref) {
@@ -1857,13 +1905,13 @@ private:
                             if (lvalue_result.has_value()) {
                                 bindings.push_back(Binding{lvalue_result.value().cell, true});
                             } else {
-                                auto value_result = evaluate_expr(arg_expr);
+                                auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
                                 if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                                 bindings.push_back(Binding{std::move(value_result).value(), true});
                             }
                         }
                     } else {
-                        auto value_result = evaluate_expr(arg_expr);
+                        auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
                         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                         bindings.push_back(Binding{std::move(value_result).value(), false});
                     }
@@ -1881,12 +1929,12 @@ private:
             if (init.brace_args.size() != 1) {
                 return std::unexpected(ConstexprError(loc, "brace-initialization of this member requires exactly one expression"));
             }
-            auto value_result = evaluate_expr(*init.brace_args[0]);
+            auto value_result = evaluate_expr_in_context(*init.brace_args[0], &field_cell->type);
             if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
             return copy_into(field_cell, std::move(value_result).value(), loc);
         }
         if (init.expr) {
-            auto value_result = evaluate_expr(*init.expr);
+            auto value_result = evaluate_expr_in_context(*init.expr, &field_cell->type);
             if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
             return copy_into(field_cell, std::move(value_result).value(), loc);
         }
@@ -1993,28 +2041,62 @@ private:
         return std::unexpected(ConstexprError(loc, message));
     }
 
+    // `static_cast<T>(v)` for any of ch06 §6's twenty scalar types. This
+    // used to enumerate four of them -- `double`, `bool`, `int`, `char`
+    // -- and reject the rest with a message naming a "Phase D1" that is
+    // defined nowhere. Every branch now asks `scpp.ast`'s scalar model
+    // what T is, so adding a scalar type cannot leave this behind.
+    //
+    // The integral path deliberately does not route through `double` the
+    // way the old `int`/`char` branch did. That was lossless only
+    // because the two types it served are narrower than double's 53-bit
+    // mantissa; `static_cast<int64_t>` of a large integer through a
+    // double would silently round. An integral source is converted as an
+    // integer and only a floating source truncates toward zero.
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> cast_value(const Type& target_type, const std::shared_ptr<Cell>& operand,
                                                    const SourceLocation& loc) {
-        if (is_named_type(target_type, "double")) {
+        if (is_floating_like(target_type)) {
             auto result = as_double(operand, loc);
             if (!result.has_value()) return std::unexpected(std::move(result).error());
-            return make_double_cell(result.value());
+            return make_float_cell_as(target_type, result.value());
         }
         if (is_named_type(target_type, "bool")) {
             auto result = as_bool(operand, loc);
             if (!result.has_value()) return std::unexpected(std::move(result).error());
             return make_bool_cell(result.value());
         }
-        if (is_named_type(target_type, "int") || is_named_type(target_type, "char")) {
-            auto double_result = as_double(operand, loc);
-            if (!double_result.has_value()) return std::unexpected(std::move(double_result).error());
+        if (is_integer_like(target_type)) {
+            std::int64_t value{};
+            if (is_floating_like(operand->type)) {
+                auto double_result = as_double(operand, loc);
+                if (!double_result.has_value()) return std::unexpected(std::move(double_result).error());
+                if (!float_value_is_integral_representable(double_result.value())) {
+                    return std::unexpected(ConstexprError(loc, "constexpr integer overflow"));
+                }
+                value = static_cast<std::int64_t>(double_result.value());
+            } else {
+                auto integer_result = as_integer(operand, loc);
+                if (!integer_result.has_value()) return std::unexpected(std::move(integer_result).error());
+                value = integer_result.value();
+            }
             auto result = std::make_shared<Cell>();
             result->type = target_type;
-            auto assign_result = checked_assign_integer(result, static_cast<std::int64_t>(double_result.value()), loc);
+            auto assign_result = checked_assign_integer(result, value, loc);
             if (!assign_result.has_value()) return std::unexpected(std::move(assign_result).error());
             return result;
         }
-        return std::unexpected(ConstexprError(loc, "constexpr cast only supports builtin scalar targets in Phase D1"));
+        return std::unexpected(ConstexprError(loc, "constant evaluation of static_cast supports scalar target types only"));
+    }
+
+    // A double outside int64_t's range (or a NaN) has no int64_t value
+    // to check bounds against -- `static_cast<std::int64_t>` of it is
+    // undefined behaviour in the host compiler, so the range test has to
+    // happen before the conversion, not after. Such a value cannot be in
+    // range for any scalar type, so reporting it as an overflow is the
+    // same answer the bounds check would give.
+    [[nodiscard]] bool float_value_is_integral_representable(double value) const {
+        if (!(value == value)) return false;
+        return value >= -9223372036854775808.0 && value < 9223372036854775808.0;
     }
 
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_binary_numeric(const Expr& expr, const std::shared_ptr<Cell>& lhs,
@@ -2026,11 +2108,16 @@ private:
             if (!right_result.has_value()) return std::unexpected(std::move(right_result).error());
             double left = left_result.value();
             double right = right_result.value();
+            // Mirrors the integral arm below: two operands of the same
+            // type produce that type, so `float32_t + float32_t` stays a
+            // float32_t rather than silently becoming a double that no
+            // float32_t place will then accept.
+            Type float_result_type = types_equal(lhs->type, rhs->type) ? lhs->type : named_type("double");
             switch (expr.binary_op) {
-                case BinaryOp::Add: return make_double_cell(left + right);
-                case BinaryOp::Sub: return make_double_cell(left - right);
-                case BinaryOp::Mul: return make_double_cell(left * right);
-                case BinaryOp::Div: return make_double_cell(left / right);
+                case BinaryOp::Add: return make_float_cell_as(float_result_type, left + right);
+                case BinaryOp::Sub: return make_float_cell_as(float_result_type, left - right);
+                case BinaryOp::Mul: return make_float_cell_as(float_result_type, left * right);
+                case BinaryOp::Div: return make_float_cell_as(float_result_type, left / right);
                 case BinaryOp::Eq: return make_bool_cell(left == right);
                 case BinaryOp::Ne: return make_bool_cell(left != right);
                 case BinaryOp::Lt: return make_bool_cell(left < right);
@@ -2130,7 +2217,7 @@ private:
             const Expr& arg_expr = *args[i];
             if (param.type.kind == TypeKind::Reference) {
                 if (param.type.is_rvalue_ref) {
-                    auto value_result = evaluate_expr(arg_expr);
+                    auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
                     if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                     std::shared_ptr<Cell> value = std::move(value_result).value();
                     if (param.type.pointee && is_same_or_base_class_type(*param.type.pointee, value->type) &&
@@ -2188,7 +2275,7 @@ private:
                     if (can_bind_lvalue) {
                         bindings.push_back(Binding{std::move(bound_value), true});
                     } else {
-                        auto value_result = evaluate_expr(arg_expr);
+                        auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
                         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                         std::shared_ptr<Cell> value = std::move(value_result).value();
                         if (param.type.pointee && is_same_or_base_class_type(*param.type.pointee, value->type) &&
@@ -2201,7 +2288,7 @@ private:
                     }
                 }
             } else {
-                auto value_result = evaluate_expr(arg_expr);
+                auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
                 if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                 std::shared_ptr<Cell> value = std::move(value_result).value();
                 if (is_same_or_base_class_type(param.type, value->type) && !types_equal(param.type, value->type)) {
@@ -2345,7 +2432,7 @@ private:
             const Expr& arg_expr = *expr.args[i - 1];
             if (param.type.kind == TypeKind::Reference) {
                 if (param.type.is_rvalue_ref) {
-                    auto value_result = evaluate_expr(arg_expr);
+                    auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
                     if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                     bindings.push_back(Binding{std::move(value_result).value(), false});
                     continue;
@@ -2363,13 +2450,13 @@ private:
                     if (arg_lvalue_result.has_value()) {
                         bindings.push_back(Binding{arg_lvalue_result.value().cell, true});
                     } else {
-                        auto value_result = evaluate_expr(arg_expr);
+                        auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
                         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                         bindings.push_back(Binding{std::move(value_result).value(), true});
                     }
                 }
             } else {
-                auto value_result = evaluate_expr(arg_expr);
+                auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
                 if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                 bindings.push_back(Binding{std::move(value_result).value(), false});
             }
@@ -2607,7 +2694,28 @@ private:
     }
 
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_expr(const Expr& expr) {
+        return evaluate_expr_in_context(expr, nullptr);
+    }
+
+    // ch06 §6: a literal has no type of its own, it adopts the type of
+    // the place that consumes it. Move checking has always implemented
+    // that rule; constant evaluation did not -- every integer literal
+    // became an `int` and every floating literal a `double` here, so
+    // `constexpr int8_t v = 5;` passed move checking and was then
+    // rejected by this evaluator as an int-to-int8_t assignment. The two
+    // layers disagreed about which programs are valid.
+    //
+    // `context_type` is the type of the place the expression is being
+    // evaluated for, or null where there is no such place (a discarded
+    // expression statement, a condition). Both layers now decide
+    // adoption with `scpp.ast`'s `literal_adopts_type`, so they cannot
+    // drift apart again.
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_expr_in_context(const Expr& expr, const Type* context_type) {
         if (auto result = tick(expr.loc, "evaluating an expression"); !result.has_value()) return std::unexpected(std::move(result).error());
+        if (context_type != nullptr && is_untyped_numeric_literal(expr) &&
+            literal_adopts_type(expr, *context_type, scpp::host_pointer_bit_width())) {
+            return make_adopted_literal_cell(expr, literal_adoption_target(*context_type));
+        }
         switch (expr.kind) {
             case ExprKind::IntegerLiteral: return make_scalar_cell(named_type("int"), expr.int_value);
             case ExprKind::FloatLiteral: return make_double_cell(expr.float_value);
@@ -2657,7 +2765,8 @@ private:
                 if (!cond_result.has_value()) return std::unexpected(std::move(cond_result).error());
                 auto cond_bool = as_bool(cond_result.value(), expr.loc);
                 if (!cond_bool.has_value()) return std::unexpected(std::move(cond_bool).error());
-                return cond_bool.value() ? evaluate_expr(*expr.rhs) : evaluate_expr(*expr.third);
+                return cond_bool.value() ? evaluate_expr_in_context(*expr.rhs, context_type)
+                                         : evaluate_expr_in_context(*expr.third, context_type);
             }
             case ExprKind::Member: {
                 auto base_result = evaluate_expr(*expr.lhs);
@@ -2695,7 +2804,7 @@ private:
                 }
                 return evaluate_call_expr(expr);
             case ExprKind::Cast: {
-                auto operand_result = evaluate_expr(*expr.lhs);
+                auto operand_result = evaluate_expr_in_context(*expr.lhs, &expr.type);
                 if (!operand_result.has_value()) return std::unexpected(std::move(operand_result).error());
                 return cast_value(expr.type, operand_result.value(), expr.loc);
             }
@@ -2707,7 +2816,7 @@ private:
                     if (!target_result.has_value()) return std::unexpected(std::move(target_result).error());
                     LValue target = std::move(target_result).value();
                     if (target.read_only) return std::unexpected(ConstexprError(expr.loc, "cannot assign through a const/constexpr binding"));
-                    auto value_result = evaluate_expr(*expr.rhs);
+                    auto value_result = evaluate_expr_in_context(*expr.rhs, &target.cell->type);
                     if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                     std::shared_ptr<Cell> value = std::move(value_result).value();
                     if (expr.binary_op != BinaryOp::Assign) {
@@ -2753,22 +2862,48 @@ private:
                     return make_bool_cell(rhs_bool.value());
                 }
                 {
-                    auto lhs_result = evaluate_expr(*expr.lhs);
+                    // ch06 §6, as move checking already reads it: when
+                    // one operand is a literal and the other is not, the
+                    // literal adopts the typed operand's type -- `a + 1`
+                    // for an int8_t `a` is int8_t arithmetic, not a
+                    // conversion. That means evaluating the typed side
+                    // first so its type is available as the literal's
+                    // context; a literal has no side effects, so the
+                    // reordering is unobservable.
+                    bool lhs_is_literal = is_untyped_numeric_literal(*expr.lhs);
+                    bool rhs_is_literal = is_untyped_numeric_literal(*expr.rhs);
+                    if (lhs_is_literal && !rhs_is_literal) {
+                        auto rhs_result = evaluate_expr_in_context(*expr.rhs, context_type);
+                        if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+                        std::shared_ptr<Cell> rhs_cell = std::move(rhs_result).value();
+                        auto lhs_result = evaluate_expr_in_context(*expr.lhs, &rhs_cell->type);
+                        if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+                        return evaluate_binary_numeric(expr, lhs_result.value(), rhs_cell);
+                    }
+                    auto lhs_result = evaluate_expr_in_context(*expr.lhs, context_type);
                     if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
-                    auto rhs_result = evaluate_expr(*expr.rhs);
+                    std::shared_ptr<Cell> lhs_cell = std::move(lhs_result).value();
+                    const Type* rhs_context = rhs_is_literal ? &lhs_cell->type : context_type;
+                    auto rhs_result = evaluate_expr_in_context(*expr.rhs, rhs_context);
                     if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
-                    return evaluate_binary_numeric(expr, lhs_result.value(), rhs_result.value());
+                    return evaluate_binary_numeric(expr, lhs_cell, rhs_result.value());
                 }
             case ExprKind::Unary:
                 switch (expr.unary_op) {
                     case UnaryOp::Neg: {
-                        auto operand_result = evaluate_expr(*expr.lhs);
+                        auto operand_result = evaluate_expr_in_context(*expr.lhs, context_type);
                         if (!operand_result.has_value()) return std::unexpected(std::move(operand_result).error());
                         std::shared_ptr<Cell> operand = std::move(operand_result).value();
+                        // Negation does not change the operand's type --
+                        // `-x` for an int8_t x is an int8_t. Both arms
+                        // used to discard it and produce `double`/`int`,
+                        // so `int8_t v = -x;` failed the assignment's
+                        // type check even though nothing about it is a
+                        // conversion.
                         if (is_floating_like(operand->type)) {
                             auto double_result = as_double(operand, expr.loc);
                             if (!double_result.has_value()) return std::unexpected(std::move(double_result).error());
-                            return make_double_cell(-double_result.value());
+                            return make_float_cell_as(operand->type, -double_result.value());
                         }
                         auto integer_result = as_integer(operand, expr.loc);
                         if (!integer_result.has_value()) return std::unexpected(std::move(integer_result).error());
@@ -2776,7 +2911,8 @@ private:
                         if (value == int64_min_value) {
                             return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
                         }
-                        return make_checked_int_cell(-value, expr.loc);
+                        Type negated_type = is_named_type(operand->type, "bool") ? named_type("int") : operand->type;
+                        return make_checked_int_cell_as(negated_type, -value, expr.loc);
                     }
                     case UnaryOp::Not: {
                         auto operand_result = evaluate_expr(*expr.lhs);
@@ -2858,7 +2994,7 @@ private:
             case ExprKind::Fold:
                 break;
         }
-        return std::unexpected(ConstexprError(expr.loc, "expression kind is not yet supported by the constexpr evaluator in Phase D1"));
+        return std::unexpected(ConstexprError(expr.loc, "this expression kind is not supported during constant evaluation"));
     }
 
     [[nodiscard]] std::expected<ExecOutcome, ConstexprError> execute_stmt(const Stmt& stmt, const Type& return_type) {
@@ -2922,7 +3058,7 @@ private:
                             if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
                             ctor_bindings.push_back(Binding{arg_result.value().cell, false});
                         } else {
-                            auto value_result = evaluate_expr(arg_expr);
+                            auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
                             if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                             ctor_bindings.push_back(
                                 Binding{std::move(value_result).value(),
@@ -2932,7 +3068,7 @@ private:
                     auto call_result = call_function(ctor, std::move(ctor_bindings), stmt.loc);
                     if (!call_result.has_value()) return std::unexpected(std::move(call_result).error());
                 } else if (stmt.init) {
-                    auto value_result = evaluate_expr(*stmt.init);
+                    auto value_result = evaluate_expr_in_context(*stmt.init, &cell->type);
                     if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                     if (auto result = copy_into(cell, std::move(value_result).value(), stmt.loc); !result.has_value()) {
                         return std::unexpected(std::move(result).error());
@@ -2943,7 +3079,7 @@ private:
             }
             case StmtKind::Return: {
                 if (stmt.expr) {
-                    auto value_result = evaluate_expr(*stmt.expr);
+                    auto value_result = evaluate_expr_in_context(*stmt.expr, &return_type);
                     if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                     return ExecOutcome{ExecFlow::Return, std::move(value_result).value()};
                 }
@@ -3131,26 +3267,38 @@ private:
     return false;
 }
 
+// Writes an immediate function's result back into the AST as the literal
+// that spells it. This used to enumerate `int`/`char`/`bool`/`double`
+// and reject every other scalar, so a `consteval int8_t f()` evaluated
+// fine and then failed to lower. The three literal kinds are now chosen
+// from `scpp.ast`'s scalar model, which is also what decides what the
+// resulting literal may adopt -- so an int8_t result lowers to an
+// integer literal that the int8_t place it fills accepts, and a
+// `float32_t` result lowers to a floating literal rather than being
+// mislabelled a double.
 [[nodiscard]] std::expected<void, ConstexprError> rewrite_expr_as_constant(Expr& expr, const std::shared_ptr<Cell>& value) {
-    if (is_named_type(value->type, "int")) {
-        expr.kind = ExprKind::IntegerLiteral;
-        expr.int_value = value->data.int_value;
-        expr.float_value = 0.0;
-        expr.bool_value = false;
-        expr.name.clear();
-    } else if (is_named_type(value->type, "char")) {
-        expr.kind = ExprKind::CharLiteral;
-        expr.int_value = value->data.int_value;
-        expr.float_value = 0.0;
-        expr.bool_value = false;
-        expr.name.clear();
-    } else if (is_named_type(value->type, "bool")) {
+    bool is_named = value->type.kind == TypeKind::Named;
+    std::string_view value_type_name{};
+    if (is_named) value_type_name = std::string_view{value->type.name};
+    if (is_named && value->type.name == "bool") {
         expr.kind = ExprKind::BoolLiteral;
         expr.bool_value = value->data.bool_value;
         expr.int_value = 0;
         expr.float_value = 0.0;
         expr.name.clear();
-    } else if (is_named_type(value->type, "double")) {
+    } else if (is_named && value->type.name == "char") {
+        expr.kind = ExprKind::CharLiteral;
+        expr.int_value = value->data.int_value;
+        expr.float_value = 0.0;
+        expr.bool_value = false;
+        expr.name.clear();
+    } else if (is_named && is_integral_scalar_type_name(value_type_name)) {
+        expr.kind = ExprKind::IntegerLiteral;
+        expr.int_value = value->data.int_value;
+        expr.float_value = 0.0;
+        expr.bool_value = false;
+        expr.name.clear();
+    } else if (is_named && is_float_scalar_type_name(value_type_name)) {
         expr.kind = ExprKind::FloatLiteral;
         expr.float_value = value->data.double_value;
         expr.int_value = 0;
@@ -3164,7 +3312,7 @@ private:
         // would have dereferenced null here.
         if (!value->data.is_pointer() || !value->data.pointer.storage ||
             !value->data.pointer.storage->data.is_array() || value->data.pointer.index != 0) {
-            return std::unexpected(ConstexprError(expr.loc, "Phase D1 cannot yet lower this constexpr pointer result back into source form"));
+            return std::unexpected(ConstexprError(expr.loc, "a constant-evaluated pointer result cannot be written back into source form"));
         }
         const ArrayValue& array = value->data.pointer.storage->data.array;
         expr.kind = ExprKind::StringLiteral;
@@ -3178,7 +3326,7 @@ private:
         expr.float_value = 0.0;
         expr.bool_value = false;
     } else {
-        return std::unexpected(ConstexprError(expr.loc, "Phase D1 can only lower scalar and string-literal immediate results"));
+        return std::unexpected(ConstexprError(expr.loc, "only scalar and string-literal immediate results can be written back into source form"));
     }
     expr.lhs.reset();
     expr.rhs.reset();
