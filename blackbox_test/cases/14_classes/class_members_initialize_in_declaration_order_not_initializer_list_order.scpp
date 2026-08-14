@@ -1,5 +1,6 @@
-// spec 6.1 + 6.4/6.5 declaration-order notes: member initialization follows
-// declaration order, not the textual order of the initializer list.
+// spec 6.1: members initialize in declaration order, and a field initialized
+// earlier is already alive when a later field's initializer reads it. The list
+// must be written in that same order, so `second` cannot be written first.
 
 class Pair {
     public:
@@ -8,7 +9,7 @@ private:
     int first;
     int second;
 public:
-    Pair() : second{this->first + 1}, first{5} {
+    Pair() : first{5}, second{this->first + 1} {
         return;
     }
     int encode() const {
