@@ -232,7 +232,7 @@ namespace scpp {
         // `Owner[3]` field would bypass the very copy constructor that
         // check just approved.
         if (field_type.kind == TypeKind::Array && field_type.element != nullptr &&
-            type_needs_nontrivial_default_init(field_type)) {
+            type_needs_elementwise_copy(field_type)) {
             auto array_llvm_type_result = to_llvm_type(field_type);
             if (!array_llvm_type_result.has_value()) return std::unexpected(std::move(array_llvm_type_result).error());
             llvm::LLVMTypeRef array_llvm_type = std::move(array_llvm_type_result).value();
@@ -264,7 +264,7 @@ namespace scpp {
                                             const Type& field_type)
 {
         if (field_type.kind == TypeKind::Array && field_type.element != nullptr &&
-            type_needs_nontrivial_default_init(field_type)) {
+            type_needs_elementwise_copy(field_type)) {
             auto array_llvm_type_result = to_llvm_type(field_type);
             if (!array_llvm_type_result.has_value()) return std::unexpected(std::move(array_llvm_type_result).error());
             llvm::LLVMTypeRef array_llvm_type = std::move(array_llvm_type_result).value();
@@ -415,6 +415,30 @@ namespace scpp {
 {
         if (type.kind == TypeKind::Array) {
             return type.element != nullptr && type.array_size > 0 && type_needs_nontrivial_default_init(*type.element);
+        }
+        if (type.kind != TypeKind::Named) return false;
+        if (find_class_def(type.name) != nullptr) return true;
+        // A struct's default member initializers are as real as a
+        // class's; they are simply not reachable through a ClassDef. The
+        // recursion matters because a struct field need not carry an
+        // initializer of its own: `struct A { int x = 7; }; struct B { A a; };`
+        // makes B non-trivial to default-initialize even though nothing
+        // is written on `a`. A struct cannot contain itself, so this
+        // terminates.
+        if (const StructDef* struct_def = find_struct_def(type.name)) {
+            for (const StructField& field : struct_def->fields) {
+                if (field.default_initializer.has_value()) return true;
+                if (type_needs_nontrivial_default_init(field.type)) return true;
+            }
+        }
+        return false;
+    }
+
+
+    [[nodiscard]] bool Codegen::type_needs_elementwise_copy(const Type& type)
+{
+        if (type.kind == TypeKind::Array) {
+            return type.element != nullptr && type.array_size > 0 && type_needs_elementwise_copy(*type.element);
         }
         return type.kind == TypeKind::Named && find_class_def(type.name) != nullptr;
     }

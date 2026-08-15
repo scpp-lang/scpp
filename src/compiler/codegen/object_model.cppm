@@ -787,43 +787,9 @@ namespace scpp {
             if (auto vtable_result = initialize_ordinary_vtable_pointer(class_def->name, object_ptr); !vtable_result.has_value()) {
                 return std::unexpected(std::move(vtable_result).error());
             }
-            for (const ClassField& field : class_def->fields) {
-                const Initializer* selected_init = nullptr;
-                for (const MemberInitializer& init : fn.member_initializers) {
-                    if (init.member_name == field.name) {
-                        selected_init = &init.initializer;
-                        break;
-                    }
-                }
-                if (selected_init == nullptr && field.default_initializer) selected_init = &*field.default_initializer;
-                if (selected_init == nullptr) continue;
-                auto field_storage_result = codegen_raw_member_storage(object_ptr, class_def->name, field);
-                if (!field_storage_result.has_value()) return std::unexpected(std::move(field_storage_result).error());
-                LValue field_storage = std::move(field_storage_result).value();
-                if (auto init_result = initialize_storage(field_storage, *selected_init); !init_result.has_value()) {
-                    return std::unexpected(std::move(init_result).error());
-                }
-            }
-            return {};
+            return emit_record_field_initializers(object_ptr, class_def->name, class_def->fields, &fn.member_initializers);
         }
-        for (const StructField& field : struct_def->fields) {
-            const Initializer* selected_init = nullptr;
-            for (const MemberInitializer& init : fn.member_initializers) {
-                if (init.member_name == field.name) {
-                    selected_init = &init.initializer;
-                    break;
-                }
-            }
-            if (selected_init == nullptr && field.default_initializer) selected_init = &*field.default_initializer;
-            if (selected_init == nullptr) continue;
-            auto field_storage_result = codegen_raw_member_storage(object_ptr, struct_def->name, field);
-            if (!field_storage_result.has_value()) return std::unexpected(std::move(field_storage_result).error());
-            LValue field_storage = std::move(field_storage_result).value();
-            if (auto init_result = initialize_storage(field_storage, *selected_init); !init_result.has_value()) {
-                return std::unexpected(std::move(init_result).error());
-            }
-        }
-        return {};
+        return emit_record_field_initializers(object_ptr, struct_def->name, struct_def->fields, &fn.member_initializers);
     }
 
 
@@ -864,7 +830,31 @@ namespace scpp {
         if (auto vtable_result = initialize_ordinary_vtable_pointer(class_def.name, object_ptr); !vtable_result.has_value()) {
             return std::unexpected(std::move(vtable_result).error());
         }
-        return emit_default_initializers_for_record_fields(object_ptr, class_def.name, class_def.fields);
+        return emit_record_field_initializers(object_ptr, class_def.name, class_def.fields, /*member_initializers=*/nullptr);
+    }
+
+
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::emit_default_initializers_for_record_storage(llvm::LLVMValueRef object_ptr, const std::string& type_name,
+                                                     bool initialize_virtual_interface_bases)
+{
+        if (const ClassDef* class_def = find_class_def(type_name)) {
+            return emit_default_initializers_for_class_storage(object_ptr, *class_def, initialize_virtual_interface_bases);
+        }
+        // A struct has no bases, no vtable and no virtual interface
+        // subobjects, so its whole default-initialization is its fields
+        // -- through the same field walk the class path ends with, not a
+        // second copy of it.
+        if (const StructDef* struct_def = find_struct_def(type_name)) {
+            return emit_record_field_initializers(object_ptr, struct_def->name, struct_def->fields, /*member_initializers=*/nullptr);
+        }
+        return {};
+    }
+
+
+    [[nodiscard]] bool Codegen::record_is_implicitly_default_initializable(const std::string& type_name) const
+{
+        if (class_has_any_constructor(type_name)) return false;
+        return find_class_def(type_name) != nullptr || find_struct_def(type_name) != nullptr;
     }
 
 } // namespace scpp

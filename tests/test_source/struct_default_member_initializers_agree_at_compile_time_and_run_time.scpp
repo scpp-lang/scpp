@@ -1,0 +1,21 @@
+struct S {
+    int a = 7;
+};
+
+constexpr int at_compile_time() {
+    S s{};
+    return s.a;
+}
+
+int at_run_time() {
+    S s{};
+    return s.a;
+}
+
+int main() {
+    constexpr int compile_time = at_compile_time();
+    if (compile_time != at_run_time()) {
+        return 1;
+    }
+    return compile_time;
+}

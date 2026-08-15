@@ -207,9 +207,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 build_call(ctor, ctor_args);
             }
         } else if (args.empty()) {
-            const ClassDef* class_def = find_class_def(class_name);
-            if (class_def != nullptr && !class_has_any_constructor(class_name)) {
-                if (auto r = emit_default_initializers_for_class_storage(target.ptr, *class_def, /*initialize_virtual_interface_bases=*/true);
+            if (record_is_implicitly_default_initializable(class_name)) {
+                if (auto r = emit_default_initializers_for_record_storage(target.ptr, class_name, /*initialize_virtual_interface_bases=*/true);
                     !r.has_value()) {
                     return std::unexpected(std::move(r).error());
                 }
@@ -715,9 +714,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             if (std::move(same_type_source_result).value()) return {};
             const Function* ctor_def = resolve_overload_by_type(target.type.name + "_new", args, /*param_offset=*/1);
             if (ctor_def == nullptr) {
-                const ClassDef* class_def = find_class_def(target.type.name);
-                if (args.empty() && class_def != nullptr && !class_has_any_constructor(target.type.name)) {
-                    return emit_default_initializers_for_class_storage(target.ptr, *class_def, /*initialize_virtual_interface_bases=*/true);
+                if (args.empty() && record_is_implicitly_default_initializable(target.type.name)) {
+                    return emit_default_initializers_for_record_storage(target.ptr, target.type.name, /*initialize_virtual_interface_bases=*/true);
                 }
                 return std::unexpected(CodegenError("class '" + target.type.name + "' has no constructor matching this call", current_loc_));
             }
@@ -759,6 +757,15 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         return initialize_storage_from_brace_args(
                             LValue{element_ptr, *target.type.element, alignment_for_type(*target.type.element)}, {});
                     });
+            }
+            // A struct reaches here rather than the class branch above,
+            // having no ClassDef -- but `S s{}` still has to run S's
+            // default member initializers on top of the zero fill, not
+            // instead of them.
+            if (target.type.kind == TypeKind::Named && find_struct_def(target.type.name) != nullptr) {
+                if (auto r = zero_initialize_storage(target.ptr, target.type, target.alignment); !r.has_value())
+                    return std::unexpected(std::move(r).error());
+                return emit_default_initializers_for_record_storage(target.ptr, target.type.name, /*initialize_virtual_interface_bases=*/false);
             }
             return zero_initialize_storage(target.ptr, target.type, target.alignment);
         }
@@ -1446,7 +1453,20 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     llvm::LLVMTypeRef llvm_type = std::move(llvm_type_result).value();
                     std::optional<unsigned> align = alignment_for_type(expr.type);
                     llvm::LLVMValueRef temp = create_entry_block_alloca(llvm_type, "valueinittmp", align);
-                    if (auto r = zero_initialize_storage(temp, expr.type, align); !r.has_value()) return std::unexpected(std::move(r).error());
+                    // A struct or an array of them is not "anything
+                    // else": `{}` on it still has to run its default
+                    // member initializers, exactly as `S s{};` does.
+                    // Reaching that through the same
+                    // initialize_storage_from_brace_args a VarDecl uses
+                    // is what keeps `S f() { return {}; }` and
+                    // `void g(S s = {})` agreeing with it instead of
+                    // being a seventh, quietly different answer.
+                    if (type_needs_nontrivial_default_init(expr.type)) {
+                        if (auto r = initialize_storage_from_brace_args(LValue{temp, expr.type, align}, {}); !r.has_value())
+                            return std::unexpected(std::move(r).error());
+                    } else if (auto r = zero_initialize_storage(temp, expr.type, align); !r.has_value()) {
+                        return std::unexpected(std::move(r).error());
+                    }
                     return llvm::LLVMBuildLoad2(builder_, llvm_type, temp, "valueinit.value");
                 }
 
@@ -1932,7 +1952,18 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 std::string ctor_name = expr.type.name + "_new";
                 const Function* ctor_def = resolve_overload_by_type(ctor_name, expr.args, /*param_offset=*/1);
                 if (ctor_def == nullptr) {
-                    if (expr.args.empty()) return heap_ptr;
+                    if (expr.args.empty()) {
+                        // `new S()` / `new C()` with no user-declared
+                        // constructor: heap storage is an object like any
+                        // other and gets the same default member
+                        // initializers a local would.
+                        if (auto r = emit_default_initializers_for_record_storage(target.ptr, expr.type.name,
+                                                                                  /*initialize_virtual_interface_bases=*/true);
+                            !r.has_value()) {
+                            return std::unexpected(std::move(r).error());
+                        }
+                        return heap_ptr;
+                    }
                     return std::unexpected(CodegenError("class '" + expr.type.name + "' has no constructor matching this call",
                         current_loc_));
                 }

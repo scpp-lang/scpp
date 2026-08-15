@@ -1,0 +1,16 @@
+int seven() {
+    return 7;
+}
+
+struct S {
+    int a = 1;
+    int b{2};
+    int c = seven();
+    int d = [](){ return 4; }();
+    int e;
+};
+
+int main() {
+    S s{};
+    return s.a + s.b + s.c + s.d + s.e;
+}

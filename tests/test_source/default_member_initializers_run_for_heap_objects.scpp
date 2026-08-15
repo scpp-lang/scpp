@@ -1,0 +1,21 @@
+struct S {
+    int a = 7;
+};
+
+class C {
+public:
+    virtual ~C() = default;
+    int a_ = 5;
+};
+
+int main() {
+    int total = 0;
+    [[scpp::unsafe]] {
+        S* s = new S();
+        C* c = new C();
+        total = s->a + c->a_;
+        delete s;
+        delete c;
+    }
+    return total;
+}

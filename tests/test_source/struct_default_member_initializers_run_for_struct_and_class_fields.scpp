@@ -1,0 +1,26 @@
+struct Inner {
+    int x = 7;
+};
+
+struct Outer {
+    Inner inner;
+    int y = 3;
+};
+
+class Holder {
+public:
+    virtual ~Holder() = default;
+    Holder() {}
+    int total() const {
+        return braced_.x + nested_.inner.x + nested_.y;
+    }
+private:
+    Inner braced_{};
+    Outer nested_{};
+};
+
+int main() {
+    Holder h{};
+    Outer o{};
+    return h.total() + o.inner.x + o.y;
+}
