@@ -1,0 +1,32 @@
+// spec §11.2(5): a program is ill-formed if it would form a complete
+// object whose most-derived type is an interface "in any object-forming
+// context" -- an open list, so this is not limited to a function body.
+class [[scpp::interface]] IValue {
+public:
+    virtual ~IValue() = default;
+    virtual int value() {
+        return 1;
+    }
+};
+
+int peek(int v) {
+    return v;
+}
+
+class Holder {
+public:
+    virtual ~Holder() = default;
+
+    Holder() : a_{peek(IValue{}.value())} {}
+
+    int get() {
+        return a_;
+    }
+
+    int a_;
+};
+
+int main() {
+    Holder h{};
+    return h.get();
+}

@@ -1,0 +1,38 @@
+// spec §11.2(5): a program is ill-formed if it would form a complete
+// object whose most-derived type is an interface "in any object-forming
+// context" -- an open list, so this is not limited to a function body.
+class [[scpp::interface]] IValue {
+public:
+    virtual ~IValue() = default;
+    virtual int value() {
+        return 1;
+    }
+};
+
+int peek(int v) {
+    return v;
+}
+
+// The lambda here is never given a closure class (monomorphize does not
+// walk a default member initializer), so this used to reach codegen and
+// abort; §11.2(5.1) inside the lambda body catches it first.
+class Holder {
+public:
+    virtual ~Holder() = default;
+
+    Holder() {}
+
+    int get() {
+        return a_;
+    }
+
+    int a_ = []() {
+        IValue v{};
+        return 2;
+    }();
+};
+
+int main() {
+    Holder h{};
+    return h.get();
+}
