@@ -1,0 +1,12 @@
+// A global's declaration is an ordinary VarDecl statement, so once the
+// walk reaches it `auto` is inferred by exactly the machinery a local
+// gets. Unreached, the placeholder survived all the way into codegen,
+// which reported "unsupported type 'auto'".
+template <typename T>
+T twice(T v) {
+    return v + v;
+}
+auto g = twice<int>(11);
+int main() {
+    return g - 12;
+}

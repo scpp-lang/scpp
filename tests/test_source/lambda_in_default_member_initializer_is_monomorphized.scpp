@@ -1,0 +1,14 @@
+// monomorphize walked Function::body and the member-initializer list,
+// but never a default member initializer -- so this lambda still had no
+// closure class when codegen looked one up, and the compiler aborted
+// with an uncaught std::out_of_range.
+class Holder {
+  public:
+    virtual ~Holder() = default;
+    Holder() {}
+    int a_ = [](){ return 3; }();
+};
+int main() {
+    Holder h{};
+    return h.a_;
+}

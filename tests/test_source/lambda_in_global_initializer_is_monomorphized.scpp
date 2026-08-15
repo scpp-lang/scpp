@@ -1,0 +1,7 @@
+// Program::globals was not visited by monomorphize at all, so a
+// namespace-scope initializer got none of the pass: this aborted with an
+// uncaught std::out_of_range.
+int g = [](){ return 3; }();
+int main() {
+    return g;
+}

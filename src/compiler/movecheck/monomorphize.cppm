@@ -224,7 +224,7 @@ public:
             program_.functions[i].member_initializers = std::move(walk_member_inits);
             program_.functions[i].body = std::move(walk_body);
         }
-        return {};
+        return walk_non_body_contexts();
     }
 
 private:
@@ -545,6 +545,160 @@ private:
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
+            }
+        }
+        return {};
+    }
+
+    // Every expression an Initializer holds, in either spelling
+    // (`= expr` and `{args...}`), as raw pointers. The nodes are
+    // independently heap-allocated (ExprPtr), so unlike the Initializer
+    // that owns them they stay put when program_.classes/structs
+    // reallocate -- which walking one can cause, by synthesizing a
+    // closure class or instantiating a generic type. Collecting up
+    // front and walking the pointers is what makes that safe.
+    [[nodiscard]] static std::vector<Expr*> default_initializer_exprs(ClassField& field) {
+        return initializer_exprs(field.default_initializer);
+    }
+
+    [[nodiscard]] static std::vector<Expr*> default_initializer_exprs(StructField& field) {
+        return initializer_exprs(field.default_initializer);
+    }
+
+    [[nodiscard]] static std::vector<Expr*> initializer_exprs(std::optional<Initializer>& initializer) {
+        std::vector<Expr*> out;
+        if (!initializer.has_value()) return out;
+        if (initializer->expr != nullptr) out.push_back(initializer->expr.get());
+        for (ExprPtr& arg : initializer->brace_args) {
+            if (arg != nullptr) out.push_back(arg.get());
+        }
+        return out;
+    }
+
+    // A Body standing in for a context that is not a function. It has no
+    // locals -- none of these contexts can name one -- but it carries
+    // the module, namespace and enclosing class the expression was
+    // written in, because infer_expr_type and overload resolution answer
+    // through exactly those fields.
+    [[nodiscard]] Body non_function_body(const std::string& owning_module,
+                                         const std::vector<std::string>& namespace_path,
+                                         const std::string& member_owner_class) {
+        Body body;
+        body.program = &program_;
+        body.function_owning_module = owning_module;
+        body.function_visibility_module = owning_module;
+        body.function_namespace_path = namespace_path;
+        body.function_member_owner_class = member_owner_class;
+        body.function_access_context_class = member_owner_class;
+        return body;
+    }
+
+    // The type a bare `{}` in this position initializes. For a reference
+    // -- `const std::string& reason = {}` is a real default argument in
+    // src/compiler/parser.cppm -- that is the referred-to type, not the
+    // reference itself: the initializer builds a std::string and the
+    // reference binds to it. Stamping the ValueInit with the reference
+    // type instead makes codegen try to assign through it.
+    [[nodiscard]] static Type initializer_target_type(const Type& declared) {
+        if (declared.kind == TypeKind::Reference && declared.pointee != nullptr) return *declared.pointee;
+        return declared;
+    }
+
+    // ch05 §5.11/§5.12: a function body is not the only place this pass
+    // has work to do. #453 fixed the constructor member-initializer
+    // list; these are the remaining four, and each was reached by the
+    // *type* half of this pass (resolve_generic_types, or
+    // substitute_type_params_in_expr during a generic instantiation) but
+    // never by walk_expr. That combination is worse than being missed
+    // entirely: a default member initializer inside a generic class came
+    // out with concrete field types and an unresolved lambda in it, so
+    // it looked processed to every later pass and aborted in codegen.
+    //
+    // Each context sets current_walk_return_type_ to the type the
+    // expression is being initialized *to*, for the same reason each
+    // function-like walk sets it to the return type: a bare `{}`
+    // (ExprKind::ValueInit) carries no type from parsing and is stamped
+    // from it here. Left unset it would inherit whatever function was
+    // walked last.
+    //
+    // Every loop re-reads .size() rather than snapshotting a count,
+    // because walking one of these can append a class (a closure, a
+    // generic instantiation) whose own default member initializers then
+    // need the same treatment. Instantiation is memoized, so this
+    // terminates.
+    [[nodiscard]] std::expected<void, DataflowError> walk_non_body_contexts() {
+        for (std::size_t i = 0; i < program_.globals.size(); i++) {
+            Stmt* decl = program_.globals[i].decl.get();
+            if (decl == nullptr || decl->kind != StmtKind::VarDecl) continue;
+            Body body = non_function_body(program_.globals[i].owning_module, program_.globals[i].namespace_path,
+                                          std::string{});
+            current_walk_return_type_ = initializer_target_type(decl->type);
+            // A global is a VarDecl, so this is the same walk a local
+            // gets -- including `auto` inference, which is why
+            // `auto g = twice<int>(11);` reported "unsupported type
+            // 'auto'" all the way into codegen.
+            if (auto _r = walk_stmt(*decl, body, std::nullopt, /*allow_generic_monomorphization=*/true);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        for (std::size_t i = 0; i < program_.classes.size(); i++) {
+            if (!program_.classes[i].template_params.empty()) continue;
+            if (program_.classes[i].is_variadic_specialization) continue;
+            for (std::size_t j = 0; j < program_.classes[i].fields.size(); j++) {
+                Type field_type = program_.classes[i].fields[j].type;
+                std::vector<Expr*> exprs = default_initializer_exprs(program_.classes[i].fields[j]);
+                if (exprs.empty()) continue;
+                Body body = non_function_body(program_.classes[i].owning_module, program_.classes[i].namespace_path,
+                                              program_.classes[i].name);
+                current_walk_return_type_ = initializer_target_type(field_type);
+                if (auto _r = walk_initializer_exprs(exprs, body); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+        }
+        for (std::size_t i = 0; i < program_.structs.size(); i++) {
+            if (!program_.structs[i].template_params.empty()) continue;
+            for (std::size_t j = 0; j < program_.structs[i].fields.size(); j++) {
+                Type field_type = program_.structs[i].fields[j].type;
+                std::vector<Expr*> exprs = default_initializer_exprs(program_.structs[i].fields[j]);
+                if (exprs.empty()) continue;
+                Body body = non_function_body(program_.structs[i].owning_module, program_.structs[i].namespace_path,
+                                              program_.structs[i].name);
+                current_walk_return_type_ = initializer_target_type(field_type);
+                if (auto _r = walk_initializer_exprs(exprs, body); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+        }
+        for (std::size_t i = 0; i < program_.functions.size(); i++) {
+            if (!program_.functions[i].template_params.empty()) continue;
+            if (belongs_to_unresolved_generic_type_template(program_.functions[i])) continue;
+            for (std::size_t j = 0; j < program_.functions[i].params.size(); j++) {
+                // Held as a shared_ptr copy, which keeps the node alive
+                // and at a fixed address no matter what walking it
+                // appends to program_.functions.
+                std::shared_ptr<Expr> default_expr = program_.functions[i].params[j].default_expr;
+                if (default_expr == nullptr) continue;
+                Body body = non_function_body(program_.functions[i].owning_module,
+                                              program_.functions[i].namespace_path,
+                                              program_.functions[i].member_owner_class);
+                current_walk_return_type_ = initializer_target_type(program_.functions[i].params[j].type);
+                if (auto _r = walk_expr(*default_expr, body, std::nullopt,
+                                        /*allow_generic_monomorphization=*/true);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void, DataflowError> walk_initializer_exprs(const std::vector<Expr*>& exprs, Body& body) {
+        for (Expr* expr : exprs) {
+            if (auto _r = walk_expr(*expr, body, std::nullopt, /*allow_generic_monomorphization=*/true);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
             }
         }
         return {};
@@ -2092,6 +2246,11 @@ private:
                 auto new_type = resolve_generic_type(old_type, SourceLocation{});
                 if (!new_type.has_value()) return std::unexpected(std::move(new_type).error());
                 program_.structs[i].fields[j].type = std::move(new_type).value();
+                for (Expr* expr : default_initializer_exprs(program_.structs[i].fields[j])) {
+                    if (auto _r = resolve_generic_types_in_expr(*expr); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
             }
         }
         std::size_t original_class_count = program_.classes.size();
@@ -2112,6 +2271,11 @@ private:
                 auto new_type = resolve_generic_type(old_type, SourceLocation{});
                 if (!new_type.has_value()) return std::unexpected(std::move(new_type).error());
                 program_.classes[i].fields[j].type = std::move(new_type).value();
+                for (Expr* expr : default_initializer_exprs(program_.classes[i].fields[j])) {
+                    if (auto _r = resolve_generic_types_in_expr(*expr); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
             }
             if (program_.classes[i].thread_movable_if_movable_expr) {
                 if (auto _r = resolve_generic_types_in_expr(*program_.classes[i].thread_movable_if_movable_expr); !_r.has_value()) {
@@ -2214,6 +2378,18 @@ private:
                 StmtPtr body_clone = deep_clone_stmt(*program_.functions[i].body);
                 if (auto _r = resolve_generic_types_in_stmt(*body_clone); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 program_.functions[i].body = std::move(body_clone);
+            }
+        }
+        // A namespace-scope variable's declaration is an ordinary
+        // VarDecl Stmt, and an independently heap-allocated one, so it
+        // resolves through exactly the same walk a local does -- it was
+        // simply never reached, which is why `Box<int> g{16};` reported
+        // "unsupported type 'Box'" while the identical local resolved.
+        for (std::size_t i = 0; i < program_.globals.size(); i++) {
+            Stmt* decl = program_.globals[i].decl.get();
+            if (decl == nullptr) continue;
+            if (auto _r = resolve_generic_types_in_stmt(*decl); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
             }
         }
         return {};

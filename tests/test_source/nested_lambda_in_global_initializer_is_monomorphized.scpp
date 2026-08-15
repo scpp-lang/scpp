@@ -1,0 +1,11 @@
+// The walk has to recurse, not just visit the outermost expression: the
+// inner lambda is reachable only through the outer lambda's own body,
+// which is not part of the global's initializer expression at all until
+// the outer lambda has itself been resolved into a function.
+int g = [](){
+    int inner = [](){ return 3; }();
+    return inner;
+}();
+int main() {
+    return g;
+}

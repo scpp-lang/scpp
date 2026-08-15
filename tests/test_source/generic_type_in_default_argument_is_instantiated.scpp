@@ -1,0 +1,14 @@
+template <typename T>
+class Box {
+  public:
+    virtual ~Box() = default;
+    Box(T v) : v_{v} {}
+    T value() const { return v_; }
+    T v_;
+};
+int f(int v = Box<int>{16}.value()) {
+    return v;
+}
+int main() {
+    return f() - 6;
+}
