@@ -1,0 +1,33 @@
+// spec §11.2(5.5): a constructor's parameter default argument is the
+// same position as any other function's, and was equally unchecked.
+class [[scpp::interface]] IValue {
+public:
+    virtual ~IValue() = default;
+
+    virtual int value() {
+        return 1;
+    }
+};
+
+int peek(int v) {
+    return v;
+}
+
+class C {
+public:
+    virtual ~C() = default;
+
+    C(int x = peek(IValue{}.value())) : v_{x} {}
+
+    int v() const {
+        return v_;
+    }
+
+private:
+    int v_;
+};
+
+int main() {
+    C c{};
+    return c.v();
+}

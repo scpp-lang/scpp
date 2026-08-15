@@ -1,0 +1,45 @@
+// The accepting side of the same widening: applying §11.2(5) to a struct
+// default member initializer and a parameter default argument must not
+// reject the reference/pointer forms those positions are allowed to use,
+// nor an ordinary call that happens to appear there.
+class [[scpp::interface]] IValue {
+public:
+    virtual ~IValue() = default;
+
+    virtual int value() {
+        return 1;
+    }
+};
+
+class Impl : public virtual IValue {
+public:
+    ~Impl() override = default;
+
+    int value() override {
+        return 5;
+    }
+};
+
+int read_through(IValue& v) {
+    return v.value();
+}
+
+int plain(int v) {
+    return v;
+}
+
+Impl object;
+
+struct S {
+    int a = plain(3);
+    int b = read_through(object);
+};
+
+int with_default(int x = plain(4)) {
+    return x;
+}
+
+int main() {
+    S s{};
+    return s.a + s.b + with_default() - 12;
+}

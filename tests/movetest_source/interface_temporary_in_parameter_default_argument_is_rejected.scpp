@@ -1,0 +1,24 @@
+// spec §11.2(5.5): a parameter's default argument is an expression that
+// runs at every call site that takes it, so it forms objects exactly as
+// any other expression does. Only the parameter's *type* was ever
+// checked (§11.2(5.6)), never its default argument.
+class [[scpp::interface]] IValue {
+public:
+    virtual ~IValue() = default;
+
+    virtual int value() {
+        return 1;
+    }
+};
+
+int peek(int v) {
+    return v;
+}
+
+int f(int x = peek(IValue{}.value())) {
+    return x;
+}
+
+int main() {
+    return f();
+}

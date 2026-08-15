@@ -385,6 +385,143 @@ void resolve_program_locals(Program& program);
 
 Body build_mir(const Function& fn);
 
+// A Body for an expression that has no enclosing function: a namespace-
+// scope variable's initializer, a field's default member initializer, or
+// a parameter's default argument. None of them can name a local, so
+// `local_decls` stays empty and `local_of` correctly answers "not a
+// local" for every identifier in them; the module/namespace fields carry
+// the visibility context the checks need to decide which declarations
+// the expression is allowed to see. Getting those wrong is not a
+// cosmetic error: overload resolution runs through them, so a Body with
+// the wrong module silently fails to find a callee that is plainly
+// visible at the point of use, and a check that depends on the callee's
+// type then passes by default.
+[[nodiscard]] Body make_initializer_scope_body(const Program& program, const std::string& owning_module,
+                                               const std::string& visibility_module,
+                                               const std::vector<std::string>& namespace_path,
+                                               const std::string& source_path);
+
+// One expression-bearing position that sits outside every function body,
+// normalised to the two spellings an initializer can have (`= expr` and
+// `{args...}`) so a consumer never has to know which kind of declaration
+// it came from.
+struct InitializerScope {
+    // The declared type the expression initializes, and where to point a
+    // diagnostic. `name` is the variable/field/parameter's own name.
+    const Type* declared_type = nullptr;
+    const Expr* expr = nullptr;
+    const std::vector<ExprPtr>* brace_args = nullptr;
+    SourceLocation loc;
+    std::string name;
+    Body body;
+    // True only for a namespace-scope variable. A field's type and a
+    // parameter's type are declarations too, but each is already checked
+    // where it is declared and under its own wording, so a consumer that
+    // has a rule about *declaring* a variable applies it only here.
+    bool declares_namespace_scope_variable = false;
+};
+
+// Where to point a diagnostic about a field's default member
+// initializer: at the initializer's own expression in either spelling
+// (`= expr` or `{arg}`), falling back to the field only when it has
+// neither. The field's own loc is a poor choice -- the parser stamps it
+// with the token that *follows* the declaration, so it points past the
+// thing being complained about (a separate parser defect).
+[[nodiscard]] SourceLocation initializer_scope_loc(const Initializer& init, const SourceLocation& fallback);
+
+// The single enumeration of every expression position in a program that
+// no function body encloses -- equivalently, every position whose
+// expressions cannot name a local and so need a synthesized Body: a
+// namespace-scope variable's initializer, a class field's default member
+// initializer, a struct field's, and a parameter's default argument. A
+// constructor's mem-initializer list is deliberately not among them: it
+// can name the constructor's parameters, so it is walked with that
+// constructor's own Body, alongside its body.
+//
+// It exists because that list is exactly what has been drifting. Each
+// pass that needed it wrote its own copy and each copy was missing
+// different entries -- movecheck's conversion checks had all four,
+// interface validation had globals and class fields but neither struct
+// fields nor parameter defaults, so an interface temporary written in
+// either of those two reached codegen, which assumes such an object
+// cannot exist and segfaults building it. A pass that needs to see every
+// expression a program contains asks here instead, and a position added
+// to the language is added to this list once rather than to every pass
+// that forgot it last time.
+//
+// The Body differs per position and genuinely has to: a global's
+// initializer resolves names in its own namespace, a field's in the
+// record's, a parameter default's in the function's *visibility* module
+// rather than its owning one. That is why this hands the caller a Body
+// per position rather than pretending one traversal state fits all.
+//
+// `visit` is called once per position and returns any
+// `std::expected<void, E>`; the first failure stops the walk.
+template <typename VisitFn>
+[[nodiscard]] auto for_each_initializer_scope(const Program& program, VisitFn&& visit)
+    -> std::invoke_result_t<VisitFn&, const InitializerScope&> {
+    using Result = std::invoke_result_t<VisitFn&, const InitializerScope&>;
+    for (const GlobalVar& global : program.globals) {
+        if (global.decl == nullptr || global.decl->kind != StmtKind::VarDecl) continue;
+        InitializerScope scope;
+        scope.declared_type = &global.decl->type;
+        scope.expr = global.decl->init.get();
+        scope.brace_args = &global.decl->ctor_args;
+        scope.loc = global.decl->loc;
+        scope.name = global.decl->var_name;
+        scope.declares_namespace_scope_variable = true;
+        scope.body = make_initializer_scope_body(program, global.owning_module, global.owning_module,
+                                                 global.namespace_path, global.decl->loc.source_path_text());
+        if (Result r = visit(scope); !r.has_value()) return r;
+    }
+    for (const ClassDef& def : program.classes) {
+        for (const ClassField& field : def.fields) {
+            if (!field.default_initializer.has_value()) continue;
+            InitializerScope scope;
+            scope.declared_type = &field.type;
+            scope.expr = field.default_initializer->expr.get();
+            scope.brace_args = &field.default_initializer->brace_args;
+            // The parser stamps a field's loc with the token that
+            // *follows* the declaration, so field.loc would point past
+            // the thing a diagnostic is about; the initializer
+            // expression's own loc is where the reader is looking.
+            scope.loc = initializer_scope_loc(*field.default_initializer, field.loc);
+            scope.name = field.name;
+            scope.body = make_initializer_scope_body(program, def.owning_module, def.owning_module, def.namespace_path,
+                                                     scope.loc.source_path_text());
+            if (Result r = visit(scope); !r.has_value()) return r;
+        }
+    }
+    for (const StructDef& def : program.structs) {
+        for (const StructField& field : def.fields) {
+            if (!field.default_initializer.has_value()) continue;
+            InitializerScope scope;
+            scope.declared_type = &field.type;
+            scope.expr = field.default_initializer->expr.get();
+            scope.brace_args = &field.default_initializer->brace_args;
+            scope.loc = initializer_scope_loc(*field.default_initializer, field.loc);
+            scope.name = field.name;
+            scope.body = make_initializer_scope_body(program, def.owning_module, def.owning_module, def.namespace_path,
+                                                     scope.loc.source_path_text());
+            if (Result r = visit(scope); !r.has_value()) return r;
+        }
+    }
+    for (const Function& fn : program.functions) {
+        for (const Param& param : fn.params) {
+            if (param.default_expr == nullptr) continue;
+            InitializerScope scope;
+            scope.declared_type = &param.type;
+            scope.expr = param.default_expr.get();
+            scope.loc = param.default_expr->loc;
+            scope.name = param.name;
+            scope.body = make_initializer_scope_body(program, fn.owning_module, fn.visibility_module, fn.namespace_path,
+                                                     fn.loc.source_path_text());
+            if (Result r = visit(scope); !r.has_value()) return r;
+        }
+    }
+    return Result{};
+}
+
 } // namespace scpp
 
 namespace scpp {
@@ -1099,6 +1236,27 @@ void resolve_program_locals(Program& program) {
 Body build_mir(const Function& fn) {
     MirBuilder builder(fn);
     return builder.build();
+}
+
+[[nodiscard]] SourceLocation initializer_scope_loc(const Initializer& init, const SourceLocation& fallback) {
+    if (init.expr != nullptr) return init.expr->loc;
+    for (const ExprPtr& arg : init.brace_args) {
+        if (arg != nullptr) return arg->loc;
+    }
+    return fallback;
+}
+
+[[nodiscard]] Body make_initializer_scope_body(const Program& program, const std::string& owning_module,
+                                               const std::string& visibility_module,
+                                               const std::vector<std::string>& namespace_path,
+                                               const std::string& source_path) {
+    Body body;
+    body.program = &program;
+    body.function_owning_module = owning_module;
+    body.function_visibility_module = visibility_module;
+    body.function_namespace_path = namespace_path;
+    body.function_source_path = source_path;
+    return body;
 }
 
 } // namespace scpp
