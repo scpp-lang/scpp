@@ -1,0 +1,10 @@
+// A struct's default member initializers are a fifth context, and were
+// unwalked like the rest -- so this was silently accepted rather than
+// diagnosed.
+struct S {
+    int a = [this](){ return 1; }();
+};
+int main() {
+    S s{};
+    return s.a;
+}

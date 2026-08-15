@@ -1,0 +1,11 @@
+// Same at namespace scope: there is no object to capture.
+class Holder {
+  public:
+    virtual ~Holder() = default;
+    Holder() {}
+    int b_ = 1;
+};
+int g = [this](){ return 1; }();
+int main() {
+    return g;
+}

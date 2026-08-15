@@ -1,0 +1,17 @@
+// Reaching the expression is what instantiates the generic. Unwalked,
+// this reported "no generated code for resolved function 'twice'" --
+// signatures knew the call, and nothing ever produced a body for it.
+template <typename T>
+T twice(T v) {
+    return v + v;
+}
+class Holder {
+  public:
+    virtual ~Holder() = default;
+    Holder() {}
+    int a_ = twice<int>(11);
+};
+int main() {
+    Holder h{};
+    return h.a_ - 12;
+}

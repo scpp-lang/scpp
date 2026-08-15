@@ -1,0 +1,17 @@
+// A default member initializer inside a generic class was the partial
+// case: generic instantiation ran substitute_type_params_in_expr over
+// it, so `T v_` came out as `int v_` and it looked processed to every
+// later pass -- but the lambda in it had still never been walked, and
+// codegen aborted with an uncaught std::out_of_range exactly as for a
+// non-generic class.
+template <typename T>
+class Box {
+  public:
+    virtual ~Box() = default;
+    Box() {}
+    T v_ = [](){ return 3; }();
+};
+int main() {
+    Box<int> b{};
+    return b.v_;
+}

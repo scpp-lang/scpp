@@ -1,0 +1,19 @@
+// A bare `{}` (ExprKind::ValueInit) carries no type from parsing; it is
+// stamped from the type being initialized. For a reference parameter
+// that is the referred-to type, not the reference: the initializer
+// builds a Wrap and the reference binds to it. Stamping the reference
+// type instead makes codegen try to assign through it, which is how
+// src/compiler/parser.cppm's own `const std::string& reason = {}`
+// started failing with "expression is not assignable".
+class Wrap {
+  public:
+    virtual ~Wrap() = default;
+    Wrap() : v_{7} {}
+    int v_;
+};
+int f(const Wrap& w = {}) {
+    return w.v_;
+}
+int main() {
+    return f();
+}

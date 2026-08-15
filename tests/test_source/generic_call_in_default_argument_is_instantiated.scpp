@@ -1,0 +1,10 @@
+template <typename T>
+T twice(T v) {
+    return v + v;
+}
+int f(int v = twice<int>(11)) {
+    return v;
+}
+int main() {
+    return f() - 12;
+}

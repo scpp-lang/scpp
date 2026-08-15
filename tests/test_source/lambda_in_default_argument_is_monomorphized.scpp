@@ -1,0 +1,9 @@
+// A default argument is a fourth expression-bearing context outside any
+// function body. Param::default_expr got generic *type* resolution but
+// was never walked, so this aborted with an uncaught std::out_of_range.
+int f(int v = [](){ return 3; }()) {
+    return v;
+}
+int main() {
+    return f();
+}

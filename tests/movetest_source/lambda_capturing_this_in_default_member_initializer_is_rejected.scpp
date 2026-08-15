@@ -1,0 +1,15 @@
+// A default member initializer runs before the object exists as far as
+// any enclosing scope is concerned, and #451 established it cannot name
+// `this` or a local. Unwalked, this crashed the compiler with an
+// uncaught std::out_of_range instead of saying so.
+class Holder {
+  public:
+    virtual ~Holder() = default;
+    Holder() {}
+    int a_ = [this](){ return this->b_; }();
+    int b_ = 1;
+};
+int main() {
+    Holder h{};
+    return h.a_;
+}
