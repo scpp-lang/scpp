@@ -1,0 +1,26 @@
+// spec §11.2(5.5),(6): the temporary is rejected even when it is only
+// bound to a reference parameter. This is the shape that stayed quiet
+// the longest -- it was accepted, and once struct default member
+// initializers began executing it started forming a real interface
+// object at run time rather than being ignored.
+class [[scpp::interface]] IValue {
+public:
+    virtual ~IValue() = default;
+
+    virtual int value() {
+        return 1;
+    }
+};
+
+int consume(IValue& v) {
+    return v.value();
+}
+
+struct S {
+    int v = consume(IValue{});
+};
+
+int main() {
+    S s{};
+    return s.v;
+}

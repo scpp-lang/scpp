@@ -600,24 +600,13 @@ namespace scpp {
     return nullptr;
 }
 
-// A Body for an initializer that has no enclosing function: a global
-// variable's own initializer, a field's default member initializer, or a
-// parameter's default argument. None of them can name a local, so
-// `local_decls` stays empty and `local_of` correctly answers "not a
-// local" for every identifier in them; the module/namespace fields carry
-// the visibility context the checks need to decide which declarations
-// this initializer is allowed to see.
-[[nodiscard]] Body make_initializer_scope_body(const Program& program, const std::string& owning_module,
-                                               const std::string& visibility_module,
-                                               const std::vector<std::string>& namespace_path,
-                                               const std::string& source_path) {
-    Body body;
-    body.program = &program;
-    body.function_owning_module = owning_module;
-    body.function_visibility_module = visibility_module;
-    body.function_namespace_path = namespace_path;
-    body.function_source_path = source_path;
-    return body;
+// The same answer for an InitializerScope, whose two spellings are held
+// as raw pointers because they are borrowed from whichever declaration
+// the position came from.
+[[nodiscard]] const Expr* single_bound_value_ptr(const Expr* assigned, const std::vector<ExprPtr>* brace_args) {
+    if (assigned != nullptr) return assigned;
+    if (brace_args != nullptr && brace_args->size() == 1) return (*brace_args)[0].get();
+    return nullptr;
 }
 
 // spec §6: a constructor's member-initializer list binds a value to a
@@ -653,78 +642,27 @@ namespace scpp {
     return {};
 }
 
-// spec §6: the three remaining positions that bind a value to a declared
-// type outside any function body -- a global variable's initializer, a
-// field's default member initializer, and a parameter's default argument
-// -- none of which ran a single one of the five checks before. A global
-// `uint8_t u = a;` was accepted where the identical local declaration is
-// rejected, `int* g_p = &g_b;` bound a `bool*`, and a default argument
-// converted whatever it liked at every call site that took it.
+// spec §6: the expression positions that bind a value to a declared type
+// outside any function body -- a global variable's initializer, a class
+// or struct field's default member initializer, and a parameter's
+// default argument -- none of which ran a single one of the five checks
+// before. A global `uint8_t u = a;` was accepted where the identical
+// local declaration is rejected, `int* g_p = &g_b;` bound a `bool*`, and
+// a default argument converted whatever it liked at every call site that
+// took it.
+//
+// The list of those positions is not written here: it comes from
+// for_each_initializer_scope, which is also what interface validation
+// walks, so the two cannot disagree about which positions exist.
 [[nodiscard]] std::expected<void, DataflowError> check_initializer_scope_conversions(const Program& program,
                                                                                      const Signatures& signatures) {
-    for (const GlobalVar& global : program.globals) {
-        if (global.decl == nullptr) continue;
-        const Expr* value = single_bound_value(global.decl->init, global.decl->ctor_args);
-        if (value == nullptr) continue;
-        Body body = make_initializer_scope_body(program, global.owning_module, global.owning_module,
-                                                global.namespace_path, global.decl->loc.source_path_text());
-        if (auto _r = check_value_binding_conversions(global.decl->type, *value, body, signatures, global.decl->loc,
-                                                      global.decl->var_name, /*report_errors=*/true);
-            !_r.has_value()) {
-            return std::unexpected(std::move(_r).error());
-        }
-    }
-    // The field walks report at the *initializer expression's* location,
-    // not at `field.loc`: the parser stamps a field's loc with the token
-    // that follows the declaration (for `class S { uint8_t u = g_a;
-    // virtual ~S() = default; };` field.loc lands on `virtual`), so
-    // `field.loc` would point past the thing being complained about.
-    // That mis-stamping is a separate parser defect; pointing at the
-    // value also matches what the local-declaration path already does.
-    for (const ClassDef& def : program.classes) {
-        for (const ClassField& field : def.fields) {
-            if (!field.default_initializer.has_value()) continue;
-            const Expr* value =
-                single_bound_value(field.default_initializer->expr, field.default_initializer->brace_args);
-            if (value == nullptr) continue;
-            Body body = make_initializer_scope_body(program, def.owning_module, def.owning_module, def.namespace_path,
-                                                    value->loc.source_path_text());
-            if (auto _r = check_value_binding_conversions(field.type, *value, body, signatures, value->loc, field.name,
-                                                          /*report_errors=*/true);
-                !_r.has_value()) {
-                return std::unexpected(std::move(_r).error());
-            }
-        }
-    }
-    for (const StructDef& def : program.structs) {
-        for (const StructField& field : def.fields) {
-            if (!field.default_initializer.has_value()) continue;
-            const Expr* value =
-                single_bound_value(field.default_initializer->expr, field.default_initializer->brace_args);
-            if (value == nullptr) continue;
-            Body body = make_initializer_scope_body(program, def.owning_module, def.owning_module, def.namespace_path,
-                                                    value->loc.source_path_text());
-            if (auto _r = check_value_binding_conversions(field.type, *value, body, signatures, value->loc, field.name,
-                                                          /*report_errors=*/true);
-                !_r.has_value()) {
-                return std::unexpected(std::move(_r).error());
-            }
-        }
-    }
-    for (const Function& fn : program.functions) {
-        for (const Param& param : fn.params) {
-            if (param.default_expr == nullptr) continue;
-            Body body = make_initializer_scope_body(program, fn.owning_module, fn.visibility_module,
-                                                    fn.namespace_path, fn.loc.source_path_text());
-            if (auto _r = check_value_binding_conversions(param.type, *param.default_expr, body, signatures,
-                                                          param.default_expr->loc, param.name,
-                                                          /*report_errors=*/true);
-                !_r.has_value()) {
-                return std::unexpected(std::move(_r).error());
-            }
-        }
-    }
-    return {};
+    return for_each_initializer_scope(program, [&](const InitializerScope& scope)
+                                                   -> std::expected<void, DataflowError> {
+        const Expr* value = single_bound_value_ptr(scope.expr, scope.brace_args);
+        if (value == nullptr) return {};
+        return check_value_binding_conversions(*scope.declared_type, *value, scope.body, signatures, scope.loc,
+                                               scope.name, /*report_errors=*/true);
+    });
 }
 
 // Validates that `operand` (a plain Identifier, e.g. `p`, or a

@@ -1,0 +1,28 @@
+// spec §11.2(5.5): the struct holding the offending initializer need not
+// be the one being declared -- an inner struct's default member
+// initializer runs when the outer one is created.
+class [[scpp::interface]] IValue {
+public:
+    virtual ~IValue() = default;
+
+    virtual int value() {
+        return 1;
+    }
+};
+
+int peek(int v) {
+    return v;
+}
+
+struct Inner {
+    int v = peek(IValue{}.value());
+};
+
+struct Outer {
+    Inner in;
+};
+
+int main() {
+    Outer o{};
+    return o.in.v;
+}

@@ -1,0 +1,27 @@
+// spec §11.2(5.5): a struct's default member initializer is an
+// object-forming context like any other. It was checked by nothing at
+// all: the validator kept its own list of the positions outside a
+// function body and program_.structs was not on it, so this was accepted
+// and -- once struct default member initializers started actually
+// executing -- reached codegen and crashed the compiler.
+class [[scpp::interface]] IValue {
+public:
+    virtual ~IValue() = default;
+
+    virtual int value() {
+        return 1;
+    }
+};
+
+int peek(int v) {
+    return v;
+}
+
+struct S {
+    int v = peek(IValue{}.value());
+};
+
+int main() {
+    S s{};
+    return s.v;
+}
