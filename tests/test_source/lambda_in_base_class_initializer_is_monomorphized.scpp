@@ -1,0 +1,20 @@
+// A base-class initializer is an entry in the same list, so a lambda
+// written there is resolved too -- before this it made overload
+// resolution report that no constructor matched.
+class Base {
+  public:
+    virtual ~Base() = default;
+    Base(int v) : v_{v} {}
+    int value() const { return v_; }
+    int v_;
+};
+class Derived : public Base {
+  public:
+    ~Derived() override = default;
+    Derived() : Base{[]() -> int { return 8; }()}, q_{1} {}
+    int q_;
+};
+int main() {
+    Derived d{};
+    return d.value();
+}

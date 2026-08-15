@@ -1,0 +1,13 @@
+// The same walk has to run for a constructor clone created during
+// monomorphization, not just for the functions present up front.
+template <typename T>
+class Box {
+  public:
+    virtual ~Box() = default;
+    Box() : a_{[]() -> int { return 12; }()} {}
+    int a_;
+};
+int main() {
+    Box<int> b{};
+    return b.a_;
+}

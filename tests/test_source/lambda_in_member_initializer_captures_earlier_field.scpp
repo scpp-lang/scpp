@@ -1,0 +1,13 @@
+// A capture initializer may read a member already constructed at that
+// point (spec §6.1), and the closure it forms is monomorphized.
+class Holder {
+  public:
+    virtual ~Holder() = default;
+    Holder() : b_{2}, a_{[x = this->b_]() -> int { return x * 5; }()} {}
+    int b_;
+    int a_;
+};
+int main() {
+    Holder h{};
+    return h.a_;
+}

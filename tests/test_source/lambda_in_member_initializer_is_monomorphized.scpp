@@ -1,0 +1,12 @@
+// A lambda written in a constructor's member-initializer-list is
+// resolved to a synthesized closure class just as one in the body is.
+class Holder {
+  public:
+    virtual ~Holder() = default;
+    Holder() : a_{[]() -> int { return 3; }()} {}
+    int a_;
+};
+int main() {
+    Holder h{};
+    return h.a_;
+}
