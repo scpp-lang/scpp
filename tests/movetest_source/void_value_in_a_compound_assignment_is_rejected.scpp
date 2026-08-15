@@ -1,0 +1,6 @@
+void h() {}
+int f() {
+    int t = 1;
+    t += h();
+    return t;
+}

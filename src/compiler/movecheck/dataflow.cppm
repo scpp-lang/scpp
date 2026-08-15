@@ -384,6 +384,24 @@ namespace scpp {
 [[nodiscard]] std::expected<void, DataflowError> check_binary_expr_operand_types(const Expr& expr, const Body& body, const Signatures& signatures,
                                      const SourceLocation& loc) {
     if (expr.binary_op == BinaryOp::Assign) return {};
+    // spec §16.3(1.5) names both operands of a binary operator as
+    // positions where a value is required, and this is the one function
+    // that judges them -- for a compound assignment too, which reaches
+    // it through validate_compound_assignment_expr's synthesized
+    // arithmetic expression. Asked before every early-out below,
+    // including the one for `&&`/`||`: those two have their own
+    // "expected a 'bool' value" diagnostic, which describes the wrong
+    // problem for an operand that is not a value at all.
+    if (auto _r = check_expression_yields_a_value(*expr.lhs, body, signatures, loc,
+                                                  "a binary operator's left operand", /*report_errors=*/true);
+        !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
+    if (auto _r = check_expression_yields_a_value(*expr.rhs, body, signatures, loc,
+                                                  "a binary operator's right operand", /*report_errors=*/true);
+        !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
     if (expr.binary_op == BinaryOp::And || expr.binary_op == BinaryOp::Or) return {};
     std::optional<Type> lhs_type = infer_expr_type(*expr.lhs, body, signatures);
     std::optional<Type> rhs_type = infer_expr_type(*expr.rhs, body, signatures);
@@ -509,12 +527,12 @@ namespace scpp {
 // definition of that question, so that every position which binds a
 // value to a declared type gets the same answer.
 //
-// The five checks existed before this was extracted, but each position
-// that ran them spelled the sequence out by hand, and no two spellings
-// agreed: the local declaration/assignment path ran all five, the global
-// assignment path ran four (no enum), the expression-level assignment
-// path ran five, and four positions -- a global declaration's own
-// initializer, a constructor's member-initializer list, a field's
+// The five conversion checks existed before this was extracted, but each
+// position that ran them spelled the sequence out by hand, and no two
+// spellings agreed: the local declaration/assignment path ran all five,
+// the global assignment path ran four (no enum), the expression-level
+// assignment path ran five, and four positions -- a global declaration's
+// own initializer, a constructor's member-initializer list, a field's
 // default member initializer, and a parameter's default argument -- ran
 // none at all. So `uint8_t u = a;` was rejected as a local and accepted
 // as a global; `S() : u{a} {}` accepted what `s.u = a;` rejected. A
@@ -527,6 +545,14 @@ namespace scpp {
                                                                                 const SourceLocation& loc,
                                                                                 const std::string& target_name,
                                                                                 bool report_errors) {
+    // First, because it is not a conversion question: the other five ask
+    // what `value` converts to, and a `void` expression has nothing to
+    // convert. See check_expression_yields_a_value.
+    if (auto _r = check_expression_yields_a_value(value, body, signatures, loc, "the value bound to '" + target_name + "'",
+                                                  report_errors);
+        !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
     if (auto _r = check_function_pointer_assignment(target_type, value, body, signatures, loc, target_name,
                                                     report_errors);
         !_r.has_value()) {
@@ -1062,6 +1088,23 @@ struct ConvertingConstructorBinding {
     // too (e.g. an IIFE could init-capture an already-moved-out
     // std::unique_ptr without error).
     std::optional<Type> direct_call_type = expr.lhs == nullptr ? infer_expr_type(expr, body, signatures) : std::nullopt;
+    // spec §16.3(1.3): an argument of a function call or of a
+    // constructor call. Asked here, ahead of the constructor redirect
+    // and of overload resolution, so that both kinds of call get it and
+    // so that the diagnostic describes the argument rather than the
+    // absence of a matching overload -- a generic callee has no such
+    // absence to report at all (`ident(h())` deduced `T = void` and
+    // instantiated a function with a `void` parameter, left for codegen
+    // to reject).
+    for (std::size_t index = 0; index < expr.args.size(); ++index) {
+        if (expr.args[index] == nullptr) continue;
+        if (auto _r = check_expression_yields_a_value(*expr.args[index], body, signatures, state.current_loc,
+                                                      "argument " + std::to_string(index + 1) + " of a call",
+                                                      report_errors);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    }
     if (!expr.lhs && direct_call_type.has_value() && direct_call_type->kind == TypeKind::Named &&
         state.class_names != nullptr && state.class_names->contains(expr.name)) {
         return check_constructor_arguments(*direct_call_type, expr.args, state, body, signatures, report_errors);
@@ -1368,6 +1411,21 @@ struct ConvertingConstructorBinding {
 [[nodiscard]] std::expected<void, DataflowError> check_constructor_arguments(const Type& constructed_type, const std::vector<ExprPtr>& ctor_args,
                                   DataflowState& state, const Body& body, const Signatures& signatures,
                                   bool report_errors) {
+    // spec §16.3(1.3): the constructor-call half of the same rule
+    // check_call_arguments applies to a function call. Also the only
+    // check a braced *scalar* declaration (`int t{h()};`) gets from
+    // movecheck at all -- it has no constructor to resolve against, so
+    // everything below no-ops for it and the question would otherwise
+    // fall through to codegen.
+    for (std::size_t index = 0; index < ctor_args.size(); ++index) {
+        if (ctor_args[index] == nullptr) continue;
+        if (auto _r = check_expression_yields_a_value(*ctor_args[index], body, signatures, state.current_loc,
+                                                      "argument " + std::to_string(index + 1) + " of a call",
+                                                      report_errors);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    }
     std::string class_name = constructed_type.name;
     std::string ctor_name = class_name + "_new";
     auto is_constructor_clone_name = [&](std::string_view name) {
@@ -1846,6 +1904,16 @@ struct ConvertingConstructorBinding {
                 expr.unary_op == UnaryOp::PostInc || expr.unary_op == UnaryOp::PostDec) {
                 return validate_increment_decrement_expr(expr, state, body, signatures, report_errors);
             }
+            // `-`, `!` and `~`: spec §16.3 does not list a unary
+            // operator's operand among its positions, but the reason is
+            // that it is covered by the same rule -- an operator applies
+            // to a value, and `-h()` had no check of any kind, so it
+            // reached codegen and faulted there.
+            if (auto _r = check_expression_yields_a_value(*expr.lhs, body, signatures, state.current_loc,
+                                                          "a unary operator's operand", report_errors);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             return apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
 
         case ExprKind::New:
@@ -1963,6 +2031,16 @@ struct ConvertingConstructorBinding {
                 return std::unexpected(std::move(_r).error());
             }
             if (report_errors) {
+                // Only the condition. [basic.types.general] explicitly
+                // permits a `void` second and third operand, and the
+                // result is then a `void` expression like any other --
+                // caught by whichever position tries to bind it, or
+                // legal if the whole conditional is discarded.
+                if (auto _r = check_expression_yields_a_value(*expr.lhs, body, signatures, state.current_loc,
+                                                              "the condition of a conditional expression", report_errors);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
                 std::optional<Type> condition_type = infer_expr_type(*expr.lhs, body, signatures);
                 if (!condition_type.has_value() || condition_type->kind != TypeKind::Named ||
                     condition_type->name != "bool") {
@@ -2234,6 +2312,16 @@ struct ConvertingConstructorBinding {
 
         case ExprKind::Subscript:
             if (auto _r = apply_expr(*expr.lhs, false, state, body, signatures, report_errors); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            if (auto _r = check_expression_yields_a_value(*expr.lhs, body, signatures, state.current_loc,
+                                                          "the object a subscript is applied to", report_errors);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            if (auto _r = check_expression_yields_a_value(*expr.rhs, body, signatures, state.current_loc,
+                                                          "a subscript index", report_errors);
+                !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
             return apply_expr(*expr.rhs, false, state, body, signatures, report_errors);
@@ -3011,9 +3099,34 @@ struct ConvertingConstructorBinding {
     switch (term.kind) {
         case TerminatorKind::Branch:
         case TerminatorKind::Switch:
+            // spec §16.3(4) requires a `bool` here (an integral or enum
+            // value for a `switch`), which is checked by codegen; the
+            // question this asks is the earlier one, because "not a
+            // bool" describes the wrong problem for an expression that
+            // is not a value at all.
+            if (auto _r = check_expression_yields_a_value(
+                    *term.condition, body, signatures, term.loc,
+                    term.kind == TerminatorKind::Switch ? "a 'switch' condition" : "an 'if'/'while' condition",
+                    /*report_errors=*/true);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             return apply_expr(*term.condition, false, state, body, signatures, /*report_errors=*/true);
         case TerminatorKind::Return: {
             if (term.return_value == nullptr) return {};
+            // spec §16.3(1.4). The one position where a `void` operand
+            // is legal rather than forbidden: [basic.types.general]
+            // allows `return f();` from a function that itself returns
+            // `void`, and that form is in use, so the check is asked
+            // only when this function returns something.
+            if (!is_void_named_type(fn.return_type)) {
+                if (auto _r = check_expression_yields_a_value(*term.return_value, body, signatures, term.loc,
+                                                              "the operand of a 'return' in '" + fn.name + "'",
+                                                              /*report_errors=*/true);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
             if (auto _r = check_scalar_conversion(fn.return_type, *term.return_value, body, signatures, term.loc,
                                                   "the return value of '" + fn.name + "'",
                                                   /*report_errors=*/true);

@@ -1,0 +1,19 @@
+class R {
+public:
+    virtual ~R() = default;
+    int a_ = 7;
+};
+
+template<typename T>
+void consume(T t) {
+}
+
+R make(int n) {
+    consume(n);
+    return {};
+}
+
+int main() {
+    R r = make(1);
+    return r.a_;
+}

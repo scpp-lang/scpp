@@ -204,6 +204,9 @@ struct NodiscardInfo {
 [[nodiscard]] std::expected<void, DataflowError> check_scalar_conversion(const Type& target_type, const Expr& expr,
                                   const Body& body, const Signatures& signatures, SourceLocation loc,
                                   const std::string& target_name, bool report_errors);
+[[nodiscard]] std::expected<void, DataflowError> check_expression_yields_a_value(const Expr& expr, const Body& body,
+                                  const Signatures& signatures, SourceLocation loc, const std::string& role,
+                                  bool report_errors);
 [[nodiscard]] bool assignment_target_is_read_only(const Expr& expr, const Body& body,
                                                   const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> validate_sizeof_operand(const Expr& expr, const Body& body, const Signatures& signatures,
@@ -1251,6 +1254,55 @@ std::expected<void, DataflowError> check_nullptr_assignment(const Type& target_t
                                              "function pointer type, or to a class type declaring a constructor that "
                                              "takes it -- never to 'bool' and never to an integer type (spec ch06 §6)",
                                          loc));
+}
+
+// [basic.types.general], which spec §1(2) applies unchanged: an
+// expression of type `void` produces no value, and may appear only where
+// no value is wanted -- as a discarded expression statement, or as the
+// operand of `return` in a function that itself returns `void`.
+//
+// scpp had this rule nowhere. Every check that judges an expression used
+// as a value asks a question of the form "are these two *scalar* types
+// the same?", and each one declines when it does not recognise a type:
+// check_scalar_conversion returns early on a non-scalar source,
+// binary_expr_has_valid_arithmetic_types returns `true` the moment
+// either operand is not a scalar, and binary_expr_has_compatible_types
+// asks types_equal, which cheerfully answers "yes" for `void` against
+// `void`. `void` is the one type no such list contains, so every one of
+// them abstained and the question went to codegen -- which caught it
+// where it happened to store through a checked path (a local
+// declaration, an assignment, a `return`) and did not where it did not.
+// A namespace-scope initializer and a unary minus reached LLVM, where
+// `void` finds an llvm_unreachable that a release build compiles to
+// nothing: `int g = h();` became unbounded recursion in
+// llvm::DataLayout::getAlignment, and `void v;` a jump to an address on
+// the stack. Those crash sites correctly assume a first-class type; the
+// fault was that nothing upstream had ever asked whether the expression
+// was a value.
+//
+// So it is asked here, once, by the checks that already stand at each of
+// the positions spec §16.3(1) enumerates -- and asked *before* they
+// decide whether they recognise the type, because "there is no value
+// here" is not a conversion question and has to be answered first.
+//
+// `void*` is untouched: that is a pointer, and a perfectly ordinary
+// value.
+std::expected<void, DataflowError> check_expression_yields_a_value(const Expr& expr, const Body& body,
+                                                                   const Signatures& signatures, SourceLocation loc,
+                                                                   const std::string& role, bool report_errors) {
+    if (!report_errors) return {};
+    // See Body::function_is_generic_template (mir.cppm): inside an
+    // uninstantiated template a `void` answer can mean "unconstrained",
+    // and this rule rejects rather than abstains.
+    if (body.function_is_generic_template) return {};
+    std::optional<Type> source_type = infer_expr_type(expr, body, signatures);
+    if (!source_type.has_value() || !is_void_named_type(*source_type)) return {};
+    return std::unexpected(DataflowError(
+        "cannot use a 'void' value as " + role +
+            ": an expression of type 'void' produces no value, so it may appear only as a discarded expression "
+            "statement or as the operand of a 'return' in a function returning 'void' ([basic.types.general], "
+            "applied unchanged by spec §1(2))",
+        loc));
 }
 
 // spec §6: scpp has no implicit conversion between *any* two distinct

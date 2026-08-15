@@ -243,6 +243,27 @@ private:
     // this is where it is filled in instead, once, before any later
     // pass (constexpr folding, movecheck, codegen) ever needs to know
     // what `expr.type` is for such a node.
+    //
+    // Both of the other two call sites are reachable from *inside* an
+    // ongoing walk -- walk_new_concrete_function when a body calls a
+    // generic and instantiates it on the spot, resolve_lambda when a
+    // body contains a lambda -- so each must put back what it found on
+    // the way out. Assigning without restoring left the enclosing body
+    // walking on with the *callee's* return type, and a bare
+    // `return {};` appearing after such a call was then stamped with
+    // it: `std::expected<int, int> f(int n) { consume(n); return {}; }`
+    // over a `template<typename T> void consume(T)` stamped the
+    // ValueInit `void` and crashed codegen. Restored by scope guard
+    // rather than by hand, because every walk below returns early on
+    // the first error.
+    struct WalkReturnTypeScope {
+        Type& slot;
+        Type saved;
+        WalkReturnTypeScope(Type& slot_in, Type fresh) : slot(slot_in), saved(slot_in) { slot = std::move(fresh); }
+        ~WalkReturnTypeScope() { slot = std::move(saved); }
+        WalkReturnTypeScope(const WalkReturnTypeScope&) = delete;
+        WalkReturnTypeScope& operator=(const WalkReturnTypeScope&) = delete;
+    };
     Type current_walk_return_type_;
     std::unordered_map<std::string, const ConceptDef*> concepts_by_name_;
     std::unordered_map<std::string, std::vector<std::size_t>> generic_template_indices_;
@@ -489,7 +510,7 @@ private:
         }
         Body body = build_mir(fn);
         body.program = &program_;
-        current_walk_return_type_ = fn.return_type;
+        WalkReturnTypeScope return_type_scope(current_walk_return_type_, fn.return_type);
         std::optional<Type> enclosing_this_type = this_type_of(fn);
         bool allow_generic_monomorphization = !fn.is_generic_template;
         // Walked out of line and written back by index, not through
@@ -6388,7 +6409,8 @@ private:
             resolve_locals(program_.functions[synthesized_index]);
             Body synthesized_body = build_mir(program_.functions[synthesized_index]);
             synthesized_body.program = &program_;
-            current_walk_return_type_ = program_.functions[synthesized_index].return_type;
+            WalkReturnTypeScope synthesized_return_type_scope(current_walk_return_type_,
+                                                              program_.functions[synthesized_index].return_type);
             Stmt& synthesized_stmt = *program_.functions[synthesized_index].body;
             const std::optional<Type> synthesized_this_type = this_type_of(program_.functions[synthesized_index]);
             const bool synthesized_is_generic = program_.functions[synthesized_index].is_generic_template;

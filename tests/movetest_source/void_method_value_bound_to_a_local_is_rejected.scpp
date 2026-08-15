@@ -1,0 +1,10 @@
+class C {
+public:
+    virtual ~C() = default;
+    void m() {}
+};
+int f() {
+    C c{};
+    int t = c.m();
+    return t;
+}
