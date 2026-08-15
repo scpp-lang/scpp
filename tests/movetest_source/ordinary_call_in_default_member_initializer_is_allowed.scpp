@@ -1,0 +1,41 @@
+// The accepting side of spec §11.2(5): a pointer or reference to an
+// interface is explicitly still well-formed, and an ordinary call in any
+// of the newly checked positions must stay accepted.
+class [[scpp::interface]] IValue {
+public:
+    virtual ~IValue() = default;
+    virtual int value() {
+        return 1;
+    }
+};
+
+class Impl : public virtual IValue {
+public:
+    ~Impl() override = default;
+
+    int value() override {
+        return 5;
+    }
+};
+
+int peek(int v) {
+    return v;
+}
+
+class Holder {
+public:
+    virtual ~Holder() = default;
+
+    Holder() {}
+
+    int get() {
+        return a_;
+    }
+
+    int a_ = peek(9);
+};
+
+int main() {
+    Holder h{};
+    return h.get();
+}

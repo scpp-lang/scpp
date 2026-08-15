@@ -54,6 +54,22 @@ public:
             if (auto _r = validate_function_signature(fn); !_r.has_value()) return std::unexpected(std::move(_r).error());
             if (auto _r = validate_function_body(fn, *fn.body); !_r.has_value()) return std::unexpected(std::move(_r).error());
         }
+        // spec §11.2(5) is stated over "any object-forming context", and
+        // the list that follows it is explicitly open ("including"). A
+        // function body is only one such context: a namespace-scope
+        // variable and a default member initializer form objects too, and
+        // neither is reachable from any function body, so neither loop
+        // above visits them. See validate_global/validate_default_member_
+        // initializers for what each of them can actually form.
+        for (const GlobalVar& global : program_.globals) {
+            if (auto _r = validate_global(global); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        }
+        for (const ClassDef& def : program_.classes) {
+            if (should_skip(def)) continue;
+            if (auto _r = validate_default_member_initializers(def); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
         return validate_thread_contracts();
     }
 
@@ -522,7 +538,94 @@ private:
     [[nodiscard]] std::expected<void, DataflowError> validate_function_body(const Function& fn, const Stmt& body_stmt) {
         Body body = build_mir(fn);
         body.program = &program_;
+        // A constructor's `: base{...}, field{...}` list is part of the
+        // constructor, but it is not part of its body Stmt, so walking
+        // only body_stmt has never looked at it -- the same "walks the
+        // body, skips the list" blindness already fixed in MIR lowering
+        // (mem-init lists were invisible to move checking) and in
+        // monomorphize (a lambda there was never given a closure class).
+        // build_mir already deep-copies the list into the Body precisely
+        // so a pass can walk it with identifiers resolved, so this walks
+        // that copy rather than fn.member_initializers: infer_expr_type
+        // needs body.local_of() to answer, and only the Body's own copy
+        // carries the resolved ids.
+        for (const MemberInitializer& init : body.owned_member_initializers) {
+            if (auto _r = walk_initializer(init.initializer, body); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
         return walk_stmt(body_stmt, body);
+    }
+
+    // Every expression an Initializer can hold, in either of its two
+    // spellings (`= expr` and `{args...}`) -- shared by the constructor
+    // mem-init list and by default member initializers so the two cannot
+    // drift apart about which positions get checked.
+    [[nodiscard]] std::expected<void, DataflowError> walk_initializer(const Initializer& init, const Body& body) {
+        if (init.expr) {
+            if (auto _r = walk_expr(*init.expr, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        }
+        for (const ExprPtr& arg : init.brace_args) {
+            if (arg == nullptr) continue;
+            if (auto _r = walk_expr(*arg, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        }
+        return {};
+    }
+
+    // A Body standing in for a context that is not a function at all (a
+    // namespace-scope variable, a default member initializer). It has no
+    // locals by construction -- neither context can name one -- but it
+    // still carries the module/namespace the expression was written in,
+    // because infer_expr_type resolves overloads through exactly those
+    // fields and would otherwise fail to see a callee that is plainly
+    // visible at the point of use, silently skipping the check.
+    [[nodiscard]] Body non_function_body(const std::string& owning_module,
+                                         const std::vector<std::string>& namespace_path) const {
+        Body body;
+        body.program = &program_;
+        body.function_owning_module = owning_module;
+        body.function_visibility_module = owning_module;
+        body.function_namespace_path = namespace_path;
+        return body;
+    }
+
+    [[nodiscard]] std::expected<void, DataflowError> validate_global(const GlobalVar& global) {
+        if (global.decl == nullptr || global.decl->kind != StmtKind::VarDecl) return {};
+        const Stmt& decl = *global.decl;
+        // spec §11.2(5.1) says "a variable definition by value" without
+        // restricting it to a local one, and (5.3) reaches an array of
+        // them through type_forms_interface_object's own Array case. The
+        // diagnostic names the global rather than reusing walk_stmt's
+        // local-variable wording, which would describe the wrong thing.
+        if (type_forms_interface_object(decl.type, program_)) {
+            return std::unexpected(DataflowError("a global variable definition forms an object of interface type (spec §11.2(5.1))",
+                                decl.loc));
+        }
+        Body body = non_function_body(global.owning_module, global.namespace_path);
+        if (decl.init) {
+            if (auto _r = walk_expr(*decl.init, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        }
+        for (const ExprPtr& arg : decl.ctor_args) {
+            if (arg == nullptr) continue;
+            if (auto _r = walk_expr(*arg, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        }
+        return {};
+    }
+
+    // A field's own `= expr` / `{args...}`. The field's *type* is already
+    // checked as a member declaration (spec §11.2(5.2), validate_class_
+    // shape); what is new here is the initializer expression, which runs
+    // for every constructor that does not name the field in its own list
+    // and can form a temporary exactly as any other expression can.
+    [[nodiscard]] std::expected<void, DataflowError> validate_default_member_initializers(const ClassDef& def) {
+        Body body = non_function_body(def.owning_module, def.namespace_path);
+        for (const ClassField& field : def.fields) {
+            if (!field.default_initializer.has_value()) continue;
+            if (auto _r = walk_initializer(*field.default_initializer, body); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        return {};
     }
 
     [[nodiscard]] std::expected<void, DataflowError> walk_stmt(const Stmt& stmt, const Body& body) {
