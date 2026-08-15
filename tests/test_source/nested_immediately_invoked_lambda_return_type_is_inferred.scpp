@@ -1,0 +1,10 @@
+// A lambda's return type was inferred from its raw, unwalked body, before
+// monomorphization had given a nested lambda its closure class -- so the
+// inner call had no type, and the outer lambda was typed `void`. The
+// anchored spelling on the next line always worked, which is what made
+// the two disagree.
+int main() {
+    int two = [](){ return [](){ return [](){ return 2; }(); }(); }();
+    int three = [](){ int inner = [](){ return 3; }(); return inner; }();
+    return two + three;
+}

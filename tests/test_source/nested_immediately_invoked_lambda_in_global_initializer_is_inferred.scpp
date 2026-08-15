@@ -1,0 +1,7 @@
+// The same mis-inference at namespace scope typed the global's
+// initializer `void`, which codegen then recursed on until it ran out of
+// stack -- the compiler died with SIGSEGV rather than diagnosing.
+int g = [](){ return [](){ return 3; }(); }();
+int main() {
+    return g;
+}

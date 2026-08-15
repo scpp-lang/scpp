@@ -6321,58 +6321,28 @@ private:
                 return std::unexpected(std::move(_r).error());
             }
         }
-        // Return-type inference must likewise run on the *original*
-        // (pre-rewrite) body: infer_expr_type has no Program access to
-        // resolve a field's type from a `this.name` Member node (see
-        // infer_lambda_return_type's own comment), but a captured name
-        // is still a plain, resolvable Identifier at this point --
-        // exactly like reject_write_to_nonmutable_by_value_capture's
-        // identical reasoning just above.
-        if (expr.has_lambda_explicit_return_type) {
-            call_method.return_type = expr.type;
-        } else if (call_method.body) {
-            std::unordered_map<std::string, Type> capture_types;
-            for (std::size_t i = 0; i < expr.lambda_captures.size(); i++) {
-                capture_types[expr.lambda_captures[i].name] = field_types[i];
-            }
-            call_method.return_type = infer_lambda_return_type(*call_method.body, call_method.params, capture_types);
-        } else {
-            call_method.return_type = named_type("void");
-        }
+        // An *explicit* `-> Type` is known here and now. An *inferred*
+        // one is not, and must not be guessed here: inferring it from
+        // this raw, unwalked body asks what an expression's type is
+        // before the pass that determines it has run, so every
+        // construct this pass itself resolves -- a nested lambda (no
+        // closure class yet, so infer_expr_type's Lambda case sees an
+        // empty `expr.name` and gives up), a generic call (still
+        // targeting the uninstantiated template, so its return type is
+        // still the template parameter `T`), and an `auto` local (still
+        // spelled "auto") -- is invisible, and the answer comes back
+        // `void`/`T`/`auto` rather than the real type. The inference
+        // therefore runs *after* the body walk below, off the walked
+        // body and its own real Body; `void` here is only a placeholder
+        // for that walk (see the write-back after it).
+        call_method.return_type = expr.has_lambda_explicit_return_type ? expr.type : named_type("void");
         if (call_method.body) rewrite_captured_identifiers_as_field_access(*call_method.body, captured_names);
 
-        // scpp requires an explicit `return;` covering every path, even
-        // for a `void` function with an otherwise-empty body (verified
-        // against this codebase's own existing behavior -- e.g. a bare
-        // `Circle() {}` constructor is rejected the same way) -- real
-        // C++ lambdas need no such thing (`[](int x) { print_int(x); }`
-        // is perfectly valid with no `return` at all), so this
-        // synthesis step must compensate by appending one when the
-        // resolved return type is `void` and the body doesn't already
-        // end with a Return statement (the common case for a body with
-        // no explicit `-> Type` and no `return expr;` of its own -- a
-        // more complex void body already ending in its own `return;` on
-        // every path is left untouched, matching this same "don't guess,
-        // defer to the real check" spirit codegen's own is_bare_void
-        // helper follows elsewhere (not reusable here directly -- a
-        // separate module, see this file's other independently-
-        // duplicated helpers, e.g. types_equal).
-        bool return_type_is_void =
-            call_method.return_type.kind == TypeKind::Named && call_method.return_type.name == "void";
-        if (return_type_is_void && call_method.body && call_method.body->kind == StmtKind::Block &&
-            (call_method.body->statements.empty() ||
-             call_method.body->statements.back()->kind != StmtKind::Return)) {
-            auto return_stmt = std::make_unique<Stmt>();
-            return_stmt->kind = StmtKind::Return;
-            return_stmt->loc = expr.loc;
-            call_method.body->statements.push_back(std::move(return_stmt));
-        }
-
         program_.functions.push_back(std::move(call_method));
-        Function& synthesized = program_.functions.back();
-        known_function_names_.insert(synthesized.name);
-        if (synthesized.is_generic_template) {
-            generic_template_indices_[synthesized.name].push_back(program_.functions.size() - 1);
+        const std::size_t synthesized_index = program_.functions.size() - 1;
+        known_function_names_.insert(program_.functions[synthesized_index].name);
+        if (program_.functions[synthesized_index].is_generic_template) {
+            generic_template_indices_[program_.functions[synthesized_index].name].push_back(synthesized_index);
         }
         // ch05 §5.9/§5.12: unlike lambda_ctor just above (whose own
         // resolution goes through walk_new_concrete_function, which
@@ -6404,19 +6374,85 @@ private:
         // synthesized closure's own "call" method is never itself a
         // generic template, so generic-call-monomorphization stays
         // enabled here.
-        if (synthesized.body) {
+        if (program_.functions[synthesized_index].body) {
             // The closure's `call` method is synthesized here, from a
             // clone of the lambda body numbered against the *enclosing*
             // function; it needs its own numbering before its own walk.
-            resolve_locals(synthesized);
-            Body synthesized_body = build_mir(synthesized);
+            // Everything below reaches the synthesized function through
+            // `program_.functions[synthesized_index]` rather than a held
+            // `Function&`: the walk appends a closure class's own "call"
+            // method for every nested lambda it finds, so any reference
+            // into that vector can dangle across it. The body `Stmt`
+            // itself is heap-allocated and survives the reallocation,
+            // which is why binding it once here is safe.
+            resolve_locals(program_.functions[synthesized_index]);
+            Body synthesized_body = build_mir(program_.functions[synthesized_index]);
             synthesized_body.program = &program_;
-            current_walk_return_type_ = synthesized.return_type;
-            if (auto _r = walk_stmt(*synthesized.body, synthesized_body, this_type_of(synthesized),
-                      /*allow_generic_monomorphization=*/!synthesized.is_generic_template);
+            current_walk_return_type_ = program_.functions[synthesized_index].return_type;
+            Stmt& synthesized_stmt = *program_.functions[synthesized_index].body;
+            const std::optional<Type> synthesized_this_type = this_type_of(program_.functions[synthesized_index]);
+            const bool synthesized_is_generic = program_.functions[synthesized_index].is_generic_template;
+            if (auto _r = walk_stmt(synthesized_stmt, synthesized_body, synthesized_this_type,
+                      /*allow_generic_monomorphization=*/!synthesized_is_generic);
                 !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
+            // ch05 §5.12: the walk above is exactly what makes an
+            // inferred return type answerable -- it is what gives a
+            // nested lambda its closure class, instantiates a generic
+            // call, and writes a resolved type back over an `auto`
+            // local. Asking before it ran (as this used to) returned
+            // `void`, `T` or `auto`, none of which the body actually
+            // returns. `synthesized_body`'s own local decls are updated
+            // in place by that walk's `auto` write-back, and it carries
+            // `program`, so a capture -- now a `this.name` Member, since
+            // the rewrite above already ran -- resolves through
+            // infer_expr_type's ordinary Member case like any other
+            // field, with no lambda-specific field lookup needed.
+            if (!expr.has_lambda_explicit_return_type) {
+                program_.functions[synthesized_index].return_type =
+                    infer_lambda_return_type(synthesized_stmt, synthesized_body);
+                // The placeholder `void` above is what build_signatures
+                // recorded for this closure's own "<ClassName>_call"; every
+                // later call site reads the return type from there, so the
+                // real one has to replace it.
+                auto _r = build_signatures(program_);
+                if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+                signatures_ = std::move(_r).value();
+            }
+        }
+
+        // scpp requires an explicit `return;` covering every path, even
+        // for a `void` function with an otherwise-empty body (verified
+        // against this codebase's own existing behavior -- e.g. a bare
+        // `Circle() {}` constructor is rejected the same way) -- real
+        // C++ lambdas need no such thing (`[](int x) { print_int(x); }`
+        // is perfectly valid with no `return` at all), so this
+        // synthesis step must compensate by appending one when the
+        // resolved return type is `void` and the body doesn't already
+        // end with a Return statement (the common case for a body with
+        // no explicit `-> Type` and no `return expr;` of its own -- a
+        // more complex void body already ending in its own `return;` on
+        // every path is left untouched, matching this same "don't guess,
+        // defer to the real check" spirit codegen's own is_bare_void
+        // helper follows elsewhere (not reusable here directly -- a
+        // separate module, see this file's other independently-
+        // duplicated helpers, e.g. types_equal). Runs after the walk and
+        // the inference above, since only they settle whether the
+        // resolved return type is `void` at all; the appended statement
+        // is a bare `return;` with no expression, so there is nothing in
+        // it for that walk to have visited.
+        Stmt* synthesized_body_stmt = program_.functions[synthesized_index].body.get();
+        const Type& resolved_return_type = program_.functions[synthesized_index].return_type;
+        bool return_type_is_void =
+            resolved_return_type.kind == TypeKind::Named && resolved_return_type.name == "void";
+        if (return_type_is_void && synthesized_body_stmt != nullptr && synthesized_body_stmt->kind == StmtKind::Block &&
+            (synthesized_body_stmt->statements.empty() ||
+             synthesized_body_stmt->statements.back()->kind != StmtKind::Return)) {
+            auto return_stmt = std::make_unique<Stmt>();
+            return_stmt->kind = StmtKind::Return;
+            return_stmt->loc = expr.loc;
+            synthesized_body_stmt->statements.push_back(std::move(return_stmt));
         }
         return {};
     }
@@ -6434,85 +6470,26 @@ private:
     // structurally) is left as `void` too, rather than guessing -- a
     // genuinely ambiguous case should use an explicit `-> Type` instead;
     // this is intentionally not a general control-flow analysis.
-    // `call_params` is the synthesized "call" method's own params
-    // (including `this`); `capture_types` maps each captured name to
-    // its own resolved field type. Run on the *original* (pre field-
-    // access-rewrite) body -- a captured name is still a plain bare
-    // Identifier at this point (never yet a `this.field` Member access,
-    // which infer_expr_type could not resolve anyway -- it has no
-    // Program access to look up a field's type) -- so both a lambda's
-    // own params and its captures are plain Identifiers infer_expr_type
-    // can resolve directly from a fresh, flat Body (no enclosing
-    // Function exists yet to build_mir from).
-    [[nodiscard]] Type infer_lambda_return_type(const Stmt& body, const std::vector<Param>& call_params,
-                                                 const std::unordered_map<std::string, Type>& capture_types) {
+    //
+    // Runs on the synthesized "call" method's own *walked* body and its
+    // own real `Body`, which is the whole point: the answer is only
+    // meaningful once this pass has finished with that body, because
+    // this pass is what decides the type of the very things a return
+    // expression is made of -- a nested lambda's closure class, a
+    // generic call's instantiated return type, an `auto` local's
+    // resolved type. That `Body` also carries `program`, so a capture
+    // (a `this.name` Member by now) resolves through infer_expr_type's
+    // ordinary Member case; no lambda-specific field lookup of its own
+    // is needed, and none is kept here.
+    [[nodiscard]] Type infer_lambda_return_type(const Stmt& body, const Body& mir_body) {
         if (body.kind != StmtKind::Block) return named_type("void");
-        // No Function exists yet to build_mir from, so the body is
-        // resolved directly against a synthetic parameter list: the
-        // closure's own parameters, followed by one stand-in parameter
-        // per captured name (sorted, so the numbering is deterministic).
-        // The resolution is written onto a throwaway clone -- the real
-        // body is `const` here and gets its own, final resolution when
-        // the synthesized "call" method is walked.
-        std::vector<Param> resolved_params = call_params;
-        std::vector<std::string> capture_names;
-        capture_names.reserve(capture_types.size());
-        for (const auto& [name, type] : capture_types) capture_names.push_back(name);
-        std::sort(capture_names.begin(), capture_names.end());
-        for (const std::string& name : capture_names) {
-            Param p;
-            p.name = name;
-            p.type = capture_types.at(name);
-            resolved_params.push_back(std::move(p));
-        }
-        StmtPtr resolved_body = deep_clone_stmt(body);
-        Body param_only_body;
-        param_only_body.local_decls = resolve_locals_in(resolved_params, *resolved_body);
-        for (const StmtPtr& stmt : resolved_body->statements) {
+        for (const StmtPtr& stmt : body.statements) {
             if (stmt->kind != StmtKind::Return || !stmt->expr) continue;
-            // `[this]() { return this->value; }` (ch05 §5.12): a
-            // `this`-capture's own field access -- infer_expr_type's
-            // Member case can never resolve this (no Program access),
-            // but this function, being a Monomorphizer method, has
-            // `program_` directly -- special-cased here rather than
-            // widening infer_expr_type's own general contract.
-            if (stmt->expr->kind == ExprKind::Member && stmt->expr->lhs->kind == ExprKind::Identifier) {
-                if (const Type* base = param_only_body.type_if_local(*stmt->expr->lhs); base != nullptr) {
-                    const Type& base_type = *base;
-                    const std::string& class_name =
-                        (base_type.kind == TypeKind::Reference ? *base_type.pointee : base_type).name;
-                    if (std::optional<Type> field_type = resolve_field_type(class_name, stmt->expr->name)) {
-                        return *field_type;
-                    }
-                }
-            }
-            std::optional<Type> t = infer_expr_type(*stmt->expr, param_only_body, signatures_);
+            std::optional<Type> t = infer_expr_type(*stmt->expr, mir_body, signatures_);
             if (t.has_value()) return *t;
             return named_type("void");
         }
         return named_type("void");
-    }
-
-    // Looks up `class_or_struct_name`'s own declared field `field_name`'s
-    // type -- a Monomorphizer method, so it has direct `program_` access
-    // (unlike movecheck's own, otherwise Program-less, Body-based
-    // machinery -- see DataflowState::class_field_types for the parallel
-    // mechanism check_moves needs for the exact same underlying reason).
-    [[nodiscard]] std::optional<Type> resolve_field_type(const std::string& class_or_struct_name,
-                                                          const std::string& field_name) const {
-        for (const ClassDef& def : program_.classes) {
-            if (def.name != class_or_struct_name) continue;
-            for (const ClassField& field : def.fields) {
-                if (field.name == field_name) return field.type;
-            }
-        }
-        for (const StructDef& def : program_.structs) {
-            if (def.name != class_or_struct_name) continue;
-            for (const StructField& field : def.fields) {
-                if (field.name == field_name) return field.type;
-            }
-        }
-        return std::nullopt;
     }
 
     [[nodiscard]] bool expr_mentions_identifier(const Expr& expr, const std::string& name) const {

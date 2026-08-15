@@ -1,0 +1,9 @@
+// In a parameter's default argument the same `void` reached codegen and
+// produced invalid IR ("Call parameter type does not match function
+// signature", passing a void result as an int argument).
+int f(int x = [](){ return [](){ return 3; }(); }()) {
+    return x;
+}
+int main() {
+    return f();
+}
