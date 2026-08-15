@@ -1,0 +1,12 @@
+class Doubler {
+public:
+    virtual ~Doubler() = default;
+    Doubler() {}
+    int call(int x) { return x * 2; }
+};
+template<typename T>
+concept IntConsumer = requires(T f, int x) { f(x); };
+int apply_it(IntConsumer auto& f, int x) {
+    return f.call(x);
+}
+int main() { Doubler d{}; return apply_it(d, 21); }

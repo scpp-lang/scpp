@@ -48,6 +48,7 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred);
 [[nodiscard]] bool is_resolved_named_type(const Type& type, const Program* program);
 [[nodiscard]] bool is_scalar_named_type(const Type& type);
 [[nodiscard]] bool is_float_named_type(const Type& type);
+[[nodiscard]] bool is_void_named_type(const Type& type);
 [[nodiscard]] bool integer_literal_compatible_with_type(const Type& type);
 [[nodiscard]] const Type& binary_operand_type(const Type& type);
 [[nodiscard]] bool is_pointer_arithmetic_offset_type(const Type& type);
@@ -326,6 +327,15 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
 
 [[nodiscard]] bool is_float_named_type(const Type& type) {
     return type.kind == TypeKind::Named && scpp::is_float_scalar_type_name(std::string_view{type.name});
+}
+
+// `void` itself, never `void*`. Deliberately a predicate of its own
+// rather than a name spelled out at each place that needs it: every
+// question this file answers is asked of a *value*, and `void` is the
+// one named type that is not one, so "is this a value at all?" has to be
+// askable separately from "which type is it?".
+[[nodiscard]] bool is_void_named_type(const Type& type) {
+    return type.kind == TypeKind::Named && type.name == "void";
 }
 
 [[nodiscard]] bool integer_literal_compatible_with_type(const Type& type) {

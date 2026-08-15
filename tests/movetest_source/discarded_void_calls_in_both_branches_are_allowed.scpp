@@ -1,0 +1,6 @@
+void h() {}
+int f() {
+    bool c = true;
+    if (c) { h(); } else { h(); }
+    return 0;
+}

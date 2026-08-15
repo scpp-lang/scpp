@@ -1,0 +1,5 @@
+void h() {}
+int f() {
+    h();
+    return 0;
+}

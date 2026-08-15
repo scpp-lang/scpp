@@ -1,0 +1,26 @@
+int counter = 0;
+
+void bump() {
+    counter = counter + 1;
+}
+
+void forward() {
+    return bump();
+}
+
+class C {
+public:
+    virtual ~C() = default;
+    void m() {
+        bump();
+    }
+};
+
+int main() {
+    bump();
+    forward();
+    C c{};
+    c.m();
+    [](){ bump(); }();
+    return counter;
+}

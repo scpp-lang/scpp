@@ -1,0 +1,7 @@
+void h() {}
+int f() {
+    int a[3];
+    a[0] = 1;
+    int t = a[h()];
+    return t;
+}

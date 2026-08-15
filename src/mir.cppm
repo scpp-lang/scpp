@@ -317,6 +317,19 @@ struct Body {
     std::string function_access_context_class;
     std::string function_source_path;
     std::vector<std::string> function_namespace_path;
+    // True while this body is a still-uninstantiated generic template
+    // (including an abbreviated template -- a `Concept auto`/`auto`
+    // parameter). Its parameter types are placeholders, so a type
+    // inferred inside it can come from a stand-in signature rather than
+    // a real one: a concept's witness class synthesizes a method per
+    // requirement and gives it return type `void` to mean "this
+    // requirement says nothing about the return type", which
+    // infer_expr_type reports as a plain `void`. A rule that merely
+    // declines to judge an unrecognised type is unaffected; one that
+    // *rejects* on a specific answer must not be founded on that.
+    // Every such body is also checked once per instantiation, where the
+    // types are real.
+    bool function_is_generic_template = false;
 
     [[nodiscard]] const LocalDecl& decl(LocalId id) const { return local_decls[local_index(id)]; }
     [[nodiscard]] LocalDecl& decl(LocalId id) { return local_decls[local_index(id)]; }
@@ -772,6 +785,7 @@ public:
         body_.function_access_context_class = fn_.access_context_class;
         body_.function_source_path = fn_.loc.source_path_text();
         body_.function_namespace_path = fn_.namespace_path;
+        body_.function_is_generic_template = fn_.is_generic_template || !fn_.template_params.empty();
         // Resolving this Body's own copy is what makes build_mir correct
         // on its own, whether or not the caller has already resolved the
         // Function it came from. Both runs assign the same ids (the

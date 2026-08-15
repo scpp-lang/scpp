@@ -1,0 +1,8 @@
+void h() {}
+struct S {
+    int a = h();
+};
+int f() {
+    S s{};
+    return s.a;
+}

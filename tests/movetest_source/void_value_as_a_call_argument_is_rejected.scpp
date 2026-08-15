@@ -1,0 +1,5 @@
+void h() {}
+int takes_int(int x) { return x; }
+int f() {
+    return takes_int(h());
+}

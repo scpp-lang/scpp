@@ -1,0 +1,6 @@
+void h() {}
+template<typename T> T ident(T t) { return t; }
+int f() {
+    int t = ident(h());
+    return t;
+}

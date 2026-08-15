@@ -1,0 +1,11 @@
+void h() {}
+class K {
+public:
+    virtual ~K() = default;
+    K(int a) { a_ = a; }
+    int a_ = 0;
+};
+int f() {
+    K k{h()};
+    return k.a_;
+}

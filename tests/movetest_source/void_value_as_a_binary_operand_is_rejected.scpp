@@ -1,0 +1,5 @@
+void h() {}
+int f() {
+    bool b = h() == h();
+    return b ? 1 : 0;
+}

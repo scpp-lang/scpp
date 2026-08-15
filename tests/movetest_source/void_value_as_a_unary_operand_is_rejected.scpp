@@ -1,0 +1,5 @@
+void h() {}
+int f() {
+    int t = -h();
+    return t;
+}
