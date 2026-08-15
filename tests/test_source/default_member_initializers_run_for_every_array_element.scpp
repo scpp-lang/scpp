@@ -1,0 +1,27 @@
+struct S {
+    int a = 7;
+};
+
+class C {
+public:
+    virtual ~C() = default;
+    int a_ = 5;
+};
+
+class Holder {
+public:
+    virtual ~Holder() = default;
+    Holder() {}
+    int total() const {
+        return elements_[0].a + elements_[1].a;
+    }
+private:
+    S elements_[2];
+};
+
+int main() {
+    S locals[2];
+    C classes[2];
+    Holder h{};
+    return locals[0].a + locals[1].a + classes[0].a_ + classes[1].a_ + h.total();
+}

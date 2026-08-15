@@ -203,12 +203,12 @@ namespace scpp {
                                                            ? resolve_constructor_overload_exact(stmt.type.name, stmt.ctor_args)
                                                            : resolve_overload_by_type(ctor_name, stmt.ctor_args, /*param_offset=*/1);
                             if (ctor_def == nullptr) {
-                                const ClassDef* class_def = find_class_def(stmt.type.name);
-                                if (stmt.ctor_args.empty() && class_def == nullptr) {
-                                } else if (stmt.ctor_args.empty() && class_def != nullptr &&
-                                           !class_has_any_constructor(stmt.type.name)) {
-                                    if (auto r = emit_default_initializers_for_class_storage(
-                                        storage, *class_def, /*initialize_virtual_interface_bases=*/true); !r.has_value()) return std::unexpected(std::move(r).error());
+                                if (stmt.ctor_args.empty() &&
+                                    record_is_implicitly_default_initializable(stmt.type.name)) {
+                                    if (auto r = emit_default_initializers_for_record_storage(
+                                        storage, stmt.type.name, /*initialize_virtual_interface_bases=*/true); !r.has_value()) return std::unexpected(std::move(r).error());
+                                } else if (stmt.ctor_args.empty() && find_class_def(stmt.type.name) == nullptr &&
+                                           find_struct_def(stmt.type.name) == nullptr) {
                                 } else {
                                     return std::unexpected(CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
                                         current_loc_));
@@ -274,15 +274,15 @@ namespace scpp {
                                                                                       no_args, storage);
                                 !r.has_value()) return std::unexpected(std::move(r).error());
                             build_call(ctor, {storage});
-                        } else if (class_def != nullptr && !class_has_any_constructor(stmt.type.name)) {
-                            if (auto r = emit_default_initializers_for_class_storage(
-                                storage, *class_def, /*initialize_virtual_interface_bases=*/true); !r.has_value()) return std::unexpected(std::move(r).error());
+                        } else if (record_is_implicitly_default_initializable(stmt.type.name)) {
+                            if (auto r = emit_default_initializers_for_record_storage(
+                                storage, stmt.type.name, /*initialize_virtual_interface_bases=*/true); !r.has_value()) return std::unexpected(std::move(r).error());
                         } else if (class_def != nullptr) {
                             return std::unexpected(CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
                                 current_loc_));
                         }
                     } else {
-                        if (auto r = zero_initialize_storage(storage, stmt.type, declared_alignment); !r.has_value()) return std::unexpected(std::move(r).error());
+                        if (auto r = initialize_storage_from_brace_args(LValue{storage, stmt.type, declared_alignment}, {}); !r.has_value()) return std::unexpected(std::move(r).error());
                     }
 
                     if (moved_flag != nullptr) {
@@ -478,12 +478,12 @@ namespace scpp {
                                                    ? resolve_constructor_overload_exact(stmt.type.name, stmt.ctor_args)
                                                    : resolve_overload_by_type(ctor_name, stmt.ctor_args, /*param_offset=*/1);
                     if (ctor_def == nullptr) {
-                        const ClassDef* class_def = find_class_def(stmt.type.name);
-                        if (stmt.ctor_args.empty() && class_def == nullptr) {
+                        if (stmt.ctor_args.empty() && record_is_implicitly_default_initializable(stmt.type.name)) {
+                            if (auto r = emit_default_initializers_for_record_storage(slot, stmt.type.name, /*initialize_virtual_interface_bases=*/true); !r.has_value()) return std::unexpected(std::move(r).error());
                             return {};
                         }
-                        if (stmt.ctor_args.empty() && class_def != nullptr && !class_has_any_constructor(stmt.type.name)) {
-                            if (auto r = emit_default_initializers_for_class_storage(slot, *class_def, /*initialize_virtual_interface_bases=*/true); !r.has_value()) return std::unexpected(std::move(r).error());
+                        if (stmt.ctor_args.empty() && find_class_def(stmt.type.name) == nullptr &&
+                            find_struct_def(stmt.type.name) == nullptr) {
                             return {};
                         }
                         // spec §6.5: `ClassName y{x};` with no matching
@@ -568,8 +568,16 @@ namespace scpp {
                     // local declared without an initializer is always
                     // zero-initialized (0 / false / null / all-zero
                     // fields), for every type -- scalars and raw pointers
-                    // included, not just struct/array/unique_ptr.
-                    if (auto r = zero_initialize_storage(slot, stmt.type, declared_alignment); !r.has_value()) return std::unexpected(std::move(r).error());
+                    // included, not just struct/array/unique_ptr. Only an
+                    // array reaches here with a record element type (a
+                    // non-array record local is required to be written
+                    // `T name{...}`), and its elements are objects that
+                    // need their own default member initializers, not a
+                    // zero fill -- which is the same question
+                    // initialize_storage_from_brace_args answers for a
+                    // field, so it answers it here too rather than a
+                    // second copy deciding differently.
+                    if (auto r = initialize_storage_from_brace_args(LValue{slot, stmt.type, declared_alignment}, {}); !r.has_value()) return std::unexpected(std::move(r).error());
                 }
                 locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
                 locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;

@@ -1,0 +1,16 @@
+struct S {
+    int a = 7;
+};
+
+S make() {
+    return {};
+}
+
+int from_default(S s = {}) {
+    return s.a;
+}
+
+int main() {
+    S made = make();
+    return made.a + from_default();
+}

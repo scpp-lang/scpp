@@ -892,16 +892,50 @@ private:
 
     [[nodiscard]] std::expected<void, CodegenError> initialize_storage(const LValue& target, const Initializer& init);
 
+    // The single answer to "what initializes this field?", asked by
+    // both the constructor path and the no-constructor path: the
+    // mem-initializer the constructor wrote, else the field's own
+    // default member initializer, else whatever default-initialization
+    // the field's *type* calls for. That last clause is not a
+    // formality -- a field with nothing written on it is still an
+    // object of its type, so `struct A { int x = 7; }; struct B { A a; };`
+    // must leave `b.a.x` as 7 even though nothing is written on `a`.
     template <typename FieldT>
-    [[nodiscard]] std::expected<void, CodegenError> emit_default_initializers_for_record_fields(llvm::LLVMValueRef object_ptr, const std::string& class_name,
-                                                     const std::vector<FieldT>& fields) {
+    [[nodiscard]] std::expected<void, CodegenError> emit_field_initialization(llvm::LLVMValueRef object_ptr, const std::string& record_name,
+                                                     const FieldT& field, const Initializer* explicit_initializer) {
+        const Initializer* selected_init = explicit_initializer;
+        if (selected_init == nullptr && field.default_initializer) selected_init = &*field.default_initializer;
+        if (selected_init == nullptr && !type_needs_nontrivial_default_init(field.type)) return {};
+        auto field_storage_result = codegen_raw_member_storage(object_ptr, record_name, field);
+        if (!field_storage_result.has_value()) return std::unexpected(std::move(field_storage_result).error());
+        LValue field_storage = std::move(field_storage_result).value();
+        if (selected_init == nullptr) return initialize_storage_from_brace_args(field_storage, {});
+        return initialize_storage(field_storage, *selected_init);
+    }
+
+    // Runs every field's initializer in declaration order.
+    // `member_initializers` is the constructor's mem-init list when a
+    // constructor is running and null when the record is being
+    // default-initialized with no constructor at all -- the only
+    // difference between those two cases, which is why they share this
+    // rather than keeping the two near-identical loops that used to
+    // disagree about fields nothing was written on.
+    template <typename FieldT>
+    [[nodiscard]] std::expected<void, CodegenError> emit_record_field_initializers(llvm::LLVMValueRef object_ptr, const std::string& record_name,
+                                                     const std::vector<FieldT>& fields,
+                                                     const std::vector<MemberInitializer>* member_initializers) {
         for (const FieldT& field : fields) {
-            if (!field.default_initializer) continue;
-            auto field_storage_result = codegen_raw_member_storage(object_ptr, class_name, field);
-            if (!field_storage_result.has_value()) return std::unexpected(std::move(field_storage_result).error());
-            LValue field_storage = std::move(field_storage_result).value();
-            if (auto init_result = initialize_storage(field_storage, *field.default_initializer); !init_result.has_value()) {
-                return std::unexpected(std::move(init_result).error());
+            const Initializer* explicit_initializer = nullptr;
+            if (member_initializers != nullptr) {
+                for (const MemberInitializer& init : *member_initializers) {
+                    if (init.member_name == field.name) {
+                        explicit_initializer = &init.initializer;
+                        break;
+                    }
+                }
+            }
+            if (auto r = emit_field_initialization(object_ptr, record_name, field, explicit_initializer); !r.has_value()) {
+                return std::unexpected(std::move(r).error());
             }
         }
         return {};
@@ -913,6 +947,23 @@ private:
 
     [[nodiscard]] std::expected<void, CodegenError> emit_default_initializers_for_class_storage(llvm::LLVMValueRef object_ptr, const ClassDef& class_def,
                                                     bool initialize_virtual_interface_bases);
+
+    // "Default-initialize the record living at this address." Codegen
+    // asked that question in six separate places and answered it six
+    // different ways, every one of them by first looking up a ClassDef
+    // -- so a struct, which has no ClassDef, silently got a bare zero
+    // fill and its default member initializers never ran at all. This is
+    // the single answer; the kind of record is its business, not the
+    // caller's.
+    [[nodiscard]] std::expected<void, CodegenError> emit_default_initializers_for_record_storage(llvm::LLVMValueRef object_ptr, const std::string& type_name,
+                                                     bool initialize_virtual_interface_bases);
+
+    // True when `type_name` names a record that can be default-
+    // initialized with no arguments and no user-declared constructor --
+    // i.e. when emit_default_initializers_for_record_storage is the
+    // right thing to call rather than reporting "no matching
+    // constructor".
+    [[nodiscard]] bool record_is_implicitly_default_initializable(const std::string& type_name) const;
 
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_class_value_for_boundary(const Expr& expr, const Type& target_type,
                                                   bool allow_implicit_converting_ctor = false);
@@ -1216,10 +1267,20 @@ private:
 
     // True when storage of this type needs more than a zero fill to be
     // brought to life: a class with a constructor, default member
-    // initializers or a vtable pointer, or an array that (recursively)
-    // holds one. Scalars, pointers and arrays of scalars are complete
-    // after zero_initialize_storage and answer false.
+    // initializers or a vtable pointer, a struct that (recursively) has
+    // a default member initializer, or an array that (recursively) holds
+    // one. Scalars, pointers and arrays of scalars are complete after
+    // zero_initialize_storage and answer false.
     [[nodiscard]] bool type_needs_nontrivial_default_init(const Type& type);
+
+    // True when copying an array of this type has to run per element
+    // rather than copy the bytes: a class element may have a copy
+    // constructor. A struct is trivially copyable by definition
+    // (ch04 §4.1), so a struct element answers false however its members
+    // are *initialized* -- which is why this is a separate question from
+    // type_needs_nontrivial_default_init rather than the same predicate
+    // read two ways.
+    [[nodiscard]] bool type_needs_elementwise_copy(const Type& type);
 
     // Runs the destructor of every subobject of `ptr`, in reverse
     // construction order: array elements back to front, recursing for

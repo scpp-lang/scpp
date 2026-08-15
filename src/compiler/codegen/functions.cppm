@@ -260,11 +260,9 @@ namespace scpp {
         const StructInfo& info = info_it->second;
 
         if (is_defaulted_default_constructor) {
-            if (const ClassDef* class_def = find_class_def(class_name)) {
-                if (auto r = emit_default_initializers_for_class_storage(this_ptr, *class_def, /*initialize_virtual_interface_bases=*/true);
-                    !r.has_value()) {
-                    return std::unexpected(std::move(r).error());
-                }
+            if (auto r = emit_default_initializers_for_record_storage(this_ptr, class_name, /*initialize_virtual_interface_bases=*/true);
+                !r.has_value()) {
+                return std::unexpected(std::move(r).error());
             }
             llvm::LLVMBuildRetVoid(builder_);
             llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
