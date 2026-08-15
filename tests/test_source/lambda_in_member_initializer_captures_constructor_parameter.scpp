@@ -1,0 +1,12 @@
+// The closure synthesized for a member-initializer lambda captures the
+// enclosing constructor's own parameters.
+class Holder {
+  public:
+    virtual ~Holder() = default;
+    Holder(int seed) : a_{[seed]() -> int { return seed + 1; }()} {}
+    int a_;
+};
+int main() {
+    Holder h{41};
+    return h.a_;
+}

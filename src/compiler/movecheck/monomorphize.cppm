@@ -211,10 +211,17 @@ public:
             bool allow_generic_monomorphization = !program_.functions[i].is_generic_template;
             std::optional<Type> enclosing_this_type = this_type_of(program_.functions[i]);
             StmtPtr walk_body = deep_clone_stmt(*program_.functions[i].body);
+            std::vector<MemberInitializer> walk_member_inits = program_.functions[i].member_initializers;
             current_walk_return_type_ = program_.functions[i].return_type;
+            if (auto _r = walk_member_initializers(walk_member_inits, body, enclosing_this_type,
+                                                   allow_generic_monomorphization);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             if (auto _r = walk_stmt(*walk_body, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
+            program_.functions[i].member_initializers = std::move(walk_member_inits);
             program_.functions[i].body = std::move(walk_body);
         }
         return {};
@@ -483,9 +490,62 @@ private:
         Body body = build_mir(fn);
         body.program = &program_;
         current_walk_return_type_ = fn.return_type;
-        if (auto _r = walk_stmt(*fn.body, body, this_type_of(fn), /*allow_generic_monomorphization=*/!fn.is_generic_template);
+        std::optional<Type> enclosing_this_type = this_type_of(fn);
+        bool allow_generic_monomorphization = !fn.is_generic_template;
+        // Walked out of line and written back by index, not through
+        // `fn`: walk_expr can synthesize a closure class and append to
+        // program_.functions, which reallocates the vector `fn` refers
+        // into. `*fn.body` survives that because a Stmt tree is
+        // independently heap-allocated, but member_initializers is a
+        // vector held *inside* the Function object and would dangle.
+        std::vector<MemberInitializer> walked_initializers = fn.member_initializers;
+        if (auto _r = walk_member_initializers(walked_initializers, body, enclosing_this_type,
+                                               allow_generic_monomorphization);
             !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
+        }
+        program_.functions[fn_index].member_initializers = std::move(walked_initializers);
+        if (auto _r = walk_stmt(*program_.functions[fn_index].body, body, enclosing_this_type,
+                                allow_generic_monomorphization);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+        return {};
+    }
+
+    // ch05 §5.12/ch06 §6.1: everything this pass does to a function
+    // body -- resolving a lambda to a synthesized closure class,
+    // monomorphizing a generic call, redirecting a bare call to a
+    // callable's `call` method, stamping a bare `return {};` -- has to
+    // reach a constructor's member-initializer-list too. The list is
+    // the second place a Function stores expressions, and each pass
+    // that walked only the body has produced a defect: mir.cppm never
+    // lowered it (ch06 §6.1's ordering rule), movecheck's use-check
+    // never visited it, and here a lambda written in the list was
+    // never resolved to a closure class at all -- leaving codegen to
+    // look that closure up under an empty name and abort inside
+    // unordered_map::at, on input the language considers valid.
+    //
+    // Walked in list order, which ch06 §6.1 makes equal to
+    // construction order, and before the body, which is when it runs.
+    [[nodiscard]] std::expected<void, DataflowError> walk_member_initializers(
+        std::vector<MemberInitializer>& initializers, Body& body, const std::optional<Type>& enclosing_this_type,
+        bool allow_generic_monomorphization) {
+        for (MemberInitializer& init : initializers) {
+            if (init.initializer.expr != nullptr) {
+                if (auto _r = walk_expr(*init.initializer.expr, body, enclosing_this_type,
+                                        allow_generic_monomorphization);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+            for (ExprPtr& arg : init.initializer.brace_args) {
+                if (arg == nullptr) continue;
+                if (auto _r = walk_expr(*arg, body, enclosing_this_type, allow_generic_monomorphization);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
         }
         return {};
     }

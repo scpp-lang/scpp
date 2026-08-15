@@ -1,0 +1,20 @@
+// The bare-call redirect (`f(args)` -> `f.call(args)` for a callable
+// object) also has to reach the list: without it this reported "call to
+// unknown function 'a'".
+class Adder {
+  public:
+    virtual ~Adder() = default;
+    Adder() {}
+    int call() { return 15; }
+};
+class Holder {
+  public:
+    virtual ~Holder() = default;
+    Holder(Adder& a) : a_{a()} {}
+    int a_;
+};
+int main() {
+    Adder ad{};
+    Holder h{ad};
+    return h.a_;
+}

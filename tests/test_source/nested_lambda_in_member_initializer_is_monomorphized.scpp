@@ -1,0 +1,12 @@
+// A lambda inside a lambda inside a member-initializer: closure
+// synthesis recurses through the list exactly as through a body.
+class Holder {
+  public:
+    virtual ~Holder() = default;
+    Holder() : a_{[]() -> int { return [](){ return 7; }(); }()} {}
+    int a_;
+};
+int main() {
+    Holder h{};
+    return h.a_;
+}

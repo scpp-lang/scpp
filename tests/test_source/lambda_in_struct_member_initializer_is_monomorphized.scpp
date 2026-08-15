@@ -1,0 +1,11 @@
+// A struct constructor's member-initializer-list gets the same walk as
+// a class's.
+struct Pair {
+    Pair() : a_{[]() -> int { return 9; }()}, b_{1} {}
+    int a_;
+    int b_;
+};
+int main() {
+    Pair p{};
+    return p.a_ + p.b_;
+}

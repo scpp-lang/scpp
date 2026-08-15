@@ -1,0 +1,17 @@
+// Not only lambdas: a generic call in a member-initializer was never
+// monomorphized either, and failed at codegen with "no generated code
+// for resolved function".
+template <typename T>
+T twice(T v) {
+    return v + v;
+}
+class Holder {
+  public:
+    virtual ~Holder() = default;
+    Holder() : a_{twice<int>(11)} {}
+    int a_;
+};
+int main() {
+    Holder h{};
+    return h.a_;
+}
