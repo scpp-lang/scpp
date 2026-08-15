@@ -1,0 +1,21 @@
+// Inference used to run before captures were rewritten into field
+// accesses, against a synthetic parameter list built just for it. It now
+// runs after that rewrite, off the closure's own real body -- so a
+// captured name reaching the return statement is a `this.name` Member
+// resolved like any other field. These are the shapes that path has to
+// keep answering.
+class Holder {
+  public:
+    virtual ~Holder() = default;
+    Holder() : v_{4} {}
+    int by_this() { return [this](){ return this->v_; }(); }
+    int v_;
+};
+int main() {
+    int n = 1;
+    int by_value = [n](){ return n; }();
+    int by_reference = [&n](){ return n; }();
+    int in_an_expression = [n](){ return n + 2; }();
+    Holder holder{};
+    return by_value + by_reference + in_an_expression + holder.by_this();
+}

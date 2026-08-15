@@ -1,0 +1,11 @@
+// Not a lambda-only defect: the inference ran before this pass
+// instantiated the generic, so it read the return type off the
+// uninstantiated template and typed the lambda `T` -- codegen then
+// reported "unsupported type 'T'".
+template <typename T>
+T identity(T value) {
+    return value;
+}
+int main() {
+    return [](){ return identity(3); }();
+}

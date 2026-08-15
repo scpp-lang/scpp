@@ -371,11 +371,6 @@ struct Body {
 // found in another.
 void resolve_locals(Function& fn);
 
-// The same walk, for a body that has no Function of its own yet: binds
-// `body`'s uses against `params` and returns the declaration table they
-// index into. `resolve_locals` is this plus the Function unwrapping.
-[[nodiscard]] std::vector<LocalDecl> resolve_locals_in(std::vector<Param>& params, Stmt& body);
-
 // Runs resolve_locals over every function in `program`. Every later pass
 // assumes a use already knows its declaration, so this must run before
 // any of them and again after any pass that synthesizes new functions
@@ -1217,12 +1212,6 @@ private:
 };
 
 } // namespace
-
-[[nodiscard]] std::vector<LocalDecl> resolve_locals_in(std::vector<Param>& params, Stmt& body) {
-    LocalResolver resolver{params, &body};
-    resolver.run();
-    return resolver.take_decls();
-}
 
 void resolve_locals(Function& fn) {
     LocalResolver resolver{fn.params, fn.body.get()};

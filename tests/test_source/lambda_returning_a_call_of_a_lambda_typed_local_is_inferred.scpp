@@ -1,0 +1,8 @@
+// The closure need not be written inline at the call: a lambda stored in
+// an `auto` local and then called in the return statement is the same
+// question, and used to give the same wrong answer.
+int main() {
+    int called_inside = [](){ auto inner = [](){ return 3; }; return inner(); }();
+    auto outer = [](){ return [](){ return 4; }(); };
+    return called_inside + outer();
+}

@@ -1,0 +1,12 @@
+// Likewise for `auto`: the write-back that resolves it happens during the
+// body walk, so inferring before that walk read the literal placeholder
+// and typed the lambda `auto` -- codegen reported "unsupported type
+// 'auto'".
+int make() {
+    return 3;
+}
+int main() {
+    int from_call = [](){ auto v = make(); return v; }();
+    int from_lambda = [](){ auto v = [](){ return 4; }(); return v; }();
+    return from_call + from_lambda;
+}
