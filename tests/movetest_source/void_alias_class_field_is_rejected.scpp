@@ -1,0 +1,9 @@
+using V = void;
+class K {
+public:
+    virtual ~K() = default;
+    V f;
+};
+int f() {
+    return 0;
+}

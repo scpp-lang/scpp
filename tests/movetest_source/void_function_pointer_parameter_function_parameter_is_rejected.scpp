@@ -1,0 +1,6 @@
+int g(int (*p)(void x)) {
+    return p == nullptr ? 0 : 1;
+}
+int f() {
+    return 0;
+}

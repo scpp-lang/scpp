@@ -1,0 +1,4 @@
+void v;
+int f() {
+    return 0;
+}

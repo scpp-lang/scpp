@@ -565,6 +565,26 @@ private:
 
     [[nodiscard]] static bool is_bare_void(const Type& type);
 
+    // Codegen's backstop for "may an object of this declared type
+    // exist?" -- the authority is movecheck's ClassSemanticsValidator
+    // (interfaces.cppm), which asks it at every declaration position in
+    // the program and runs before codegen in the driver's pipeline.
+    // This stays because codegen is separately callable and separately
+    // tested (tests/codegen_test.cpp drives parse -> monomorphize ->
+    // fold -> Codegen with no move check at all), and an uninhabitable
+    // type reaching LLVM's layout is not a bad diagnostic but a
+    // segfault: every size/alignment query on a void type is an
+    // `llvm_unreachable`, which under NDEBUG runs off the end of a
+    // function with no `ret`.
+    //
+    // One helper over ast.cppm's one structural predicate, called at
+    // every position codegen itself commits a declared type to storage
+    // -- parameter, local variable, class field, struct/union field.
+    // Previously each of those had its own answer or no answer at all,
+    // which is exactly how a struct field and a class field of the same
+    // type came to be treated differently.
+    [[nodiscard]] std::expected<void, CodegenError> validate_type_is_inhabitable(const Type& type, const std::string& what) const;
+
     // ch02 §2.1: an `extern "C"` signature's parameter and return types
     // must have a defined C representation. Allowed: scalars (`int`/
     // `bool`) and `void` (return-type position only, checked by the

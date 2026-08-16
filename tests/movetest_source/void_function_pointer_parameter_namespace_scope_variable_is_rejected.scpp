@@ -1,0 +1,4 @@
+int (*gp)(void x) = nullptr;
+int f() {
+    return gp == nullptr ? 0 : 1;
+}

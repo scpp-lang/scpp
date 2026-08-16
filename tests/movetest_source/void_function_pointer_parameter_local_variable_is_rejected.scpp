@@ -1,0 +1,4 @@
+int f() {
+    int (*p)(void x) = nullptr;
+    return p == nullptr ? 0 : 1;
+}

@@ -1,0 +1,4 @@
+int f() {
+    void a[3]{};
+    return 0;
+}

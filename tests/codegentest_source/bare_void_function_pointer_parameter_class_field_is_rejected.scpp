@@ -1,0 +1,9 @@
+class K {
+public:
+    virtual ~K() = default;
+    int (*p)(void x) = nullptr;
+};
+int main() {
+    K k{};
+    return 0;
+}

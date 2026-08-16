@@ -29,11 +29,9 @@ namespace scpp {
                 if (auto r = validate_c_abi_compatible(param.type, fn.name, "parameter '" + param.name + "'"); !r.has_value())
                     return std::unexpected(std::move(r).error());
             }
-            if (is_bare_void(param.type)) {
-                return std::unexpected(CodegenError("function '" + fn.name + "': parameter '" + param.name +
-                                    "' cannot have type 'void' (only a return type or a pointer's pointee "
-                                    "-- 'void*' -- may be 'void')",
-                    current_loc_));
+            if (auto r = validate_type_is_inhabitable(param.type, "function '" + fn.name + "' parameter '" + param.name + "'");
+                !r.has_value()) {
+                return std::unexpected(std::move(r).error());
             }
             auto param_type_result = llvm_param_type_for_function(fn, param, i);
             if (!param_type_result.has_value()) return std::unexpected(std::move(param_type_result).error());

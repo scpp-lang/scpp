@@ -3136,6 +3136,64 @@ public:
 // scpp's switch-case grammar (validate_switch_fallthrough) requires that.
 [[nodiscard]] inline std::string describe_type_brief(const Type& type);
 
+// "May an object of this type exist?" -- the mirror of movecheck's
+// check_expression_yields_a_value ("is this expression a value?").  That
+// one is asked of a *value*, where a value is required; this one is
+// asked of a *type*, at every position where a declaration brings an
+// object into being.  `void` is the type of no object, so a variable, a
+// field, an array element or a parameter of that type names storage that
+// cannot exist -- and nothing downstream is prepared for it: every LLVM
+// size/alignment query on a void type is an `llvm_unreachable`, which
+// under NDEBUG is not a diagnostic but a segfault.
+//
+// It lives here, beside is_scalar_type_name and describe_type_brief,
+// because both the frontend rule (movecheck's ClassSemanticsValidator,
+// the authority) and codegen's backstop must give the same answer, and
+// the way they came to disagree was each keeping its own spelling of it:
+// codegen answered in four hand-written places -- three `is_bare_void`
+// calls plus a `type.name == "void"` line inside a *struct-only*
+// triviality validator -- and each place saw a different set of
+// positions, so `struct S { void f; };` was rejected with a diagnostic
+// while `class K { void f; };` handed a void type to LLVM's layout and
+// segfaulted.
+//
+// It is deliberately structural rather than a list of spellings, and
+// the recursion is not "look through every composite type" -- it is one
+// question asked of each place a composite type *contains an object*.
+// Array elements, a reference's referent, a span's element and a
+// function type's *parameters* are all objects, so `void[3]`, `void&`,
+// `std::span<void>` and `int(void)` each require objects that cannot
+// exist. A pointer's pointee and a function's *return* type are not
+// objects, so `void*` (a pointer to unspecified storage, which the spec
+// spells out) and `void()` stay perfectly ordinary. Descending into
+// function parameters but not the return type is what makes
+// `int g(void x);` and `int (*p)(void x);` -- the same function type,
+// spelled twice -- finally give the same answer; before, only the first
+// spelling was checked and the second reached LLVM, which reported
+// "Call parameter type does not match function signature!" about the
+// lowering instead of a diagnostic about the program.
+//
+// The switch is exhaustive with no `default:` on purpose: a new TypeKind
+// must be classified here deliberately rather than inheriting "yes" by
+// omission -- inheriting an answer by omission is how this rule came to
+// have four of them.
+[[nodiscard]] inline bool type_can_have_objects(const Type& type) {
+    switch (type.kind) {
+        case TypeKind::Named: return type.name != "void";
+        case TypeKind::Pointer: return true;
+        case TypeKind::Array: return type.element == nullptr || type_can_have_objects(*type.element);
+        case TypeKind::Reference:
+        case TypeKind::Span: return type.pointee == nullptr || type_can_have_objects(*type.pointee);
+        case TypeKind::Function:
+        case TypeKind::FunctionPointer:
+            for (const Type& param : type.function_params) {
+                if (!type_can_have_objects(param)) return false;
+            }
+            return true;
+    }
+    return true;
+}
+
 [[nodiscard]] inline std::string describe_type_brief_named(const Type& type) {
     std::string result{""};
     if (type.is_const_qualified) result += "const ";
