@@ -1,0 +1,39 @@
+// ch05 §5.12: what a nested closure captures from the closure it sits in
+// is that closure object's *field*, which is what decides where a
+// by-reference chained capture points.
+//
+// When the outer captured by reference, its field is already a reference
+// and by_reference_capture_type leaves it alone, so the inner's borrow
+// reaches all the way through to the original local -- writes are
+// visible outside both closures.
+//
+// When the outer captured by value, the inner's reference genuinely
+// points *into the outer closure*, not at the original local, so writes
+// are visible on the outer closure's own copy across calls and the
+// original local is untouched. That distinction is the whole reason the
+// borrow's root is the enclosing closure object rather than the original
+// local, and it is only observable at run time -- hence this test rather
+// than an acceptance-only one.
+import std;
+
+int main() {
+    int x = 7;
+    auto through = [&x]() mutable {
+        auto i = [&x]() mutable { x = x + 1; };
+        i();
+        i();
+    };
+    through();
+
+    int y = 5;
+    auto into_closure = [y]() mutable {
+        auto i = [&y]() mutable { y = y + 1; };
+        i();
+        i();
+        return y;
+    };
+    int copy_after = into_closure();
+
+    std::println("{} {} {}", x, copy_after, y);
+    return x + copy_after + y;
+}

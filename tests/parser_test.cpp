@@ -5331,8 +5331,8 @@ void test_stmt_field_count_is_guarded() {
 
 void test_lambda_capture_field_count_is_guarded() {
     const scpp::LambdaCapture probe{};
-    const auto& [name, by_reference, init, resolved_local] = probe;
-    expect(name.empty() && !by_reference && init == nullptr && resolved_local == 0,
+    const auto& [name, by_reference, init, resolved_local, from_enclosing_closure] = probe;
+    expect(name.empty() && !by_reference && init == nullptr && resolved_local == 0 && !from_enclosing_closure,
            "a default-constructed LambdaCapture value-initializes every field");
 }
 

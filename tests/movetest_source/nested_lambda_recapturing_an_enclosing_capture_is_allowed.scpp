@@ -1,0 +1,24 @@
+// ch05 §5.12: the positive control for re-capture chaining, at the
+// movecheck layer rather than at run time. A by-reference re-capture is
+// a borrow whose root is the enclosing closure object, so it must not
+// be reported as a use of a local that is not in scope, nor conflict
+// with the enclosing closure's own capture of the same name.
+int main() {
+    int x = 7;
+    auto by_value = [x]() {
+        auto inner = [x]() { return x; };
+        return inner();
+    };
+    auto by_value_then_reference = [x]() {
+        auto inner = [&x]() { return x; };
+        return inner();
+    };
+
+    int r = 11;
+    auto by_reference_twice = [&r]() {
+        auto inner = [&r]() { return r; };
+        return inner();
+    };
+
+    return by_value() + by_value_then_reference() + by_reference_twice();
+}

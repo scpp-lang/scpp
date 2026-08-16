@@ -749,7 +749,11 @@ private:
         for (const std::string& excluded : excluded_names) member_field_names.erase(excluded);
         if (member_field_names.empty()) return;
 
-        rewrite_captured_identifiers_as_field_access(*fn.body, member_field_names);
+        // A method's members are visible by bare name inside a lambda
+        // written in that method too (it captures `this`), so the rewrite
+        // is lexical over the whole body -- see its own comment.
+        rewrite_captured_identifiers_as_field_access(*fn.body, member_field_names,
+                                                     /*nested_lambda_bodies_share_this=*/true);
     }
 
     // ch05 §5.9: builds the "plain member name -> mangled function name"
@@ -6102,6 +6106,44 @@ private:
         return {};
     }
 
+    // ch05 §5.12: the closure class whose "call" method is currently
+    // being walked -- identified from that method's own `this` type,
+    // which names it -- or nullptr when the enclosing function is not a
+    // closure's call method at all (an ordinary method, or a free
+    // function, whose `this` is either a real user class or absent).
+    [[nodiscard]] const ClassDef* enclosing_closure_class(const std::optional<Type>& enclosing_this_type) const {
+        if (!enclosing_this_type.has_value()) return nullptr;
+        const Type* owner_type = enclosing_this_type->kind == TypeKind::Reference && enclosing_this_type->pointee != nullptr
+                                     ? enclosing_this_type->pointee.get()
+                                     : &*enclosing_this_type;
+        if (owner_type->kind != TypeKind::Named) return nullptr;
+        for (const ClassDef& cls : program_.classes) {
+            if (cls.name != owner_type->name) continue;
+            return cls.is_closure ? &cls : nullptr;
+        }
+        return nullptr;
+    }
+
+    // ch05 §5.12: the type of `name` as a field of that closure, or
+    // nullopt when the enclosing function is not a closure's call method
+    // at all, or that closure has no such field.
+    //
+    // "Is this name reachable from here?" is asked of the enclosing
+    // *closure*, not of any enclosing class: an ordinary method's fields
+    // stay uncapturable by bare name (real C++ requires `[this]`), and a
+    // nested lambda naming something the enclosing lambda never captured
+    // finds nothing here either, because a closure's fields are exactly
+    // its captures.
+    [[nodiscard]] std::optional<Type> enclosing_closure_field_type(const std::optional<Type>& enclosing_this_type,
+                                                                   const std::string& name) const {
+        const ClassDef* cls = enclosing_closure_class(enclosing_this_type);
+        if (cls == nullptr) return std::nullopt;
+        for (const ClassField& field : cls->fields) {
+            if (field.name == name) return field.type;
+        }
+        return std::nullopt;
+    }
+
     // ch05 §5.12: resolves a single Lambda expression node in place --
     // performs blanket-capture free-variable analysis if needed,
     // resolves every capture's concrete field type, synthesizes the
@@ -6131,10 +6173,21 @@ private:
                 // -- must be named explicitly (`[this]`/`[=, this]`/
                 // `[&, this]`).
                 if (name == "this") continue;
-                // Not a real local in the enclosing scope -- leave for
+                // Not a real local in the enclosing scope -- but it may
+                // still be a capture chained out of an enclosing closure
+                // (see the explicit-capture path below, which this
+                // mirrors). Only if it is neither is the name left for
                 // the usual "use of undeclared variable" error rather
-                // than guessing.
-                if (resolved == 0) continue;
+                // than guessed at here.
+                if (resolved == 0) {
+                    if (!enclosing_closure_field_type(enclosing_this_type, name).has_value()) continue;
+                    LambdaCapture chained_capture;
+                    chained_capture.name = name;
+                    chained_capture.by_reference = by_reference;
+                    chained_capture.from_enclosing_closure = true;
+                    expr.lambda_captures.push_back(std::move(chained_capture));
+                    continue;
+                }
                 LambdaCapture capture;
                 capture.name = name;
                 // The synthesized capture inherits the binding of the use
@@ -6171,12 +6224,38 @@ private:
             // local of this function.
             bool captured_is_const = false;
             if (capture.name == "this") {
-                if (!enclosing_this_type.has_value()) {
+                // ch05 §5.12: inside a closure's own "call" method,
+                // `this` is the *closure*, which is synthetic and not
+                // what the user wrote. What `[this]` names there is the
+                // receiver the enclosing lambda itself captured -- the
+                // closure's own `this` field -- so a nested `[this]`
+                // chains off that field exactly like any other
+                // re-captured name. Without this, the inner closure
+                // captured the outer closure object and every member
+                // access through it resolved against the wrong class.
+                if (std::optional<Type> chained_this = enclosing_closure_field_type(enclosing_this_type, "this");
+                    chained_this.has_value()) {
+                    capture.from_enclosing_closure = true;
+                    captured_type = std::move(*chained_this);
+                } else if (!enclosing_this_type.has_value() ||
+                           enclosing_closure_class(enclosing_this_type) != nullptr) {
+                    // Either there is no `this` at all, or the only one
+                    // in scope is a closure's own synthetic receiver
+                    // while that closure has no `this` field -- i.e. the
+                    // enclosing lambda did not capture `this`, so there
+                    // is nothing for this one to chain onto and the
+                    // enclosing local scope has no receiver either. Real
+                    // C++ is ill-formed here for the same reason. This
+                    // used to fall through to the branch below and
+                    // silently capture the *enclosing closure object* as
+                    // `this`, which type-checked and compiled while
+                    // meaning something no one wrote.
                     return std::unexpected(DataflowError(
                         "a lambda captures 'this', but is not itself inside a method body (ch05 §5.12)",
                         expr.loc));
+                } else {
+                    captured_type = *enclosing_this_type;
                 }
-                captured_type = *enclosing_this_type;
             } else if (capture.init) {
                 std::optional<Type> t = infer_expr_type(*capture.init, enclosing_body, signatures_);
                 if (!t.has_value()) {
@@ -6188,13 +6267,35 @@ private:
             } else {
                 std::optional<LocalId> captured = enclosing_body.local_of(capture);
                 if (!captured.has_value()) {
-                    return std::unexpected(DataflowError("lambda captures '" + capture.name +
-                                             "', which is not a local variable or parameter in this scope (ch05 "
-                                             "§5.12)",
-                        expr.loc));
+                    // ch05 §5.12: not a local here -- but this lambda may
+                    // be nested inside another, in which case the name it
+                    // wants is one the *enclosing closure* captured, and
+                    // by now exists only as a field of that closure (the
+                    // enclosing body's own references to it were rewritten
+                    // to `this.name` before this walk began). Chain the
+                    // capture onto that field rather than failing: what a
+                    // nested closure captures from an enclosing one is the
+                    // enclosing closure object's field, not the original
+                    // local, which is not in scope here at all.
+                    std::optional<Type> chained = enclosing_closure_field_type(enclosing_this_type, capture.name);
+                    if (!chained.has_value()) {
+                        return std::unexpected(DataflowError("lambda captures '" + capture.name +
+                                                 "', which is not a local variable or parameter in this scope (ch05 "
+                                                 "§5.12)",
+                            expr.loc));
+                    }
+                    capture.from_enclosing_closure = true;
+                    // The enclosing field is already a reference type when
+                    // the enclosing closure captured by reference; the
+                    // is_reference short-circuit in by_reference_capture_type
+                    // keeps a by-reference chain from re-wrapping it, and a
+                    // by-value chain off a by-reference field copies the
+                    // referent, exactly as reading `this.name` would.
+                    captured_type = std::move(*chained);
+                } else {
+                    captured_type = enclosing_body.type_of(*captured);
+                    captured_is_const = enclosing_body.decl(*captured).is_const;
                 }
-                captured_type = enclosing_body.type_of(*captured);
-                captured_is_const = enclosing_body.decl(*captured).is_const;
             }
             if (capture.by_reference) {
                 field_types.push_back(by_reference_capture_type(captured_type, captured_is_const));
@@ -6208,6 +6309,7 @@ private:
         expr.name = class_name;
         ClassDef closure_class;
         closure_class.name = class_name;
+        closure_class.is_closure = true;
         closure_class.fields.reserve(expr.lambda_captures.size());
         for (std::size_t i = 0; i < expr.lambda_captures.size(); i++) {
             ClassField field;
@@ -6357,7 +6459,13 @@ private:
         // body and its own real Body; `void` here is only a placeholder
         // for that walk (see the write-back after it).
         call_method.return_type = expr.has_lambda_explicit_return_type ? expr.type : named_type("void");
-        if (call_method.body) rewrite_captured_identifiers_as_field_access(*call_method.body, captured_names);
+        // Stops at a nested lambda's own body: that closure has its own
+        // `this`, and its own resolve_lambda rewrites it against its own
+        // capture list once this body's walk reaches it.
+        if (call_method.body) {
+            rewrite_captured_identifiers_as_field_access(*call_method.body, captured_names,
+                                                         /*nested_lambda_bodies_share_this=*/false);
+        }
 
         program_.functions.push_back(std::move(call_method));
         const std::size_t synthesized_index = program_.functions.size() - 1;

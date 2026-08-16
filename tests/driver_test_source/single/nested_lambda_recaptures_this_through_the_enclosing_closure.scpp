@@ -1,0 +1,50 @@
+// ch05 §5.12: inside a closure's own synthesized "call" method, `this`
+// is the *closure*, which is synthetic and is not what the user wrote.
+// So a nested `[this]` must not bind to it: what `[this]` names there is
+// the receiver the enclosing lambda itself captured -- the enclosing
+// closure's own `this` field -- and it chains off that field exactly
+// like any other re-captured name.
+//
+// Getting this wrong is silent rather than loud: the inner closure would
+// capture the outer *closure object* as its `this`, and every member
+// access through it would then resolve against the wrong class. The two
+// spellings below (`this.v` and a bare `w`, which the method-member
+// rewrite turns into `this.w` before any of this runs) both have to land
+// on the same real receiver, and the receiver is mutated first so a
+// stale copy is distinguishable from the live object.
+import std;
+
+class K {
+  public:
+    int v{5};
+    int w{6};
+
+    int go() {
+        auto o = [this]() {
+            auto i = [this]() { return this.v + w; };
+            return i();
+        };
+        return o();
+    }
+
+    int deep() {
+        auto o = [this]() {
+            auto m = [this]() {
+                auto i = [this]() { return v * 100 + w; };
+                return i();
+            };
+            return m();
+        };
+        return o();
+    }
+
+    virtual ~K() = default;
+};
+
+int main() {
+    K k{};
+    k.v = 20;
+    k.w = 3;
+    std::println("{} {}", k.go(), k.deep());
+    return k.go();
+}

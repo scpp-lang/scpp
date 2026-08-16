@@ -1,0 +1,79 @@
+// ch05 §5.12: a lambda nested inside another may capture a name the
+// enclosing lambda captured. What it captures is the *enclosing closure
+// object's field*, not the original local -- that local is not in scope
+// inside the enclosing closure's synthesized "call" method at all.
+//
+// This used to be rejected as "lambda captures 'x', which is not a local
+// variable or parameter in this scope": by the time the inner lambda was
+// resolved, the enclosing body's own references to `x` had already been
+// rewritten to `this.x`, so looking `x` up as a local found nothing.
+//
+// Acceptance alone would not be enough -- a chained capture also has to
+// read the right storage. Every value below is distinguishable, so a
+// closure that captured the wrong field, or the wrong closure, shows up
+// as a wrong number rather than as a compile error.
+//
+// The by-reference outer capture gets its own local: a live `[&x]`
+// closure holds a mutable borrow of `x` for as long as it exists, so
+// reusing one local across every case would trip that (correct) rule
+// instead of testing this one.
+import std;
+
+int main() {
+    int x = 7;
+    int z = 3;
+
+    // Outer by value, inner by value.
+    auto a = [x]() { auto i = [x]() { return x; }; return i(); };
+    // Outer by value, inner by reference: the inner borrows the outer
+    // closure's own field.
+    auto b = [x]() { auto i = [&x]() { return x; }; return i(); };
+    // Outer explicit, inner default-capture: the inner's blanket capture
+    // has to chain too, not just an explicitly written one.
+    auto e = [x]() { auto i = [=]() { return x; }; return i(); };
+    // Depth 3 -- chaining has to compose, not just work one level down.
+    auto f = [x]() {
+        auto m = [x]() {
+            auto i = [x]() { return x; };
+            return i();
+        };
+        return m();
+    };
+    // Two names chained at once.
+    auto g = [x, z]() { auto i = [x, z]() { return x * z; }; return i(); };
+    // A chained capture alongside an ordinary one: `w` really is a local
+    // of the enclosing closure's call method, so it must keep resolving
+    // as a local while `x` chains.
+    auto h = [x]() {
+        int w = 2;
+        auto i = [x, w]() { return x + w; };
+        return i();
+    };
+    // The inner lambda immediately invoked rather than stored.
+    auto k = [x]() { return [x]() { return x; }(); };
+    // The inner lambda called more than once.
+    auto m = [x]() {
+        auto i = [x]() { return x; };
+        return i() + i();
+    };
+    // An init-capture whose initializer names an outer capture, and an
+    // ordinary capture of an outer *init*-capture.
+    auto n = [x]() { auto i = [y = x]() { return y; }; return i(); };
+    auto p = [y = x]() { auto i = [y]() { return y; }; return i(); };
+
+    // Outer by reference, inner by reference: the outer's field is
+    // already a reference, so the chain collapses to the same referent
+    // rather than stacking a reference to a reference.
+    int r = 11;
+    auto c = [&r]() { auto i = [&r]() { return r; }; return i(); };
+    int c_result = c();
+
+    // Outer default-capture, inner explicit.
+    int q = 13;
+    auto d = [=]() { auto i = [q]() { return q; }; return i(); };
+    int d_result = d();
+
+    std::println("{} {} {} {} {} {} {} {} {} {} {} {}", a(), b(), e(), f(), g(), h(), k(), m(), n(), p(), c_result,
+                 d_result);
+    return g() + h();
+}

@@ -1,0 +1,24 @@
+// ch05 §5.12: re-capture chains through the enclosing *closure*, never
+// through an enclosing class. A method's own fields stay uncapturable by
+// bare name -- real C++ requires `[this]`, and scpp agrees -- and that
+// stays true inside a lambda nested in a `[this]`-capturing lambda,
+// where the enclosing closure has a `this` field but no `v` field.
+class K {
+  public:
+    int v{5};
+
+    int go() {
+        auto outer = [this]() {
+            auto inner = [v]() { return v; };
+            return inner();
+        };
+        return outer();
+    }
+
+    virtual ~K() = default;
+};
+
+int main() {
+    K k{};
+    return k.go();
+}

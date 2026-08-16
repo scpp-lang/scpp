@@ -1,0 +1,22 @@
+// ch05 §5.12: `[this]` inside a closure names the receiver the enclosing
+// lambda captured -- the enclosing closure's own `this` field. When the
+// enclosing lambda did not capture `this` there is no such field, and no
+// receiver in the enclosing scope either, so there is nothing to name.
+// Real C++ is ill-formed here for the same reason.
+//
+// A single-level `[this]` in a free function has always been rejected;
+// nested, it used to be silently *accepted*, capturing the enclosing
+// closure object itself as `this` -- a program that type-checked and
+// compiled while meaning something no one wrote.
+//
+// The enclosing closure deliberately captures nothing and the inner
+// result is used on its own: reading a capture of the outer alongside
+// it would instead trip the borrow rules on the wrongly-captured `this`,
+// which is a different (accidental) rejection and would hide this one.
+int main() {
+    auto outer = []() {
+        auto inner = [this]() { return 1; };
+        return inner();
+    };
+    return outer();
+}

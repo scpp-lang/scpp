@@ -1,0 +1,14 @@
+// ch05 §5.12: a by-value re-capture is an ordinary by-value capture --
+// it just reads its initial value out of the enclosing closure's field
+// rather than out of a local. So the non-`mutable` rule applies to it
+// unchanged: a closure's by-value captures are const inside a lambda
+// that is not declared `mutable`, however the capture got there.
+int main() {
+    int x = 7;
+    auto outer = [x]() mutable {
+        auto inner = [x]() { x = x + 1; };
+        inner();
+    };
+    outer();
+    return 0;
+}
