@@ -1,0 +1,24 @@
+// movecheck's half of the boundary, and the reason this defect lived
+// only in codegen. #459 established "is this expression a value?" as a
+// movecheck question and rejected `void` wherever a value is required --
+// but deliberately asked it only of the conditional's *condition*, not
+// of its arms, on the grounds that [basic.types.general] permits a
+// `void` second and third operand and the result is then a `void`
+// expression like any other: legal if discarded, caught by whichever
+// position tries to bind it (see the movetest cases next to this one).
+//
+// So this already passed movecheck before the fix and still does. It is
+// here to pin that decision down: if a later change makes movecheck
+// reject a discarded `void` conditional, that is a regression against
+// #459's model, and codegen accepting it would no longer be reachable
+// to notice.
+int taken = 0;
+
+void h() { taken = 1; }
+void h2() { taken = 2; }
+
+int main() {
+    bool c = true;
+    c ? h() : h2();
+    return 0;
+}

@@ -1,0 +1,4 @@
+contains: call void @h()
+contains: call void @h2()
+contains: call void @h3()
+count_at_least: 3 | cond.end

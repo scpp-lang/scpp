@@ -1,0 +1,23 @@
+// `return c ? h() : h2();` from a `void` function. #459 deliberately
+// left `return h();` from a `void` function accepted -- returning a
+// `void` expression from a `void` function is exactly what [stmt.return]
+// permits -- and a conditional with two `void` arms is a `void`
+// expression like any other, so this is the same shape and must be
+// accepted for the same reason. It was not: the conditional never got as
+// far as the `return`, because codegen rejected the arms' merge first.
+//
+// The `ret void` marker at the end is the point: the merge block falls
+// through to the return with nothing merged into it.
+int taken = 0;
+
+void h() { taken = 1; }
+void h2() { taken = 2; }
+
+void pick(bool c) {
+    return c ? h() : h2();
+}
+
+int main() {
+    pick(true);
+    return 0;
+}

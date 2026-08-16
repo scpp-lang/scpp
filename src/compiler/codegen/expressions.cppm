@@ -1482,14 +1482,19 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 return llvm::LLVMBuildGlobalString(builder_, expr.name.c_str(), "str");
 
             case ExprKind::Conditional: {
-                // ch05/ch06: the conditional yields a *value*, so each arm
-                // is generated against the one type both agree on (see
+                // ch05/ch06: a conditional *usually* yields a value, so each
+                // arm is generated against the one type both agree on (see
                 // movecheck's conditional_arm_types_agree, which decides
                 // the very same question): an untyped literal arm is
                 // materialized at the other arm's width, and a scalar
                 // lvalue arm (e.g. a `const T&`-returning call) is read
                 // through as an ordinary value. Falls back to plain
                 // codegen_expr whenever neither arm has an inferable type.
+                //
+                // "Usually" is the whole of the fix below: when both arms
+                // are `void` the conditional is a `void` expression and
+                // yields no value at all, which this case used to assume
+                // could not happen -- see the merge block.
                 auto arm_value_type = [&](const Expr& arm) -> std::optional<Type> {
                     std::optional<Type> arm_type = infer_type(arm);
                     if (!arm_type.has_value()) return std::nullopt;
@@ -1546,6 +1551,33 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 if (llvm::LLVMTypeOf(then_value) != llvm::LLVMTypeOf(else_value)) {
                     return std::unexpected(CodegenError("conditional operator requires both arms to have the same type", current_loc_));
                 }
+                // [basic.types.general]: when both arms are `void` the
+                // conditional is itself a `void` expression -- it produces
+                // no value, so there is nothing for the merge block to
+                // merge. movecheck already says exactly this and asks
+                // check_expression_yields_a_value only of the *condition*
+                // (dataflow.cppm's Conditional case), leaving the result
+                // "legal if the whole conditional is discarded, caught by
+                // whichever position tries to bind it". Codegen was the
+                // only place that still assumed otherwise: it named the
+                // merged result unconditionally, and `phi void %condtmp`
+                // is an instruction with a name but no value -- rejected
+                // by LLVM's verifier, so `c ? h() : h2();` as a discarded
+                // statement, which is legal, was reported as "generated
+                // invalid IR" instead of compiling.
+                //
+                // The arms' effects are already emitted; the branch and
+                // the merge block stand as they are for any conditional.
+                // Only the phi is skipped, and the then-arm's own
+                // void-typed value is handed back so that a `void`
+                // conditional is shaped for every consumer exactly like
+                // any other void expression -- a `void` call returns its
+                // own `call void` instruction in just the same way. It is
+                // never read: `LLVMTypeOf` is void, so check_store_type,
+                // check_return_type and overload resolution each reject
+                // it at the boundary with the same diagnostic a bare
+                // `h()` gets there, and no other use survives movecheck.
+                if (llvm::LLVMTypeOf(then_value) == llvm::LLVMVoidTypeInContext(context_)) return then_value;
                 llvm::LLVMValueRef phi = llvm::LLVMBuildPhi(builder_, llvm::LLVMTypeOf(then_value), "condtmp");
                 llvm::LLVMValueRef incoming_values[] = {then_value, else_value};
                 llvm::LLVMBasicBlockRef incoming_blocks[] = {then_end, else_end};

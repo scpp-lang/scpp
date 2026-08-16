@@ -1,0 +1,20 @@
+// The arms need not be free functions: a `void`-returning *method* call
+// is a `void` expression too, and two of them make a `void` conditional.
+// Worth its own case because a method call reaches codegen through a
+// different path (an implicit `this` argument, and for a virtual one a
+// vtable load) than a plain call, and the merge block sees only the
+// resulting value -- which is `void` either way.
+class Counter {
+public:
+    int value{0};
+    void up() { value = value + 1; }
+    void down() { value = value - 1; }
+    virtual ~Counter() = default;
+};
+
+int main() {
+    Counter k{};
+    bool c = true;
+    c ? k.up() : k.down();
+    return 0;
+}

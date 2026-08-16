@@ -1,0 +1,18 @@
+// A `void` conditional is a `void` expression, so it is itself a legal
+// arm of another `void` conditional. Nesting is what distinguishes a fix
+// that special-cases the reported shape from one that gives `void`
+// conditionals a consistent model: the inner conditional's result is
+// produced by the same path that then has to be consumed as an arm of
+// the outer one.
+int taken = 0;
+
+void h() { taken = 1; }
+void h2() { taken = 2; }
+void h3() { taken = 3; }
+
+int main() {
+    bool c = true;
+    bool d = false;
+    c ? (d ? h() : h2()) : h3();
+    return 0;
+}

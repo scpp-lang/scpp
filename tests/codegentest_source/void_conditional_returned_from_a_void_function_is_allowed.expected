@@ -1,0 +1,1 @@
+sequence: define void @pick(i8 %c) | label %cond.then, label %cond.else | cond.then: | call void @h() | br label %cond.end | cond.else: | call void @h2() | br label %cond.end | cond.end: | ret void

@@ -1,0 +1,1 @@
+sequence: label %cond.then, label %cond.else | cond.then: | call void @Counter_up | br label %cond.end | cond.else: | call void @Counter_down | br label %cond.end | cond.end:

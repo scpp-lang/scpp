@@ -1,0 +1,29 @@
+// [basic.types.general]: a conditional expression whose second and third
+// operands are both `void` is itself a `void` expression. Discarding it
+// as an expression statement is legal, and this is what that lowers to:
+// an ordinary condition/then/else/merge diamond in which each arm is
+// generated purely for its effect and the merge block merges nothing.
+//
+// Codegen used to name the merged result unconditionally --
+// `%condtmp = phi void [ <badref>, %cond.then ], [ <badref>, %cond.else ]`
+// -- and LLVM's verifier rejects an instruction that has a name but no
+// value, so this legal program was reported as
+// "internal error: generated invalid IR: Instruction has a name, but
+// provides a void value!". movecheck had already decided the opposite,
+// and correctly: its Conditional case asks
+// check_expression_yields_a_value only of the *condition*, leaving the
+// result legal when the whole conditional is discarded.
+//
+// Any reintroduction of the phi fails this case outright rather than
+// merely changing the IR: `generate()` runs LLVM's verifier per function,
+// so a `phi void` produces no IR at all and every assertion below fails.
+int taken = 0;
+
+void h() { taken = 1; }
+void h2() { taken = 2; }
+
+int main() {
+    bool c = true;
+    c ? h() : h2();
+    return 0;
+}
