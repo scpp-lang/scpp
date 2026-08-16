@@ -389,6 +389,27 @@ class LambdaCapture {
     // Name resolution's result for the *enclosing* function's local this
     // capture names -- see Expr::resolved_local for the encoding.
     std::size_t resolved_local = 0;
+    // ch05 §5.12: true when what this capture names is not a local of the
+    // enclosing scope at all, but a *field of the enclosing closure* --
+    // i.e. this lambda is nested inside another lambda that captured the
+    // same name, so by the time this one is resolved the name has already
+    // been rewritten to `this.name` in the enclosing body.
+    //
+    // A closure capturing an outer closure's capture is capturing the
+    // outer *closure object's field*, not the original local -- the local
+    // is not in scope here and may already be gone. That distinction is
+    // the whole content of this flag: it redirects
+    // make_capture_identifier (the single authoritative "what names the
+    // captured entity in the enclosing scope" mapping) from a bare local
+    // Identifier to a `this.name` Member, which is what the enclosing
+    // scope actually has.
+    //
+    // Set only by monomorphize's resolve_lambda, and only when the
+    // enclosing function is a synthesized closure's own "call" method
+    // (ClassDef::is_closure) -- never for an ordinary method, where a
+    // bare field name is deliberately *not* capturable (real C++ requires
+    // `[this]`, and scpp agrees).
+    bool from_enclosing_closure = false;
 };
 
 enum class LambdaCaptureMode {
@@ -1022,17 +1043,46 @@ inline void assign_stmt_fields(Stmt& dest, const Stmt& src) {
     return clone;
 }
 
-// The single authoritative mapping from a `LambdaCapture` to the `Identifier`
-// expression that names the captured entity in the *enclosing* scope. Codegen
+// The single authoritative mapping from a `LambdaCapture` to the expression
+// that names the captured entity in the *enclosing* scope. Codegen
 // materializes each capture by evaluating such a node, and a bare name would
 // not resolve: the node has to carry the enclosing declaration's id, which is
 // exactly the sort of field that used to get dropped by hand-written synthesis.
 // Anything that builds one of these must go through here.
+//
+// ch05 §5.12: for a capture chained from an enclosing closure
+// (LambdaCapture::from_enclosing_closure) the enclosing scope has no such
+// local -- the name is a field of the enclosing closure object, reached
+// through its own `this`, exactly as every other reference to that name in
+// the enclosing body was already rewritten
+// (rewrite_captured_identifiers_as_field_access). So the node is a
+// `this.name` Member rather than an Identifier, and carries no
+// `resolved_local`: there is no local to resolve to.
 [[nodiscard]] inline Expr make_capture_identifier(const LambdaCapture& capture, const SourceLocation& loc) {
     Expr ident{};
-    ident.kind = ExprKind::Identifier;
     ident.loc = loc;
     ident.name = capture.name;
+    if (capture.from_enclosing_closure) {
+        auto this_ref = std::make_unique<Expr>();
+        this_ref->kind = ExprKind::Identifier;
+        this_ref->loc = loc;
+        this_ref->name = "this";
+        // This node is synthesized during monomorphization's walk, after
+        // resolve_locals has already run over the enclosing closure's
+        // "call" method, so nothing else will ever bind it. It can be
+        // bound here without a lookup because `this` is always the first
+        // parameter and can never be shadowed or redeclared, so it is
+        // always local id 0 -- exactly the invariant Body::this_local()
+        // is founded on (the stored form is `id + 1`, zero meaning
+        // unresolved). The capture's own `resolved_local` stays 0: a
+        // chained capture names no local in the enclosing scope at all,
+        // and `local_of(capture)` must keep answering "not a local".
+        this_ref->resolved_local = 1;
+        ident.kind = ExprKind::Member;
+        ident.lhs = std::move(this_ref);
+        return ident;
+    }
+    ident.kind = ExprKind::Identifier;
     ident.resolved_local = capture.resolved_local;
     return ident;
 }
@@ -1174,7 +1224,8 @@ inline GlobalVar& GlobalVar::operator=(const GlobalVar& other) {
 }
 
 inline LambdaCapture::LambdaCapture(const LambdaCapture& other)
-    : name{other.name}, by_reference{other.by_reference}, init{}, resolved_local{other.resolved_local} {
+    : name{other.name}, by_reference{other.by_reference}, init{}, resolved_local{other.resolved_local},
+      from_enclosing_closure{other.from_enclosing_closure} {
     if (other.init != nullptr) init = deep_clone_expr(*other.init);
 }
 
@@ -2018,6 +2069,22 @@ class ClassDef {
     // every call site is monomorphized against a real concrete type
     // instead (see Function::is_generic_template).
     bool is_concept_witness = false;
+    // ch05 §5.12: true for a hidden class synthesized from a lambda
+    // expression's own capture list (one private field per capture, plus
+    // a "call" method carrying the body) -- never a real, user-written
+    // class. See monomorphize's resolve_lambda, which creates it.
+    //
+    // Distinguishes "this method's enclosing class is a closure" from
+    // "...is an ordinary class", which is the difference between a
+    // nested lambda legitimately chaining a capture out of the closure it
+    // sits in (LambdaCapture::from_enclosing_closure) and an ordinary
+    // method's lambda trying to capture a bare field name -- the latter
+    // stays an error, exactly as in real C++, where a member must be
+    // reached through a captured `this`. A name check on the synthesized
+    // `__lambdaN` spelling would answer the same question by convention
+    // rather than from the model, and would be defeated by any user class
+    // that happened to be spelled that way.
+    bool is_closure = false;
     // ch05 §5.14: non-empty for a generic class's own *template*
     // definition (`template<typename T> class Name { ... };`, or
     // `template<Concept T> class Name { ... };`) -- its single

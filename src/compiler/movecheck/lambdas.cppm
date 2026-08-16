@@ -26,9 +26,11 @@ void collect_free_identifiers(const Expr& expr, const std::unordered_set<std::st
 void collect_free_identifiers(const Stmt& stmt, const std::unordered_set<std::string>& excluded,
                               FreeIdentifierMap& out);
 void rewrite_captured_identifiers_as_field_access(Stmt& stmt,
-                                                  const std::unordered_set<std::string>& captured_names);
+                                                  const std::unordered_set<std::string>& captured_names,
+                                                  bool nested_lambda_bodies_share_this);
 void rewrite_captured_identifiers_as_field_access(Expr& expr,
-                                                  const std::unordered_set<std::string>& captured_names);
+                                                  const std::unordered_set<std::string>& captured_names,
+                                                  bool nested_lambda_bodies_share_this);
 void rewrite_unqualified_member_calls(Stmt& stmt, const std::unordered_map<std::string, std::string>& instance_methods,
                                       const std::unordered_map<std::string, std::string>& static_methods);
 void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::string, std::string>& instance_methods,
@@ -134,19 +136,39 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
         // A capture list is written outside the closure, so `captured`
         // is the enclosing declaration the capture names -- resolved
         // once by resolve_locals and carried on the capture itself, not
-        // re-looked-up by spelling here.
+        // re-looked-up by spelling here. A capture chained out of an
+        // enclosing closure (from_enclosing_closure) names no local at
+        // all, so this is legitimately empty for one.
         std::optional<LocalId> captured = body.local_of(capture);
         // The rest of this function reuses the ordinary place-checking
         // paths, which all expect an Expr; this stands in for the
-        // capture as it would have been written as an identifier, and so
-        // must carry the same resolution the capture itself does.
-        Expr capture_ident;
-        capture_ident.kind = ExprKind::Identifier;
-        capture_ident.loc = expr.loc;
-        capture_ident.name = capture.name;
+        // capture as it would have been written in the enclosing scope,
+        // and so must carry the same resolution the capture itself does
+        // -- a bare Identifier for an ordinary capture, a `this.name`
+        // Member for a chained one (make_capture_identifier decides,
+        // as the one place that mapping lives; codegen materializes the
+        // capture from the very same node).
+        Expr capture_ident = make_capture_identifier(capture, expr.loc);
         if (captured.has_value()) set_resolved_local(capture_ident, *captured);
+        // ch05 §5.12: what a nested closure captures from the closure it
+        // sits in is that closure object's *field*. So the whole
+        // question below -- "what is being captured, and what does
+        // borrowing it borrow from" -- is answered for a chained capture
+        // by the ordinary field paths, reading `this.name`: by value it
+        // is a copy out of the enclosing closure, and by reference it is
+        // a borrow whose root resolve_borrow_source_root reports as the
+        // enclosing closure object itself (`this`), not the original
+        // local -- which is the honest answer, since that local is not in
+        // scope here and the reference genuinely points into the
+        // enclosing closure when that closure captured by value. When it
+        // captured by reference the field is already a reference and
+        // by_reference_capture_type leaves it alone, so the chain
+        // collapses to the same referent rather than stacking.
+        const bool chained = capture.from_enclosing_closure && !captured.has_value();
+        std::optional<Type> chained_type =
+            chained ? infer_expr_type(capture_ident, body, signatures) : std::nullopt;
         if (!capture.by_reference) {
-            if (!captured.has_value()) {
+            if (!captured.has_value() && !chained) {
                 if (report_errors) {
                     return std::unexpected(DataflowError("lambda captures '" + capture.name +
                                            "', which is not a local variable or parameter in this scope (ch05 §5.12)",
@@ -159,12 +181,15 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
-                if (auto _r = apply_by_value_capture_source(capture_ident, body.type_of(*captured), capture.name); !_r.has_value()) {
-                    return std::unexpected(std::move(_r).error());
+                const Type* by_value_type = chained ? (chained_type.has_value() ? &*chained_type : nullptr)
+                                                    : &body.type_of(*captured);
+                if (by_value_type != nullptr) {
+                    if (auto _r = apply_by_value_capture_source(capture_ident, *by_value_type, capture.name); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
                 continue;
             }
-            continue;
         }
         if (auto _r = reject_lifetime_group_state_embedding(capture_ident, state, body, signatures, report_errors, "a closure capture", nullptr);
             !_r.has_value()) {
@@ -173,7 +198,7 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
         auto roots_result = resolve_borrow_source_root(capture_ident, state, body, signatures, report_errors);
         if (!roots_result.has_value()) return std::unexpected(std::move(roots_result).error());
         RootSet roots = std::move(roots_result).value();
-        if (!captured.has_value()) {
+        if (!captured.has_value() && !chained) {
             if (report_errors) {
                 return std::unexpected(DataflowError("lambda captures '" + capture.name +
                                        "', which is not a local variable or parameter in this scope (ch05 §5.12)",
@@ -181,7 +206,9 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
             }
             continue;
         }
-        Type ref_type = by_reference_capture_type(body.type_of(*captured), body.decl(*captured).is_const);
+        if (chained && !chained_type.has_value()) continue;
+        Type ref_type = chained ? by_reference_capture_type(*chained_type, /*source_is_const=*/false)
+                                : by_reference_capture_type(body.type_of(*captured), body.decl(*captured).is_const);
         if (auto _r = apply_reference_argument(capture_ident, ref_type, state, reference_capture_borrows, body, signatures,
                                   report_errors); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
@@ -336,16 +363,41 @@ void collect_free_identifiers(const Stmt& stmt, const std::unordered_set<std::st
 // not a local, so every such reference must be rewritten this way. The
 // lambda's own parameters and any of its own locally-declared variables
 // are left as ordinary bare identifiers -- only names in
-// `captured_names` are ever rewritten. A nested lambda's own body is
-// conservatively rewritten too (matching collect_free_identifiers'
-// identical reasoning above); this codebase does not attempt to prove a
-// nested lambda's own parameter/local never shadows a captured name
-// from this outer scope -- an accepted v1 limitation (not demonstrated
-// by any documented example, and real C++ closure-capture-chain nesting
-// is itself a well-known deep-end topic).
-void rewrite_captured_identifiers_as_field_access(Stmt& stmt, const std::unordered_set<std::string>& captured_names);
+// `captured_names` are ever rewritten.
+//
+// `nested_lambda_bodies_share_this` is the difference between this
+// function's two callers, and it is a real semantic difference, not a
+// knob:
+//
+//   * Rewriting a *method*'s bare member names to `this.member`
+//     (monomorphize's rewrite_unqualified_member_field_reads) passes
+//     true. A lambda written inside that method and capturing `this`
+//     sees the very same members by the very same bare names, so its
+//     body is lexically part of the same rewrite; the closure's own
+//     later pass then maps that `this` onto its own captured `this`
+//     field.
+//
+//   * Rewriting a *closure*'s captured names to `this.name`
+//     (resolve_lambda) passes false. This closure's `this` is not a
+//     nested closure's `this`, so rewriting a nested body's `x` here
+//     names a field of the wrong object -- it used to, and
+//     `struct '__lambdaN' has no field 'x'` is how that showed up. The
+//     nested lambda gets its own rewrite, against its own capture list,
+//     when resolve_lambda reaches it during the walk of this body;
+//     leaving its body alone until then is also what lets its own
+//     free-variable analysis still see a bare `x` to chain a capture
+//     from (LambdaCapture::from_enclosing_closure).
+//
+// A nested lambda's *init-capture initializers* are descended into
+// either way, and must be: unlike its body, they are expressions of this
+// enclosing scope, evaluated here (`[y = x]` inside a closure that
+// captured `x` reads this closure's own `x` field), exactly like any
+// other sub-expression appearing at this level.
+void rewrite_captured_identifiers_as_field_access(Stmt& stmt, const std::unordered_set<std::string>& captured_names,
+                                                  bool nested_lambda_bodies_share_this);
 
-void rewrite_captured_identifiers_as_field_access(Expr& expr, const std::unordered_set<std::string>& captured_names) {
+void rewrite_captured_identifiers_as_field_access(Expr& expr, const std::unordered_set<std::string>& captured_names,
+                                                  bool nested_lambda_bodies_share_this) {
     if (expr.kind == ExprKind::Identifier && captured_names.contains(expr.name)) {
         auto this_ref = std::make_unique<Expr>();
         this_ref->kind = ExprKind::Identifier;
@@ -387,42 +439,53 @@ void rewrite_captured_identifiers_as_field_access(Expr& expr, const std::unorder
         field_ref->name = expr.name;
         expr.lhs = std::move(field_ref);
         expr.name = "call";
-        for (ExprPtr& arg : expr.args) rewrite_captured_identifiers_as_field_access(*arg, captured_names);
+        for (ExprPtr& arg : expr.args) rewrite_captured_identifiers_as_field_access(*arg, captured_names, nested_lambda_bodies_share_this);
         return;
     }
-    if (expr.lhs) rewrite_captured_identifiers_as_field_access(*expr.lhs, captured_names);
-    if (expr.rhs) rewrite_captured_identifiers_as_field_access(*expr.rhs, captured_names);
-    if (expr.third) rewrite_captured_identifiers_as_field_access(*expr.third, captured_names);
-    for (ExprPtr& arg : expr.args) rewrite_captured_identifiers_as_field_access(*arg, captured_names);
-    if (expr.kind == ExprKind::Lambda && expr.lambda_body) {
-        rewrite_captured_identifiers_as_field_access(*expr.lambda_body, captured_names);
+    if (expr.lhs) rewrite_captured_identifiers_as_field_access(*expr.lhs, captured_names, nested_lambda_bodies_share_this);
+    if (expr.rhs) rewrite_captured_identifiers_as_field_access(*expr.rhs, captured_names, nested_lambda_bodies_share_this);
+    if (expr.third) rewrite_captured_identifiers_as_field_access(*expr.third, captured_names, nested_lambda_bodies_share_this);
+    for (ExprPtr& arg : expr.args) rewrite_captured_identifiers_as_field_access(*arg, captured_names, nested_lambda_bodies_share_this);
+    if (expr.kind == ExprKind::Lambda) {
+        // See this function's own comment: the nested lambda's capture
+        // *initializers* always belong to this scope; its body belongs
+        // to this scope only when it shares this `this`.
+        for (LambdaCapture& capture : expr.lambda_captures) {
+            if (capture.init) {
+                rewrite_captured_identifiers_as_field_access(*capture.init, captured_names, nested_lambda_bodies_share_this);
+            }
+        }
+        if (nested_lambda_bodies_share_this && expr.lambda_body) {
+            rewrite_captured_identifiers_as_field_access(*expr.lambda_body, captured_names, nested_lambda_bodies_share_this);
+        }
     }
 }
 
-void rewrite_captured_identifiers_as_field_access(Stmt& stmt, const std::unordered_set<std::string>& captured_names) {
+void rewrite_captured_identifiers_as_field_access(Stmt& stmt, const std::unordered_set<std::string>& captured_names,
+                                                  bool nested_lambda_bodies_share_this) {
     switch (stmt.kind) {
         case StmtKind::VarDecl:
-            if (stmt.init) rewrite_captured_identifiers_as_field_access(*stmt.init, captured_names);
-            for (ExprPtr& arg : stmt.ctor_args) rewrite_captured_identifiers_as_field_access(*arg, captured_names);
+            if (stmt.init) rewrite_captured_identifiers_as_field_access(*stmt.init, captured_names, nested_lambda_bodies_share_this);
+            for (ExprPtr& arg : stmt.ctor_args) rewrite_captured_identifiers_as_field_access(*arg, captured_names, nested_lambda_bodies_share_this);
             return;
         case StmtKind::Return:
         case StmtKind::ExprStmt:
-            if (stmt.expr) rewrite_captured_identifiers_as_field_access(*stmt.expr, captured_names);
+            if (stmt.expr) rewrite_captured_identifiers_as_field_access(*stmt.expr, captured_names, nested_lambda_bodies_share_this);
             return;
         case StmtKind::If:
-            rewrite_captured_identifiers_as_field_access(*stmt.condition, captured_names);
-            rewrite_captured_identifiers_as_field_access(*stmt.then_branch, captured_names);
-            if (stmt.else_branch) rewrite_captured_identifiers_as_field_access(*stmt.else_branch, captured_names);
+            rewrite_captured_identifiers_as_field_access(*stmt.condition, captured_names, nested_lambda_bodies_share_this);
+            rewrite_captured_identifiers_as_field_access(*stmt.then_branch, captured_names, nested_lambda_bodies_share_this);
+            if (stmt.else_branch) rewrite_captured_identifiers_as_field_access(*stmt.else_branch, captured_names, nested_lambda_bodies_share_this);
             return;
         case StmtKind::While:
-            rewrite_captured_identifiers_as_field_access(*stmt.condition, captured_names);
-            rewrite_captured_identifiers_as_field_access(*stmt.then_branch, captured_names);
+            rewrite_captured_identifiers_as_field_access(*stmt.condition, captured_names, nested_lambda_bodies_share_this);
+            rewrite_captured_identifiers_as_field_access(*stmt.then_branch, captured_names, nested_lambda_bodies_share_this);
             return;
         case StmtKind::Switch:
-            rewrite_captured_identifiers_as_field_access(*stmt.condition, captured_names);
+            rewrite_captured_identifiers_as_field_access(*stmt.condition, captured_names, nested_lambda_bodies_share_this);
             for (SwitchCase& switch_case : stmt.switch_cases) {
-                if (switch_case.value) rewrite_captured_identifiers_as_field_access(*switch_case.value, captured_names);
-                for (StmtPtr& s : switch_case.statements) rewrite_captured_identifiers_as_field_access(*s, captured_names);
+                if (switch_case.value) rewrite_captured_identifiers_as_field_access(*switch_case.value, captured_names, nested_lambda_bodies_share_this);
+                for (StmtPtr& s : switch_case.statements) rewrite_captured_identifiers_as_field_access(*s, captured_names, nested_lambda_bodies_share_this);
             }
             return;
         case StmtKind::Break:
@@ -430,7 +493,7 @@ void rewrite_captured_identifiers_as_field_access(Stmt& stmt, const std::unorder
         case StmtKind::Fallthrough:
             return;
         case StmtKind::Block:
-            for (StmtPtr& s : stmt.statements) rewrite_captured_identifiers_as_field_access(*s, captured_names);
+            for (StmtPtr& s : stmt.statements) rewrite_captured_identifiers_as_field_access(*s, captured_names, nested_lambda_bodies_share_this);
             return;
     }
 }

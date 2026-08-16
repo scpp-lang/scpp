@@ -1,0 +1,17 @@
+// ch05 §5.12: a nested lambda may re-capture what the enclosing lambda
+// captured, because a closure's fields are exactly its captures. A name
+// the enclosing lambda did *not* capture is therefore not reachable from
+// inside it -- the enclosing local is genuinely out of scope there, and
+// no field stands in for it.
+//
+// This is the boundary of that widening: `x` chains, `y` must not.
+int main() {
+    int x = 7;
+    int y = 9;
+    auto outer = [x]() {
+        auto inner = [y]() { return y; };
+        return inner() + x;
+    };
+    outer();
+    return 0;
+}

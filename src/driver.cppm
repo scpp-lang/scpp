@@ -62,7 +62,7 @@ struct DriverError : std::runtime_error {
     DriverErrorKind kind;
 };
 
-inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 8;
+inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 9;
 inline constexpr std::string_view SCPPM_COMPILE_TIME_AST_MAGIC = "SAST";
 
 struct CompileTimePayloadPlan {
@@ -888,10 +888,11 @@ void write_param(std::ostream& out, const Param& param) {
 
 // Structurally bound; see `write_expr`.
 void write_lambda_capture(std::ostream& out, const LambdaCapture& capture) {
-    const auto& [name, by_reference, init, resolved_local] = capture;
+    const auto& [name, by_reference, init, resolved_local, from_enclosing_closure] = capture;
     write_string(out, name);
     write_u8(out, by_reference ? 1u : 0u);
     write_u64_le(out, static_cast<std::uint64_t>(resolved_local));
+    write_u8(out, from_enclosing_closure ? 1u : 0u);
     write_u8(out, init ? 1u : 0u);
     if (init) write_expr(out, *init);
 }
@@ -907,6 +908,9 @@ void write_lambda_capture(std::ostream& out, const LambdaCapture& capture) {
     auto resolved_local_r = read_u64_le(in, context + " resolved local");
     if (!resolved_local_r.has_value()) return std::unexpected(std::move(resolved_local_r).error());
     capture.resolved_local = static_cast<std::size_t>(resolved_local_r.value());
+    auto from_enclosing_r = read_u8(in, context + " from enclosing closure");
+    if (!from_enclosing_r.has_value()) return std::unexpected(std::move(from_enclosing_r).error());
+    capture.from_enclosing_closure = from_enclosing_r.value() != 0u;
     auto init_present_r = read_u8(in, context + " init present");
     if (!init_present_r.has_value()) return std::unexpected(std::move(init_present_r).error());
     if (init_present_r.value() != 0u) {
