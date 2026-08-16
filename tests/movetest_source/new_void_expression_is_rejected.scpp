@@ -1,0 +1,6 @@
+int f() {
+    [[scpp::unsafe]] {
+        void* p = new void;
+        return 0;
+    }
+}

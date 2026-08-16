@@ -1,0 +1,7 @@
+void* g = nullptr;
+void h() {
+}
+int f() {
+    h();
+    return g == nullptr ? 0 : 1;
+}

@@ -1,0 +1,9 @@
+class K {
+public:
+    virtual ~K() = default;
+    void (*destroy_)(void*) = nullptr;
+};
+int f() {
+    K k{};
+    return 0;
+}

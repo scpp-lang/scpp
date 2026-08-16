@@ -25,6 +25,14 @@ namespace scpp {
     }
 }
 
+// This validator is, despite its name, the compiler's only enumeration
+// of the positions at which a *type is declared*: a class field, a
+// struct field, a parameter, a local variable, a namespace-scope
+// variable, and a new-expression. It grew that enumeration for the
+// interface-object rules of spec §11.2(5), but the list is not specific
+// to them -- so any rule of the form "may an object of this declared
+// type exist here?" belongs on the same list rather than on a private
+// copy of it. `validate_declared_type` below is the second such rule.
 class ClassSemanticsValidator {
 public:
     ClassSemanticsValidator(const Program& program, const Signatures& signatures)
@@ -44,14 +52,29 @@ public:
             if (should_skip(def)) continue;
             if (auto _r = validate_class_shape(def); !_r.has_value()) return std::unexpected(std::move(_r).error());
         }
+        for (const StructDef& def : program_.structs) {
+            if (should_skip_struct(def)) continue;
+            if (auto _r = validate_struct_shape(def); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        }
         for (const ClassDef& def : program_.classes) {
             if (should_skip(def)) continue;
             if (auto _r = ensure_analyzed(def.name); !_r.has_value()) return std::unexpected(std::move(_r).error());
         }
+        // Every function's signature, not just every function with a
+        // body: a pure virtual method has no body, and its parameter
+        // types are declarations exactly as any other function's are.
+        // Checking only the ones with bodies is what let
+        // `virtual int m(void x) = 0;` reach codegen, where LLVM
+        // reported it as "Function arguments must have first-class
+        // types!" -- a verifier message about the lowering rather than a
+        // diagnostic about the program.
+        for (const Function& fn : program_.functions) {
+            if (!fn.member_owner_class.empty() && !fn.forwards_to.empty()) continue;
+            if (auto _r = validate_function_signature(fn); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        }
         for (const Function& fn : program_.functions) {
             if (!fn.body) continue;
             if (!fn.member_owner_class.empty() && !fn.forwards_to.empty()) continue;
-            if (auto _r = validate_function_signature(fn); !_r.has_value()) return std::unexpected(std::move(_r).error());
             if (auto _r = validate_function_body(fn, *fn.body); !_r.has_value()) return std::unexpected(std::move(_r).error());
         }
         // spec §11.2(5) is stated over "any object-forming context", and
@@ -103,6 +126,37 @@ private:
         return def.is_forward_declaration || def.is_concept_witness || def.is_synthetic_check_only ||
                !def.template_params.empty() || def.is_variadic_primary_template || def.is_variadic_specialization ||
                def.is_partial_specialization || def.name.rfind("__lambda", 0) == 0;
+    }
+
+    // The struct counterpart of should_skip: a template definition has
+    // symbolic field types that mean nothing until instantiated, and a
+    // forward declaration has no fields at all.
+    [[nodiscard]] static bool should_skip_struct(const StructDef& def) {
+        return def.is_forward_declaration || !def.template_params.empty();
+    }
+
+    // The one judgement passed on a *declaration*, as opposed to on an
+    // expression: may an object of this declared type exist here at all?
+    //
+    // Every caller below is a position that brings an object into being
+    // -- a class field, a struct field, a parameter, a local variable, a
+    // namespace-scope variable -- and this validator is the only pass in
+    // the compiler that enumerates them. That is why the rule lives
+    // here: there was no "declared types are validated here" place to
+    // put it in, and the absence is exactly why the same question was
+    // being answered separately, and differently, in four codegen sites.
+    // A function's *return* type is deliberately not a caller: it
+    // declares no object, and `void` there is the one place `void` is
+    // meaningful.
+    [[nodiscard]] static std::expected<void, DataflowError> validate_declared_type(const Type& type,
+                                                                                   const std::string& position,
+                                                                                   const SourceLocation& loc) {
+        if (type_can_have_objects(type)) return {};
+        return std::unexpected(DataflowError(
+            position + " declares an object of type '" + describe_type_brief(type) +
+                "', but 'void' is the type of no object: it may be a function's return type or a pointer's pointee "
+                "-- 'void*' -- and nothing else ([basic.types.general], applied unchanged by spec §1(2))",
+            loc));
     }
 
     [[nodiscard]] static std::string non_type_expr_key(const Expr* expr) {
@@ -295,9 +349,44 @@ private:
         }
         if (auto _r = validate_explicit_virtual_destructor(def); !_r.has_value()) return std::unexpected(std::move(_r).error());
         for (const ClassField& field : def.fields) {
+            if (auto _r = validate_declared_type(field.type, "class '" + def.name + "' non-static data member '" + field.name + "'",
+                                                 field.loc);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             if (type_forms_interface_object(field.type, program_)) {
                 return std::unexpected(DataflowError("class '" + def.name + "' forms an object of interface type in a non-static data member "
                                     "declaration (spec §11.2(5.2))"));
+            }
+        }
+        return {};
+    }
+
+    // Struct fields are the sixth declaration position, and until now the
+    // only one no frontend pass looked at: a struct's field types were
+    // judged solely by codegen's validate_trivial, whose actual question
+    // is "may this be a *struct* field?" (it also rejects references,
+    // spans, bare function types and class types). `void` was one line
+    // inside that struct-only answer, which is why `struct S { void f; };`
+    // was rejected with a sensible message while `class K { void f; };`
+    // handed a void type to LLVM's layout and segfaulted.
+    //
+    // Only the declared-type rule is asked here. Its sibling
+    // validate_class_shape also asks §11.2(5.2) ("does this field form an
+    // object of interface type?"), and a struct field is just as much a
+    // data member declaration -- but a struct field of interface type is
+    // already rejected today (by validate_trivial, as a class type), so
+    // extending §11.2(5.2) here would change a diagnostic's wording, not
+    // a program's acceptance. That is a separate rule from this one and
+    // gets its own change.
+    [[nodiscard]] std::expected<void, DataflowError> validate_struct_shape(const StructDef& def) {
+        for (const StructField& field : def.fields) {
+            if (auto _r = validate_declared_type(field.type,
+                                                 std::string(def.is_union ? "union '" : "struct '") + def.name + "' data member '" +
+                                                     field.name + "'",
+                                                 field.loc);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
             }
         }
         return {};
@@ -523,8 +612,21 @@ private:
     }
 
     [[nodiscard]] std::expected<void, DataflowError> validate_function_signature(const Function& fn) {
+        const bool is_template = fn.is_generic_template || !fn.template_params.empty();
         for (std::size_t i = 0; i < fn.params.size(); i++) {
             if (i == 0 && fn.params[i].name == "this") continue;
+            // Inside an uninstantiated template a parameter's type is
+            // symbolic, and a concept witness substitutes a `void`
+            // sentinel for an unconstrained one -- the same "a `void`
+            // answer can mean unconstrained here" abstention
+            // check_expression_yields_a_value makes (calls.cppm).
+            if (!is_template) {
+                if (auto _r = validate_declared_type(fn.params[i].type,
+                                                     "function '" + fn.name + "' parameter '" + fn.params[i].name + "'", fn.loc);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
             if (type_forms_interface_object(fn.params[i].type, program_)) {
                 return std::unexpected(DataflowError("function '" + fn.name + "' forms an object of interface type in a by-value "
                                     "parameter declaration (spec §11.2(5.6))",
@@ -589,9 +691,15 @@ private:
     [[nodiscard]] std::expected<void, DataflowError> validate_initializer_scopes() {
         return for_each_initializer_scope(program_, [&](const InitializerScope& scope)
                                                         -> std::expected<void, DataflowError> {
-            if (scope.declares_namespace_scope_variable && type_forms_interface_object(*scope.declared_type, program_)) {
-                return std::unexpected(DataflowError("a global variable definition forms an object of interface type (spec §11.2(5.1))",
-                                    scope.loc));
+            if (scope.declares_namespace_scope_variable) {
+                if (auto _r = validate_declared_type(*scope.declared_type, "global variable '" + scope.name + "'", scope.loc);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                if (type_forms_interface_object(*scope.declared_type, program_)) {
+                    return std::unexpected(DataflowError("a global variable definition forms an object of interface type (spec §11.2(5.1))",
+                                        scope.loc));
+                }
             }
             if (scope.expr != nullptr) {
                 if (auto _r = walk_expr(*scope.expr, scope.body); !_r.has_value()) return std::unexpected(std::move(_r).error());
@@ -609,6 +717,12 @@ private:
     [[nodiscard]] std::expected<void, DataflowError> walk_stmt(const Stmt& stmt, const Body& body) {
         switch (stmt.kind) {
             case StmtKind::VarDecl:
+                if (!body.function_is_generic_template) {
+                    if (auto _r = validate_declared_type(stmt.type, "local variable '" + stmt.var_name + "'", stmt.loc);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
                 if (type_forms_interface_object(stmt.type, program_)) {
                     return std::unexpected(DataflowError("a local variable definition forms an object of interface type (spec §11.2(5.1))",
                                         stmt.loc));
@@ -680,9 +794,19 @@ private:
         if (expr.lambda_body) {
             if (auto _r = walk_stmt(*expr.lambda_body, body); !_r.has_value()) return std::unexpected(std::move(_r).error());
         }
-        if (expr.kind == ExprKind::New && type_forms_interface_object(expr.type, program_)) {
-            return std::unexpected(DataflowError("a new-expression forms an object whose most-derived type is an interface (spec §11.2(5.4))",
-                                expr.loc));
+        if (expr.kind == ExprKind::New) {
+            // A new-expression is the one *expression* that declares a
+            // type rather than producing a value of one, so the
+            // declaration rule applies to it exactly as to a variable.
+            if (!body.function_is_generic_template) {
+                if (auto _r = validate_declared_type(expr.type, "a new-expression", expr.loc); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+            if (type_forms_interface_object(expr.type, program_)) {
+                return std::unexpected(DataflowError("a new-expression forms an object whose most-derived type is an interface (spec §11.2(5.4))",
+                                    expr.loc));
+            }
         }
         if (expr.kind == ExprKind::Call || expr.kind == ExprKind::Cast) {
             std::optional<Type> inferred = infer_expr_type(expr, body, signatures_);

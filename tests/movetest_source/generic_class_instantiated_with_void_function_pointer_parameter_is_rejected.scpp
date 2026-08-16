@@ -1,0 +1,10 @@
+template<typename T>
+class Box {
+public:
+    virtual ~Box() = default;
+    int (*p)(T) = nullptr;
+};
+int f() {
+    Box<void> b{};
+    return 0;
+}

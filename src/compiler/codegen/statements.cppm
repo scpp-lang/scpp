@@ -46,6 +46,10 @@ namespace scpp {
                     return std::unexpected(CodegenError(
                         "internal error: declaration of '" + stmt.var_name + "' was never resolved to a local", stmt.loc));
                 }
+                if (auto r = validate_type_is_inhabitable(stmt.type, "local variable '" + stmt.var_name + "'");
+                    !r.has_value()) {
+                    return std::unexpected(std::move(r).error());
+                }
                 std::optional<unsigned> declared_alignment = alignment_for_type(stmt.type);
                 if (stmt.resolved_alignment != 0) {
                     unsigned explicit_align = stmt.resolved_alignment;
@@ -182,11 +186,6 @@ namespace scpp {
                         if (!span_value_result.has_value()) return std::unexpected(std::move(span_value_result).error());
                         llvm::LLVMValueRef span_value = std::move(span_value_result).value();
                         llvm::LLVMBuildStore(builder_, span_value, storage);
-                    } else if (is_bare_void(stmt.type)) {
-                        return std::unexpected(CodegenError("variable '" + stmt.var_name +
-                                               "' cannot have type 'void' (only a return type or a pointer's "
-                                               "pointee -- 'void*' -- may be 'void')",
-                            current_loc_));
                     } else if (stmt.init && stmt.init->kind == ExprKind::Lambda) {
                         if (auto r = codegen_construct_lambda(*stmt.init, storage); !r.has_value()) return std::unexpected(std::move(r).error());
                     } else if (stmt.has_ctor_args) {
@@ -394,13 +393,6 @@ namespace scpp {
                         scope_stack_.back().push_back(declared_local_of(stmt));
                     }
                     return {};
-                }
-
-                if (is_bare_void(stmt.type)) {
-                    return std::unexpected(CodegenError("variable '" + stmt.var_name +
-                                        "' cannot have type 'void' (only a return type or a pointer's "
-                                        "pointee -- 'void*' -- may be 'void')",
-                        current_loc_));
                 }
 
                 // ch05 §5.12: `auto f = [...];` -- the only spelling

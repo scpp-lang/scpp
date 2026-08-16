@@ -1,0 +1,6 @@
+struct S {
+    int (*p)(void x);
+};
+int f() {
+    return 0;
+}

@@ -1,0 +1,7 @@
+union U {
+    void f;
+    int i;
+};
+int f() {
+    return 0;
+}

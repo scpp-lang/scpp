@@ -1,0 +1,9 @@
+class K {
+public:
+    virtual ~K() = default;
+    K(void x) {}
+    int a_ = 0;
+};
+int f() {
+    return 0;
+}

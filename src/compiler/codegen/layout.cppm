@@ -142,6 +142,13 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
 
     [[nodiscard]] std::expected<void, CodegenError> Codegen::validate_trivial(const Type& type, std::vector<std::string>& in_progress)
 {
+        // Asked first, and separately from everything below: the rest of
+        // this function answers "may this type be a *struct* field?",
+        // which is a narrower question that happens to have had `void` in
+        // its list. Keeping the two apart is what makes a struct field
+        // and a class field agree -- declare_class asks the same question
+        // of the same predicate.
+        if (auto r = validate_type_is_inhabitable(type, "a data member"); !r.has_value()) return std::unexpected(std::move(r).error());
         switch (type.kind) {
             case TypeKind::Pointer:
             case TypeKind::FunctionPointer:
@@ -160,11 +167,6 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
             case TypeKind::Named: {
                 if (is_scalar_type_name(type.name)) return {};
                 if (find_enum_def(program_, type.name) != nullptr) return {};
-                if (type.name == "void") {
-                    return std::unexpected(CodegenError("'void' cannot be a struct field (only a return type or a "
-                                        "pointer's pointee -- 'void*' -- may be 'void')",
-                        current_loc_));
-                }
                 if (find_class_def(type.name) != nullptr) {
                     return std::unexpected(CodegenError("a class type '" + type.name + "' cannot be a struct field; use class instead",
                         current_loc_));
@@ -348,6 +350,11 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
                                      static_cast<std::size_t>(pointer_abi_alignment_for_as(module_, 0)));
         }
         for (const ClassField& field : def.fields) {
+            if (auto r = validate_type_is_inhabitable(field.type,
+                                                      "class '" + def.name + "' non-static data member '" + field.name + "'");
+                !r.has_value()) {
+                return std::unexpected(std::move(r).error());
+            }
             auto field_type_result = to_llvm_type(field.type);
             if (!field_type_result.has_value()) return std::unexpected(std::move(field_type_result).error());
             llvm::LLVMTypeRef field_type = std::move(field_type_result).value();
@@ -672,6 +679,17 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
     [[nodiscard]] bool Codegen::is_bare_void(const Type& type)
 {
         return type.kind == TypeKind::Named && type.name == "void";
+    }
+
+
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::validate_type_is_inhabitable(const Type& type,
+                                                                                          const std::string& what) const
+{
+        if (type_can_have_objects(type)) return {};
+        return std::unexpected(CodegenError(what + " declares an object of type '" + describe_type_brief(type) +
+                                "', but 'void' is the type of no object: it may be a function's return type or a "
+                                "pointer's pointee -- 'void*' -- and nothing else",
+            current_loc_));
     }
 
 

@@ -1,0 +1,8 @@
+class [[scpp::interface]] I {
+public:
+    virtual ~I() = default;
+    virtual int m(void x) = 0;
+};
+int f() {
+    return 0;
+}
