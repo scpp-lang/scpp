@@ -1,0 +1,12 @@
+// As above, in argument position: an argument is a value position, so a
+// `void` conditional may not appear there.
+int taken = 0;
+
+void h() { taken = 1; }
+void h2() { taken = 2; }
+int take(int v) { return v; }
+
+int main() {
+    bool c = true;
+    return take(c ? h() : h2());
+}

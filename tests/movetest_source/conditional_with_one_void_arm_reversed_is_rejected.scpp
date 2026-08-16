@@ -1,0 +1,14 @@
+// conditional_with_one_void_arm_is_rejected with the arms swapped. The
+// asymmetry matters: codegen's own arm-type check reads the *then* arm's
+// type to size the merge, so a fix that inspected only `then_value`
+// would accept `c ? g() : h()` while rejecting `c ? h() : g()`.
+int taken = 0;
+
+void h() { taken = 1; }
+int g() { return 2; }
+
+int main() {
+    bool c = true;
+    c ? g() : h();
+    return 0;
+}

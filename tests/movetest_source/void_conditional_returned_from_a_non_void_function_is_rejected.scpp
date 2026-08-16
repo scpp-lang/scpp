@@ -1,0 +1,13 @@
+// The counterpart of void_conditional_returned_from_a_void_function_is_allowed
+// in tests/codegentest_source: `return <void expression>;` is legal from
+// a `void` function and ill-formed from every other, and making the
+// `void` conditional compile must not blur that.
+int taken = 0;
+
+void h() { taken = 1; }
+void h2() { taken = 2; }
+
+int main() {
+    bool c = true;
+    return c ? h() : h2();
+}

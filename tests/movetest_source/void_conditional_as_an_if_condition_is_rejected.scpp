@@ -1,0 +1,13 @@
+// As above, as a condition. Note this is the *outer* `if` whose condition
+// is a `void` conditional -- not to be confused with the inner
+// conditional's own condition, which is a `bool` and fine.
+int taken = 0;
+
+void h() { taken = 1; }
+void h2() { taken = 2; }
+
+int main() {
+    bool c = true;
+    if (c ? h() : h2()) { return 1; }
+    return 0;
+}

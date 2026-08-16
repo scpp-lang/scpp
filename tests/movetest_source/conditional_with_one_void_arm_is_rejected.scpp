@@ -1,0 +1,17 @@
+// The boundary on the other side of "a conditional with two `void` arms
+// is legal". One `void` arm and one non-`void` arm genuinely is
+// ill-formed -- there is no type both arms agree on -- and widening
+// acceptance for the both-`void` case must not widen it to here.
+//
+// Rejected by movecheck's conditional_arm_types_agree, i.e. by the
+// frontend, before codegen ever sees it.
+int taken = 0;
+
+void h() { taken = 1; }
+int g() { return 2; }
+
+int main() {
+    bool c = true;
+    c ? h() : g();
+    return 0;
+}

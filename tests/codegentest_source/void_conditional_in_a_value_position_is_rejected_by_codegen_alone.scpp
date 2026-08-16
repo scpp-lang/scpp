@@ -1,0 +1,31 @@
+// The gatekeeper this fix could most easily have broken, checked in the
+// one pipeline where movecheck is not there to catch it first.
+//
+// Before the fix, *every* reachable `void` conditional failed codegen --
+// including the ill-formed ones -- because the merge block always built
+// a named phi. Making the legal ones compile removes that accidental
+// gate, so the value positions have to be rejected by something real.
+// They are: the conditional now hands back its arms' own `void`-typed
+// value, which makes it indistinguishable from a plain `void` call to
+// every consumer, and check_store_type rejects it here with exactly the
+// message `int x = h();` gets -- "type mismatch initializing/assigning
+// variable 'x'".
+//
+// tests/movetest_source/void_conditional_bound_to_a_variable_is_rejected
+// is the same program seen by the frontend, which is what actually
+// diagnoses it for a user: the full driver runs check_moves first, so
+// this codegen-only path is the backstop, not the diagnostic.
+//
+// (Honest note: this case also fails on the pre-fix compiler, but for
+// the *wrong* reason -- the invalid-IR verifier failure. `throws:`
+// compares only the error kind, and both are CodegenError. Its value is
+// forward-looking, as a guard on the backstop.)
+int taken = 0;
+void h() { taken = 1; }
+void h2() { taken = 2; }
+
+int main() {
+    bool c = true;
+    int x = c ? h() : h2();
+    return x;
+}

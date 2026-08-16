@@ -1,0 +1,28 @@
+// A conditional whose arms are both `void` is a `void` expression
+// ([basic.types.general]); discarding it as a statement is legal. It
+// used to be rejected as "generated invalid IR: Instruction has a name,
+// but provides a void value!", because codegen named the merged result
+// unconditionally even when there was no value to merge.
+//
+// Accepting it is only half the fix: it also has to *mean* the right
+// thing. A conditional evaluates exactly one of its arms, chosen by the
+// condition, and that is what this checks -- the arm-effect counters
+// below distinguish "one arm ran" from "both ran" and from "the wrong
+// one ran", none of which a pure IR-shape assertion would catch.
+import std;
+
+int then_hits = 0;
+int else_hits = 0;
+
+void bump_then() { then_hits = then_hits + 1; }
+void bump_else() { else_hits = else_hits + 1; }
+
+int main() {
+    bool c = true;
+    c ? bump_then() : bump_else();
+    c = false;
+    c ? bump_then() : bump_else();
+    c ? bump_then() : bump_else();
+    std::println("{} {}", then_hits, else_hits);
+    return then_hits * 10 + else_hits;
+}
