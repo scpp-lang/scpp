@@ -73,9 +73,22 @@ using ParameterLifetimeMap = std::unordered_map<std::string, LifetimeAnnotation>
 inline constexpr LocalId kProgramLifetimeRoot = static_cast<LocalId>(static_cast<std::size_t>(-1));
 inline constexpr std::string_view kProgramLifetimeRootName = "<program-lifetime>";
 
+// One by-reference capture's hold on the enclosing frame, kept so it can
+// be released when the closure variable dies
+// (release_closure_capture_borrows). Which of the two forms it takes is
+// the same distinction reborrow_is_tracked_against_lender draws for
+// every other borrow in the language:
+//  - `lender` unset: the capture borrowed an owned local outright, so it
+//    holds `borrows[root]` -- `[&x]` where `x` is an `int`.
+//  - `lender` set: the capture *reborrowed* an already-bound reference/
+//    span local, which already holds the one live access to `root`, so
+//    it holds `suspended_reborrows[*lender]` instead -- `[&r]` where `r`
+//    is `int& r = x;`. Entering such a capture against `root` would
+//    double-count the very borrow `r` itself installed.
 struct ClosureCaptureBorrow {
     LocalId root{};
     bool is_mutable = false;
+    std::optional<LocalId> lender;
 
     bool operator==(const ClosureCaptureBorrow&) const = default;
 };

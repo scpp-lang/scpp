@@ -257,7 +257,20 @@ std::expected<void, DataflowError> validate_reborrow_lender_write(LocalId lender
 // immediately after its BindReference, before ScopeExit is even
 // reached). Whichever fires first does the actual work; the other is
 // then a harmless no-op, since both leave the exact same state.
+//
+// A lender with an outstanding reborrow is *not* releasable, however far
+// past its own last use it is. `local`'s borrow of the root is the only
+// thing standing between that root and the reborrow still aliasing it,
+// so handing the root back while a derived borrow is live would let the
+// root be written or re-borrowed underneath it. Liveness of the lender's
+// *name* is the wrong question once it has lent: what keeps the borrow
+// alive is the derived borrow, and that is what suspended_reborrows
+// records. The suspension is dropped by whoever took it -- another
+// reference's own release_reference_borrow, or a closure's
+// release_closure_capture_borrows -- and this then releases normally at
+// the next opportunity (ScopeExit at the latest).
 void release_reference_borrow(LocalId local, DataflowState& state, [[maybe_unused]] const Body& body) {
+    if (local_is_suspended_for_reborrow(local, state)) return;
     auto ref_it = state.ref_targets.find(local);
     if (ref_it == state.ref_targets.end()) return;
     RefTarget target = ref_it->second;
@@ -295,6 +308,23 @@ void release_closure_capture_borrows(LocalId local, DataflowState& state) {
     auto closure_it = state.closure_capture_borrows.find(local);
     if (closure_it == state.closure_capture_borrows.end()) return;
     for (const ClosureCaptureBorrow& capture_borrow : closure_it->second) {
+        // Release whichever hold this capture took -- see
+        // ClosureCaptureBorrow's own comment for why a reborrowing
+        // capture holds its lender suspended rather than the root
+        // borrowed.
+        if (capture_borrow.lender.has_value()) {
+            auto suspension_it = state.suspended_reborrows.find(*capture_borrow.lender);
+            if (suspension_it == state.suspended_reborrows.end()) continue;
+            if (capture_borrow.is_mutable) {
+                suspension_it->second.mutable_suspended = false;
+            } else if (suspension_it->second.shared_count > 0) {
+                suspension_it->second.shared_count--;
+            }
+            if (!suspension_it->second.mutable_suspended && suspension_it->second.shared_count == 0) {
+                state.suspended_reborrows.erase(suspension_it);
+            }
+            continue;
+        }
         auto borrow_it = state.borrows.find(capture_borrow.root);
         if (borrow_it == state.borrows.end()) continue;
         if (capture_borrow.is_mutable) {
@@ -595,18 +625,31 @@ std::vector<std::vector<LiveSet>> compute_reference_liveness(const Body& body,
 // first rather than erasing while iterating `state.ref_targets` directly.
 void release_dead_references(DataflowState& state, const Body& body, const LiveSet& live_after_stmt) {
     std::vector<LocalId> dead;
-    for (const auto& [local, root] : state.ref_targets) {
-        if (!live_after_stmt.contains(local)) dead.push_back(local);
-    }
-    for (LocalId local : dead) {
-        release_reference_borrow(local, state, body);
-    }
-    dead.clear();
-    for (const auto& [local, borrows] : state.closure_capture_borrows) {
-        if (!live_after_stmt.contains(local)) dead.push_back(local);
-    }
-    for (LocalId local : dead) {
-        release_closure_capture_borrows(local, state);
+    // Releasing a dead closure can drop the suspension that was keeping
+    // a dead lender alive, and releasing a dead reborrow can do the same
+    // -- so a single pass in a fixed order would leave whichever came
+    // first still holding its root, purely because of map iteration
+    // order. Repeat while something actually goes away; measuring real
+    // progress rather than assuming it matters because
+    // release_reference_borrow declines to release a lender that is
+    // still lending, and would otherwise be re-attempted forever.
+    for (;;) {
+        std::size_t before = state.ref_targets.size() + state.closure_capture_borrows.size();
+        dead.clear();
+        for (const auto& [local, root] : state.ref_targets) {
+            if (!live_after_stmt.contains(local)) dead.push_back(local);
+        }
+        for (LocalId local : dead) {
+            release_reference_borrow(local, state, body);
+        }
+        dead.clear();
+        for (const auto& [local, borrows] : state.closure_capture_borrows) {
+            if (!live_after_stmt.contains(local)) dead.push_back(local);
+        }
+        for (LocalId local : dead) {
+            release_closure_capture_borrows(local, state);
+        }
+        if (state.ref_targets.size() + state.closure_capture_borrows.size() == before) return;
     }
 }
 

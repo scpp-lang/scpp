@@ -13,7 +13,7 @@ import :borrows;
 
 namespace scpp {
 
-[[nodiscard]] std::expected<void, DataflowError> apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& reference_capture_borrows,
+[[nodiscard]] std::expected<void, DataflowError> apply_lambda_captures(const Expr& expr, DataflowState& state,
                            const Body& body, const Signatures& signatures, bool report_errors,
                            std::vector<ClosureCaptureBorrow>* out_closure_capture_borrows = nullptr);
 void collect_locally_declared_names(const Stmt& stmt, std::unordered_set<std::string>& out);
@@ -49,20 +49,34 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
 // ch05 §5.12: checks every capture of a resolved Lambda literal --
 // shared by apply_expr's own Lambda case (a *transient* use: an IIFE, a
 // call argument, ... -- the closure literal itself can never outlive
-// this statement, so `reference_capture_borrows` is a fresh, local,
-// discarded-afterward map there) and apply_statement's class-typed
-// Assign case (a closure literal being bound to a *named* `auto`
-// variable, ch05 §5.12's only spelling for this -- which genuinely can
-// outlive this statement, so that caller passes `state.borrows` itself,
-// making any by-reference capture's borrow last for the rest of this
-// function, exactly like an ordinary `T& r = x;` binding's own borrow
-// would -- a deliberately conservative simplification: released only at
-// function end rather than at the closure variable's own precise last
-// use, since v0.1 has no liveness analysis for a class-typed local the
-// way it already has for a plain reference/span, see
-// compute_reference_liveness). Checked the same way passing each
-// capture as an argument already would be (reusing existing machinery,
-// zero new move/borrow logic beyond this per-capture dispatch):
+// this statement, so nothing it takes has to persist) and
+// apply_statement's class-typed Assign case (a closure literal being
+// bound to a *named* `auto` variable, ch05 §5.12's only spelling for
+// this -- which genuinely can outlive this statement, so that caller
+// passes `out_closure_capture_borrows` and installs what this reports
+// into `state`, making the hold last for the rest of the function
+// exactly like an ordinary `T& r = x;` binding's own would -- a
+// deliberately conservative simplification: released only at function
+// end rather than at the closure variable's own precise last use, since
+// v0.1 has no liveness analysis for a class-typed local the way it
+// already has for a plain reference/span, see
+// compute_reference_liveness).
+//
+// The map below is scoped to this one construction and nothing else. It
+// used to *be* `state.borrows` for the named-variable caller, which
+// conflated two different questions -- "does this capture list name the
+// same thing twice?" and "what does the finished closure hold?" -- and
+// so asked the first one against a map already carrying the enclosing
+// function's live borrows. A capture that reborrows a reference then
+// collided with the borrow that reference's own binding had installed,
+// and `[&r]` where `r` is `int& r = x;` was rejected as though it had
+// named `x` twice in one call. The persistent conflict check that
+// question actually needs is apply_reference_argument's own, made
+// against `state.borrows` directly, and it is unaffected by this.
+//
+// Checked the same way passing each capture as an argument already
+// would be (reusing existing machinery, zero new move/borrow logic
+// beyond this per-capture dispatch):
 //  - an init-capture's own expression is evaluated normally (e.g.
 //    permitting std::move(p) for a move-only type).
 //  - a by-value capture of a class type uses the same copy/move boundary
@@ -72,11 +86,13 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
 //    `std::move(p)` in an init-capture).
 //  - a by-reference capture is checked exactly like a reference-typed
 //    call argument (apply_reference_argument): the closure's own field
-//    genuinely borrows it, for as long as `reference_capture_borrows`
-//    (see above) says it lasts.
-[[nodiscard]] std::expected<void, DataflowError> apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& reference_capture_borrows,
+//    genuinely borrows it, and what that hold is entered against --
+//    the root, or the lender when the capture is a reborrow -- follows
+//    reborrow_is_tracked_against_lender, the same as everywhere else.
+[[nodiscard]] std::expected<void, DataflowError> apply_lambda_captures(const Expr& expr, DataflowState& state,
                             const Body& body, const Signatures& signatures, bool report_errors,
                             std::vector<ClosureCaptureBorrow>* out_closure_capture_borrows) {
+    BorrowMap reference_capture_borrows;
     auto apply_by_value_capture_source = [&](const Expr& source, const Type& declared_type, const LambdaCapture& capture,
                                              const std::string& capture_display) -> std::expected<void, DataflowError> {
         // ch05 §5.12: what a by-value capture stores is the *referent* --
@@ -223,8 +239,19 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
             return std::unexpected(std::move(_r).error());
         }
         if (out_closure_capture_borrows != nullptr) {
+            // What the finished closure holds follows the same split
+            // apply_reference_argument just checked against: a capture
+            // that reborrows an already-bound reference/span local holds
+            // that *lender* suspended for as long as the closure lives,
+            // exactly as a stored `T& q = r;` does, while a capture of
+            // an owned local holds the root borrowed.
+            std::optional<LocalId> lender = resolve_reborrow_lender(capture_ident, body, signatures);
+            if (reborrow_is_tracked_against_lender(lender, body)) {
+                out_closure_capture_borrows->push_back(ClosureCaptureBorrow{*lender, ref_type.is_mutable_ref, lender});
+                continue;
+            }
             for (LocalId root : roots) {
-                out_closure_capture_borrows->push_back(ClosureCaptureBorrow{root, ref_type.is_mutable_ref});
+                out_closure_capture_borrows->push_back(ClosureCaptureBorrow{root, ref_type.is_mutable_ref, std::nullopt});
             }
         }
     }

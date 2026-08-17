@@ -1,0 +1,17 @@
+// spec ch05 §5.12: the same for a class-typed reference -- the closure
+// borrows the object, it does not copy it.
+class K {
+public:
+    virtual ~K() { return; }
+    int v{7};
+};
+int main() {
+    K k{};
+    K& r = k;
+    auto i = [&r]() {
+        r.v = r.v + 1;
+        return r.v;
+    };
+    int seen = i();
+    return (seen - 8) + (k.v - 8);
+}

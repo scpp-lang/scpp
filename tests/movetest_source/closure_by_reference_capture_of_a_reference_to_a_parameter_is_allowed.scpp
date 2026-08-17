@@ -1,0 +1,14 @@
+// spec ch05 §5.12: the reborrowing capture is legal whatever the
+// lender's root is -- here a parameter. This used to be answered
+// differently per root kind (a global or a field reached through
+// `this` was accepted while a local or a parameter was not), which is
+// the signature of a rule being applied somewhere other than where it
+// belongs.
+int f(int p) {
+    int& r = p;
+    auto i = [&r]() { return r; };
+    return i();
+}
+int main() {
+    return f(7);
+}
