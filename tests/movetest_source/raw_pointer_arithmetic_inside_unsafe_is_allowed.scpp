@@ -1,0 +1,16 @@
+// Positive control: every arithmetic form above is licensed inside an
+// unsafe block (spec §5.1(6)).
+int main() {
+    int a[4];
+    a[2] = 7;
+    int* p = &a[0];
+    int v = 0;
+    [[scpp::unsafe]] {
+        int* q = p + 2;
+        int* r = q - 1;
+        p += 2;
+        v = *p;
+        if (r == p) { v = v + 1; }
+    }
+    return v - 7;
+}

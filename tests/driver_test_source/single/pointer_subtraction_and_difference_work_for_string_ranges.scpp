@@ -10,13 +10,18 @@ char read_char(const char* ptr) {
     }
 }
 int main() {
-    std::string line{"scpp"};
-    const char* first = line.c_str();
-    const char* end = first + line.size();
-    const char* second = end - 3;
-    ptrdiff_t distance = end - first;
-    if (!same_ptr(second, first + 1)) return 1;
-    if (read_char(second) != 'c') return 2;
-    if (distance != 4) return 3;
-    return 0;
+    // spec §5.1(5.1): this test is *about* raw pointer arithmetic
+    // (`c_str() + size()`), which now requires an unsafe block.
+    [[scpp::unsafe]] {
+
+        std::string line{"scpp"};
+        const char* first = line.c_str();
+        const char* end = first + line.size();
+        const char* second = end - 3;
+        ptrdiff_t distance = end - first;
+        if (!same_ptr(second, first + 1)) return 1;
+        if (read_char(second) != 'c') return 2;
+        if (distance != 4) return 3;
+        return 0;
+    }
 }

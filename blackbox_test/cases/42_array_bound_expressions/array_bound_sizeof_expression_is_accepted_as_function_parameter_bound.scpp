@@ -6,7 +6,11 @@
 // constant-expression bound just like the other two sites, confirming
 // uniform application of the parser change.
 void fill_first_byte(char buf[sizeof(int)], char value) {
-    buf[0] = value;
+    // As this file's own comment notes, a parameter array declarator
+    // decays to a pointer, so this is raw-pointer indexing and needs an
+    // unsafe block (spec ch01 §5.1(5.1)). The case is about *parsing* a
+    // `sizeof`-based bound, which is unaffected.
+    [[scpp::unsafe]] { buf[0] = value; }
     return;
 }
 

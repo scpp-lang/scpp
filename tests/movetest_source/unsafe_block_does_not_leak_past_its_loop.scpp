@@ -1,0 +1,16 @@
+// The unsafe block ends where its lexical scope ends, including when it
+// contains a loop: the subscript after the block is still rejected.
+int main() {
+    int a[4];
+    int* p = &a[0];
+    int total = 0;
+    [[scpp::unsafe]] {
+        int i = 0;
+        while (i < 2) {
+            total = total + p[i];
+            i = i + 1;
+        }
+    }
+    total = total + p[0];
+    return total;
+}

@@ -1,0 +1,10 @@
+// Positive control for the gate above: inside `[[scpp::unsafe]]` the
+// exact same subscript is licensed (spec §5.1(6)).
+int main() {
+    int a[4];
+    a[0] = 5;
+    int* p = &a[0];
+    int v = 0;
+    [[scpp::unsafe]] { v = p[0]; }
+    return v - 5;
+}

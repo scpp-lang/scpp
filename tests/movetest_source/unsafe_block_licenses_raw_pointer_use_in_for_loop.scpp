@@ -1,0 +1,14 @@
+// Same lexical-vs-dataflow defect as the while-loop case, via `for`.
+int main() {
+    int a[4];
+    a[0] = 1;
+    a[1] = 2;
+    int* p = &a[0];
+    int total = 0;
+    [[scpp::unsafe]] {
+        for (int i = 0; i < 2; i = i + 1) {
+            total = total + p[i];
+        }
+    }
+    return total - 3;
+}

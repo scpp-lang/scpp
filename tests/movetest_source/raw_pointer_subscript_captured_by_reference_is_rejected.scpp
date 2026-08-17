@@ -1,0 +1,12 @@
+// Spelling axis: a by-reference capture is rewritten to `this.p`, which
+// is still the same raw pointer (spec §5.1(5.1)).
+int main() {
+    int a[4];
+    int* p = &a[0];
+    auto reader = [&p]() {
+        int v = 0;
+        v = p[0];
+        return v;
+    };
+    return reader();
+}

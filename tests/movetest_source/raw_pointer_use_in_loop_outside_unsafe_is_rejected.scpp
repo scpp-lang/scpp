@@ -1,0 +1,14 @@
+// The negative half of the loop fix: making the unsafe depth lexical
+// must not make a loop body unsafe by itself. This loop is *not* inside
+// an unsafe block and stays ill-formed.
+int main() {
+    int a[4];
+    int* p = &a[0];
+    int total = 0;
+    int i = 0;
+    while (i < 2) {
+        total = total + p[i];
+        i = i + 1;
+    }
+    return total;
+}

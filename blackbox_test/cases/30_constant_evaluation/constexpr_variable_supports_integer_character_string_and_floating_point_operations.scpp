@@ -1,7 +1,20 @@
 // spec §7.2(5)-(6): required constant evaluation in v1 supports local
 // declarations, assignments, and integer / character / string-literal /
-// floating-point operations inside a `constexpr` function.
-constexpr int compute_value() {
+// floating-point operations inside an immediate function.
+//
+// Declared `consteval` rather than `constexpr` because reading a
+// character out of a string literal is raw-pointer indexing, which
+// ch01 §5.1(5.1) gates -- and a `constexpr` function, being callable at
+// runtime too, must stay gated, while ch06 §7.3(1) forbids writing the
+// `[[scpp::unsafe]]` block that would license it during required
+// constant evaluation. `consteval` is the one spelling that satisfies
+// both rules: it is never lowered as runtime code, and ch06 §7(3.2)
+// already guarantees a pointer into a string-literal object is
+// bounds-tracked by the evaluator. (That `constexpr` + string-literal
+// indexing is currently unwritable is a spec defect reported
+// separately; `constexpr_function_can_run_at_runtime.scpp` still covers
+// the runtime-callable half.)
+consteval int compute_value() {
     const char* text = "z";
     double scaled = (20.5 + 0.5) * 2.0;
     return static_cast<int>(scaled) +

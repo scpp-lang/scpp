@@ -261,13 +261,15 @@ DataflowState join_states(const DataflowState& a, const DataflowState& b) {
         a.parameter_lifetimes,
         join_suspended_reborrows(a.suspended_reborrows, b.suspended_reborrows),
         join_closure_capture_borrows(a.closure_capture_borrows, b.closure_capture_borrows),
-        // In a well-formed program every incoming path agrees on the
-        // unsafe nesting depth at a given program point (see
-        // DataflowState::unsafe_depth) -- min is just a conservative,
-        // defensive tie-break (fail toward "not unsafe", i.e. checks stay
-        // on) for whatever a not-yet-rejected, malformed program's
-        // fixed-point iteration computes along the way, mirroring
-        // join_ref_targets' own comment above.
+        // Lexical, not a dataflow fact: check_function overwrites this
+        // from BasicBlock::unsafe_depth_on_entry immediately after every
+        // join, so what happens here does not decide any block's depth.
+        // It used to: joining with `min` pinned a loop head to 0,
+        // because the back edge's `out_state` starts default-constructed
+        // and `min` never recovers -- see BasicBlock::
+        // unsafe_depth_on_entry. `min` is kept for the states this
+        // function returns to any other caller, as the same defensive
+        // "fail toward not-unsafe" tie-break join_ref_targets uses.
         std::min(a.unsafe_depth, b.unsafe_depth),
         // `current_class`/`class_names`/`class_field_types` are set once
         // per function and never change afterward (see DataflowState's

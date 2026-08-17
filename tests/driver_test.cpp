@@ -3511,7 +3511,8 @@ void run_cli_extension_tests() {
                         "int main() {\n"
                         "    helper::CheckedString<int> text{\"ok\"};\n"
                         "    const char* ptr = text.c_str();\n"
-                        "    if (ptr[0] == 'o') return 0;\n"
+                        "    // spec \u00a75.1(5.1): raw pointer indexing.\n"
+                        "    [[scpp::unsafe]] { if (ptr[0] == 'o') return 0; }\n"
                         "    return 1;\n"
                         "}\n");
         RunResult build_result =
@@ -3563,7 +3564,8 @@ void run_cli_extension_tests() {
                         "int main() {\n"
                         "    helper::CheckedString<int> text{\"ok\"};\n"
                         "    const char* ptr = text.c_str();\n"
-                        "    if (ptr[0] == 'o') return 0;\n"
+                        "    // spec \u00a75.1(5.1): raw pointer indexing.\n"
+                        "    [[scpp::unsafe]] { if (ptr[0] == 'o') return 0; }\n"
                         "    return 1;\n"
                         "}\n");
         RunResult build_result =
@@ -6504,10 +6506,13 @@ int main() {
     candidate += tail;
     if (candidate.size() != 11) return 1;
     const char* text = candidate.c_str();
-    if (text[0] != 'o') return 2;
-    if (text[5] != ':') return 3;
-    if (text[6] != ':') return 4;
-    if (text[10] != 'e') return 5;
+    // spec §5.1(5.1): raw pointer indexing.
+    [[scpp::unsafe]] {
+        if (text[0] != 'o') return 2;
+        if (text[5] != ':') return 3;
+        if (text[6] != ':') return 4;
+        if (text[10] != 'e') return 5;
+    }
     return 0;
 }
 )SCPP",

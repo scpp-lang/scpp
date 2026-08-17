@@ -1,0 +1,12 @@
+// Positive control for the borrow-source entry point.
+int main() {
+    int a[4];
+    a[1] = 3;
+    int* p = &a[0];
+    int v = 0;
+    [[scpp::unsafe]] {
+        int* q = &p[1];
+        v = *q;
+    }
+    return v - 3;
+}

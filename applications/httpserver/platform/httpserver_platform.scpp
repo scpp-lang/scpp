@@ -223,6 +223,9 @@ int scpp_httpserver_epoll_wait(int epoll_fd, PlatformEvent* events, int max_even
     [[scpp::unsafe]] { ready = epoll_wait(epoll_fd, &native_events[0], max_events, timeout_ms); }
     if (ready < 0) return negative_errno();
     int i = 0;
+    // spec §5.1(5.1): `events` is a raw `PlatformEvent*`, so indexing it
+    // is gated exactly as the `native_events` reads below already were.
+    [[scpp::unsafe]] {
     while (i < ready) {
         int native_flags{};
         int token{};
@@ -239,6 +242,7 @@ int scpp_httpserver_epoll_wait(int epoll_fd, PlatformEvent* events, int max_even
             events[i].hangup = 1;
         }
         i = i + 1;
+    }
     }
     return ready;
 }
@@ -310,43 +314,55 @@ int scpp_httpserver_pread(int file_fd, char* buffer, int count, int offset) {
 }
 
 export int text_length(const char* text) {
-    int i = 0;
-    while (text[i] != '\0') { i = i + 1; }
-    return i;
+    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
+    [[scpp::unsafe]] {
+        int i = 0;
+        while (text[i] != '\0') { i = i + 1; }
+        return i;
+    }
 }
 
 export bool copy_text(char* dst, int capacity, const char* src) {
-    int i = 0;
-    while (src[i] != '\0') {
-        if (i + 1 >= capacity) {
-            if (capacity > 0) dst[0] = '\0';
-            return false;
+    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
+    [[scpp::unsafe]] {
+        int i = 0;
+        while (src[i] != '\0') {
+            if (i + 1 >= capacity) {
+                if (capacity > 0) dst[0] = '\0';
+                return false;
+            }
+            dst[i] = src[i];
+            i = i + 1;
         }
-        dst[i] = src[i];
-        i = i + 1;
+        dst[i] = '\0';
+        return true;
     }
-    dst[i] = '\0';
-    return true;
 }
 
 export bool append_text(char* dst, int capacity, int& len, const char* src) {
-    int i = 0;
-    while (src[i] != '\0') {
-        if (len + 1 >= capacity) return false;
-        dst[len] = src[i];
-        len = len + 1;
-        i = i + 1;
+    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
+    [[scpp::unsafe]] {
+        int i = 0;
+        while (src[i] != '\0') {
+            if (len + 1 >= capacity) return false;
+            dst[len] = src[i];
+            len = len + 1;
+            i = i + 1;
+        }
+        dst[len] = '\0';
+        return true;
     }
-    dst[len] = '\0';
-    return true;
 }
 
 export bool append_char(char* dst, int capacity, int& len, char c) {
-    if (len + 1 >= capacity) return false;
-    dst[len] = c;
-    len = len + 1;
-    dst[len] = '\0';
-    return true;
+    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
+    [[scpp::unsafe]] {
+        if (len + 1 >= capacity) return false;
+        dst[len] = c;
+        len = len + 1;
+        dst[len] = '\0';
+        return true;
+    }
 }
 
 export bool append_int(char* dst, int capacity, int& len, int value) {
@@ -373,59 +389,77 @@ export bool append_int(char* dst, int capacity, int& len, int value) {
 }
 
 export bool span_equals(const char* buffer, int start, int end, const char* text) {
-    int i = 0;
-    int index = start;
-    while (index < end && text[i] != '\0') {
-        if (buffer[index] != text[i]) return false;
-        index = index + 1;
-        i = i + 1;
+    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
+    [[scpp::unsafe]] {
+        int i = 0;
+        int index = start;
+        while (index < end && text[i] != '\0') {
+            if (buffer[index] != text[i]) return false;
+            index = index + 1;
+            i = i + 1;
+        }
+        return index == end && text[i] == '\0';
     }
-    return index == end && text[i] == '\0';
 }
 
 export bool ends_with(const char* text, const char* suffix) {
-    int text_len = text_length(text);
-    int suffix_len = text_length(suffix);
-    if (suffix_len > text_len) return false;
-    int i = 0;
-    while (i < suffix_len) {
-        if (text[text_len - suffix_len + i] != suffix[i]) return false;
-        i = i + 1;
+    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
+    [[scpp::unsafe]] {
+        int text_len = text_length(text);
+        int suffix_len = text_length(suffix);
+        if (suffix_len > text_len) return false;
+        int i = 0;
+        while (i < suffix_len) {
+            if (text[text_len - suffix_len + i] != suffix[i]) return false;
+            i = i + 1;
+        }
+        return true;
     }
-    return true;
 }
 
 export bool is_dot_segment(const char* text) {
-    return (text[0] == '.' && text[1] == '\0') || (text[0] == '.' && text[1] == '.' && text[2] == '\0');
+    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
+    [[scpp::unsafe]] {
+        return (text[0] == '.' && text[1] == '\0') || (text[0] == '.' && text[1] == '.' && text[2] == '\0');
+    }
 }
 
 export bool contains_forbidden_segment_char(const char* text) {
-    int i = 0;
-    while (text[i] != '\0') {
-        if (text[i] == '/' || text[i] == '\\') return true;
-        i = i + 1;
+    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
+    [[scpp::unsafe]] {
+        int i = 0;
+        while (text[i] != '\0') {
+            if (text[i] == '/' || text[i] == '\\') return true;
+            i = i + 1;
+        }
+        return false;
     }
-    return false;
 }
 
 export int header_end_index(const char* buffer, int length) {
-    int i = 0;
-    while (i + 3 < length) {
-        if (buffer[i] == '\r' && buffer[i + 1] == '\n' && buffer[i + 2] == '\r' && buffer[i + 3] == '\n') {
-            return i;
+    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
+    [[scpp::unsafe]] {
+        int i = 0;
+        while (i + 3 < length) {
+            if (buffer[i] == '\r' && buffer[i + 1] == '\n' && buffer[i + 2] == '\r' && buffer[i + 3] == '\n') {
+                return i;
+            }
+            i = i + 1;
         }
-        i = i + 1;
+        return -1;
     }
-    return -1;
 }
 
 export int first_line_end_index(const char* buffer, int length) {
-    int i = 0;
-    while (i + 1 < length) {
-        if (buffer[i] == '\r' && buffer[i + 1] == '\n') return i;
-        i = i + 1;
+    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
+    [[scpp::unsafe]] {
+        int i = 0;
+        while (i + 1 < length) {
+            if (buffer[i] == '\r' && buffer[i + 1] == '\n') return i;
+            i = i + 1;
+        }
+        return -1;
     }
-    return -1;
 }
 
 export int hex_value(char c) {
@@ -436,34 +470,37 @@ export int hex_value(char c) {
 }
 
 export bool decode_request_path(const char* buffer, int start, int end, char* out, int capacity) {
-    if (start >= end || buffer[start] != '/') return false;
-    int out_len = 0;
-    int i = start + 1;
-    while (i < end) {
-        char c = buffer[i];
-        if (c == '?') break;
-        if (c == '%') {
-            if (i + 2 >= end) return false;
-            int hi = hex_value(buffer[i + 1]);
-            int lo = hex_value(buffer[i + 2]);
-            if (hi < 0 || lo < 0) return false;
-            char decoded = static_cast<char>(hi * 16 + lo);
-            if (decoded == '\0' || decoded == '/' || decoded == '\\') return false;
+    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
+    [[scpp::unsafe]] {
+        if (start >= end || buffer[start] != '/') return false;
+        int out_len = 0;
+        int i = start + 1;
+        while (i < end) {
+            char c = buffer[i];
+            if (c == '?') break;
+            if (c == '%') {
+                if (i + 2 >= end) return false;
+                int hi = hex_value(buffer[i + 1]);
+                int lo = hex_value(buffer[i + 2]);
+                if (hi < 0 || lo < 0) return false;
+                char decoded = static_cast<char>(hi * 16 + lo);
+                if (decoded == '\0' || decoded == '/' || decoded == '\\') return false;
+                if (out_len + 1 >= capacity) return false;
+                out[out_len] = decoded;
+                out_len = out_len + 1;
+                i = i + 3;
+                continue;
+            }
+            if (c == '\\') return false;
             if (out_len + 1 >= capacity) return false;
-            out[out_len] = decoded;
+            out[out_len] = c;
             out_len = out_len + 1;
-            i = i + 3;
-            continue;
+            i = i + 1;
         }
-        if (c == '\\') return false;
-        if (out_len + 1 >= capacity) return false;
-        out[out_len] = c;
-        out_len = out_len + 1;
-        i = i + 1;
+        while (out_len > 0 && out[out_len - 1] == '/') { out_len = out_len - 1; }
+        out[out_len] = '\0';
+        return true;
     }
-    while (out_len > 0 && out[out_len - 1] == '/') { out_len = out_len - 1; }
-    out[out_len] = '\0';
-    return true;
 }
 
 export const char* content_type_for(const char* relative_path) {

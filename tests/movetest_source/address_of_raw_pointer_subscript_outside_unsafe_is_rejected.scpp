@@ -1,0 +1,10 @@
+// `&p[1]` reaches a Subscript through resolve_borrow_source_root rather
+// than through apply_expr, so it needs the same §5.1(5.1) gate: it
+// computes `p + 1` and is exactly the pointer arithmetic that rule
+// names, however the result is then used.
+int main() {
+    int a[4];
+    int* p = &a[0];
+    int* q = &p[1];
+    return q == p ? 1 : 0;
+}

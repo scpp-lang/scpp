@@ -1,0 +1,21 @@
+// `unsafe_depth` is a *lexical* property but was computed as a dataflow
+// fact joined with min() across predecessors. A loop head has a back
+// edge from a block whose out-state starts at the default 0, so min()
+// pinned the head to 0 and -- being monotone downward -- never
+// recovered: a stable wrong fixed point in which `[[scpp::unsafe]]`
+// licensed nothing inside any loop body.
+int main() {
+    int a[4];
+    a[0] = 1;
+    a[1] = 2;
+    int* p = &a[0];
+    int total = 0;
+    [[scpp::unsafe]] {
+        int i = 0;
+        while (i < 2) {
+            total = total + p[i];
+            i = i + 1;
+        }
+    }
+    return total - 3;
+}

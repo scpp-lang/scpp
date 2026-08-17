@@ -1,0 +1,18 @@
+// Spelling axis: a raw pointer *field* indexed as `this.p[0]`.
+class Holder {
+public:
+    virtual ~Holder() { return; }
+    int* p;
+    Holder(int* q) : p{q} {}
+    int first() {
+        int v = 0;
+        v = this->p[0];
+        return v;
+    }
+};
+
+int main() {
+    int a[4];
+    Holder h{&a[0]};
+    return h.first();
+}

@@ -1,0 +1,8 @@
+// Spec §5.1(5.1) gates "pointer arithmetic on a value of pointer type
+// ([expr.add])" -- forming `p + 1` is gated even without dereferencing it.
+int main() {
+    int a[4];
+    int* p = &a[0];
+    int* q = p + 1;
+    return q == p ? 1 : 0;
+}

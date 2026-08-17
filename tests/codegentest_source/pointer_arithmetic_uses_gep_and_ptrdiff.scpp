@@ -1,7 +1,12 @@
 int main() {
     int values[4];
-    int* first = &values[0];
-    int* third = first + 2;
-    ptrdiff_t diff = third - first;
-    return diff == 2 ? 0 : 1;
+    // spec §5.1(5.1): forming `first + 2` and `third - first` is pointer
+    // arithmetic and needs an unsafe block; the lowering under test
+    // (GEP + sdiv) is unchanged.
+    [[scpp::unsafe]] {
+        int* first = &values[0];
+        int* third = first + 2;
+        ptrdiff_t diff = third - first;
+        return diff == 2 ? 0 : 1;
+    }
 }
