@@ -1,0 +1,14 @@
+// Same semantics with no closure involved: `q` is a reference to `p`, so
+// reading through `*q` must reach `x`, and writing through `*q` must be
+// visible in `x` itself.
+int main() {
+    int x = 7;
+    int* p = &x;
+    int*& q = p;
+    int first = 0;
+    [[scpp::unsafe]] {
+        first = *q;
+        *q = 11;
+    }
+    return first + x;
+}

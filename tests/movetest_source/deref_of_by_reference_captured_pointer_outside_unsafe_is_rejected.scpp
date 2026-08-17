@@ -1,0 +1,13 @@
+// Critical control for the widening: looking through the reference must
+// not make the pointer dereference itself safe. Outside an unsafe block
+// this stays ill-formed (ch01 §5.1(5.1)/(6)).
+int main() {
+    int x = 7;
+    int* p = &x;
+    auto reader = [&p]() {
+        int v = 0;
+        v = *p;
+        return v;
+    };
+    return reader();
+}

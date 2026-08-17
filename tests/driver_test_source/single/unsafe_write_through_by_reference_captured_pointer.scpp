@@ -1,0 +1,18 @@
+// Semantics, not just acceptance: a `[&p]` capture holds a reference to
+// the pointer variable, so writing through it inside an unsafe block must
+// reach the original referent. 7 -> 9, plus a read back through the same
+// capture.
+int main() {
+    int x = 7;
+    int* p = &x;
+    auto writer = [&p]() {
+        int v = 0;
+        [[scpp::unsafe]] {
+            *p = 9;
+            v = *p;
+        }
+        return v;
+    };
+    int written = writer();
+    return written + x;
+}

@@ -1723,12 +1723,21 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     return old_value;
                 }
                 if (expr.unary_op == UnaryOp::Deref) {
-                    if (std::optional<Type> operand_type = infer_type(*expr.lhs);
-                        operand_type.has_value() && is_interface_pointer_type(*operand_type)) {
+                    // A reference *to* a pointer is looked through for
+                    // each of these type questions (see codegen_lvalue's
+                    // Unary case for why): `*q` where `q` is `int*&` is a
+                    // dereference of the pointer it binds, and the operand
+                    // codegen below already resolves the reference.
+                    std::optional<Type> deref_operand_type = infer_type(*expr.lhs);
+                    const Type* deref_operand_underlying =
+                        deref_operand_type.has_value() && deref_operand_type->kind == TypeKind::Reference &&
+                                deref_operand_type->pointee
+                            ? &*deref_operand_type->pointee
+                            : (deref_operand_type ? &*deref_operand_type : nullptr);
+                    if (deref_operand_underlying != nullptr && is_interface_pointer_type(*deref_operand_underlying)) {
                         return codegen_expr(*expr.lhs);
                     }
-                    if (std::optional<Type> operand_type = infer_type(*expr.lhs);
-                        operand_type.has_value() && operand_type->kind == TypeKind::FunctionPointer) {
+                    if (deref_operand_underlying != nullptr && deref_operand_underlying->kind == TypeKind::FunctionPointer) {
                         return codegen_expr(*expr.lhs);
                     }
                     // Same lvalue-then-load pattern as Identifier/Member/
@@ -2858,22 +2867,26 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                                       alignment_for_type(*callee_def->return_type.pointee)};
                     }
                 }
-                if (operand_type->kind != TypeKind::Pointer) {
+                if (operand_type->kind != TypeKind::Pointer && operand_underlying.kind != TypeKind::Pointer) {
                     // Whether a raw pointer dereference is licensed here
                     // (ch01 §1.3: only inside `unsafe {}`) is the move
                     // checker's job (scpp.movecheck), not codegen's --
                     // by the time a program reaches codegen it's already
                     // been accepted, so this is purely an "operand has no
-                    // sensible address to load" guard. A reference
-                    // operand can't reach here at all (codegen_lvalue's
-                    // own Identifier case already auto-dereferences a
-                    // reference-typed local, so `*r` where `r` is `T&`
-                    // would already have `r` resolved to its referent by
-                    // the time this runs).
+                    // sensible address to load" guard. `operand_underlying`
+                    // is tested alongside the declared type because a
+                    // reference *to* a pointer (`int*& q = p;`, an `int*&`
+                    // parameter, or a `[&p]` capture, whose closure field
+                    // by_reference_capture_type gives reference type) still
+                    // has a pointer to load: codegen_lvalue's Identifier/
+                    // Member cases resolve such an operand to the referent
+                    // pointer's own storage, so only this type question --
+                    // not the address computation below it -- ever saw the
+                    // reference.
                     return std::unexpected(CodegenError("dereference ('*') is only supported for a raw pointer or a class with operator*",
                         current_loc_));
                 }
-                if (is_interface_pointer_type(*operand_type)) {
+                if (is_interface_pointer_type(operand_underlying)) {
                     return std::unexpected(CodegenError("dereferencing an interface pointer does not yield an assignable storage location",
                         current_loc_));
                 }
@@ -2892,7 +2905,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     if (!pointee_ptr_result.has_value()) return std::unexpected(std::move(pointee_ptr_result).error());
                     pointee_ptr = std::move(pointee_ptr_result).value();
                 }
-                return LValue{pointee_ptr, *operand_type->pointee, alignment_for_type(*operand_type->pointee)};
+                return LValue{pointee_ptr, *operand_underlying.pointee, alignment_for_type(*operand_underlying.pointee)};
             }
 
             default:

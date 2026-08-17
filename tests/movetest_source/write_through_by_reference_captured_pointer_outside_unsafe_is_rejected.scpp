@@ -1,0 +1,11 @@
+// Control: a write through the captured pointer is the same gated
+// indirection as a read.
+int main() {
+    int x = 7;
+    int* p = &x;
+    auto writer = [&p]() {
+        *p = 9;
+        return 0;
+    };
+    return writer();
+}

@@ -1,0 +1,11 @@
+// No closure anywhere: the rule is about the type reached, not about how
+// the program spelled its way to it. `int*&` is a reference to a pointer,
+// so `*q` inside an unsafe block is the same gated indirection as `*p`.
+int main() {
+    int x = 7;
+    int* p = &x;
+    int*& q = p;
+    [[scpp::unsafe]] {
+        return *q;
+    }
+}

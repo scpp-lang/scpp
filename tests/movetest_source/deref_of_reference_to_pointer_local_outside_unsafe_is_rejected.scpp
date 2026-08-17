@@ -1,0 +1,8 @@
+// Control, no closure: binding a reference to a raw pointer must not
+// launder away the unsafe requirement.
+int main() {
+    int x = 7;
+    int* p = &x;
+    int*& q = p;
+    return *q;
+}
