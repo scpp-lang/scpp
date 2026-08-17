@@ -4200,9 +4200,32 @@ private:
     // destructively rewritten for the later runtime pipeline.
     if (auto result = aligner.run(); !result.has_value()) return result;
     for (std::reference_wrapper<Stmt> stmt : consteval_if_rewrites) rewrite_consteval_if_for_runtime(stmt.get());
-    for (Function& fn : program.functions) {
-        if (fn.eval_mode == FunctionEvalMode::Consteval && !fn.name.ends_with("_new")) fn.body.reset();
-    }
+    // Consteval bodies are deliberately *kept* here. This pass used to end
+    // by discarding them (`fn.body.reset()` for every Consteval function
+    // whose name did not end in "_new"), which dated from a time when
+    // codegen would otherwise have tried to emit them. Codegen has since
+    // grown an explicit, unconditional skip -- see is_never_compiled in
+    // codegen/orchestration.cppm, which returns true for every Consteval
+    // function -- so the reset no longer protected anything.
+    //
+    // What it did still do was blind movecheck: compile_program runs this
+    // pass immediately before check_moves (src/driver.cppm), so a consteval
+    // function reached the borrow/move checker with no body at all and every
+    // ch02 rule, plus the body-walking half of spec §11.2(5), silently
+    // walked nothing. Constructors escaped only by accident -- the
+    // "_new" suffix carve-out was added to make consteval class-argument
+    // conversion work, and having them checked was a side effect of a
+    // name-shaped stand-in for "is this a constructor".
+    //
+    // A consteval body is an ordinary function body: ch02's ownership rules
+    // describe the program rather than the machine, so a use-after-move
+    // during constant evaluation is just as ill-formed as one at run time.
+    // (The §5.1(5.1) raw-pointer gates are the documented exception, and
+    // they are exempted where they are enforced -- movecheck/dataflow.cppm's
+    // entry state -- because ch06 §7.3(1) makes `[[scpp::unsafe]]`
+    // unevaluatable during constant evaluation, so the licence they demand
+    // cannot be written there. That exemption is what keeps this change and
+    // #466 describing one model rather than two.)
     return {};
 }
 

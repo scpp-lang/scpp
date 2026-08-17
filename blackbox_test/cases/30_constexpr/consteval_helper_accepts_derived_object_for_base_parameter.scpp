@@ -19,8 +19,13 @@ consteval int take(TagList<> tags) {
 }
 
 consteval int answer() {
-    TagList<int, bool> tags{};
-    return take(tags);
+    // A named local is an lvalue and TagList has a user-declared (virtual)
+    // destructor, so ch02's by-value rule needs a fresh value here -- the
+    // identical runtime code has always been rejected. This body only ever
+    // read `TagList<int, bool> tags{}; return take(tags);` because consteval
+    // bodies were not movechecked at all. The derived-to-base conversion
+    // this case is about is unchanged.
+    return take(TagList<int, bool>{});
 }
 
 int main() {
