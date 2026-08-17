@@ -29,6 +29,7 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred);
 [[nodiscard]] bool local_has_mutable_reborrow_suspended(std::string_view name, const DataflowState& state);
 [[nodiscard]] bool is_explicit_star_this(const Expr& expr);
 [[nodiscard]] Type by_reference_capture_type(const Type& captured_type, bool source_is_const);
+[[nodiscard]] Type by_value_capture_type(const LambdaCapture& capture, const Type& captured_type);
 
 [[nodiscard]] bool is_scalar_type_name(const std::string& name);
 [[nodiscard]] bool is_integral_scalar_type_name(const std::string& name);
@@ -128,6 +129,37 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
     capture_type.pointee = std::make_shared<Type>(captured_type);
     capture_type.is_mutable_ref = !source_is_const;
     return capture_type;
+}
+
+[[nodiscard]] Type by_value_capture_type(const LambdaCapture& capture, const Type& captured_type) {
+    // ch05 §5.12: `[this]` is spelled without `&` but is not an object
+    // capture at all -- it names the enclosing receiver, and scpp models
+    // it as a reference field exactly as `this` itself is a reference
+    // parameter. Copying the whole object here would silently change
+    // what every member access through the closure refers to, and would
+    // put a class through copy rules it never asked for.
+    if (capture.name == "this") return captured_type;
+    // A by-value capture is an *owned* field of the closure object
+    // (docs/book ch11-01: "by-value captures become ordinary owned
+    // fields"), so what it stores is the referent, copied -- never the
+    // reference itself, which would make the field an alias and tie the
+    // closure to a lifetime a by-value capture is specifically meant to
+    // be free of. Real C++ decays the same way (`[r]` where `r` is
+    // `int&` copies the `int`).
+    //
+    // This is the mirror of by_reference_capture_type just above, and
+    // the two together are the whole answer to "what type does a
+    // capture's field have": that one adds a reference where there is
+    // none, this one removes one where there is.
+    if (is_reference(captured_type) && captured_type.pointee != nullptr) {
+        // The reference's own read-only-ness (`is_mutable_ref`) stays
+        // behind with the reference: what a `const int&` yields is an
+        // ordinary `int` field, which a `mutable` lambda may then write,
+        // because the copy is the closure's own object and writing it
+        // cannot reach the original.
+        return *captured_type.pointee;
+    }
+    return captured_type;
 }
 
 // The scalar predicates below are thin re-exports of `scpp.ast`'s

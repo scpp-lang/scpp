@@ -1,0 +1,20 @@
+// spec ch05 §5.12: the referent rule holds for class types too -- the
+// closure field is an owned `W`, built by `W`'s copy constructor from
+// the referent. Mutating the original afterwards must not be visible.
+class W {
+public:
+    virtual ~W() { return; }
+    W() { return; }
+    W(const W& other) {
+        this->v = other.v;
+        return;
+    }
+    int v{7};
+};
+int main() {
+    W w{};
+    W& r = w;
+    auto i = [r]() { return r.v; };
+    w.v = 99;
+    return i() - 7;
+}

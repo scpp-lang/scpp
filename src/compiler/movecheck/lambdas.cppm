@@ -77,8 +77,17 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
 [[nodiscard]] std::expected<void, DataflowError> apply_lambda_captures(const Expr& expr, DataflowState& state, BorrowMap& reference_capture_borrows,
                             const Body& body, const Signatures& signatures, bool report_errors,
                             std::vector<ClosureCaptureBorrow>* out_closure_capture_borrows) {
-    auto apply_by_value_capture_source = [&](const Expr& source, const Type& source_type,
+    auto apply_by_value_capture_source = [&](const Expr& source, const Type& declared_type, const LambdaCapture& capture,
                                              const std::string& capture_display) -> std::expected<void, DataflowError> {
+        // ch05 §5.12: what a by-value capture stores is the *referent* --
+        // by_value_capture_type is the one place that decides it, and the
+        // rules below have to be asked about that type, not about the
+        // declared type of the thing named. A `std::unique_ptr<int>& r`
+        // captured as `[r]` is just as much an implicit copy of a
+        // move-only class as `[p]` on the pointer itself is, and used to
+        // slip past every check here because a Reference is not a named
+        // class type.
+        const Type source_type = by_value_capture_type(capture, declared_type);
         if (is_named_class_type(source_type, body)) {
             bool is_copy_source = is_bare_same_type_copy_source(source, source_type, body, signatures);
             bool is_freely_copyable_source =
@@ -123,7 +132,7 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
             }
             std::optional<Type> init_type = infer_expr_type(*capture.init, body, signatures);
             if (init_type.has_value()) {
-                if (auto _r = apply_by_value_capture_source(*capture.init, *init_type, capture.name); !_r.has_value()) {
+                if (auto _r = apply_by_value_capture_source(*capture.init, *init_type, capture, capture.name); !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
             } else {
@@ -184,7 +193,7 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
                 const Type* by_value_type = chained ? (chained_type.has_value() ? &*chained_type : nullptr)
                                                     : &body.type_of(*captured);
                 if (by_value_type != nullptr) {
-                    if (auto _r = apply_by_value_capture_source(capture_ident, *by_value_type, capture.name); !_r.has_value()) {
+                    if (auto _r = apply_by_value_capture_source(capture_ident, *by_value_type, capture, capture.name); !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
                 }

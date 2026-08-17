@@ -1,0 +1,14 @@
+// spec ch05 §5.12: the copy/move rules for a by-value capture must be
+// asked about the type the closure field actually has -- the referent.
+// Reaching a move-only class through a reference is just as much an
+// implicit copy as naming it directly, so this is rejected for the
+// same reason as
+// closure_by_value_capture_of_unique_ptr_is_rejected.scpp.
+import std;
+
+int main() {
+    std::unique_ptr<int> p = std::make_unique<int>(7);
+    std::unique_ptr<int>& r = p;
+    auto i = [r]() { return 1; };
+    return i();
+}

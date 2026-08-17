@@ -1,0 +1,12 @@
+// spec ch05 §5.12 / book ch11-01: a by-value capture becomes an
+// *owned* field of the closure object, so capturing a reference-typed
+// local by value copies the referent -- never the reference. The copy
+// is therefore independent of the original: mutating `x` after the
+// closure is built must not be visible through the capture.
+int main() {
+    int x = 7;
+    int& r = x;
+    auto i = [r]() { return r; };
+    x = 99;
+    return i() - 7;
+}

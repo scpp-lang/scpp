@@ -1,0 +1,10 @@
+// spec ch05 §5.12 / book ch11-01: a by-value capture becomes an owned
+// field holding a copy of the referent, so capturing a reference-typed
+// local by value is legal and creates no borrow of the referent -- the
+// closure carries no lifetime dependency on `r` or on `x`.
+int main() {
+    int x = 7;
+    int& r = x;
+    auto i = [r]() { return r; };
+    return i();
+}
