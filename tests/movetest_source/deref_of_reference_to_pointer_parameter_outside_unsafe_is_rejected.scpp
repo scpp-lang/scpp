@@ -1,0 +1,10 @@
+// Control: reference-to-pointer parameter, no unsafe block.
+int read_through(int*& p) {
+    return *p;
+}
+
+int main() {
+    int x = 7;
+    int* p = &x;
+    return read_through(p);
+}

@@ -1,0 +1,13 @@
+// A reference-to-pointer parameter is the third spelling that reaches a
+// pointer through a reference; it must be licensed identically.
+int read_through(int*& p) {
+    [[scpp::unsafe]] {
+        return *p;
+    }
+}
+
+int main() {
+    int x = 7;
+    int* p = &x;
+    return read_through(p);
+}

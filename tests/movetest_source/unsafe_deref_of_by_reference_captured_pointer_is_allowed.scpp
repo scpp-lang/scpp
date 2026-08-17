@@ -1,0 +1,18 @@
+// ch01 §5.1(5.1)/ch03 §7.1(4): indirection through a raw pointer is a
+// gated operation, licensed by an enclosing `[[scpp::unsafe]]` block. A
+// `[&p]` capture gives the closure a reference-typed field (see
+// by_reference_capture_type), but a reference to a pointer is still that
+// pointer, so the unsafe block licenses this exactly as it would `*p`
+// spelled directly.
+int main() {
+    int x = 7;
+    int* p = &x;
+    auto reader = [&p]() {
+        int v = 0;
+        [[scpp::unsafe]] {
+            v = *p;
+        }
+        return v;
+    };
+    return reader();
+}

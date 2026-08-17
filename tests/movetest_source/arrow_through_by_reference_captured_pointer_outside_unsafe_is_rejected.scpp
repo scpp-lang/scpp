@@ -1,0 +1,18 @@
+// Control: `->` through a captured raw pointer outside an unsafe block
+// stays ill-formed (ch03 §7.2).
+class K {
+public:
+    virtual ~K() { return; }
+    int v{7};
+};
+
+int main() {
+    K k{};
+    K* p = &k;
+    auto reader = [&p]() {
+        int v = 0;
+        v = p->v;
+        return v;
+    };
+    return reader();
+}

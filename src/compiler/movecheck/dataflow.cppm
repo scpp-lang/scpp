@@ -724,8 +724,23 @@ namespace scpp {
     const Type* underlying =
         resolved.has_value() && resolved->kind == TypeKind::Reference && resolved->pointee ? &*resolved->pointee
                                                                                             : (resolved ? &*resolved : nullptr);
-    bool is_raw_ptr = resolved.has_value() && resolved->kind == TypeKind::Pointer;
-    bool is_fn_ptr = resolved.has_value() && is_function_pointer(*resolved);
+    // Spec §7.1(4)/§5.1(5.1) gate `*E` on `E` being "of pointer type",
+    // which is a question about the pointer, not about how the program
+    // reached it. A reference *to* a pointer is still that pointer --
+    // binding one changes nothing about what indirection through it
+    // does or what it must be licensed by -- so the reference is looked
+    // through here exactly as the class-`operator*` test just above
+    // already does. Testing `resolved` directly instead meant every
+    // spelling that produces a `T*&` (an `int*& q = p;` local, an
+    // `int*&` parameter, and -- because by_reference_capture_type wraps
+    // the captured type -- a `[&p]` capture, which is how this
+    // surfaced) failed the "is it a pointer at all?" test and was
+    // rejected before the unsafe context was ever consulted. That made
+    // `[[scpp::unsafe]]` powerless over exactly the operation it exists
+    // to license, and reported it as though a pointer had never been
+    // involved.
+    bool is_raw_ptr = underlying != nullptr && underlying->kind == TypeKind::Pointer;
+    bool is_fn_ptr = underlying != nullptr && is_function_pointer(*underlying);
     bool is_class_deref =
         underlying != nullptr && underlying->kind == TypeKind::Named &&
         signatures.contains(underlying->name + "_operator_deref");
