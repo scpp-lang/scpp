@@ -1,0 +1,9 @@
+// spec ch05 §5.12: the reference's read-only-ness stays with the
+// reference. Capturing a `const int&` by value yields an ordinary
+// owned `int` field, so the capture is legal.
+int main() {
+    int x = 7;
+    const int& r = x;
+    auto i = [r]() { return r; };
+    return i();
+}

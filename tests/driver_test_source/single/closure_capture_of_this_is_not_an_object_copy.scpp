@@ -1,0 +1,22 @@
+// spec ch05 §5.12: `[this]` is spelled without `&` but captures the
+// receiver, which scpp models as a reference field. It must NOT be
+// swept into the by-value referent-copy rule: a write through the
+// captured `this` has to reach the original object, and capturing
+// `this` must stay legal for a class with no copy constructor.
+class K {
+public:
+    virtual ~K() { return; }
+    int v{7};
+    int m() {
+        auto i = [this]() {
+            this.v = 9;
+            return 0;
+        };
+        int unused = i();
+        return unused + this.v;
+    }
+};
+int main() {
+    K k{};
+    return k.m() - 9;
+}

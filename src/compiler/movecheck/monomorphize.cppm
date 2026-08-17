@@ -6301,7 +6301,7 @@ private:
                 field_types.push_back(by_reference_capture_type(captured_type, captured_is_const));
             } else {
                 if (capture.name != "this") by_value_names.insert(capture.name);
-                field_types.push_back(std::move(captured_type));
+                field_types.push_back(by_value_capture_type(capture, captured_type));
             }
         }
 

@@ -1,0 +1,10 @@
+// spec ch05 §5.12: because the by-value capture owns its copy, a
+// `mutable` lambda writing it writes the closure's own field. The
+// referent -- and so the original local -- is untouched.
+int main() {
+    int x = 7;
+    int& r = x;
+    auto i = [r]() mutable { r = 5; return r; };
+    int inside = i();
+    return (inside - 5) + (x - 7);
+}

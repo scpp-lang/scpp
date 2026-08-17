@@ -1,0 +1,9 @@
+// spec ch05 §5.12: an init-capture takes the same path -- `[c = r]`
+// where `r` is `int&` gives the closure an owned `int`, not a
+// reference field.
+int main() {
+    int x = 7;
+    int& r = x;
+    auto i = [c = r]() { return c; };
+    return i();
+}
