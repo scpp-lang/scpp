@@ -2,6 +2,7 @@ import scpp.driver;
 import scpp.parser;
 import scpp.compiler.movecheck;
 import scpp.compiler.codegen;
+import scpp.constexpression;
 import scpp.ast;
 import std;
 
@@ -174,6 +175,13 @@ bool full_pipeline_fails(std::string_view source) {
     scpp::Program program = std::move(program_result.value());
     auto monomorphize_result = scpp::monomorphize_generics(program);
     if (!monomorphize_result.has_value()) return true;
+    // fold_immediate_calls belongs between monomorphize_generics and
+    // check_moves -- that is the driver's own order (see compile_program in
+    // src/driver.cppm). Omitting it here made this helper's name a lie and
+    // was how consteval bodies going unchecked stayed invisible: this pass
+    // is the one that used to discard them, so no harness that skipped it
+    // could ever reproduce the driver's behaviour for a consteval function.
+    if (auto fold_result = scpp::fold_immediate_calls(program); !fold_result.has_value()) return true;
     auto check_moves_result = scpp::check_moves(program);
     if (!check_moves_result.has_value()) return true;
     scpp::Codegen codegen("test_module");
@@ -189,6 +197,13 @@ bool full_pipeline_fails_with_std_imports(std::string_view source) {
     scpp::Program program = std::move(program_result.value());
     auto monomorphize_result = scpp::monomorphize_generics(program);
     if (!monomorphize_result.has_value()) return true;
+    // fold_immediate_calls belongs between monomorphize_generics and
+    // check_moves -- that is the driver's own order (see compile_program in
+    // src/driver.cppm). Omitting it here made this helper's name a lie and
+    // was how consteval bodies going unchecked stayed invisible: this pass
+    // is the one that used to discard them, so no harness that skipped it
+    // could ever reproduce the driver's behaviour for a consteval function.
+    if (auto fold_result = scpp::fold_immediate_calls(program); !fold_result.has_value()) return true;
     auto check_moves_result = scpp::check_moves(program);
     if (!check_moves_result.has_value()) return true;
     scpp::Codegen codegen("test_module");
@@ -2461,8 +2476,15 @@ void run_consteval_tests() {
             "    return 41;\n"
             "}\n"
             "consteval int answer() {\n"
-            "    TagList<int, bool> tags{};\n"
-            "    return take(tags);\n"
+            // A named local is an lvalue, and TagList has a user-declared
+            // (virtual) destructor, so it is not implicitly copyable:
+            // ch02's by-value rule requires a fresh value or std::move(x)
+            // here, exactly as it does in a runtime function. Before
+            // consteval bodies were movechecked at all this read
+            // `TagList<int, bool> tags{}; return take(tags);`, which the
+            // identical runtime code has always rejected. The derived-to-
+            // base conversion this case is actually about is unaffected.
+            "    return take(TagList<int, bool>{});\n"
             "}\n"
             "int main() {\n"
             "    return answer() - 41;\n"
@@ -2736,6 +2758,172 @@ void run_consteval_tests() {
                      std::string(compile_result_47.error().what()).find("cannot execute user-defined destructor of 'NeedsDrop'") !=
                          std::string::npos;
         expect(threw, case_name + ": expected required constant evaluation to reject user-defined destructor execution");
+    }
+
+    // ch07 x7.1 / ch02: a `consteval` function's body is an ordinary
+    // function body -- ch02's ownership rules describe the program, not
+    // the machine, so a use-after-move or a double borrow is just as
+    // ill-formed when it happens during constant evaluation as at run
+    // time. Until this batch none of it was checked: fold_immediate_calls
+    // ended by discarding every consteval body (`fn.body.reset()`, guarded
+    // only by a `!name.ends_with("_new")` suffix test), and the driver runs
+    // fold_immediate_calls *immediately before* check_moves -- so movecheck
+    // was handed a body-less Function and silently walked nothing.
+    // Constructors were the sole exception, and only by accident: the
+    // "_new" carve-out was added to make consteval class-argument
+    // conversion work, not to have them checked.
+    //
+    // These cases must go through the real driver (try_compile_and_run ->
+    // scpp::compile_to_executable), because that is the *only* harness
+    // that runs fold_immediate_calls at all: movecheck_test's own
+    // throws_move_error runs parse -> monomorphize_generics -> check_moves,
+    // and full_pipeline_fails above did the same until this batch. A
+    // movetest_source fixture therefore cannot observe this defect -- it
+    // would pass identically before and after the fix.
+    struct ConstevalRejectionCase {
+        const char* name;
+        const char* source;
+        const char* expected_fragment;
+    };
+    const ConstevalRejectionCase consteval_rejection_cases[] = {
+        {"consteval_free_function_use_after_move_is_rejected",
+         "class Box { public: virtual ~Box() = default; int v{}; };\n"
+         "consteval int probe() {\n"
+         "    Box a{};\n"
+         "    Box b = std::move(a);\n"
+         "    return a.v + b.v;\n"
+         "}\n"
+         "int main() { return 0; }\n",
+         "use of moved-out variable 'a'"},
+        {"consteval_free_function_double_move_is_rejected",
+         "class Box { public: virtual ~Box() = default; int v{}; };\n"
+         "consteval int probe() {\n"
+         "    Box a{};\n"
+         "    Box b = std::move(a);\n"
+         "    Box c = std::move(a);\n"
+         "    return b.v + c.v;\n"
+         "}\n"
+         "int main() { return 0; }\n",
+         "use of moved-out variable 'a'"},
+        {"consteval_free_function_borrow_conflict_is_rejected",
+         "consteval int probe() {\n"
+         "    int n = 1;\n"
+         "    int& r1 = n;\n"
+         "    int& r2 = n;\n"
+         "    return r1 + r2;\n"
+         "}\n"
+         "int main() { return 0; }\n",
+         "already borrowed"},
+        {"consteval_method_use_after_move_is_rejected",
+         "class Box { public: virtual ~Box() = default; int v{}; };\n"
+         "class Holder {\n"
+         "public:\n"
+         "    virtual ~Holder() = default;\n"
+         "    consteval int probe() {\n"
+         "        Box a{};\n"
+         "        Box b = std::move(a);\n"
+         "        return a.v + b.v;\n"
+         "    }\n"
+         "};\n"
+         "int main() { return 0; }\n",
+         "use of moved-out variable 'a'"},
+        // Not a move rule: spec x11.2(5.1) is enforced by
+        // movecheck/interfaces.cppm while walking a *body*, so it was
+        // skipped in exactly the same way. Its signature-level siblings
+        // (x11.2(5.6)/(5.7), which read the declaration rather than the
+        // body) were always checked in consteval functions -- that split is
+        // what identifies the body, not the rule set, as what went missing.
+        {"consteval_free_function_interface_typed_local_is_rejected",
+         "class [[scpp::interface]] IValue {\n"
+         "public:\n"
+         "    virtual ~IValue() = default;\n"
+         "    virtual int value() { return 1; }\n"
+         "};\n"
+         "consteval int probe() {\n"
+         "    IValue bad{};\n"
+         "    return bad.value();\n"
+         "}\n"
+         "int main() { return 0; }\n",
+         "interface type"},
+    };
+    for (const ConstevalRejectionCase& rejection_case : consteval_rejection_cases) {
+        std::string case_name = rejection_case.name;
+        cases_run++;
+        auto result = try_compile_and_run(rejection_case.source, case_name);
+        bool rejected = !result.has_value();
+        std::string message = rejected ? result.error().what() : "";
+        expect(rejected, case_name + ": expected the consteval body to be move-checked and rejected");
+        if (rejected) {
+            expect(message.find(rejection_case.expected_fragment) != std::string::npos,
+                   case_name + ": expected the diagnostic to contain '" +
+                       std::string(rejection_case.expected_fragment) + "', got: " + message);
+        }
+    }
+
+    // The complementary half, and the one that keeps this batch consistent
+    // with the previous one: #466 deliberately exempted consteval bodies
+    // from the x5.1(5.1) raw-pointer gates, because ch06 x7.3(1) makes
+    // `[[scpp::unsafe]]` unevaluatable during constant evaluation -- the
+    // licence those gates demand cannot be written there, so requiring it
+    // would make the operations unusable rather than guarded. Now that
+    // consteval bodies reach movecheck at all, that exemption is load-
+    // bearing for the first time: without it these four would start
+    // failing. A well-formed move is the fourth control -- checking a body
+    // must not mean rejecting it.
+    const std::pair<const char*, const char*> consteval_acceptance_cases[] = {
+        {"consteval_raw_pointer_deref_stays_exempt_from_unsafe_gate",
+         "consteval int probe() {\n"
+         "    int n = 7;\n"
+         "    int* p = &n;\n"
+         "    return *p;\n"
+         "}\n"
+         "int main() { return 0; }\n"},
+        {"consteval_raw_pointer_subscript_stays_exempt_from_unsafe_gate",
+         "consteval int probe() {\n"
+         "    int arr[2];\n"
+         "    arr[0] = 3;\n"
+         "    arr[1] = 4;\n"
+         "    int* p = &arr[0];\n"
+         "    return p[1];\n"
+         "}\n"
+         "int main() { return 0; }\n"},
+        {"consteval_raw_pointer_arithmetic_stays_exempt_from_unsafe_gate",
+         "consteval int probe() {\n"
+         "    int arr[2];\n"
+         "    arr[0] = 3;\n"
+         "    arr[1] = 4;\n"
+         "    int* p = &arr[0];\n"
+         "    int* q = p + 1;\n"
+         "    return *q;\n"
+         "}\n"
+         "int main() { return 0; }\n"},
+        {"consteval_method_raw_pointer_deref_stays_exempt_from_unsafe_gate",
+         "class Holder {\n"
+         "public:\n"
+         "    virtual ~Holder() = default;\n"
+         "    consteval int probe() {\n"
+         "        int n = 7;\n"
+         "        int* p = &n;\n"
+         "        return *p;\n"
+         "    }\n"
+         "};\n"
+         "int main() { return 0; }\n"},
+        {"consteval_well_formed_move_stays_allowed",
+         "class Box { public: virtual ~Box() = default; int v{}; };\n"
+         "consteval int probe() {\n"
+         "    Box a{};\n"
+         "    Box b = std::move(a);\n"
+         "    return b.v;\n"
+         "}\n"
+         "int main() { return 0; }\n"},
+    };
+    for (const auto& [name, source] : consteval_acceptance_cases) {
+        std::string case_name = name;
+        cases_run++;
+        auto result = try_compile_and_run(source, case_name);
+        expect(result.has_value(),
+               case_name + ": expected the consteval body to be accepted, got: " +
+                   (result.has_value() ? std::string() : std::string(result.error().what())));
     }
 }
 
