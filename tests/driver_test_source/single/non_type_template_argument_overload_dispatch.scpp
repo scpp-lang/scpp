@@ -1,0 +1,27 @@
+// Acceptance alone would not prove much here: the fix makes `Buf<4>` and
+// `Buf<8>` distinct types, so the interesting question is whether each
+// call now reaches the overload that actually matches. 40 + 80 - 120 == 0
+// only if both dispatch correctly; picking either overload twice gives a
+// non-zero exit status.
+template<int N>
+class Buf {
+public:
+    virtual ~Buf() = default;
+    int size() const {
+        return N;
+    }
+};
+
+int pick(const Buf<4>& b) {
+    return 40;
+}
+
+int pick(const Buf<8>& b) {
+    return 80;
+}
+
+int main() {
+    Buf<4> a{};
+    Buf<8> c{};
+    return pick(a) + pick(c) - 120;
+}

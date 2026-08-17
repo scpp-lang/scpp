@@ -1,0 +1,29 @@
+// The same rule for methods: the duplicate-signature check runs over
+// mangled method names too ('Sink_take'), so the ignored non_type_args
+// made these two overloads collide in exactly the same way.
+template<int N>
+class Buf {
+public:
+    virtual ~Buf() = default;
+    int size() const {
+        return N;
+    }
+};
+
+class Sink {
+public:
+    virtual ~Sink() = default;
+    int take(const Buf<4>& b) {
+        return 40;
+    }
+    int take(const Buf<8>& b) {
+        return 80;
+    }
+};
+
+int main() {
+    Sink s{};
+    Buf<4> a{};
+    Buf<8> c{};
+    return s.take(a) + s.take(c) - 120;
+}

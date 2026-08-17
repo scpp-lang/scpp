@@ -2056,35 +2056,11 @@ void write_function(std::ostream& out, const Function& fn) {
     return fn;
 }
 
-[[nodiscard]] bool types_equal_for_payload_merge(const Type& a, const Type& b) {
-    if (a.kind != b.kind || a.name != b.name || a.array_size != b.array_size ||
-        a.is_unsafe_function_pointer != b.is_unsafe_function_pointer || a.is_const_function != b.is_const_function ||
-        a.function_ref_qualifier != b.function_ref_qualifier || a.is_mutable_ref != b.is_mutable_ref ||
-        a.is_rvalue_ref != b.is_rvalue_ref || a.is_mutable_pointee != b.is_mutable_pointee ||
-        a.is_const_qualified != b.is_const_qualified ||
-        a.is_pack_expansion != b.is_pack_expansion || a.template_args.size() != b.template_args.size() ||
-        a.non_type_args.size() != b.non_type_args.size() || a.function_params.size() != b.function_params.size()) {
-        return false;
-    }
-    auto ptr_equal = [&](const std::shared_ptr<Type>& lhs, const std::shared_ptr<Type>& rhs) {
-        if (static_cast<bool>(lhs) != static_cast<bool>(rhs)) return false;
-        return !lhs || types_equal_for_payload_merge(*lhs, *rhs);
-    };
-    if (!ptr_equal(a.pointee, b.pointee) || !ptr_equal(a.element, b.element) || !ptr_equal(a.function_return, b.function_return)) {
-        return false;
-    }
-    for (std::size_t i = 0; i < a.template_args.size(); i++) if (!types_equal_for_payload_merge(a.template_args[i], b.template_args[i])) return false;
-    for (std::size_t i = 0; i < a.function_params.size(); i++) if (!types_equal_for_payload_merge(a.function_params[i], b.function_params[i])) return false;
-    for (std::size_t i = 0; i < a.non_type_args.size(); i++) {
-        const auto& lhs = a.non_type_args[i];
-        const auto& rhs = b.non_type_args[i];
-        if (static_cast<bool>(lhs) != static_cast<bool>(rhs)) return false;
-        if (!lhs) continue;
-        if (lhs->kind != rhs->kind || lhs->int_value != rhs->int_value || lhs->name != rhs->name) return false;
-    }
-    return true;
-}
 
+// The Type comparison these merge helpers need is scpp::types_equal
+// (scpp.ast). This file used to define types_equal_for_payload_merge, a
+// fifth independent copy; it and the parser's were the two that compared
+// non_type_args by value and is_pack_expansion at all.
 [[nodiscard]] bool params_equal_for_payload_merge(const std::vector<Param>& a, const std::vector<Param>& b) {
     if (a.size() != b.size()) return false;
     for (std::size_t i = 0; i < a.size(); i++) {
@@ -2092,7 +2068,7 @@ void write_function(std::ostream& out, const Function& fn) {
             a[i].require_thread_movable != b[i].require_thread_movable ||
             a[i].require_thread_shareable != b[i].require_thread_shareable ||
             a[i].is_parameter_pack != b[i].is_parameter_pack ||
-            !types_equal_for_payload_merge(a[i].type, b[i].type)) {
+            !types_equal(a[i].type, b[i].type)) {
             return false;
         }
     }
@@ -2100,7 +2076,7 @@ void write_function(std::ostream& out, const Function& fn) {
 }
 
 [[nodiscard]] bool same_function_identity_for_payload_merge(const Function& a, const Function& b) {
-    return a.name == b.name && types_equal_for_payload_merge(a.return_type, b.return_type) &&
+    return a.name == b.name && types_equal(a.return_type, b.return_type) &&
            params_equal_for_payload_merge(a.params, b.params) && a.receiver_ref_qualifier == b.receiver_ref_qualifier &&
            a.is_nodiscard == b.is_nodiscard && a.nodiscard_reason == b.nodiscard_reason &&
            a.member_owner_class == b.member_owner_class && a.is_static == b.is_static && a.access == b.access &&
@@ -2123,7 +2099,7 @@ void write_function(std::ostream& out, const Function& fn) {
 [[nodiscard]] bool same_specialization_args(const std::vector<Type>& a, const std::vector<Type>& b) {
     if (a.size() != b.size()) return false;
     for (std::size_t i = 0; i < a.size(); i++) {
-        if (!types_equal_for_payload_merge(a[i], b[i])) return false;
+        if (!types_equal(a[i], b[i])) return false;
     }
     return true;
 }

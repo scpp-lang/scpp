@@ -2189,40 +2189,11 @@ private:
         }
     }
 
-    [[nodiscard]] bool types_equal(const Type& a, const Type& b) const {
-        if (a.kind != b.kind) return false;
-        if (a.name != b.name || a.is_mutable_ref != b.is_mutable_ref ||
-            a.is_mutable_pointee != b.is_mutable_pointee || a.array_size != b.array_size ||
-            a.is_pack_expansion != b.is_pack_expansion || a.is_unsafe_function_pointer != b.is_unsafe_function_pointer ||
-            a.is_const_function != b.is_const_function || a.function_ref_qualifier != b.function_ref_qualifier ||
-            a.is_rvalue_ref != b.is_rvalue_ref || a.is_const_qualified != b.is_const_qualified) {
-            return false;
-        }
-        if (a.template_args.size() != b.template_args.size() || a.non_type_args.size() != b.non_type_args.size() ||
-            a.function_params.size() != b.function_params.size()) {
-            return false;
-        }
-        if ((a.pointee != nullptr) != (b.pointee != nullptr) ||
-            (a.element != nullptr) != (b.element != nullptr) ||
-            (a.function_return != nullptr) != (b.function_return != nullptr)) {
-            return false;
-        }
-        if (a.pointee != nullptr && !types_equal(*a.pointee, *b.pointee)) return false;
-        if (a.element != nullptr && !types_equal(*a.element, *b.element)) return false;
-        if (a.function_return != nullptr && !types_equal(*a.function_return, *b.function_return)) return false;
-        for (std::size_t i = 0; i < a.template_args.size(); i++) {
-            if (!types_equal(a.template_args[i], b.template_args[i])) return false;
-        }
-        for (std::size_t i = 0; i < a.function_params.size(); i++) {
-            if (!types_equal(a.function_params[i], b.function_params[i])) return false;
-        }
-        for (std::size_t i = 0; i < a.non_type_args.size(); i++) {
-            const Expr& lhs = *a.non_type_args[i];
-            const Expr& rhs = *b.non_type_args[i];
-            if (lhs.kind != rhs.kind || lhs.int_value != rhs.int_value || lhs.name != rhs.name) return false;
-        }
-        return true;
-    }
+    // Type identity is scpp::types_equal (scpp.ast). The parser used to
+    // define its own member copy; it and driver.cppm's
+    // types_equal_for_payload_merge were the only two of the five that
+    // compared non_type_args by value, which is what the shared one now
+    // does everywhere.
 
     [[nodiscard]] bool params_equal(const std::vector<Param>& a, const std::vector<Param>& b) const {
         if (a.size() != b.size()) return false;

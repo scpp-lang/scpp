@@ -606,15 +606,12 @@ private:
     [[nodiscard]] std::expected<void, CodegenError> validate_c_abi_compatible(const Type& type, const std::string& fn_name,
                                     const std::string& context_description);
 
-    // Structural (deep) equality between two Types -- see movecheck's own
-    // types_equal (this file has no access to it: separate module,
-    // separate data model) for why a naive `=default` comparison of
-    // Type's shared_ptr pointee/element wouldn't work. Used only for
-    // function-overload resolution (ch05 §5.10)'s exact-type-match rule.
-    // Reference additionally requires is_rvalue_ref to match: `T&`/
-    // `const T&` and `T&&` (ch03) are distinct parameter types, never
-    // interchangeable -- meaningless for Span.
-    [[nodiscard]] static bool types_equal(const Type& a, const Type& b);
+    // Overload resolution (ch05 §5.10)'s exact-type-match rule uses
+    // scpp::types_equal from scpp.ast, which this module already imports.
+    // Codegen used to declare a private static copy here, on the stated
+    // premise that movecheck's was unreachable ("separate module, separate
+    // data model") -- but both operate on scpp.ast's own Type, so the one
+    // place both can reach is where the comparison now lives.
 
     [[nodiscard]] static const Type& binary_operand_type(const Type& type);
 

@@ -487,45 +487,10 @@ bool ignore_result(std::expected<ExecOutcome, ConstexprError> result) { return r
 
 bool ignore_result(std::expected<void, ConstexprError> result) { return result.has_value(); }
 
-[[nodiscard]] bool types_equal(const Type& a, const Type& b) {
-    if (a.kind != b.kind) return false;
-    if (a.is_const_qualified != b.is_const_qualified) return false;
-    switch (a.kind) {
-        case TypeKind::Named:
-            if (a.name != b.name || a.template_args.size() != b.template_args.size() ||
-                a.non_type_args.size() != b.non_type_args.size()) {
-                return false;
-            }
-            for (std::size_t i = 0; i < a.template_args.size(); ++i) {
-                if (!types_equal(a.template_args[i], b.template_args[i])) return false;
-            }
-            return true;
-        case TypeKind::Pointer:
-            return a.is_mutable_pointee == b.is_mutable_pointee && a.pointee && b.pointee &&
-                   types_equal(*a.pointee, *b.pointee);
-        case TypeKind::Reference:
-            return a.is_mutable_ref == b.is_mutable_ref && a.is_rvalue_ref == b.is_rvalue_ref && a.pointee && b.pointee &&
-                   types_equal(*a.pointee, *b.pointee);
-        case TypeKind::Array:
-            return a.array_size == b.array_size && a.element && b.element && types_equal(*a.element, *b.element);
-        case TypeKind::Span:
-            return a.is_mutable_ref == b.is_mutable_ref && a.pointee && b.pointee &&
-                   types_equal(*a.pointee, *b.pointee);
-        case TypeKind::Function:
-        case TypeKind::FunctionPointer:
-            if (a.function_params.size() != b.function_params.size() || !a.function_return || !b.function_return ||
-                !types_equal(*a.function_return, *b.function_return)) {
-                return false;
-            }
-            for (std::size_t i = 0; i < a.function_params.size(); ++i) {
-                if (!types_equal(a.function_params[i], b.function_params[i])) return false;
-            }
-            return a.is_const_function == b.is_const_function &&
-                   a.function_ref_qualifier == b.function_ref_qualifier &&
-                   a.is_unsafe_function_pointer == b.is_unsafe_function_pointer;
-    }
-    return false;
-}
+// Type identity comes from scpp::types_equal (scpp.ast), the one module
+// this one is allowed to see besides std. This file used to carry its own
+// copy, which compared non_type_args by *count* -- so `Buf<4>` and
+// `Buf<8>` were distinguishable from `Buf<4, 4>` but not from each other.
 
 [[nodiscard]] Type make_const_char_pointer_type() {
     Type result{};

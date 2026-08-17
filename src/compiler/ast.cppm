@@ -730,6 +730,91 @@ class Expr {
     StmtPtr lambda_body{};
 };
 
+// Structural (deep) equality between two Types -- "are these the same
+// type?", asked identically by every layer of the compiler.
+//
+// It has to be structural because Type's pointee/element/function_return
+// are shared_ptr (see Type's own comment: "so Type stays copyable"), so
+// two independently-parsed but conceptually identical types -- two
+// separate `int*` parameter declarations, say -- are distinct shared_ptr
+// instances and would compare unequal under a naively `=default`-ed
+// operator==.
+//
+// This lives in scpp.ast because that is the only module all five former
+// callers can reach: scpp.compiler.movecheck:types, scpp.compiler.codegen
+// (via :api), scpp.constexpression (which by design sees nothing but std
+// and scpp.ast), scpp.parser and scpp.driver. Each of those had grown its
+// own copy, and the copies had drifted apart -- see the batch that
+// introduced this function for the full comparison. They were not
+// deliberately different comparisons for different layers; they were five
+// independent attempts at one question, each omitting a different field.
+//
+// Fields deliberately *not* compared, all three ignored by all five of
+// the original implementations:
+//   - `lifetime`: a [[scpp::lifetime]] annotation constrains how a value
+//     may be used, and is not part of the type's identity.
+//   - `array_size_expr`: the unevaluated spelling of a bound whose value
+//     is `array_size`, which *is* compared. Comparing both would make
+//     `int[2]` and `int[1 + 1]` distinct types.
+//   - `is_reference_wrapper_lifetime_source`: a derived analysis flag
+//     rather than part of what the type is.
+[[nodiscard]] bool types_equal(const Type& a, const Type& b);
+
+// A non-type template argument participates in type identity by *value*:
+// `Buf<4>` and `Buf<8>` are different types. Only the argument shapes a
+// non-type argument can actually take are compared (an integer literal or
+// a name); anything richer is not expressible as one today.
+[[nodiscard]] inline bool non_type_args_equal(const std::vector<std::shared_ptr<Expr>>& a,
+                                              const std::vector<std::shared_ptr<Expr>>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); i++) {
+        if ((a[i] != nullptr) != (b[i] != nullptr)) return false;
+        if (a[i] == nullptr) continue;
+        if (a[i]->kind != b[i]->kind || a[i]->int_value != b[i]->int_value || a[i]->name != b[i]->name) return false;
+    }
+    return true;
+}
+
+[[nodiscard]] inline bool types_equal(const Type& a, const Type& b) {
+    // Compared for every kind rather than only for the kind each field
+    // "belongs" to. A field that is meaningless for a kind holds its
+    // default on both sides and so compares equal anyway, and gating on
+    // the kind is exactly how the movecheck/codegen/constexpression copies
+    // came to ignore is_pack_expansion entirely: it belongs to no single
+    // kind, so a kind-indexed switch had nowhere to put it.
+    if (a.kind != b.kind || a.name != b.name || a.array_size != b.array_size ||
+        a.is_unsafe_function_pointer != b.is_unsafe_function_pointer ||
+        a.is_const_function != b.is_const_function || a.function_ref_qualifier != b.function_ref_qualifier ||
+        a.is_mutable_ref != b.is_mutable_ref || a.is_rvalue_ref != b.is_rvalue_ref ||
+        a.is_mutable_pointee != b.is_mutable_pointee || a.is_const_qualified != b.is_const_qualified ||
+        a.is_pack_expansion != b.is_pack_expansion) {
+        return false;
+    }
+    if (a.template_args.size() != b.template_args.size() || a.function_params.size() != b.function_params.size()) {
+        return false;
+    }
+    if (!non_type_args_equal(a.non_type_args, b.non_type_args)) return false;
+    // Null-guarded on both sides: a Named type has no pointee, and a
+    // malformed or partially built type may be missing one where its kind
+    // implies one. Two of the five originals dereferenced these
+    // unconditionally.
+    auto child_equal = [](const std::shared_ptr<Type>& lhs, const std::shared_ptr<Type>& rhs) {
+        if ((lhs != nullptr) != (rhs != nullptr)) return false;
+        return lhs == nullptr || types_equal(*lhs, *rhs);
+    };
+    if (!child_equal(a.pointee, b.pointee) || !child_equal(a.element, b.element) ||
+        !child_equal(a.function_return, b.function_return)) {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.template_args.size(); i++) {
+        if (!types_equal(a.template_args[i], b.template_args[i])) return false;
+    }
+    for (std::size_t i = 0; i < a.function_params.size(); i++) {
+        if (!types_equal(a.function_params[i], b.function_params[i])) return false;
+    }
+    return true;
+}
+
 enum class StmtKind {
     VarDecl,
     Return,

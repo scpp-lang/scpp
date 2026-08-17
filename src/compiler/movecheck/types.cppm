@@ -44,7 +44,6 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred);
 [[nodiscard]] bool type_contains_lifetime_carrying_state(const Type& type, const Program& program,
                                                          std::unordered_set<std::string> visiting = {});
 [[nodiscard]] std::string named_type_name(const Type& type);
-[[nodiscard]] bool types_equal(const Type& a, const Type& b);
 [[nodiscard]] bool raw_pointer_implicitly_convertible(const Type& source, const Type& target);
 [[nodiscard]] bool is_resolved_named_type(const Type& type, const Program* program);
 [[nodiscard]] bool is_scalar_named_type(const Type& type);
@@ -265,57 +264,20 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
     return "";
 }
 
-// Structural (deep) equality between two Types -- needed since Type's
-// pointee/element are shared_ptr (Type's own comment: "so Type stays
-// copyable"), so two independently-parsed-but-conceptually-identical
-// types (e.g. two separate `int*` parameter declarations) are different
-// shared_ptr instances and would compare unequal under a naively
-// `=default`-ed operator==. Used only for function-overload resolution
-// (ch05 §5.10): since ch06 established no scpp scalar type implicitly
-// converts to any other, overload resolution is exact type match only --
-// this is that "exact match" test. Deliberately requires is_mutable_ref/
-// is_mutable_pointee to also match: `T&` and `const T&` (or `T*`/
-// `const T*`) are distinct parameter types for overloading purposes, not
-// interchangeable. Reference additionally requires is_rvalue_ref to
-// match: `T&`/`const T&` (a borrow) and `T&&` (ch03's move-parameter
-// form) are likewise distinct parameter types, never interchangeable --
-// meaningless for Span (which has no rvalue-reference concept at all).
-[[nodiscard]] bool types_equal(const Type& a, const Type& b) {
-    if (a.kind != b.kind) return false;
-    if (a.is_const_qualified != b.is_const_qualified) return false;
-    switch (a.kind) {
-        case TypeKind::Named:
-            if (a.name != b.name || a.template_args.size() != b.template_args.size()) return false;
-            for (std::size_t i = 0; i < a.template_args.size(); i++) {
-                if (!types_equal(a.template_args[i], b.template_args[i])) return false;
-            }
-            return true;
-        case TypeKind::Pointer:
-            return a.is_mutable_pointee == b.is_mutable_pointee && types_equal(*a.pointee, *b.pointee);
-        case TypeKind::Function:
-        case TypeKind::FunctionPointer:
-            if ((a.kind == TypeKind::FunctionPointer && a.is_unsafe_function_pointer != b.is_unsafe_function_pointer) ||
-                (a.kind == TypeKind::Function &&
-                 (a.is_const_function != b.is_const_function ||
-                  a.function_ref_qualifier != b.function_ref_qualifier)) ||
-                !types_equal(*a.function_return, *b.function_return) ||
-                a.function_params.size() != b.function_params.size()) {
-                return false;
-            }
-            for (std::size_t i = 0; i < a.function_params.size(); i++) {
-                if (!types_equal(a.function_params[i], b.function_params[i])) return false;
-            }
-            return true;
-        case TypeKind::Reference:
-            return a.is_mutable_ref == b.is_mutable_ref && a.is_rvalue_ref == b.is_rvalue_ref &&
-                   types_equal(*a.pointee, *b.pointee);
-        case TypeKind::Span:
-            return a.is_mutable_ref == b.is_mutable_ref && types_equal(*a.pointee, *b.pointee);
-        case TypeKind::Array:
-            return a.array_size == b.array_size && types_equal(*a.element, *b.element);
-    }
-    return false;
-}
+// Overload resolution (ch05 §5.10) is exact type match only -- ch06
+// established that no scpp scalar type implicitly converts to any other --
+// and scpp::types_equal (scpp.ast) is that "exact match" test. It is
+// deliberately strict about is_mutable_ref/is_mutable_pointee (`T&` and
+// `const T&`, `T*` and `const T*`, are distinct parameter types for
+// overloading, not interchangeable) and about is_rvalue_ref (a borrow and
+// ch03's move-parameter form `T&&` are likewise never interchangeable).
+//
+// This file used to carry its own copy of that comparison. So did
+// codegen/semantics.cppm, constexpression.cppm, parser.cppm and
+// driver.cppm, and the five had drifted apart: this one ignored
+// non_type_args entirely, so `Buf<4>` and `Buf<8>` compared *equal* and
+// two overloads distinguished only by a non-type template argument were
+// rejected here as a redefinition with an identical parameter list.
 
 [[nodiscard]] bool raw_pointer_implicitly_convertible(const Type& source, const Type& target) {
     if (source.kind != TypeKind::Pointer || target.kind != TypeKind::Pointer) return false;
