@@ -1,0 +1,11 @@
+// spec ch05 §5.12: `[&r]` where `r` is itself `int& r = x;` is a
+// *reborrow* of the access `r` already holds, not a second independent
+// borrow of `x`. It is accounted for against the lender `r` -- exactly
+// as a stored `int& q = r;` is -- rather than against `x`, which `r`'s
+// own binding has already borrowed.
+int main() {
+    int x = 7;
+    int& r = x;
+    auto i = [&r]() { return r; };
+    return i();
+}

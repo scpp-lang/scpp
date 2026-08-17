@@ -1,0 +1,11 @@
+// spec ch05 §5.7: accounting a reborrow against its lender must still
+// catch a genuine duplicate -- `f(r, r)` lends the same access twice in
+// one call, and both arguments land on the same lender.
+int f(int& a, int& b) {
+    return a + b;
+}
+int main() {
+    int x = 7;
+    int& r = x;
+    return f(r, r) - 7;
+}

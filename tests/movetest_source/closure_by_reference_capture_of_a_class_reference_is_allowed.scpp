@@ -1,0 +1,14 @@
+// spec ch05 §5.12: a reborrowing capture of a class-typed reference is
+// no different -- the closure field is `K&`, aliasing the same object
+// the lender already borrows.
+class K {
+public:
+    virtual ~K() { return; }
+    int v{7};
+};
+int main() {
+    K k{};
+    K& r = k;
+    auto i = [&r]() { return r.v; };
+    return i();
+}

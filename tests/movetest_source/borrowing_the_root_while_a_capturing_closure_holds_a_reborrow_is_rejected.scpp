@@ -1,0 +1,10 @@
+// spec ch05 §5.12: companion to the write case -- a second mutable
+// borrow of the root would alias what the closure's reborrow already
+// reaches.
+int main() {
+    int x = 7;
+    int& r = x;
+    auto i = [&r]() { return r; };
+    int& q = x;
+    return i() + q - 7;
+}

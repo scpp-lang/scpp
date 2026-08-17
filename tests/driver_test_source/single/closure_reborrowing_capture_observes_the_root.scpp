@@ -1,0 +1,15 @@
+// spec ch05 §5.12: a by-reference capture of a reference local
+// reborrows it, so the closure's field aliases the same object -- a
+// write made through the reference before the closure runs is visible
+// to it, and a write made through the closure is visible outside.
+int main() {
+    int x = 7;
+    int& r = x;
+    auto i = [&r]() {
+        r = r + 1;
+        return r;
+    };
+    int first = i();
+    int second = i();
+    return (first - 8) + (second - 9) + (x - 9);
+}

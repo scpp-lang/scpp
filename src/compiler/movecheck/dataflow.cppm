@@ -890,7 +890,8 @@ namespace scpp {
     // a mutable reference may always be lent out as either mutable or
     // shared, and a shared one as shared.
     std::optional<LocalId> lender = resolve_reborrow_lender(arg, body, signatures);
-    if (reborrow_is_tracked_against_lender(lender, body)) {
+    bool tracked_reborrow = reborrow_is_tracked_against_lender(lender, body);
+    if (tracked_reborrow) {
         if (auto _r = validate_reborrow_lender(*lender, is_mutable, state, body, report_errors); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
@@ -925,7 +926,20 @@ namespace scpp {
         }
     }
 
-    for (LocalId root : roots) {
+    // Which key this argument occupies for the duration of the call is
+    // the same question reborrow_is_tracked_against_lender already
+    // answers everywhere else: a tracked reborrow is accounted for
+    // against its *lender*, not against the root the lender reaches.
+    // Entering it against the root instead would re-assert the very
+    // borrow the lender itself installed, and so report the lender's own
+    // binding as a conflicting second borrow -- which is exactly what
+    // used to happen, and why `[&r]` (whose captures are checked through
+    // this function against a map that outlives the construction) could
+    // not name a reference at all. Keying on the lender still catches a
+    // genuine duplicate: `f(r, r)` lends the same access twice and both
+    // arguments land on the same key.
+    RootSet in_call_keys = tracked_reborrow ? RootSet{*lender} : roots;
+    for (LocalId root : in_call_keys) {
         auto in_call_it = in_call_borrows.find(root);
         bool in_call_conflict =
             in_call_it != in_call_borrows.end() &&
@@ -2341,13 +2355,11 @@ struct ConvertingConstructorBinding {
             // statement (scpp has no way to name/store a closure value
             // beyond this one -- unless it's the direct initializer of
             // an `auto` variable, see apply_statement's own Assign
-            // case, which calls apply_lambda_captures directly with
-            // `state.borrows` itself instead of a throwaway map), so a
-            // fresh, local, discarded-afterward BorrowMap here is sound
-            // -- see apply_lambda_captures' own comment for the shared
-            // per-capture logic.
-            BorrowMap capture_borrows;
-            if (auto _r = apply_lambda_captures(expr, state, capture_borrows, body, signatures, report_errors); !_r.has_value()) {
+            // case, which asks apply_lambda_captures to report what the
+            // closure holds so it can install it), so taking nothing
+            // persistent here is sound -- see apply_lambda_captures' own
+            // comment for the shared per-capture logic.
+            if (auto _r = apply_lambda_captures(expr, state, body, signatures, report_errors); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
             return {};
@@ -2862,17 +2874,37 @@ struct ConvertingConstructorBinding {
                     // (apply_expr's own Lambda case -- an IIFE, a call
                     // argument, ...), one bound to a named `auto`
                     // variable genuinely can outlive this statement, so
-                    // any by-reference capture's borrow must land
-                    // directly in `state.borrows` (persisting for the
-                    // rest of this function -- see
-                    // apply_lambda_captures' own comment) rather than a
-                    // throwaway map that apply_expr's generic Lambda
-                    // handling would otherwise use.
+                    // what its by-reference captures hold has to persist
+                    // for the rest of this function -- see
+                    // apply_lambda_captures' own comment.
                     std::vector<ClosureCaptureBorrow> closure_capture_borrows;
-                    if (auto _r = apply_lambda_captures(*stmt.expr, state, state.borrows, body, signatures, report_errors,
+                    if (auto _r = apply_lambda_captures(*stmt.expr, state, body, signatures, report_errors,
                                           &closure_capture_borrows);
                         !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
+                    }
+                    // Installed here rather than as a side effect of the
+                    // per-construction duplicate-detection map, and
+                    // split the same way apply_reference_binding splits
+                    // an ordinary reference binding: a reborrowing
+                    // capture suspends its lender, any other borrows its
+                    // root. release_closure_capture_borrows undoes
+                    // whichever it was.
+                    for (const ClosureCaptureBorrow& capture_borrow : closure_capture_borrows) {
+                        if (capture_borrow.lender.has_value()) {
+                            if (capture_borrow.is_mutable) {
+                                state.suspended_reborrows[*capture_borrow.lender].mutable_suspended = true;
+                            } else {
+                                state.suspended_reborrows[*capture_borrow.lender].shared_count++;
+                            }
+                            continue;
+                        }
+                        BorrowState& borrow = state.borrows[capture_borrow.root];
+                        if (capture_borrow.is_mutable) {
+                            borrow.mutable_borrow = true;
+                        } else {
+                            borrow.shared_count++;
+                        }
                     }
                     if (!closure_capture_borrows.empty()) {
                         state.closure_capture_borrows[stmt.local] = std::move(closure_capture_borrows);

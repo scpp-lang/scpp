@@ -1,0 +1,11 @@
+// spec ch05 §5.12/ch05.3: `q` reborrows `r`, so `r` is still lending
+// even though its own name is never used again. Releasing `r`'s borrow
+// of `x` at its last use would hand `x` back while `q` still aliases
+// it; this was accepted before the lender-liveness rule was corrected.
+int main() {
+    int x = 7;
+    int& r = x;
+    int& q = r;
+    x = 9;
+    return q;
+}

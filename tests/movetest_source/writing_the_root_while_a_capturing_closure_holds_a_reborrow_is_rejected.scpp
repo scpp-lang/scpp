@@ -1,0 +1,12 @@
+// spec ch05 §5.12: the closure holds a reborrow derived from `r` for as
+// long as it lives, so `r` must keep its own borrow of `x` alive that
+// whole time -- a lender's *name* going dead does not end the borrow
+// once something derived from it is still outstanding. Writing `x`
+// underneath the closure is therefore rejected.
+int main() {
+    int x = 7;
+    int& r = x;
+    auto i = [&r]() { return r; };
+    x = 9;
+    return i();
+}
