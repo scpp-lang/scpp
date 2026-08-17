@@ -1,0 +1,28 @@
+// ch05 §5.10: overload resolution is exact type match, and a non-type
+// template argument is part of a type's identity -- `Buf<4>` and `Buf<8>`
+// are different types, so these two overloads have different parameter
+// lists. movecheck's own copy of types_equal ignored non_type_args
+// entirely, so it saw one parameter list twice and rejected the second
+// declaration as a redefinition.
+template<int N>
+class Buf {
+public:
+    virtual ~Buf() = default;
+    int size() const {
+        return N;
+    }
+};
+
+int pick(const Buf<4>& b) {
+    return 40;
+}
+
+int pick(const Buf<8>& b) {
+    return 80;
+}
+
+int main() {
+    Buf<4> a{};
+    Buf<8> c{};
+    return pick(a) + pick(c) - 120;
+}

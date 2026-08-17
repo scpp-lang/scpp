@@ -1268,44 +1268,6 @@ namespace {
     }
 
 
-    [[nodiscard]] bool Codegen::types_equal(const Type& a, const Type& b)
-{
-        if (a.kind != b.kind) return false;
-        if (a.is_const_qualified != b.is_const_qualified) return false;
-        switch (a.kind) {
-            case TypeKind::Named:
-                if (a.name != b.name || a.template_args.size() != b.template_args.size()) return false;
-                for (std::size_t i = 0; i < a.template_args.size(); i++) {
-                    if (!types_equal(a.template_args[i], b.template_args[i])) return false;
-                }
-                return true;
-            case TypeKind::Pointer: return a.is_mutable_pointee == b.is_mutable_pointee && types_equal(*a.pointee, *b.pointee);
-            case TypeKind::Function:
-            case TypeKind::FunctionPointer:
-                if ((a.kind == TypeKind::FunctionPointer && a.is_unsafe_function_pointer != b.is_unsafe_function_pointer) ||
-                    (a.kind == TypeKind::Function &&
-                     (a.is_const_function != b.is_const_function ||
-                      a.function_ref_qualifier != b.function_ref_qualifier)) ||
-                    !types_equal(*a.function_return, *b.function_return) ||
-                    a.function_params.size() != b.function_params.size()) {
-                    return false;
-                }
-
-                for (std::size_t i = 0; i < a.function_params.size(); i++) {
-                    if (!types_equal(a.function_params[i], b.function_params[i])) return false;
-                }
-                return true;
-            case TypeKind::Reference:
-                return a.is_mutable_ref == b.is_mutable_ref && a.is_rvalue_ref == b.is_rvalue_ref &&
-                       types_equal(*a.pointee, *b.pointee);
-            case TypeKind::Span:
-                return a.is_mutable_ref == b.is_mutable_ref && types_equal(*a.pointee, *b.pointee);
-            case TypeKind::Array: return a.array_size == b.array_size && types_equal(*a.element, *b.element);
-        }
-        return false;
-    }
-
-
     [[nodiscard]] const Type& Codegen::binary_operand_type(const Type& type)
 {
         return type.kind == TypeKind::Reference ? *type.pointee : type;

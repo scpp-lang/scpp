@@ -1,0 +1,25 @@
+// The negative control for the two above: comparing non_type_args by
+// value must not degrade into never comparing equal. Two overloads whose
+// non-type arguments really are the same still have identical parameter
+// lists and must still be rejected.
+template<int N>
+class Buf {
+public:
+    virtual ~Buf() = default;
+    int size() const {
+        return N;
+    }
+};
+
+int pick(const Buf<4>& b) {
+    return 40;
+}
+
+int pick(const Buf<4>& b) {
+    return 41;
+}
+
+int main() {
+    Buf<4> a{};
+    return pick(a);
+}
