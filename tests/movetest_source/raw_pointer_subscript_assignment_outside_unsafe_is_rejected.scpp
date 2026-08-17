@@ -1,0 +1,9 @@
+// Spec §5.1(5.1): a subscript used as an assignment target is the same
+// gated indirection as a subscript read.
+int main() {
+    int a[4];
+    a[0] = 5;
+    int* p = &a[0];
+    p[1] = 9;
+    return 0;
+}

@@ -13,7 +13,13 @@ namespace std {
     const char* empty{};
     if (s == empty) return 0;
     size_t len = 0;
-    while (s[len] != '\0') len = len + 1;
+    // spec §5.1(5.1): walking a NUL-terminated raw pointer is pointer
+    // arithmetic and indirection, gated on an unsafe context. There is
+    // no bound to check against here -- finding the bound is what this
+    // function is for -- so the unsafe block is the honest spelling.
+    [[scpp::unsafe]] {
+        while (s[len] != '\0') len = len + 1;
+    }
     return len;
 }
 

@@ -10320,7 +10320,13 @@ private:
             node->kind = ExprKind::IntegerLiteral;
             node->loc = loc;
             std::int64_t parsed_int_value = 0;
-            std::from_chars(tok.text.data(), tok.text.data() + tok.text.size(), parsed_int_value);
+            // spec §5.1(5.1): `data() + size()` is pointer arithmetic on
+            // a raw `const char*`. `from_chars` only offers the
+            // first/last pointer-pair form, so the one-past-the-end
+            // pointer has to be formed here.
+            [[scpp::unsafe]] {
+                std::from_chars(tok.text.data(), tok.text.data() + tok.text.size(), parsed_int_value);
+            }
             node->int_value = parsed_int_value;
             return std::move(node);
         }
@@ -10329,7 +10335,10 @@ private:
             node->kind = ExprKind::FloatLiteral;
             node->loc = loc;
             double parsed_float_value = 0.0;
-            std::from_chars(tok.text.data(), tok.text.data() + tok.text.size(), parsed_float_value);
+            // Same one-past-the-end pointer as the integer case above.
+            [[scpp::unsafe]] {
+                std::from_chars(tok.text.data(), tok.text.data() + tok.text.size(), parsed_float_value);
+            }
             node->float_value = parsed_float_value;
             return std::move(node);
         }

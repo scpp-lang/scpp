@@ -1,0 +1,7 @@
+// Spec §5.1(5.1)/[expr.add]: `p - 1` is pointer arithmetic.
+int main() {
+    int a[4];
+    int* p = &a[1];
+    int* q = p - 1;
+    return q == p ? 1 : 0;
+}

@@ -1,0 +1,10 @@
+// Spec §5.1(5.1)/(6): `p[0]` is `*((p)+(0))` ([expr.sub]/1) -- both
+// pointer arithmetic and indirection -- so it needs an unsafe block.
+int main() {
+    int a[4];
+    a[0] = 5;
+    int* p = &a[0];
+    int v = 0;
+    v = p[0];
+    return v;
+}

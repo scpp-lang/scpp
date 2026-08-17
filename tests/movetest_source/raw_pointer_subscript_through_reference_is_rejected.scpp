@@ -1,0 +1,11 @@
+// #465 lesson: the gate is about the pointer, not how it is spelled.
+// `int*& r` is a reference to the same pointer, so indexing it is the
+// same gated operation (spec §5.1(5.1)).
+int main() {
+    int a[4];
+    int* p = &a[0];
+    int*& r = p;
+    int v = 0;
+    v = r[0];
+    return v;
+}

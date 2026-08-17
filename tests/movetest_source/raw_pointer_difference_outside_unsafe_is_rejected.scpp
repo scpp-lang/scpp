@@ -1,0 +1,9 @@
+// Spec §5.1(5.1)/[expr.add]: `q - p` (pointer difference) is pointer
+// arithmetic just as `p - 1` is.
+int main() {
+    int a[4];
+    int* p = &a[0];
+    int* q = &a[2];
+    std::ptrdiff_t d = q - p;
+    return d == 2 ? 0 : 1;
+}

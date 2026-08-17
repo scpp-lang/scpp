@@ -1,0 +1,14 @@
+// The precise spec boundary: §5.1(5.1) cites [expr.unary.op] and
+// [expr.add] only. Relational and equality comparison of pointers
+// ([expr.rel]/[expr.eq]) is *not* a gated operation and must stay
+// available in a safe context -- it reads no memory.
+int main() {
+    int a[4];
+    int* p = &a[0];
+    int* q = &a[0];
+    bool same = p == q;
+    bool ordered = p < q;
+    bool ne = p != q;
+    if (same && !ordered && !ne) { return 0; }
+    return 1;
+}

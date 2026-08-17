@@ -1,0 +1,16 @@
+// The loop defect affected *every* gated operation, not just the new
+// pointer-arithmetic gate: a plain dereference inside an unsafe block
+// inside a loop was rejected too.
+int main() {
+    int x = 5;
+    int* p = &x;
+    int total = 0;
+    [[scpp::unsafe]] {
+        int i = 0;
+        while (i < 2) {
+            total = total + *p;
+            i = i + 1;
+        }
+    }
+    return total - 10;
+}

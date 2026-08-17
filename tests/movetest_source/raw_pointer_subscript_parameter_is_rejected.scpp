@@ -1,0 +1,11 @@
+// Spelling axis: a raw pointer parameter indexes exactly like a local.
+int read_first(int* p) {
+    int v = 0;
+    v = p[0];
+    return v;
+}
+
+int main() {
+    int a[4];
+    return read_first(&a[0]);
+}

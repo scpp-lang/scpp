@@ -14,22 +14,27 @@ extern "C" {
 namespace std {
 
 int __format_next_field(const char* s, int i) {
-    while (s[i] != '\0') {
-        if (s[i] == '{') {
-            if (s[i + 1] == '{') {
-                i = i + 2;
-                continue;
+    // spec §5.1(5.1): scanning a NUL-terminated format string is raw
+    // pointer indexing throughout, so the whole scan is the unsafe
+    // region rather than each read individually.
+    [[scpp::unsafe]] {
+        while (s[i] != '\0') {
+            if (s[i] == '{') {
+                if (s[i + 1] == '{') {
+                    i = i + 2;
+                    continue;
+                }
+                return i + 2;
             }
-            return i + 2;
-        }
-        if (s[i] == '}') {
-            if (s[i + 1] == '}') {
-                i = i + 2;
-                continue;
+            if (s[i] == '}') {
+                if (s[i + 1] == '}') {
+                    i = i + 2;
+                    continue;
+                }
+                return i;
             }
-            return i;
+            i = i + 1;
         }
-        i = i + 1;
     }
     return i;
 }
@@ -172,22 +177,26 @@ public:
 
 void __format_emit_range(const char* s, int begin, int end) {
     int i = begin;
-    while (i < end) {
-        if (s[i] == '{' && s[i + 1] == '{') {
+    // spec §5.1(5.1): same raw format-string indexing as
+    // __format_next_field just above.
+    [[scpp::unsafe]] {
+        while (i < end) {
+            if (s[i] == '{' && s[i + 1] == '{') {
+                std::__format_printer<char> printer{};
+                printer.write('{');
+                i = i + 2;
+                continue;
+            }
+            if (s[i] == '}' && s[i + 1] == '}') {
+                std::__format_printer<char> printer{};
+                printer.write('}');
+                i = i + 2;
+                continue;
+            }
             std::__format_printer<char> printer{};
-            printer.write('{');
-            i = i + 2;
-            continue;
+            printer.write(s[i]);
+            i = i + 1;
         }
-        if (s[i] == '}' && s[i + 1] == '}') {
-            std::__format_printer<char> printer{};
-            printer.write('}');
-            i = i + 2;
-            continue;
-        }
-        std::__format_printer<char> printer{};
-        printer.write(s[i]);
-        i = i + 1;
     }
     return;
 }

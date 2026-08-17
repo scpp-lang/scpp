@@ -49,6 +49,8 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
 [[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
                          const Signatures& signatures);
+[[nodiscard]] std::expected<void, DataflowError> validate_subscript_expr(const Expr& expr, const DataflowState& state, const Body& body,
+                             const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> apply_address_of(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
                       bool report_errors);
 
@@ -723,6 +725,18 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
             // could itself read/move/call), so it's checked exactly like
             // any other read; the array base contributes the (whole-)
             // root, same as Member above.
+            //
+            // The §5.1(5.1) gate has to be applied here too, exactly as
+            // the Deref case below calls validate_deref_expr: `&p[i]`
+            // and `int& r = p[i]` reach a Subscript through this
+            // function and never through apply_expr, so without this
+            // call they performed unlicensed raw-pointer arithmetic
+            // while the otherwise identical `p[i]` read was rejected.
+            if (report_errors) {
+                if (auto _r = validate_subscript_expr(expr, state, body, signatures); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
             if (auto _r = apply_expr(*expr.rhs, /*is_move_target_context=*/false, state, body, signatures, report_errors); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }

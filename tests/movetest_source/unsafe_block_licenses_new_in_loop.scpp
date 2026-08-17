@@ -1,0 +1,18 @@
+// ... including `new` (spec §5.1(5.4)), which shares the same
+// unsafe_depth state. The loop must be *inside* the unsafe block: when
+// the block is inside the loop the marker and the code it governs share
+// a basic block, so the join never gets a chance to lose the depth --
+// which is why the defect was invisible in that (more common) nesting.
+int main() {
+    int total = 0;
+    [[scpp::unsafe]] {
+        int i = 0;
+        while (i < 2) {
+            int* p = new int(3);
+            total = total + *p;
+            delete p;
+            i = i + 1;
+        }
+    }
+    return total - 6;
+}

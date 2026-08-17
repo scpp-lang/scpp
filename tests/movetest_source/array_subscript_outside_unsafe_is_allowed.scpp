@@ -1,0 +1,10 @@
+// Control: an *array* is not a pointer type. Indexing one is bounds-
+// meaningful and stays ungated -- the fix must not make ordinary array
+// element access require an unsafe block.
+int main() {
+    int a[4];
+    a[0] = 1;
+    a[3] = 2;
+    int i = 3;
+    return a[0] + a[i] - 3;
+}

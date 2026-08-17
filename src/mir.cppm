@@ -260,6 +260,22 @@ struct Terminator {
 struct BasicBlock {
     std::vector<MirStatement> statements;
     Terminator terminator;
+    // Lexical `[[scpp::unsafe]]` nesting in effect where this block
+    // begins, excluding the function-level base (spec §5.1(3): an
+    // unsafe context is a property of the enclosing *compound-statement*,
+    // i.e. of the syntax).
+    //
+    // Recorded here because it is a lexical fact and cannot be recovered
+    // from the CFG. The move checker's worklist fixed-point used to
+    // derive it entirely from the UnsafeEnter/UnsafeExit statements
+    // below, flowing it along edges and joining it with `min` -- which
+    // works only for straight-line code. A loop's head has a back edge
+    // from a block whose `out_state` starts out default-constructed at
+    // depth 0, so `min` pinned the head to 0 and, being monotone
+    // downward, never recovered: a *stable* wrong fixed point. The
+    // effect was that `[[scpp::unsafe]] { while (...) { ... } }` licensed
+    // nothing at all inside the loop, for every gated operation.
+    int unsafe_depth_on_entry = 0;
 };
 
 // The MIR for a single function: a CFG of basic blocks, plus one entry
@@ -817,6 +833,10 @@ private:
     std::vector<Param> owned_params_;
     Body body_;
     std::size_t current_block_ = 0;
+    // Lexical `[[scpp::unsafe]]` nesting at the point currently being
+    // lowered; stamped onto every block created (see
+    // BasicBlock::unsafe_depth_on_entry).
+    int unsafe_depth_ = 0;
     // One frame per lexically-enclosing block/if-branch/while-body,
     // holding the locals declared directly within it -- mirrors codegen's
     // scope_stack_. Parameters are declared before any frame is pushed
@@ -935,6 +955,7 @@ private:
 
     std::size_t new_block() {
         body_.blocks.push_back(BasicBlock{});
+        body_.blocks.back().unsafe_depth_on_entry = unsafe_depth_;
         return body_.blocks.size() - 1;
     }
 
@@ -951,6 +972,13 @@ private:
                 if (stmt.is_unsafe) {
                     current().statements.push_back(
                         plain_stmt(MirStatementKind::UnsafeEnter, nullptr, stmt.loc));
+                    // Tracked lexically alongside the marker statement so
+                    // that any block created while lowering the body --
+                    // a loop head in particular, which the marker's own
+                    // flow can never reach correctly -- records the depth
+                    // it actually sits at (see BasicBlock::
+                    // unsafe_depth_on_entry).
+                    unsafe_depth_++;
                 }
                 for (const auto& s : stmt.statements) {
                     // Dead code after a return/unreachable terminator
@@ -967,6 +995,7 @@ private:
                     current().statements.push_back(
                         plain_stmt(MirStatementKind::UnsafeExit, nullptr, stmt.loc));
                 }
+                if (stmt.is_unsafe) unsafe_depth_--;
                 pop_scope();
                 return;
 

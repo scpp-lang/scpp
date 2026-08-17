@@ -22,7 +22,7 @@ namespace scpp {
 [[nodiscard]] bool binary_expr_has_valid_arithmetic_types(const Expr& expr, const Body& body,
                                                           const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> check_binary_expr_operand_types(const Expr& expr, const Body& body, const Signatures& signatures,
-                                     const SourceLocation& loc);
+                                     const SourceLocation& loc, int unsafe_depth);
 [[nodiscard]] std::optional<Type> resolve_member_field_type(const Expr& member_expr, const Body& body,
                                                             const DataflowState& state, const Signatures& signatures);
 [[nodiscard]] std::optional<Type> resolve_assignment_place_type(const Expr& place, const Body& body,
@@ -47,6 +47,8 @@ namespace scpp {
                                                                                      const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
                          const Signatures& signatures);
+[[nodiscard]] std::expected<void, DataflowError> validate_subscript_expr(const Expr& expr, const DataflowState& state, const Body& body,
+                             const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> apply_deref(const Expr& expr, const DataflowState& state, const Body& body, const Signatures& signatures,
                  bool report_errors);
 [[nodiscard]] std::expected<void, DataflowError> apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
@@ -338,7 +340,7 @@ namespace scpp {
         arithmetic_check.binary_op = compound_base_operator(expr.binary_op);
         arithmetic_check.lhs = deep_clone_expr(*expr.lhs);
         arithmetic_check.rhs = deep_clone_expr(*expr.rhs);
-        if (auto _r = check_binary_expr_operand_types(arithmetic_check, body, signatures, expr.loc); !_r.has_value()) {
+        if (auto _r = check_binary_expr_operand_types(arithmetic_check, body, signatures, expr.loc, state.unsafe_depth); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
     }
@@ -382,7 +384,7 @@ namespace scpp {
 }
 
 [[nodiscard]] std::expected<void, DataflowError> check_binary_expr_operand_types(const Expr& expr, const Body& body, const Signatures& signatures,
-                                     const SourceLocation& loc) {
+                                     const SourceLocation& loc, int unsafe_depth) {
     if (expr.binary_op == BinaryOp::Assign) return {};
     // spec §16.3(1.5) names both operands of a binary operator as
     // positions where a value is required, and this is the one function
@@ -413,6 +415,29 @@ namespace scpp {
     bool arithmetic_op = expr.binary_op == BinaryOp::Add || expr.binary_op == BinaryOp::Sub || expr.binary_op == BinaryOp::Mul ||
                          expr.binary_op == BinaryOp::Div;
     if (arithmetic_op) {
+        // spec §5.1(5.1) makes "indirection through, *or pointer
+        // arithmetic on*, a value of pointer type ([expr.unary.op],
+        // [expr.add])" a gated operation, ill-formed in a safe context
+        // by §5.1(6). Only the indirection half was ever implemented
+        // (validate_deref_expr); forming `p + i`, `p - i` or `p - q` was
+        // accepted anywhere, so a program could walk a raw pointer off
+        // the end of an object without an unsafe block in sight. This is
+        // the [expr.add] half of the same sentence, and it deliberately
+        // does not extend to the relational and equality operators
+        // below: §5.1(5.1) cites [expr.add] alone, and comparing two
+        // pointers reads no storage and produces no new address, so
+        // `p < q` and `p == q` stay ungated.
+        //
+        // Reached for `p += i` too: validate_compound_assignment_expr
+        // routes a synthesized `p + i` through here, which is exactly
+        // right -- [expr.ass] defines `E1 op= E2` as `E1 = E1 op E2`,
+        // so a compound assignment is the same [expr.add] arithmetic.
+        if (lhs_type.has_value() && rhs_type.has_value() && unsafe_depth == 0 &&
+            pointer_arithmetic_result_type(expr.binary_op, *lhs_type, *rhs_type).has_value()) {
+            return std::unexpected(DataflowError("cannot do pointer arithmetic on a raw pointer outside '[[scpp::unsafe]] { }' "
+                                 "(spec §5.1(5.1))",
+                loc));
+        }
         if (binary_expr_has_valid_arithmetic_types(expr, body, signatures)) return {};
         if (!lhs_type.has_value() || !rhs_type.has_value()) return {};
         const Type& lhs_operand = binary_operand_type(*lhs_type);
@@ -780,10 +805,43 @@ namespace scpp {
     return {};
 }
 
+// The subscript counterpart of validate_deref_expr, and deliberately a
+// peer of it rather than an inline check: [expr.sub]/1 defines `E1[E2]`
+// as `*((E1)+(E2))`, so a raw-pointer subscript is *both* halves of spec
+// §5.1(5.1) at once -- the pointer arithmetic and the indirection
+// through its result -- and §5.1(6) makes it ill-formed in a safe
+// context. Neither half caught it before: validate_deref_expr never sees
+// a Subscript node (it handles a written `*E`), and the arithmetic is
+// implied by the subscript rather than spelled as an [expr.add]
+// operator, so it never reached check_binary_expr_operand_types either.
+//
+// It has to be a shared function because a Subscript is reached from two
+// independent entry points that must agree -- apply_expr's Subscript
+// case for a plain read, and resolve_borrow_source_root's Subscript case
+// for `&p[i]`/`int& r = p[i]`, which does not go through apply_expr at
+// all. validate_deref_expr is already called from both for exactly this
+// reason; the subscript half simply never grew the counterpart, so
+// `&p[1]` performed unlicensed pointer arithmetic while `p[1]` did not.
+//
+// The reference-stripped operand type is what decides this, per #465:
+// `int*& r = p; r[0]` reaches the same pointer and must be gated
+// identically. An array (`a[0]`) and a class with `operator[]`
+// (`std::span`, `std::vector`) are not pointer types and stay ungated --
+// checked indexing is the safe way to do this and must remain available
+// in a safe context.
+[[nodiscard]] std::expected<void, DataflowError> validate_subscript_expr(const Expr& expr, const DataflowState& state, const Body& body,
+                             const Signatures& signatures) {
+    if (state.unsafe_depth != 0) return {};
+    std::optional<Type> object_type = infer_expr_type(*expr.lhs, body, signatures);
+    if (!object_type.has_value() || binary_operand_type(*object_type).kind != TypeKind::Pointer) return {};
+    return std::unexpected(DataflowError("cannot subscript a raw pointer outside '[[scpp::unsafe]] { }' "
+                         "(spec §5.1(5.1))",
+        state.current_loc));
+}
+
 // Handles a raw-pointer/function-pointer/`*this` Deref expression used as
 // a plain read (not as a borrow source -- see resolve_borrow_source_root's
-// own Deref case for that). Class overloads of `operator*` are rewritten
-// to ordinary calls earlier in the pipeline, so they bypass this helper
+// own Deref case for that). Class overloads of `operator*` are rewritten// to ordinary calls earlier in the pipeline, so they bypass this helper
 // entirely. A raw pointer has no ownership/move state of its own to
 // disturb. `*this` is likewise just an explicit spelling of the receiver
 // object itself (ch05 §5.9), so it behaves exactly like reading `this`.
@@ -2269,7 +2327,7 @@ struct ConvertingConstructorBinding {
                 return std::unexpected(std::move(_r).error());
             }
             if (report_errors) {
-                if (auto _r = check_binary_expr_operand_types(expr, body, signatures, state.current_loc); !_r.has_value()) {
+                if (auto _r = check_binary_expr_operand_types(expr, body, signatures, state.current_loc, state.unsafe_depth); !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
             }
@@ -2352,6 +2410,16 @@ struct ConvertingConstructorBinding {
                                                           "a subscript index", report_errors);
                 !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
+            }
+            // [expr.sub]/1 defines `E1[E2]` as `*((E1)+(E2))`, so a raw
+            // pointer subscript is *both* halves of spec §5.1(5.1) at
+            // once. See validate_subscript_expr, which is shared with
+            // resolve_borrow_source_root's Subscript case so that
+            // `&p[i]` is gated identically to `p[i]`.
+            if (report_errors) {
+                if (auto _r = validate_subscript_expr(expr, state, body, signatures); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
             }
             return apply_expr(*expr.rhs, false, state, body, signatures, report_errors);
 
@@ -3631,7 +3699,35 @@ struct SwitchCaseKey {
     // Every other function's entry_state starts at 0; unsafe_depth then
     // only increases via an explicit, lexically nested
     // `[[scpp::unsafe]] { }` block within that function's own body.
-    entry_state.unsafe_depth = fn.is_unsafe ? 1 : 0;
+    //
+    // A `consteval` body is the second exception, and for the opposite
+    // reason: not because it is trusted, but because ch06 §7.3(1) makes
+    // the licence *unobtainable* there -- evaluating a
+    // `[[scpp::unsafe]]` compound-statement during required constant
+    // evaluation is itself ill-formed. Gating a consteval body would
+    // therefore not mean "say you meant it", it would mean "you cannot
+    // write this at all", which §5.1(6) does not say and which would
+    // make `std::format`'s own compile-time format-string validation
+    // (a `consteval` constructor that walks a `const char*` literal)
+    // unwritable.
+    //
+    // That is safe because ch06 §7(3) already supplies, by construction,
+    // exactly what §5.1(5.1) exists to guarantee: during required
+    // constant evaluation a pointer value is *permitted only if* it is
+    // null, designates an element or one-past-the-end of a
+    // string-literal object (3.2), or designates a subobject of a
+    // constant-initialized static (3.3). There is no unprovenanced
+    // pointer for the evaluator to walk off the end of, and the
+    // evaluator diagnoses an out-of-range access rather than executing
+    // it. `consteval` specifically -- and not `constexpr` -- because
+    // only `consteval` guarantees the body is *never* lowered as
+    // runtime code, where none of ch06 §7(3)'s restrictions apply.
+    //
+    // The implementation already agrees for consteval *free functions*,
+    // which are never lowered to MIR at all and so were never
+    // move-checked; a consteval *constructor* is lowered, which is the
+    // only reason the asymmetry was visible here.
+    entry_state.unsafe_depth = (fn.is_unsafe || fn.eval_mode == FunctionEvalMode::Consteval) ? 1 : 0;
     // ch04 §4.2/ch05 §5.9: `this` is always params[0] when present (see
     // parser's make_this_param) -- a user can never spell a same-named
     // parameter themselves, since `this` is a keyword, not an ordinary
@@ -3712,6 +3808,13 @@ struct SwitchCaseKey {
                 first = false;
             }
         }
+        // `unsafe_depth` is lexical, not a dataflow fact, so it is read
+        // off the block rather than flowed into it -- see
+        // BasicBlock::unsafe_depth_on_entry for what joining it did to a
+        // loop head. The UnsafeEnter/UnsafeExit statements still adjust
+        // it *within* a block, which is where a marker and the code it
+        // governs do share a block.
+        new_in.unsafe_depth = entry_state.unsafe_depth + body.blocks[b].unsafe_depth_on_entry;
 
         DataflowState new_out = new_in;
         for (std::size_t i = 0; i < body.blocks[b].statements.size(); i++) {
