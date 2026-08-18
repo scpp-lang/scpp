@@ -2984,6 +2984,269 @@ void run_consteval_tests() {
         std::filesystem::remove(exe_path_47g);
     }
 
+    // ch09 §9.1(1) leaves C++ [dcl.constexpr] in force unchanged, so a
+    // `constexpr` variable's initializer must be a constant expression at
+    // *any* scope; ch07 §7.1(2) makes that a required constant evaluation
+    // and §7.1(3) makes it well-formed only if no operation ch07 §7.3
+    // forbids is evaluated. At namespace scope none of that was enforced.
+    //
+    // The gap was not "never evaluated" but "evaluated only if something
+    // else looks": resolve_global_constant computes a global's initializer
+    // lazily and memoized, but only when another constant expression names
+    // the global. AlignmentResolver::run() already walked program_.globals
+    // for types and alignment, and already called validate_constexpr_locals
+    // for every function -- the globals arm of that same traversal was
+    // simply never written.
+    //
+    // The consequence was worse than an unchecked promise: every accepted
+    // initializer was emitted as a *runtime* dynamic initializer, so
+    // `constexpr int G = <divides by zero>;` built a binary that aborted at
+    // run time and the step-budget case genuinely spun its loop on the
+    // machine. At namespace scope the keyword's only effect was to let the
+    // variable be named inside other constant expressions.
+    //
+    // The five cases below pin one ch07 rule each. They exist as unit tests
+    // rather than blackbox cases because what is being pinned is that a
+    // diagnostic is produced at all for a position that previously produced
+    // none.
+    struct NamespaceScopeConstexprRejectionCase {
+        const char* name;
+        const char* source;
+        const char* expected_fragment;
+    };
+    const NamespaceScopeConstexprRejectionCase namespace_scope_constexpr_rejection_cases[] = {
+        {"namespace_scope_constexpr_initializer_rejects_division_by_zero",
+         "constexpr int bad() {\n"
+         "    int zero = 0;\n"
+         "    return 1 / zero;\n"
+         "}\n"
+         "constexpr int kValue = bad();\n"
+         "int main() {\n"
+         "    return 0;\n"
+         "}\n",
+         "constexpr division by zero"},
+        {"namespace_scope_constexpr_initializer_rejects_integer_overflow",
+         "constexpr int bad() {\n"
+         "    int big = 2147483647;\n"
+         "    return big + 1;\n"
+         "}\n"
+         "constexpr int kValue = bad();\n"
+         "int main() {\n"
+         "    return 0;\n"
+         "}\n",
+         "constexpr integer overflow"},
+        // ch07 §7.3(4): the same transitive user-defined-destructor rule
+        // that governs a `constexpr` *local* has to reach a namespace-scope
+        // initializer too. The destructor body calls a non-`constexpr`
+        // function, so were the body ever reached the diagnostic would name
+        // the call instead -- the expected fragment therefore also proves
+        // the rule fires before execution, not during it.
+        {"namespace_scope_constexpr_initializer_rejects_user_defined_destructor",
+         "int side_effect() {\n"
+         "    return 1;\n"
+         "}\n"
+         "struct NeedsDrop {\n"
+         "    int value{};\n"
+         "    ~NeedsDrop() {\n"
+         "        int ignored = side_effect();\n"
+         "        return;\n"
+         "    }\n"
+         "};\n"
+         "constexpr int make_value() {\n"
+         "    NeedsDrop box{};\n"
+         "    box.value = 7;\n"
+         "    return box.value;\n"
+         "}\n"
+         "constexpr int kValue = make_value();\n"
+         "int main() {\n"
+         "    return 0;\n"
+         "}\n",
+         "cannot execute user-defined destructor of 'NeedsDrop'"},
+        {"namespace_scope_constexpr_initializer_rejects_non_constexpr_call",
+         "int runtime_only() {\n"
+         "    return 1;\n"
+         "}\n"
+         "constexpr int caller() {\n"
+         "    return runtime_only();\n"
+         "}\n"
+         "constexpr int kValue = caller();\n"
+         "int main() {\n"
+         "    return 0;\n"
+         "}\n",
+         "immediate evaluation may only call constexpr/consteval functions"},
+        // The step budget stands in for the recursion budget here: a
+        // `constexpr` recursion deep enough to reach max_recursion_depth
+        // crashes the compiler outright, which is a separate defect
+        // reported on its own rather than pinned as expected behaviour.
+        {"namespace_scope_constexpr_initializer_rejects_step_budget_exhaustion",
+         "constexpr int spin() {\n"
+         "    int total = 0;\n"
+         "    int i = 0;\n"
+         "    while (i < 300000) {\n"
+         "        total = total + 1;\n"
+         "        i = i + 1;\n"
+         "    }\n"
+         "    return total;\n"
+         "}\n"
+         "constexpr int kValue = spin();\n"
+         "int main() {\n"
+         "    return 0;\n"
+         "}\n",
+         "exceeded step budget"},
+    };
+    for (const NamespaceScopeConstexprRejectionCase& rejection_case : namespace_scope_constexpr_rejection_cases) {
+        std::string case_name = rejection_case.name;
+        cases_run++;
+        auto compile_result_47h = scpp::compile_to_executable(
+            rejection_case.source, (std::filesystem::current_path() / (case_name + "_exe")).string(), std_link_inputs(),
+            prebuilt_module_import_paths());
+        bool threw = !compile_result_47h.has_value() &&
+                     std::string(compile_result_47h.error().what()).find(rejection_case.expected_fragment) !=
+                         std::string::npos;
+        expect(threw, case_name + ": expected a namespace-scope constexpr initializer to be constant-evaluated and rejected with '" +
+                          rejection_case.expected_fragment + "'");
+    }
+
+    // ch09 §9.1(4): every potentially-evaluated call to an immediate
+    // function shall produce a constant expression -- so a `consteval` call
+    // in a namespace-scope initializer *must* run at translation time,
+    // whatever the variable's own constness. It reached codegen instead,
+    // because collect_runtime_stmt_rewrites walked program.functions and
+    // never program.globals; codegen deliberately emits no body for an
+    // immediate function, so the call failed with an internal error. That
+    // made `consteval` uncallable from any namespace-scope initializer, and
+    // it is the same missing globals traversal as the cases above rather
+    // than a second defect. All three spellings are pinned because the
+    // failure was independent of `constexpr`.
+    {
+        std::string case_name = "namespace_scope_initializers_can_call_consteval_functions";
+        cases_run++;
+        std::filesystem::path exe_path_47i = std::filesystem::current_path() / (case_name + "_exe");
+        auto compile_result_47i = scpp::compile_to_executable(
+            "consteval int seven() {\n"
+            "    return 7;\n"
+            "}\n"
+            "constexpr int kConstexprValue = seven();\n"
+            "int mutable_value = seven();\n"
+            "const int kConstValue = seven();\n"
+            "int main() {\n"
+            "    return kConstexprValue + mutable_value + kConstValue;\n"
+            "}\n",
+            exe_path_47i.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_47i.has_value()) throw std::move(compile_result_47i).error();
+        RunResult run_result_47i = run_command_capture(exe_path_47i.string() + " 2>&1");
+        expect(run_result_47i.exit_code == 21,
+               case_name + ": expected consteval to be callable from constexpr, mutable and const namespace-scope initializers, got " +
+                   std::to_string(run_result_47i.exit_code));
+        std::filesystem::remove(exe_path_47i);
+    }
+
+    // Validating the globals has to drive the existing memoized
+    // resolve_global_constant entry point rather than add a second one,
+    // because that entry point is what makes a namespace-scope constant
+    // independent of declaration order and what detects a cycle between
+    // two of them. Both properties are pinned so a later change cannot
+    // quietly replace the memoized path with a linear walk.
+    {
+        std::string case_name = "namespace_scope_constexpr_initializer_is_order_independent";
+        cases_run++;
+        std::filesystem::path exe_path_47j = std::filesystem::current_path() / (case_name + "_exe");
+        auto compile_result_47j = scpp::compile_to_executable(
+            "constexpr int kFirst = kSecond + 1;\n"
+            "constexpr int kSecond = 5;\n"
+            "int main() {\n"
+            "    return kFirst;\n"
+            "}\n",
+            exe_path_47j.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_47j.has_value()) throw std::move(compile_result_47j).error();
+        RunResult run_result_47j = run_command_capture(exe_path_47j.string() + " 2>&1");
+        expect(run_result_47j.exit_code == 6,
+               case_name + ": expected a constexpr global to be usable before its definition, got " +
+                   std::to_string(run_result_47j.exit_code));
+        std::filesystem::remove(exe_path_47j);
+    }
+
+    {
+        std::string case_name = "namespace_scope_constexpr_circular_initializer_is_diagnosed";
+        cases_run++;
+        auto compile_result_47k = scpp::compile_to_executable(
+            "constexpr int kFirst = kSecond + 1;\n"
+            "constexpr int kSecond = kFirst + 1;\n"
+            "int main() {\n"
+            "    return kFirst;\n"
+            "}\n",
+            (std::filesystem::current_path() / (case_name + "_exe")).string(), std_link_inputs(),
+            prebuilt_module_import_paths());
+        bool threw = !compile_result_47k.has_value() &&
+                     std::string(compile_result_47k.error().what()).find("circularly depends on global constexpr variable") !=
+                         std::string::npos;
+        expect(threw, case_name + ": expected a cycle between two constexpr globals to be diagnosed without anything else naming them");
+    }
+
+    // The control column. scpp supports dynamic initialization of globals,
+    // and neither C++ nor ch07 requires a plain or `const` variable's
+    // initializer to be a constant expression -- `const int G = side();` is
+    // legitimately initialized at run time. Constant-evaluating the
+    // `constexpr` globals must not reach either spelling, so both stay
+    // exactly as they were; these two guards therefore pass against the
+    // pre-fix compiler by construction, which is the point of a control.
+    struct NamespaceScopeDynamicInitCase {
+        const char* name;
+        const char* source;
+    };
+    const NamespaceScopeDynamicInitCase namespace_scope_dynamic_init_cases[] = {
+        {"namespace_scope_mutable_global_still_dynamically_initialized",
+         "int side_effect() {\n"
+         "    return 3;\n"
+         "}\n"
+         "int value = side_effect();\n"
+         "int main() {\n"
+         "    return value;\n"
+         "}\n"},
+        {"namespace_scope_const_global_still_dynamically_initialized",
+         "int side_effect() {\n"
+         "    return 3;\n"
+         "}\n"
+         "const int kValue = side_effect();\n"
+         "int main() {\n"
+         "    return kValue;\n"
+         "}\n"},
+    };
+    for (const NamespaceScopeDynamicInitCase& dynamic_init_case : namespace_scope_dynamic_init_cases) {
+        std::string case_name = dynamic_init_case.name;
+        cases_run++;
+        std::filesystem::path exe_path_47l = std::filesystem::current_path() / (case_name + "_exe");
+        auto compile_result_47l = scpp::compile_to_executable(dynamic_init_case.source, exe_path_47l.string(),
+                                                              std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_47l.has_value()) throw std::move(compile_result_47l).error();
+        RunResult run_result_47l = run_command_capture(exe_path_47l.string() + " 2>&1");
+        expect(run_result_47l.exit_code == 3,
+               case_name + ": expected a non-constexpr global to keep its runtime dynamic initializer, got " +
+                   std::to_string(run_result_47l.exit_code));
+        std::filesystem::remove(exe_path_47l);
+    }
+
+    {
+        std::string case_name = "namespace_scope_constexpr_valid_initializer_is_still_accepted";
+        cases_run++;
+        std::filesystem::path exe_path_47m = std::filesystem::current_path() / (case_name + "_exe");
+        auto compile_result_47m = scpp::compile_to_executable(
+            "constexpr int twice(int x) {\n"
+            "    return x * 2;\n"
+            "}\n"
+            "constexpr int kValue = twice(3) + 3;\n"
+            "int main() {\n"
+            "    return kValue;\n"
+            "}\n",
+            exe_path_47m.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_47m.has_value()) throw std::move(compile_result_47m).error();
+        RunResult run_result_47m = run_command_capture(exe_path_47m.string() + " 2>&1");
+        expect(run_result_47m.exit_code == 9,
+               case_name + ": expected a genuinely constant namespace-scope initializer to stay accepted, got " +
+                   std::to_string(run_result_47m.exit_code));
+        std::filesystem::remove(exe_path_47m);
+    }
+
     // ch07 x7.1 / ch02: a `consteval` function's body is an ordinary
     // function body -- ch02's ownership rules describe the program, not
     // the machine, so a use-after-move or a double borrow is just as
