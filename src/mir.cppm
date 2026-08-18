@@ -445,14 +445,6 @@ struct InitializerScope {
     bool declares_namespace_scope_variable = false;
 };
 
-// Where to point a diagnostic about a field's default member
-// initializer: at the initializer's own expression in either spelling
-// (`= expr` or `{arg}`), falling back to the field only when it has
-// neither. The field's own loc is a poor choice -- the parser stamps it
-// with the token that *follows* the declaration, so it points past the
-// thing being complained about (a separate parser defect).
-[[nodiscard]] SourceLocation initializer_scope_loc(const Initializer& init, const SourceLocation& fallback);
-
 // The single enumeration of every expression position in a program that
 // no function body encloses -- equivalently, every position whose
 // expressions cannot name a local and so need a synthesized Body: a
@@ -505,11 +497,7 @@ template <typename VisitFn>
             scope.declared_type = &field.type;
             scope.expr = field.default_initializer->expr.get();
             scope.brace_args = &field.default_initializer->brace_args;
-            // The parser stamps a field's loc with the token that
-            // *follows* the declaration, so field.loc would point past
-            // the thing a diagnostic is about; the initializer
-            // expression's own loc is where the reader is looking.
-            scope.loc = initializer_scope_loc(*field.default_initializer, field.loc);
+            scope.loc = field.loc;
             scope.name = field.name;
             scope.body = make_initializer_scope_body(program, def.owning_module, def.owning_module, def.namespace_path,
                                                      scope.loc.source_path_text());
@@ -523,7 +511,7 @@ template <typename VisitFn>
             scope.declared_type = &field.type;
             scope.expr = field.default_initializer->expr.get();
             scope.brace_args = &field.default_initializer->brace_args;
-            scope.loc = initializer_scope_loc(*field.default_initializer, field.loc);
+            scope.loc = field.loc;
             scope.name = field.name;
             scope.body = make_initializer_scope_body(program, def.owning_module, def.owning_module, def.namespace_path,
                                                      scope.loc.source_path_text());
@@ -1268,14 +1256,6 @@ void resolve_program_locals(Program& program) {
 Body build_mir(const Function& fn) {
     MirBuilder builder(fn);
     return builder.build();
-}
-
-[[nodiscard]] SourceLocation initializer_scope_loc(const Initializer& init, const SourceLocation& fallback) {
-    if (init.expr != nullptr) return init.expr->loc;
-    for (const ExprPtr& arg : init.brace_args) {
-        if (arg != nullptr) return arg->loc;
-    }
-    return fallback;
 }
 
 [[nodiscard]] Body make_initializer_scope_body(const Program& program, const std::string& owning_module,

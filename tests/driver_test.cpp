@@ -471,6 +471,19 @@ void run_error_location_tests() {
          "import std;\nint f() {\n    std::unique_ptr<int> p = std::make_unique<int>(5);\n    std::unique_ptr<int> q = "
          "std::move(p);\n    return *p;\n}\nint main() { return f(); }\n",
          5},
+        // A record field's diagnostic must land on the field, not on
+        // whatever member follows it. The parser used to stamp a field's
+        // loc with the first token *after* its terminating `;`, so both
+        // of these blamed `int tail` -- and the CLI printed a caret
+        // under that line. `bad` is deliberately not the last member, so
+        // a wrong location is a different line rather than the closing
+        // brace.
+        {"void_struct_field_blames_the_field",
+         "struct S {\n    int ok = 1;\n    void bad;\n    int tail = 2;\n};\nint main() { return 0; }\n", 3},
+        {"void_class_field_blames_the_field",
+         "class K {\npublic:\n    virtual ~K() { return; }\n    void bad;\n    int tail = 2;\n};\nint main() { return "
+         "0; }\n",
+         4},
     };
     for (const Case& c : dataflow_cases) {
         cases_run++;

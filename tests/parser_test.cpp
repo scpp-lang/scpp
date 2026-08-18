@@ -5707,6 +5707,251 @@ void test_capture_identifier_carries_resolution() {
     expect(ident.loc.line == 4 && ident.loc.column == 9, "a capture identifier carries the requested location");
 }
 
+
+// The parser used to stamp a record field's `loc` by calling
+// current_loc() from inside parse_record_body_into's field-adder
+// callback -- which runs *after* the field's terminating `;` has been
+// consumed, so every field was stamped with the first token of the
+// *next* member (or with the closing `}` for the last field). A
+// diagnostic about a field therefore pointed at, and printed a caret
+// under, the wrong line: `struct S { void bad; int tail = 2; };`
+// blamed `int tail`. A field's loc is its own declaration's first
+// token, exactly as a method's already was (both are `member_loc`).
+const scpp::ClassField* find_class_field(const scpp::ClassDef& def, std::string_view name) {
+    for (const scpp::ClassField& field : def.fields) {
+        if (field.name == name) return &field;
+    }
+    return nullptr;
+}
+
+const scpp::StructField* find_struct_field(const scpp::StructDef& def, std::string_view name) {
+    for (const scpp::StructField& field : def.fields) {
+        if (field.name == name) return &field;
+    }
+    return nullptr;
+}
+
+void expect_field_loc(const scpp::SourceLocation& loc, int line, int column, const std::string& what) {
+    expect(loc.line == line && loc.column == column,
+           what + ": expected " + std::to_string(line) + ":" + std::to_string(column) + ", got " +
+               std::to_string(loc.line) + ":" + std::to_string(loc.column));
+}
+
+void test_class_field_loc_is_its_own_declaration() {
+    //  1: class C {
+    //  2: public:
+    //  3:     virtual ~C() { return; }
+    //  4:     int no_init;
+    //  5:     int with_eq = 1;
+    //  6:     int with_brace{2};
+    //  7:     int with_empty_brace{};
+    //  8:     int before_method = 3;
+    //  9:     int m() { return 0; }
+    // 10:     alignas(8)
+    // 11:     int aligned = 4;
+    // 12:     int (*cb)(int) = nullptr;
+    // 13:     int arr[3];
+    // 14:     int last = 5;
+    // 15: };
+    scpp::Program program = expect_parse_ok(
+        "class C {\n"
+        "public:\n"
+        "    virtual ~C() { return; }\n"
+        "    int no_init;\n"
+        "    int with_eq = 1;\n"
+        "    int with_brace{2};\n"
+        "    int with_empty_brace{};\n"
+        "    int before_method = 3;\n"
+        "    int m() { return 0; }\n"
+        "    alignas(8)\n"
+        "    int aligned = 4;\n"
+        "    int (*cb)(int) = nullptr;\n"
+        "    int arr[3];\n"
+        "    int last = 5;\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::ClassDef* def = find_class_named(program, "C");
+    if (def == nullptr) {
+        expect(false, "class_field_loc_is_its_own_declaration: class C should parse");
+        return;
+    }
+    struct Expected {
+        std::string name;
+        int line;
+    };
+    // Every spelling of a field declaration, in every position a field
+    // can hold: before another field, before a method, and last before
+    // the closing brace -- the three the old stamping conflated.
+    const std::vector<Expected> expected = {
+        {"no_init", 4},    {"with_eq", 5}, {"with_brace", 6}, {"with_empty_brace", 7}, {"before_method", 8},
+        // An `alignas` specifier is part of the declaration, so the
+        // declaration starts on its line, not on the line naming the
+        // type -- the same first token a method declaration is stamped
+        // with.
+        {"aligned", 10},   {"cb", 12},     {"arr", 13},       {"last", 14},
+    };
+    for (const Expected& e : expected) {
+        const scpp::ClassField* field = find_class_field(*def, e.name);
+        if (field == nullptr) {
+            expect(false, "class_field_loc_is_its_own_declaration: missing field '" + e.name + "'");
+            continue;
+        }
+        expect_field_loc(field->loc, e.line, 5, "class field '" + e.name + "'");
+    }
+    // The method in the middle keeps its own location, so a field and
+    // the member following it can never share one.
+    const scpp::Function* method = find_function_named(program, "C_m");
+    expect(method != nullptr && method->loc.line == 9,
+           "class_field_loc_is_its_own_declaration: method C::m should be stamped at line 9");
+}
+
+void test_struct_field_loc_is_its_own_declaration() {
+    //  1: struct S {
+    //  2:     int no_init;
+    //  3:     int with_eq = 1;
+    //  4:     int with_brace{2};
+    //  5:     int with_empty_brace{};
+    //  6:     alignas(8)
+    //  7:     int aligned = 3;
+    //  8:     int (*cb)(int) = nullptr;
+    //  9:     int arr[3];
+    // 10:
+    // 11:
+    // 12:     int last = 4;
+    // 13: };
+    scpp::Program program = expect_parse_ok(
+        "struct S {\n"
+        "    int no_init;\n"
+        "    int with_eq = 1;\n"
+        "    int with_brace{2};\n"
+        "    int with_empty_brace{};\n"
+        "    alignas(8)\n"
+        "    int aligned = 3;\n"
+        "    int (*cb)(int) = nullptr;\n"
+        "    int arr[3];\n"
+        "\n"
+        "\n"
+        "    int last = 4;\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::StructDef* def = find_struct_named(program, "S");
+    if (def == nullptr) {
+        expect(false, "struct_field_loc_is_its_own_declaration: struct S should parse");
+        return;
+    }
+    struct Expected {
+        std::string name;
+        int line;
+    };
+    // `arr` is followed by two blank lines: the old stamping was
+    // token-based, so it skipped them and blamed `int last` three lines
+    // below.
+    const std::vector<Expected> expected = {
+        {"no_init", 2}, {"with_eq", 3}, {"with_brace", 4}, {"with_empty_brace", 5},
+        {"aligned", 6}, {"cb", 8},      {"arr", 9},        {"last", 12},
+    };
+    for (const Expected& e : expected) {
+        const scpp::StructField* field = find_struct_field(*def, e.name);
+        if (field == nullptr) {
+            expect(false, "struct_field_loc_is_its_own_declaration: missing field '" + e.name + "'");
+            continue;
+        }
+        expect_field_loc(field->loc, e.line, 5, "struct field '" + e.name + "'");
+    }
+}
+
+// A union's fields never went through the field-adder callback (they are
+// parsed and stamped inline in parse_union_def), so they were already
+// right -- which is what identified the callback rather than field
+// parsing in general. Pinned so the two paths cannot drift apart again.
+void test_union_field_loc_is_its_own_declaration() {
+    scpp::Program program = expect_parse_ok(
+        "union U {\n"
+        "    int a;\n"
+        "    char b;\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    const scpp::StructDef* def = find_struct_named(program, "U");
+    if (def == nullptr) {
+        expect(false, "union_field_loc_is_its_own_declaration: union U should parse");
+        return;
+    }
+    const scpp::StructField* a = find_struct_field(*def, "a");
+    const scpp::StructField* b = find_struct_field(*def, "b");
+    if (a == nullptr || b == nullptr) {
+        expect(false, "union_field_loc_is_its_own_declaration: expected both union members");
+        return;
+    }
+    expect_field_loc(a->loc, 2, 5, "union field 'a'");
+    expect_field_loc(b->loc, 3, 5, "union field 'b'");
+}
+
+// Four of the five places a ClassDef is built never stamped `loc` at
+// all, so an ordinary `class` carried the default "unknown" 0:0 -- and
+// driver.cppm serializes it into a module's payload, so the missing
+// location crossed module boundaries too. Every StructDef site already
+// stamped it.
+void test_class_def_loc_is_the_class_declaration() {
+    //  1: class Plain {
+    //  2: public:
+    //  3:     virtual ~Plain() { return; }
+    //  4:     int v = 1;
+    //  5: };
+    //  6: template<typename T>
+    //  7: class Generic {
+    //  8: public:
+    //  9:     virtual ~Generic() { return; }
+    // 10:     int v = 1;
+    // 11: };
+    // 12: template<typename... Ts>
+    // 13: class Box;
+    // 14: template<>
+    // 15: class Box<> {
+    // 16: public:
+    // 17:     virtual ~Box() { return; }
+    // 18: };
+    // 19: template<typename Head, typename... Tail>
+    // 20: class Box<Head, Tail...> {
+    // 21: public:
+    // 22:     virtual ~Box() { return; }
+    // 23: };
+    scpp::Program program = expect_parse_ok(
+        "class Plain {\n"
+        "public:\n"
+        "    virtual ~Plain() { return; }\n"
+        "    int v = 1;\n"
+        "};\n"
+        "template<typename T>\n"
+        "class Generic {\n"
+        "public:\n"
+        "    virtual ~Generic() { return; }\n"
+        "    int v = 1;\n"
+        "};\n"
+        "template<typename... Ts>\n"
+        "class Box;\n"
+        "template<>\n"
+        "class Box<> {\n"
+        "public:\n"
+        "    virtual ~Box() { return; }\n"
+        "};\n"
+        "template<typename Head, typename... Tail>\n"
+        "class Box<Head, Tail...> {\n"
+        "public:\n"
+        "    virtual ~Box() { return; }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    for (const scpp::ClassDef& def : program.classes) {
+        expect(def.loc.is_known(), "class '" + def.name + "' should carry a known source location");
+    }
+    const scpp::ClassDef* plain = find_class_named(program, "Plain");
+    const scpp::ClassDef* generic = find_class_named(program, "Generic");
+    if (plain == nullptr || generic == nullptr) {
+        expect(false, "class_def_loc_is_the_class_declaration: expected Plain and Generic to parse");
+        return;
+    }
+    expect_field_loc(plain->loc, 1, 1, "class 'Plain'");
+    expect_field_loc(generic->loc, 7, 1, "class 'Generic'");
+}
 } // namespace
 
 int main() {
@@ -5987,6 +6232,11 @@ int main() {
     test_stmt_clone_preserves_every_field();
     test_global_var_copy_preserves_switch_cases();
     test_capture_identifier_carries_resolution();
+
+    test_class_field_loc_is_its_own_declaration();
+    test_struct_field_loc_is_its_own_declaration();
+    test_union_field_loc_is_its_own_declaration();
+    test_class_def_loc_is_the_class_declaration();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
