@@ -3247,6 +3247,341 @@ void run_consteval_tests() {
         std::filesystem::remove(exe_path_47m);
     }
 
+    // ch05 x5.2: a name written without qualification is looked up in the
+    // innermost enclosing namespace first and then progressively outward to
+    // the global namespace. The constant evaluator had no model of that at
+    // all: it resolved variables through an exact-string map keyed on the
+    // *qualified* var_name, so an unqualified `T` inside `namespace a`
+    // could never match `a::T`, and functions through a second exact-string
+    // map that the parser had pre-qualified for it.
+    //
+    // That made three answers to one question. ast.cppm already exported
+    // find_visible_global -- the correct progressive-outward walk, honouring
+    // an explicit `::` -- and both movecheck and codegen already used it.
+    // parser.cppm's qualify_same_namespace_function_calls_* rewrote
+    // unqualified *call* names, but only inside function bodies and
+    // constructor member-initializer lists, and only with the single full
+    // namespace prefix rather than a walk; it never visits a VarDecl's
+    // type.array_size_expr or its alignment_specs. The evaluator silently
+    // depended on that rewrite having happened, and fell back to its own
+    // exact-string maps wherever the rewrite does not reach.
+    //
+    // The failure was not uniformly "not found". Where a same-named global
+    // existed in an enclosing namespace, the exact-string map matched *it*,
+    // so an unqualified name inside a namespace bound to the outer variable
+    // and the program compiled and ran with a silently wrong value. Six of
+    // the grid's cells were of that kind.
+    struct ConstexprNamespaceLookupCase {
+        const char* name;
+        const char* source;
+        int expected_exit_code;
+    };
+    const ConstexprNamespaceLookupCase constexpr_namespace_lookup_cases[] = {
+        {"constexpr_lookup_finds_unqualified_sibling_variable",
+         "namespace a {\n"
+         "constexpr int kTarget = 8;\n"
+         "int read() {\n"
+         "    constexpr int local = kTarget;\n"
+         "    return local;\n"
+         "}\n"
+         "}\n"
+         "int main() {\n"
+         "    return a::read();\n"
+         "}\n",
+         8},
+        // The parser's rewrite qualifies calls inside function bodies, so
+        // an unqualified sibling *call* already worked there. It does not
+        // run over a namespace-scope initializer, which is why this
+        // spelling failed while the one above it succeeded.
+        {"constexpr_lookup_finds_unqualified_sibling_function_in_global_initializer",
+         "namespace a {\n"
+         "constexpr int target() {\n"
+         "    return 8;\n"
+         "}\n"
+         "constexpr int kValue = target();\n"
+         "}\n"
+         "int main() {\n"
+         "    constexpr int local = a::kValue;\n"
+         "    return local;\n"
+         "}\n",
+         8},
+        {"constexpr_lookup_walks_outward_to_enclosing_namespace",
+         "namespace a {\n"
+         "constexpr int kTarget = 8;\n"
+         "namespace b {\n"
+         "int read() {\n"
+         "    constexpr int local = kTarget;\n"
+         "    return local;\n"
+         "}\n"
+         "}\n"
+         "}\n"
+         "int main() {\n"
+         "    return a::b::read();\n"
+         "}\n",
+         8},
+        // Partial qualification relative to the current namespace: `b::T`
+        // naming `a::b::T` from inside `a`. The exact-string map only ever
+        // held the full `a::b::T`, and the parser's rewrite prepends the
+        // full prefix rather than walking, so neither could form this.
+        {"constexpr_lookup_finds_nested_namespace_by_partial_qualification",
+         "namespace a {\n"
+         "namespace b {\n"
+         "constexpr int kTarget = 8;\n"
+         "}\n"
+         "int read() {\n"
+         "    constexpr int local = b::kTarget;\n"
+         "    return local;\n"
+         "}\n"
+         "}\n"
+         "int main() {\n"
+         "    return a::read();\n"
+         "}\n",
+         8},
+        // The silent wrong value. Pre-fix this compiled and returned 3:
+        // bare `kTarget` never matched the map's `a::kTarget`, so it fell
+        // through to the global one. Nothing was diagnosed.
+        {"constexpr_lookup_prefers_inner_namespace_over_global_variable",
+         "constexpr int kTarget = 3;\n"
+         "namespace a {\n"
+         "constexpr int kTarget = 8;\n"
+         "int read() {\n"
+         "    constexpr int local = kTarget;\n"
+         "    return local;\n"
+         "}\n"
+         "}\n"
+         "int main() {\n"
+         "    return a::read();\n"
+         "}\n",
+         8},
+        // The same silent wrong value for functions, in the array-bound
+        // position the parser's rewrite never visits.
+        {"constexpr_lookup_prefers_inner_namespace_over_global_function_in_array_bound",
+         "constexpr int target() {\n"
+         "    return 3;\n"
+         "}\n"
+         "namespace a {\n"
+         "constexpr int target() {\n"
+         "    return 8;\n"
+         "}\n"
+         "int read() {\n"
+         "    int buffer[target()];\n"
+         "    buffer[0] = 0;\n"
+         "    return static_cast<int>(sizeof(buffer)) / 4;\n"
+         "}\n"
+         "}\n"
+         "int main() {\n"
+         "    return a::read();\n"
+         "}\n",
+         8},
+        {"constexpr_lookup_resolves_namespaced_name_in_array_bound",
+         "namespace a {\n"
+         "constexpr int kTarget = 8;\n"
+         "int read() {\n"
+         "    int buffer[kTarget];\n"
+         "    buffer[0] = 0;\n"
+         "    return static_cast<int>(sizeof(buffer)) / 4;\n"
+         "}\n"
+         "}\n"
+         "int main() {\n"
+         "    return a::read();\n"
+         "}\n",
+         8},
+        {"constexpr_lookup_resolves_namespaced_name_in_alignas_argument",
+         "namespace a {\n"
+         "constexpr int kTarget = 8;\n"
+         "int read() {\n"
+         "    alignas(kTarget) int value = 8;\n"
+         "    return value;\n"
+         "}\n"
+         "}\n"
+         "int main() {\n"
+         "    return a::read();\n"
+         "}\n",
+         8},
+        {"constexpr_lookup_walks_outward_from_a_consteval_body",
+         "namespace a {\n"
+         "constexpr int kTarget = 8;\n"
+         "namespace b {\n"
+         "consteval int immediate() {\n"
+         "    return kTarget;\n"
+         "}\n"
+         "}\n"
+         "}\n"
+         "int main() {\n"
+         "    constexpr int local = a::b::immediate();\n"
+         "    return local;\n"
+         "}\n",
+         8},
+        // A type definition's own constant expressions are evaluated by a
+        // different traversal from a function's, and it had no namespace
+        // context at all to lose: resolve_struct/resolve_class walk field
+        // types and alignment specifiers through root entry points that
+        // reset engine state. Each of the four positions below therefore
+        // failed even though the equivalent spelling in a function body
+        // worked, and each is fixed by giving the walk the defining
+        // type's own namespace_path rather than by a second lookup path.
+        {"constexpr_lookup_resolves_namespaced_name_in_a_struct_field_array_bound",
+         "namespace a {\n"
+         "constexpr int kSize = 8;\n"
+         "struct Holder {\n"
+         "    int buffer[kSize];\n"
+         "};\n"
+         "}\n"
+         "int main() {\n"
+         "    a::Holder holder{};\n"
+         "    return static_cast<int>(sizeof(holder)) / 4;\n"
+         "}\n",
+         8},
+        {"constexpr_lookup_resolves_namespaced_name_in_a_struct_member_alignas",
+         "namespace a {\n"
+         "constexpr int kAlign = 8;\n"
+         "struct Holder {\n"
+         "    alignas(kAlign) int value;\n"
+         "};\n"
+         "}\n"
+         "int main() {\n"
+         "    a::Holder holder{};\n"
+         "    holder.value = 1;\n"
+         "    return static_cast<int>(alignof(a::Holder));\n"
+         "}\n",
+         8},
+        {"constexpr_lookup_resolves_namespaced_name_in_a_struct_alignas",
+         "namespace a {\n"
+         "constexpr int kAlign = 8;\n"
+         "struct alignas(kAlign) Holder {\n"
+         "    int value;\n"
+         "};\n"
+         "}\n"
+         "int main() {\n"
+         "    a::Holder holder{};\n"
+         "    holder.value = 1;\n"
+         "    return static_cast<int>(alignof(a::Holder));\n"
+         "}\n",
+         8},
+        {"constexpr_lookup_resolves_namespaced_name_in_a_class_member_alignas",
+         "namespace a {\n"
+         "constexpr int kAlign = 8;\n"
+         "class Holder {\n"
+         "public:\n"
+         "    alignas(kAlign) int value{};\n"
+         "    virtual ~Holder() = default;\n"
+         "};\n"
+         "}\n"
+         "int main() {\n"
+         "    return static_cast<int>(alignof(a::Holder));\n"
+         "}\n",
+         8},
+        // Controls for the widening. Both pass against the pre-fix
+        // compiler by construction -- they are here so that a later change
+        // cannot let the outward walk run past a name it should have
+        // stopped at, or ignore an explicit `::`.
+        {"constexpr_lookup_honours_explicit_global_qualification",
+         "constexpr int kTarget = 8;\n"
+         "namespace a {\n"
+         "constexpr int kTarget = 3;\n"
+         "int read() {\n"
+         "    constexpr int local = ::kTarget;\n"
+         "    return local;\n"
+         "}\n"
+         "}\n"
+         "int main() {\n"
+         "    return a::read();\n"
+         "}\n",
+         8},
+        {"constexpr_lookup_ignores_same_name_in_an_unrelated_namespace",
+         "constexpr int kTarget = 8;\n"
+         "namespace c {\n"
+         "constexpr int kTarget = 3;\n"
+         "}\n"
+         "namespace a {\n"
+         "int read() {\n"
+         "    constexpr int local = kTarget;\n"
+         "    return local;\n"
+         "}\n"
+         "}\n"
+         "int main() {\n"
+         "    return a::read();\n"
+         "}\n",
+         8},
+    };
+    for (const ConstexprNamespaceLookupCase& lookup_case : constexpr_namespace_lookup_cases) {
+        std::string case_name = lookup_case.name;
+        cases_run++;
+        std::filesystem::path exe_path_47n = std::filesystem::current_path() / (case_name + "_exe");
+        auto compile_result_47n = scpp::compile_to_executable(lookup_case.source, exe_path_47n.string(),
+                                                              std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_47n.has_value()) throw std::move(compile_result_47n).error();
+        RunResult run_result_47n = run_command_capture(exe_path_47n.string() + " 2>&1");
+        expect(run_result_47n.exit_code == lookup_case.expected_exit_code,
+               case_name + ": expected the constant evaluator to resolve the name to " +
+                   std::to_string(lookup_case.expected_exit_code) + ", got " + std::to_string(run_result_47n.exit_code));
+        std::filesystem::remove(exe_path_47n);
+    }
+
+    // The other half of the widening. An unqualified name must not reach
+    // into an unrelated namespace, and giving the evaluator a namespace
+    // model must not make a `const` or plain global -- neither of which is
+    // a constant in scpp, at the global namespace either -- start
+    // resolving. All three are rejected before the fix as well; they are
+    // the guard that the walk widened only along the axis it was meant to.
+    struct ConstexprNamespaceLookupRejectionCase {
+        const char* name;
+        const char* source;
+        const char* expected_fragment;
+    };
+    const ConstexprNamespaceLookupRejectionCase constexpr_namespace_lookup_rejection_cases[] = {
+        {"constexpr_lookup_does_not_reach_into_an_unrelated_namespace",
+         "namespace c {\n"
+         "constexpr int kTarget = 8;\n"
+         "}\n"
+         "namespace a {\n"
+         "int read() {\n"
+         "    constexpr int local = kTarget;\n"
+         "    return local;\n"
+         "}\n"
+         "}\n"
+         "int main() {\n"
+         "    return a::read();\n"
+         "}\n",
+         "identifier 'kTarget' is not available"},
+        {"constexpr_lookup_does_not_promote_a_namespaced_const_global",
+         "namespace a {\n"
+         "const int kTarget = 8;\n"
+         "int read() {\n"
+         "    constexpr int local = kTarget;\n"
+         "    return local;\n"
+         "}\n"
+         "}\n"
+         "int main() {\n"
+         "    return a::read();\n"
+         "}\n",
+         "identifier 'kTarget' is not available"},
+        {"constexpr_lookup_does_not_promote_a_namespaced_mutable_global",
+         "namespace a {\n"
+         "int kTarget = 8;\n"
+         "int read() {\n"
+         "    constexpr int local = kTarget;\n"
+         "    return local;\n"
+         "}\n"
+         "}\n"
+         "int main() {\n"
+         "    return a::read();\n"
+         "}\n",
+         "identifier 'kTarget' is not available"},
+    };
+    for (const ConstexprNamespaceLookupRejectionCase& lookup_case : constexpr_namespace_lookup_rejection_cases) {
+        std::string case_name = lookup_case.name;
+        cases_run++;
+        auto compile_result_47o = scpp::compile_to_executable(
+            lookup_case.source, (std::filesystem::current_path() / (case_name + "_exe")).string(), std_link_inputs(),
+            prebuilt_module_import_paths());
+        bool threw = !compile_result_47o.has_value() &&
+                     std::string(compile_result_47o.error().what()).find(lookup_case.expected_fragment) !=
+                         std::string::npos;
+        expect(threw, case_name + ": expected the constant evaluator's namespace walk to stop short, with '" +
+                          lookup_case.expected_fragment + "'");
+    }
+
     // ch07 x7.1 / ch02: a `consteval` function's body is an ordinary
     // function body -- ch02's ownership rules describe the program, not
     // the machine, so a use-after-move or a double borrow is just as
