@@ -2614,41 +2614,49 @@ class Program {
 
 using OptionalProgramRef = std::optional<std::reference_wrapper<const Program>>;
 
+// The single implementation of scpp's namespace-visibility walk for globals:
+// progressively outward through `namespace_path`, then the global namespace,
+// unless `::` was written explicitly. Returning an index rather than a pointer
+// lets callers that must remain safe scpp (no raw-pointer dereference, ch01
+// §1.3) reach the global through `program.globals[index]`.
+[[nodiscard]] inline std::optional<std::size_t>
+find_visible_global_index(const Program& program, const std::vector<std::string>& namespace_path,
+                          const std::string& name, bool explicit_global_qualification = false) {
+    auto matches_name = [&](std::size_t index, std::string_view candidate) {
+        const GlobalVar& global = program.globals[index];
+        if (global.decl.get() == nullptr) return false;
+        std::string_view global_name{global.decl->var_name};
+        return global_name == candidate;
+    };
+    if (!explicit_global_qualification) {
+        for (std::size_t depth = namespace_path.size(); depth > 0; depth--) {
+            std::string candidate{};
+            for (std::size_t i = 0; i < depth; i++) {
+                if (candidate.size() != 0) candidate += "::";
+                candidate += namespace_path[i];
+            }
+            candidate += "::";
+            candidate += name;
+            for (std::size_t i = 0; i < program.globals.size(); i++) {
+                if (matches_name(i, candidate)) return i;
+            }
+        }
+    }
+    for (std::size_t i = 0; i < program.globals.size(); i++) {
+        if (matches_name(i, name)) return i;
+    }
+    return std::optional<std::size_t>{};
+}
+
 [[nodiscard]] inline const GlobalVar*
 find_visible_global(std::optional<std::reference_wrapper<const Program [[scpp::lifetime(program)]]>> program,
                     const std::vector<std::string>& namespace_path,
                     const std::string& name, bool explicit_global_qualification = false) [[scpp::lifetime(program)]] {
     if (!program.has_value()) return nullptr;
-    auto matches_name = [&](const GlobalVar& global, std::string_view candidate) {
-        if (global.decl.get() == nullptr) return false;
-        std::string_view global_name{global.decl->var_name};
-        return global_name == candidate;
-    };
-    if (explicit_global_qualification) {
-        for (std::size_t i = 0; i < program->get().globals.size(); i++) {
-            const GlobalVar& global = program->get().globals[i];
-            if (matches_name(global, name)) return &global;
-        }
-        return nullptr;
-    }
-    for (std::size_t depth = namespace_path.size(); depth > 0; depth--) {
-        std::string candidate{};
-        for (std::size_t i = 0; i < depth; i++) {
-            if (candidate.size() != 0) candidate += "::";
-            candidate += namespace_path[i];
-        }
-        candidate += "::";
-        candidate += name;
-        for (std::size_t i = 0; i < program->get().globals.size(); i++) {
-            const GlobalVar& global = program->get().globals[i];
-            if (matches_name(global, candidate)) return &global;
-        }
-    }
-    for (std::size_t i = 0; i < program->get().globals.size(); i++) {
-        const GlobalVar& global = program->get().globals[i];
-        if (matches_name(global, name)) return &global;
-    }
-    return nullptr;
+    std::optional<std::size_t> index =
+        find_visible_global_index(program->get(), namespace_path, name, explicit_global_qualification);
+    if (!index.has_value()) return nullptr;
+    return &program->get().globals[*index];
 }
 
 // ch06 §6 fixes scpp's scalar types at exactly twenty distinct names,
