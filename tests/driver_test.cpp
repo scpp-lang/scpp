@@ -3074,10 +3074,21 @@ void run_consteval_tests() {
          "    return 0;\n"
          "}\n",
          "immediate evaluation may only call constexpr/consteval functions"},
-        // The step budget stands in for the recursion budget here: a
-        // `constexpr` recursion deep enough to reach max_recursion_depth
-        // crashes the compiler outright, which is a separate defect
-        // reported on its own rather than pinned as expected behaviour.
+        // Both budgets are exercised here: the recursion budget now reports
+        // instead of crashing the compiler, so it no longer has to be stood
+        // in for by the step budget.
+        {"namespace_scope_constexpr_initializer_rejects_recursion_budget_exhaustion",
+         "constexpr int count(int n) {\n"
+         "    if (n <= 0) {\n"
+         "        return 0;\n"
+         "    }\n"
+         "    return count(n - 1) + 1;\n"
+         "}\n"
+         "constexpr int kValue = count(4096);\n"
+         "int main() {\n"
+         "    return 0;\n"
+         "}\n",
+         "exceeded recursion budget"},
         {"namespace_scope_constexpr_initializer_rejects_step_budget_exhaustion",
          "constexpr int spin() {\n"
          "    int total = 0;\n"

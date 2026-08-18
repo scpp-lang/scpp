@@ -2908,16 +2908,21 @@ public:
     // of ~1046-1054 down to ~851-859 on this build/environment's default
     // 8 MiB thread stack -- a real, if narrow, regression matching the
     // exact class of risk that made batch 3 lower constexpression.cppm's own
-    // max_recursion_depth 512->256 for the same reason. Real import
-    // graphs never come close (the whole std library totals under 20
-    // import declarations), so this limit exists purely to turn an
+    // max_recursion_depth 512->256. That lowering has since been shown to
+    // have been made on a wrong premise and to a still-unreachable value:
+    // the cost there is frame allocation on the way *down*, not
+    // std::expected propagation on the way back up, and 256 levels of that
+    // engine's walk still could not fit on an 8 MiB stack, so its budget
+    // stayed unreachable until it was rederived from a measurement and
+    // backed by a byte-measured guard. Real import graphs never come close
+    // to this counter (the whole std library totals under 20 import
+    // declarations), so this limit exists purely to turn an
     // unreachable-in-practice pathological chain into a clean, reported
-    // ParseError instead of a raw SIGSEGV -- chosen to match
-    // constexpression.cppm's own max_recursion_depth precedent value, which
-    // leaves a >3x margin below the ~851 empirical native crash point
-    // measured above (and construction below is native C++, not
-    // self-hosted, so no scpp-side stack-cost concern applies to this
-    // counter itself).
+    // ParseError instead of a raw SIGSEGV. 256 is retained here on its own
+    // measurement rather than by borrowing that file's value: it leaves a
+    // >3x margin below the ~851 empirical native crash point measured
+    // above (and construction below is native C++, not self-hosted, so no
+    // scpp-side stack-cost concern applies to this counter itself).
     static constexpr int kMaxResolutionDepth = 256;
 
     // Returns std::expected rather than throwing on failure now that

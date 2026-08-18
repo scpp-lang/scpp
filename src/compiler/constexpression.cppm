@@ -9,18 +9,57 @@ export namespace scpp {
 
 struct ConstexprLimits {
     int max_steps = 1000000;
-    // Lowered from 512: propagating std::expected<T, ConstexprError>
-    // through this engine's mutually-recursive evaluation walk (call_function
-    // -> execute_stmt -> evaluate_expr -> evaluate_call_expr -> ...) costs
-    // more C++ stack per level than the exceptions this engine used to
-    // throw, since every frame now materializes its own expected<T, E>
-    // return value instead of unwinding past it. 512 levels of recursion
-    // reliably overflowed an 8 MiB stack (a Debug build's default) before
-    // this engine's own budget check could ever fire; 256 leaves a wide,
-    // empirically-verified safety margin (the crash threshold measured
-    // well above 300) and is still far deeper than any real constexpr/
-    // consteval recursion is likely to need.
-    int max_recursion_depth = 256;
+    // A *language* limit: how deep a program's constant evaluation may
+    // recurse. It must therefore be host- and build-independent, which is
+    // exactly what the two previous values were not. Both 512 and its
+    // replacement 256 were unreachable in the project's default (and CI's)
+    // Debug build -- the host stack died first, so the diagnostic below
+    // could never be produced and the compiler segfaulted instead.
+    //
+    // 128 is derived rather than picked. This engine's mutually-recursive
+    // walk (call_function -> execute_stmt -> evaluate_expr ->
+    // evaluate_call_expr -> call_function) was measured, by bisecting the
+    // native crash depth against several `ulimit -s` values, to cost a
+    // perfectly linear 36,792 bytes of host stack per level in a Debug
+    // build (55 levels survive a 2 MiB stack, 112 survive 4 MiB, 226
+    // survive 8 MiB). 128 levels therefore consume 4.49 MiB, which fits
+    // inside max_stack_bytes below with room to spare on the 8 MiB stack
+    // that is the default nearly everywhere. Because that keeps *this*
+    // counter the binding limit in every build, a program is accepted or
+    // rejected at the same depth whether the compiler was built Debug or
+    // Release -- an optimized build makes the frames far smaller, but must
+    // not thereby accept programs a Debug build rejects.
+    //
+    // The earlier note here blamed std::expected<T, ConstexprError>
+    // propagation (batch 3, versus the exceptions this engine used to
+    // throw) for the per-level cost. That premise is measurably wrong
+    // about *where* the cost is: recursing to depth d and then failing at
+    // the deepest frame propagates the error cleanly back through 226
+    // frames and crashes at exactly the same depth as a successful
+    // evaluation, so the stack dies on the way *down*, in frame
+    // allocation, not on the way back up. The frames are large because
+    // this file's two switch-dispatch functions reserve one stack slot per
+    // expected<> local across all their arms at once at -O0; that is a
+    // separate defect, reported on its own.
+    int max_recursion_depth = 128;
+    // An *implementation* safety property, and a different question from
+    // the one above: how much host stack this engine may consume before it
+    // must stop rather than die. No compile-time depth constant can answer
+    // it, because the bytes-per-level it would have to be divided by are
+    // not fixed -- they change with the build type (36,792 in Debug,
+    // far smaller optimized), and with any future edit to the evaluation
+    // walk's frames. Measuring the bytes directly is what makes "this
+    // limit reports, it does not crash" a guarantee instead of a property
+    // that happens to hold until someone adds a local variable.
+    //
+    // 6 MiB sits above the 4.49 MiB that max_recursion_depth can consume
+    // (so the depth limit stays the binding one, per above) and ~1.9 MiB
+    // below the 8 MiB stack where the crash was measured, which is some 50
+    // further Debug frames of headroom for unwinding the diagnostic back
+    // out. It assumes an 8 MiB host stack; reading the real rlimit would
+    // need a POSIX header, and this module must stay compilable by scpp
+    // itself, which rejects a global module fragment outright.
+    std::size_t max_stack_bytes = static_cast<std::size_t>(6 * 1024 * 1024);
     int max_loop_iterations = 262144;
 };
 
@@ -849,6 +888,10 @@ private:
     ConstexprLimits limits_{};
     int steps_ = 0;
     int call_depth_ = 0;
+    // Frame address of the outermost call_function of the current
+    // evaluation, captured when call_depth_ is still 0; see that function
+    // for why the engine measures bytes and not only levels.
+    const char* stack_base_ = nullptr;
     int string_storage_counter_ = 0;
     std::vector<std::unordered_map<std::string, Binding>> frames_{};
     std::unordered_map<std::string, std::vector<std::size_t>> functions_by_name_{};
@@ -2364,6 +2407,24 @@ private:
             return std::unexpected(ConstexprError(loc, "immediate evaluation may only call constexpr/consteval functions"));
         }
         if (!fn.body) return std::unexpected(ConstexprError(loc, "cannot evaluate a declaration-only function at compile time"));
+        // The depth counter below is the limit a program is judged against,
+        // but it is only safe while limits_.max_recursion_depth levels
+        // actually fit on the host stack. Measure the bytes as well, so the
+        // engine reports this diagnostic rather than dying when they do not
+        // -- if the per-level frame cost grows, or the host stack is smaller
+        // than the 8 MiB max_stack_bytes was derived against. `stack_probe`
+        // is an ordinary local: its address lies inside this frame, so the
+        // distance from the outermost call's frame is the stack this walk
+        // has consumed. The stack grows downward on every target scpp
+        // supports; the ordering test below simply declines to measure if it
+        // ever does not.
+        const char stack_probe = 0;
+        if (call_depth_ == 0) {
+            stack_base_ = &stack_probe;
+        } else if (stack_base_ != nullptr && stack_base_ > &stack_probe &&
+                   static_cast<std::size_t>(stack_base_ - &stack_probe) > limits_.max_stack_bytes) {
+            return std::unexpected(ConstexprError(loc, "constexpr evaluation exceeded recursion budget"));
+        }
         ++call_depth_;
         if (call_depth_ > limits_.max_recursion_depth) {
             --call_depth_;
