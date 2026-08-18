@@ -2773,6 +2773,217 @@ void run_consteval_tests() {
         expect(threw, case_name + ": expected required constant evaluation to reject user-defined destructor execution");
     }
 
+    // ch07 §7.3(4) forbids required constant evaluation from executing
+    // "any operation that requires a user-defined destructor", and ch07
+    // §7.2(1.4) admits only a *trivial* struct type. The check used to
+    // ask a narrower question -- "is this named type a *class* declaring
+    // a body-having destructor" -- so a `struct`, a record reached as a
+    // member, one reached as an array element, and one inherited from a
+    // base all slipped through and had their destructors silently
+    // skipped rather than diagnosed. The four cases below pin each of
+    // those, and the fifth pins that a defaulted destructor -- which ch11
+    // §11.5(1) requires every class to declare, and which is
+    // user-*declared* rather than user-*defined* -- is still evaluable,
+    // since that is what keeps class-typed locals writable in a
+    // `consteval` context at all.
+    //
+    // The struct case gives the destructor a body that calls a
+    // non-`constexpr` function: constant evaluation rejects such a call
+    // on sight, so a program that compiles at all proves the body was
+    // never reached.
+    {
+        std::string case_name = "required_constant_evaluation_rejects_struct_user_defined_destructor";
+        cases_run++;
+        auto compile_result_47b = scpp::compile_to_executable(
+            "int side_effect() { return 1; }\n"
+            "struct NeedsDrop {\n"
+            "    int value{};\n"
+            "    constexpr NeedsDrop(int x) : value{x} { return; }\n"
+            "    ~NeedsDrop() {\n"
+            "        int observed = side_effect();\n"
+            "        return;\n"
+            "    }\n"
+            "};\n"
+            "constexpr int make_value() {\n"
+            "    NeedsDrop box{42};\n"
+            "    return box.value;\n"
+            "}\n"
+            "int main() {\n"
+            "    constexpr int value = make_value();\n"
+            "    return value;\n"
+            "}\n",
+            (std::filesystem::current_path() / "required_constant_evaluation_rejects_struct_user_defined_destructor_exe")
+                .string(),
+            std_link_inputs(), prebuilt_module_import_paths());
+        bool rejected = !compile_result_47b.has_value() &&
+                        std::string(compile_result_47b.error().what()).find("cannot execute user-defined destructor of 'NeedsDrop'") !=
+                            std::string::npos;
+        expect(rejected, case_name + ": expected a struct's user-defined destructor to be rejected exactly as a class's is");
+    }
+
+    {
+        std::string case_name = "required_constant_evaluation_rejects_user_defined_destructor_reached_through_member";
+        cases_run++;
+        auto compile_result_47c = scpp::compile_to_executable(
+            "class NeedsDrop {\n"
+            "public:\n"
+            "    int value{};\n"
+            "    constexpr NeedsDrop(int x) : value{x} { return; }\n"
+            "    virtual ~NeedsDrop() { return; }\n"
+            "};\n"
+            "class Holder {\n"
+            "public:\n"
+            "    NeedsDrop inner;\n"
+            "    constexpr Holder(int x) : inner{x} { return; }\n"
+            "    virtual ~Holder() = default;\n"
+            "};\n"
+            "constexpr int make_value() {\n"
+            "    Holder holder{42};\n"
+            "    return holder.inner.value;\n"
+            "}\n"
+            "int main() {\n"
+            "    constexpr int value = make_value();\n"
+            "    return value;\n"
+            "}\n",
+            (std::filesystem::current_path() /
+             "required_constant_evaluation_rejects_user_defined_destructor_reached_through_member_exe")
+                .string(),
+            std_link_inputs(), prebuilt_module_import_paths());
+        bool rejected = !compile_result_47c.has_value() &&
+                        std::string(compile_result_47c.error().what())
+                                .find("cannot execute user-defined destructor of 'NeedsDrop', reached from 'Holder'") !=
+                            std::string::npos;
+        expect(rejected, case_name + ": expected a member's user-defined destructor to be reached through the declared type");
+    }
+
+    {
+        std::string case_name = "required_constant_evaluation_rejects_user_defined_destructor_reached_through_array_element";
+        cases_run++;
+        auto compile_result_47d = scpp::compile_to_executable(
+            "struct NeedsDrop {\n"
+            "    int value{};\n"
+            "    ~NeedsDrop() { return; }\n"
+            "};\n"
+            "struct Holder {\n"
+            "    NeedsDrop slots[2];\n"
+            "};\n"
+            "constexpr int make_value() {\n"
+            "    Holder holder{};\n"
+            "    return holder.slots[0].value;\n"
+            "}\n"
+            "int main() {\n"
+            "    constexpr int value = make_value();\n"
+            "    return value;\n"
+            "}\n",
+            (std::filesystem::current_path() /
+             "required_constant_evaluation_rejects_user_defined_destructor_reached_through_array_element_exe")
+                .string(),
+            std_link_inputs(), prebuilt_module_import_paths());
+        bool rejected = !compile_result_47d.has_value() &&
+                        std::string(compile_result_47d.error().what())
+                                .find("cannot execute user-defined destructor of 'NeedsDrop', reached from 'Holder'") !=
+                            std::string::npos;
+        expect(rejected, case_name + ": expected an array element's user-defined destructor to be reached through the declared type");
+    }
+
+    {
+        std::string case_name = "required_constant_evaluation_rejects_user_defined_destructor_inherited_from_base";
+        cases_run++;
+        auto compile_result_47e = scpp::compile_to_executable(
+            "class NeedsDrop {\n"
+            "public:\n"
+            "    int value{};\n"
+            "    constexpr NeedsDrop(int x) : value{x} { return; }\n"
+            "    virtual ~NeedsDrop() { return; }\n"
+            "};\n"
+            "class Derived : public NeedsDrop {\n"
+            "public:\n"
+            "    constexpr Derived(int x) : NeedsDrop{x} { return; }\n"
+            "    ~Derived() override = default;\n"
+            "    constexpr int read() const { return 42; }\n"
+            "};\n"
+            "constexpr int make_value() {\n"
+            "    Derived derived{42};\n"
+            "    return derived.read();\n"
+            "}\n"
+            "int main() {\n"
+            "    constexpr int value = make_value();\n"
+            "    return value;\n"
+            "}\n",
+            (std::filesystem::current_path() /
+             "required_constant_evaluation_rejects_user_defined_destructor_inherited_from_base_exe")
+                .string(),
+            std_link_inputs(), prebuilt_module_import_paths());
+        bool rejected = !compile_result_47e.has_value() &&
+                        std::string(compile_result_47e.error().what())
+                                .find("cannot execute user-defined destructor of 'NeedsDrop', reached from 'Derived'") !=
+                            std::string::npos;
+        expect(rejected, case_name + ": expected a base subobject's user-defined destructor to be reached through the derived type");
+    }
+
+    {
+        std::string case_name = "required_constant_evaluation_accepts_defaulted_virtual_destructor";
+        cases_run++;
+        std::filesystem::path exe_path_47f =
+            std::filesystem::current_path() / "required_constant_evaluation_accepts_defaulted_virtual_destructor_exe";
+        auto compile_result_47f = scpp::compile_to_executable(
+            "class Helper {\n"
+            "public:\n"
+            "    int value{};\n"
+            "    consteval Helper(int x) : value{x} { return; }\n"
+            "    virtual ~Helper() = default;\n"
+            "    consteval int read() const { return value; }\n"
+            "};\n"
+            "consteval int make_value() {\n"
+            "    Helper helper{42};\n"
+            "    return helper.read();\n"
+            "}\n"
+            "int main() {\n"
+            "    constexpr int value = make_value();\n"
+            "    return value;\n"
+            "}\n",
+            exe_path_47f.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_47f.has_value()) throw std::move(compile_result_47f).error();
+        RunResult run_result_47f = run_command_capture(exe_path_47f.string() + " 2>&1");
+        expect(run_result_47f.exit_code == 42,
+               case_name + ": expected a defaulted virtual destructor to stay evaluable, got " +
+                   std::to_string(run_result_47f.exit_code));
+        std::filesystem::remove(exe_path_47f);
+    }
+
+    // ch07 §7.1's note: a call to a `constexpr` function outside a
+    // required-constant-evaluation context is an ordinary runtime
+    // computation. Tightening the destructor check must not reach it,
+    // so the same function that is ill-formed as `constexpr int v = ...`
+    // above stays well-formed -- and keeps running its destructor -- when
+    // it is simply called.
+    {
+        std::string case_name = "constexpr_function_with_user_defined_destructor_still_runs_at_runtime";
+        cases_run++;
+        std::filesystem::path exe_path_47g =
+            std::filesystem::current_path() / "constexpr_function_with_user_defined_destructor_still_runs_at_runtime_exe";
+        auto compile_result_47g = scpp::compile_to_executable(
+            "struct NeedsDrop {\n"
+            "    int value{};\n"
+            "    ~NeedsDrop() { return; }\n"
+            "};\n"
+            "constexpr int make_value(int x) {\n"
+            "    NeedsDrop box{};\n"
+            "    box.value = x;\n"
+            "    return box.value;\n"
+            "}\n"
+            "int main() {\n"
+            "    return make_value(42);\n"
+            "}\n",
+            exe_path_47g.string(), std_link_inputs(), prebuilt_module_import_paths());
+        if (!compile_result_47g.has_value()) throw std::move(compile_result_47g).error();
+        RunResult run_result_47g = run_command_capture(exe_path_47g.string() + " 2>&1");
+        expect(run_result_47g.exit_code == 42,
+               case_name + ": expected a runtime call to stay unaffected by the constant-evaluation destructor rule, got " +
+                   std::to_string(run_result_47g.exit_code));
+        std::filesystem::remove(exe_path_47g);
+    }
+
     // ch07 x7.1 / ch02: a `consteval` function's body is an ordinary
     // function body -- ch02's ownership rules describe the program, not
     // the machine, so a use-after-move or a double borrow is just as

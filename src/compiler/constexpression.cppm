@@ -1986,9 +1986,20 @@ private:
         return classes_by_name_.contains(name);
     }
 
-    [[nodiscard]] bool has_user_defined_destructor(const std::string& class_name) const {
+    [[nodiscard]] bool is_record_name(const std::string& name) const {
+        return classes_by_name_.contains(name) || structs_by_name_.contains(name);
+    }
+
+    // ch11 §11.5(1) requires every class to *declare* an explicit virtual
+    // destructor, while ch07 §7.2(2.4)/§7.3(4) forbid required constant
+    // evaluation from executing a *user-defined* one. Those are different
+    // terms: `virtual ~T() = default;` is user-declared and not
+    // user-defined, so it satisfies both and stays evaluable. Hence the
+    // body test -- a destructor slot with no body is a defaulted one and
+    // runs no user code.
+    [[nodiscard]] bool has_user_defined_destructor(const std::string& record_name) const {
         std::string destructor_name{};
-        destructor_name += class_name;
+        destructor_name += record_name;
         destructor_name += "_delete";
         if (!functions_by_name_.contains(destructor_name)) return false;
         for (std::size_t fn_index : functions_by_name_.at(destructor_name)) {
@@ -1997,12 +2008,80 @@ private:
         return false;
     }
 
+    // ch07 §7.3(4) makes required constant evaluation ill-formed when it
+    // would "execute any operation that requires a user-defined
+    // destructor", and ch07 §7.2(1.4) admits only a *trivial* struct type.
+    // Both ask about the objects an evaluation would destroy, not about
+    // the spelling of one name: destroying a `W` also destroys every base
+    // subobject, member and array element it owns, running each of their
+    // destructors.
+    //
+    // This used to ask "is this named type a *class* that declares a
+    // body-having destructor", which is a list-shaped approximation of
+    // that question and silently admitted three families: a `struct` of
+    // any shape (the guard tested `classes_by_name_` only, though the
+    // `_delete` mangling is common to both records), a record reached as
+    // a member of the declared type, and one reached as an array element
+    // -- a guard keyed on `type.kind == Named` cannot express the array
+    // case at all. In each the destructor was neither diagnosed nor run,
+    // so a destructor body calling a non-constexpr function compiled
+    // clean.
+    //
+    // Pointer, Reference and Span deliberately terminate the walk:
+    // destroying a pointer or a non-owning view destroys no pointee (and
+    // ch07 §7.3(3) forbids `delete` outright), so descending through them
+    // would reject programs the spec permits. `visiting` breaks cycles,
+    // which those same indirections make representable.
+    [[nodiscard]] std::optional<std::string> type_owning_user_defined_destructor(const Type& type,
+                                                                                std::vector<std::string>& visiting) const {
+        if (type.kind == TypeKind::Array) {
+            if (!type.element) return std::nullopt;
+            return type_owning_user_defined_destructor(*type.element, visiting);
+        }
+        if (type.kind != TypeKind::Named || !is_record_name(type.name)) return std::nullopt;
+        for (const std::string& active : visiting) {
+            if (active == type.name) return std::nullopt;
+        }
+        if (has_user_defined_destructor(type.name)) return type.name;
+        visiting.push_back(type.name);
+        std::optional<std::string> found{};
+        if (structs_by_name_.contains(type.name)) {
+            const StructDef& struct_def = program_.structs[structs_by_name_.at(type.name)];
+            for (const StructField& field : struct_def.fields) {
+                found = type_owning_user_defined_destructor(field.type, visiting);
+                if (found.has_value()) break;
+            }
+        } else {
+            const ClassDef& class_def = program_.classes[classes_by_name_.at(type.name)];
+            if (auto base = class_def.direct_ordinary_base(); base.has_value()) {
+                found = type_owning_user_defined_destructor(base->get().base_type, visiting);
+            }
+            if (!found.has_value()) {
+                for (const ClassField& field : class_def.fields) {
+                    found = type_owning_user_defined_destructor(field.type, visiting);
+                    if (found.has_value()) break;
+                }
+            }
+        }
+        visiting.pop_back();
+        return found;
+    }
+
     [[nodiscard]] std::expected<void, ConstexprError> reject_user_defined_destructor_execution(const Type& type, const SourceLocation& loc) const {
-        if (type.kind != TypeKind::Named || !is_class_name(type.name) || !has_user_defined_destructor(type.name)) return {};
+        std::vector<std::string> visiting{};
+        std::optional<std::string> owner = type_owning_user_defined_destructor(type, visiting);
+        if (!owner.has_value()) return {};
         std::string message{};
         message += "required constant evaluation cannot execute user-defined destructor of '";
-        message += type.name;
+        message += *owner;
         message += "'";
+        const Type* declared = &type;
+        while (declared->kind == TypeKind::Array && declared->element) declared = declared->element.get();
+        if (declared->kind == TypeKind::Named && declared->name != *owner) {
+            message += ", reached from '";
+            message += declared->name;
+            message += "'";
+        }
         return std::unexpected(ConstexprError(loc, message));
     }
 
