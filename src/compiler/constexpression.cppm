@@ -608,6 +608,50 @@ public:
         return result;
     }
 
+    // ch09 §9.1(1) leaves [dcl.constexpr] in force unchanged, so a
+    // `constexpr` variable's initializer must be a constant expression --
+    // at namespace scope exactly as inside a function. ch07 §7.1(2) makes
+    // that required constant evaluation and §7.1(3) makes it well-formed
+    // only if every necessary operation is permitted by §7.2 and none
+    // listed in §7.3 is evaluated.
+    //
+    // Nothing performed that evaluation for a global. `resolve_global_-
+    // constant` below has always been able to, but only *lazily*, when
+    // some other constant expression named the global; a `constexpr`
+    // global that nothing else mentioned was never evaluated on its own
+    // account, so every rule -- division by zero, overflow, the
+    // user-defined-destructor rule, the step budget, calling a
+    // non-`constexpr` function -- went unenforced there, and the
+    // initializer was then emitted as an ordinary *runtime* dynamic
+    // initializer. `constexpr` at namespace scope promised compile-time
+    // initialization and delivered neither the promise nor its check.
+    // This is validate_constexpr_locals' missing counterpart: the
+    // traversal existed for one arm and was never written for the other.
+    //
+    // Deliberately drives `resolve_global_constant` rather than
+    // re-evaluating here, so the memoized result, the isolated frame
+    // stack, the order-independence of one global initialized from a
+    // later one, and the existing circular-dependency diagnostic all stay
+    // single-sourced. The per-evaluation budgets are reset per global --
+    // each initializer is its own required constant evaluation -- while
+    // `string_storage_counter_` deliberately is not, since memoized cells
+    // from an earlier global outlive this loop and their storage ids must
+    // stay distinct.
+    [[nodiscard]] std::expected<void, ConstexprError> validate_constexpr_global(Stmt& decl) {
+        if (!decl.is_constexpr || !decl.init) return {};
+        steps_ = 0;
+        call_depth_ = 0;
+        auto value_result = resolve_global_constant(decl.var_name, decl.loc);
+        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+        std::shared_ptr<Cell> value = std::move(value_result).value();
+        if (value == nullptr) return {};
+        // Same best-effort folding as the local case: validation has
+        // already succeeded, and a value that cannot be lowered back into
+        // source-form AST simply keeps its original initializer.
+        ignore_result(rewrite_expr_as_constant(*decl.init, value));
+        return {};
+    }
+
     [[nodiscard]] std::expected<std::uint64_t, ConstexprError> resolve_root_alignment_specs(const std::vector<AlignmentSpecifier>& specs, std::uint64_t natural_alignment,
                                                const std::string& what) {
         frames_.clear();
@@ -3691,6 +3735,14 @@ public:
             if (!alignment_result.has_value()) return std::unexpected(std::move(alignment_result).error());
             global.decl->resolved_alignment = alignment_result.value();
         }
+        // Separate pass, deliberately after every global's *type* is
+        // resolved above: one global's initializer may ask for another
+        // global's layout (`sizeof`), and that must not depend on
+        // declaration order.
+        for (GlobalVar& global : program_.globals) {
+            if (global.decl == nullptr) continue;
+            if (auto result = engine_.validate_constexpr_global(*global.decl); !result.has_value()) return result;
+        }
         for (Function& fn : program_.functions) {
             if (!fn.body) continue;
             if (fn.is_generic_template) continue;
@@ -4223,6 +4275,23 @@ private:
     for (Function& fn : program.functions) {
         if (!fn.body) continue;
         if (auto result = collect_runtime_stmt_rewrites(program, *fn.body, engine, expr_rewrites, consteval_if_rewrites);
+            !result.has_value()) {
+            return result;
+        }
+    }
+    // ch09 §9.1(4): *every* potentially-evaluated call to an immediate
+    // function shall produce a constant expression -- a global's
+    // initializer is not an exception, and this holds whether or not the
+    // global is itself `constexpr`. This loop was simply absent: only
+    // function bodies were walked, so a `consteval` call at namespace
+    // scope was never folded, survived into codegen, and hit codegen's
+    // deliberate "a consteval function is never compiled" skip as
+    // `internal error: no generated code for resolved function 'f'`. That
+    // made every immediate function uncallable from any namespace-scope
+    // initializer.
+    for (GlobalVar& global : program.globals) {
+        if (global.decl == nullptr || !global.decl->init) continue;
+        if (auto result = collect_runtime_expr_rewrites(program, *global.decl->init, engine, expr_rewrites, consteval_if_rewrites);
             !result.has_value()) {
             return result;
         }
