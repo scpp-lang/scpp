@@ -129,7 +129,16 @@ using RecordUsingHandlerFn = std::function<bool(AccessSpecifier)>;
 // ModuleResolver's own `const std::string&` argument above has never
 // hit this), at the cost of the two call sites below copying instead
 // of moving into their StructField/ClassField.
-using RecordFieldAdderFn = std::function<void(const Type&, const std::string&, AccessSpecifier,
+//
+// The leading SourceLocation is the member declaration's *own* first
+// token, handed over explicitly rather than left for each callback to
+// recover from the parser's cursor: by the time a field is added its
+// whole declaration -- terminating `;` included -- has been consumed,
+// so a callback calling current_loc() gets the *next* member's first
+// token (or the closing `}`) instead. Passing it makes a field's loc
+// come from exactly the same `member_loc` every member function in the
+// same record body is already stamped with.
+using RecordFieldAdderFn = std::function<void(const SourceLocation&, const Type&, const std::string&, AccessSpecifier,
                                                const std::optional<Initializer>&,
                                                const std::vector<AlignmentSpecifier>&)>;
 
@@ -5786,20 +5795,18 @@ private:
                 "a struct member declaration",
                 _msg_4902,
                 std::function<bool(AccessSpecifier)>([](AccessSpecifier access [[maybe_unused]]) -> bool { return true; }),
-                // Needs explicit 'this' too (calls current_loc(), a
-                // Parser method) -- see try_finish's comment above.
                 // By-const-ref parameters (matching RecordFieldAdderFn's
                 // own by-reference contract, see its declaration's
                 // comment above) mean this copies field_type/field_name/
                 // default_initializer/alignment_specs into the new
                 // StructField rather than moving them.
-                std::function<void(const Type&, const std::string&, AccessSpecifier,
+                std::function<void(const SourceLocation&, const Type&, const std::string&, AccessSpecifier,
                                     const std::optional<Initializer>&, const std::vector<AlignmentSpecifier>&)>(
-                    [&, this](const Type& field_type, const std::string& field_name, AccessSpecifier access,
+                    [&](const SourceLocation& field_loc, const Type& field_type, const std::string& field_name, AccessSpecifier access,
                         const std::optional<Initializer>& default_initializer, const std::vector<AlignmentSpecifier>& alignment_specs) {
                         StructField field{};
 
-                        field.loc = current_loc();
+                        field.loc = field_loc;
                         field.type = field_type;
                         field.name = field_name;
                         field.access = access;
@@ -7218,6 +7225,7 @@ private:
 
         ClassDef def{};
 
+        def.loc = loc;
         def.name = qualified_class_name;
         def.namespace_path = namespace_stack_;
         def.is_exported = is_exported;
@@ -7358,6 +7366,7 @@ private:
 
         ClassDef def{};
 
+        def.loc = loc;
         def.name = qualified_class_name;
         def.namespace_path = namespace_stack_;
         def.is_exported = is_exported;
@@ -7467,6 +7476,7 @@ private:
 
         ClassDef def{};
 
+        def.loc = loc;
         def.name = qualified_class_name;
         def.is_interface = class_attrs.has("interface");
         def.thread_movable_override = class_attrs.has("thread_movable");
@@ -7603,6 +7613,7 @@ private:
 
         ClassDef def{};
 
+        def.loc = loc;
         def.name = qualified_class_name;
         def.is_interface = class_attrs.has("interface");
         def.alignment_specs = std::move(leading_alignments);
@@ -8285,7 +8296,7 @@ private:
                 if (!default_initializer_result.has_value()) return std::unexpected(std::move(default_initializer_result).error());
                 std::optional<Initializer> default_initializer = std::move(default_initializer_result).value();
                 if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
-                add_field_fn(std::move(field_type), std::move(field_name), current_access, std::move(default_initializer),
+                add_field_fn(member_loc, std::move(field_type), std::move(field_name), current_access, std::move(default_initializer),
                           std::move(member_alignments));
                 continue;
             }
@@ -8395,7 +8406,7 @@ private:
             if (!default_initializer_result.has_value()) return std::unexpected(std::move(default_initializer_result).error());
             std::optional<Initializer> default_initializer = std::move(default_initializer_result).value();
             if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
-            add_field_fn(std::move(field_type), std::move(member_name), current_access, std::move(default_initializer),
+            add_field_fn(member_loc, std::move(field_type), std::move(member_name), current_access, std::move(default_initializer),
                       std::move(member_alignments));
         }
         if (auto _r = expect(TokenKind::RBrace, "'}'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
@@ -8423,9 +8434,10 @@ private:
         // from binding a this-capturing closure to a named local
         // before this call, which is itself a Parser method needing
         // its own implicit `this` receiver borrow).
-        // Both callbacks below need explicit 'this' too (call
-        // parse_class_using_declaration/current_loc, both Parser
-        // methods) -- see try_finish's comment above.
+        // The using-declaration callback below needs explicit 'this' too
+        // (calls parse_class_using_declaration, a Parser method) -- see
+        // try_finish's comment above. The field adder calls no Parser
+        // method, so it captures nothing but the enclosing locals.
         if (auto _rv = parse_record_body_into(
                 program, class_name, qualified_class_name, synthesized_member_owner_name, template_params, def.is_exported,
                 def.template_owner_id, AccessSpecifier::Private,
@@ -8442,13 +8454,13 @@ private:
                 // By-const-ref parameters (see RecordFieldAdderFn's own
                 // declaration comment above) mean this copies rather than
                 // moves into the new ClassField.
-                std::function<void(const Type&, const std::string&, AccessSpecifier,
+                std::function<void(const SourceLocation&, const Type&, const std::string&, AccessSpecifier,
                                     const std::optional<Initializer>&, const std::vector<AlignmentSpecifier>&)>(
-                    [&, this](const Type& field_type, const std::string& field_name, AccessSpecifier access,
+                    [&](const SourceLocation& field_loc, const Type& field_type, const std::string& field_name, AccessSpecifier access,
                         const std::optional<Initializer>& default_initializer, const std::vector<AlignmentSpecifier>& alignment_specs) {
                         ClassField field{};
 
-                        field.loc = current_loc();
+                        field.loc = field_loc;
                         field.type = field_type;
                         field.name = field_name;
                         field.access = access;
