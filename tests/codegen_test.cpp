@@ -1727,6 +1727,100 @@ void run_constexpr_diagnostic_text_tests() {
         expect(what.size() > what.find(expected_fragment) + expected_fragment.size(),
                case_name + ": expected a non-empty 'while ...' tail in '" + what + "'");
     }
+
+    {
+        // A recursion deeper than the budget has to produce the documented
+        // diagnostic, not a SIGSEGV. These depths used to crash the compiler
+        // outright: the host stack died at 227 levels in a Debug build, 29
+        // levels before max_recursion_depth (then 256) could ever be reached,
+        // so the budget was unreachable and the limit did not exist.
+        struct RecursionDepthCase {
+            std::string case_name;
+            int depth;
+        };
+        const std::vector<RecursionDepthCase> recursion_depth_cases = {
+            {"diagnostic_recursion_budget_at_old_unreachable_limit", 256},
+            {"diagnostic_recursion_budget_at_old_original_limit", 512},
+            {"diagnostic_recursion_budget_far_past_limit", 20000},
+        };
+        for (const RecursionDepthCase& recursion_case : recursion_depth_cases) {
+            cases_run++;
+            scpp::Program program = parse_with_std_imports(
+                "consteval int count(int n) { if (n <= 0) { return 0; } return count(n - 1) + 1; }\n"
+                "int main() { return count(" +
+                std::to_string(recursion_case.depth) + "); }\n");
+            auto result = scpp::fold_immediate_calls(program);
+            expect(!result.has_value(), recursion_case.case_name + ": expected the recursion budget to be exceeded");
+            if (!result.has_value()) {
+                const std::string what = result.error().what();
+                const std::string expected_recursion_fragment = "constexpr evaluation exceeded recursion budget";
+                expect(what.find(expected_recursion_fragment) != std::string::npos,
+                       recursion_case.case_name + ": expected '" + expected_recursion_fragment + "' but got '" + what +
+                           "'");
+            }
+        }
+    }
+
+    {
+        // The margin proof, and the reason max_recursion_depth is derived
+        // from a measurement rather than picked: exactly max_recursion_depth
+        // levels of this engine's walk must actually fit on the host stack.
+        // Recursing to the documented depth has to succeed and one level
+        // deeper has to be diagnosed, so if a later change to the evaluation
+        // walk's frames makes the documented depth overflow the stack again,
+        // this case crashes instead of quietly passing -- which is how the
+        // previous two values for this constant went wrong unnoticed.
+        const int recursion_budget = scpp::ConstexprLimits{}.max_recursion_depth;
+        const std::string count_source =
+            "consteval int count(int n) { if (n <= 0) { return 0; } return count(n - 1) + 1; }\n";
+
+        std::string case_name = "recursion_budget_is_reachable_at_the_documented_depth";
+        cases_run++;
+        scpp::Program at_budget = parse_with_std_imports(
+            count_source + "int main() { return count(" + std::to_string(recursion_budget - 1) + "); }\n");
+        auto at_budget_result = scpp::fold_immediate_calls(at_budget);
+        expect(at_budget_result.has_value(),
+               case_name + ": expected a recursion of exactly max_recursion_depth levels to evaluate, but got '" +
+                   (at_budget_result.has_value() ? std::string{} : std::string(at_budget_result.error().what())) + "'");
+
+        case_name = "recursion_budget_fires_one_level_past_the_documented_depth";
+        cases_run++;
+        scpp::Program past_budget = parse_with_std_imports(
+            count_source + "int main() { return count(" + std::to_string(recursion_budget) + "); }\n");
+        auto past_budget_result = scpp::fold_immediate_calls(past_budget);
+        expect(!past_budget_result.has_value(),
+               case_name + ": expected one level past max_recursion_depth to be diagnosed");
+        if (!past_budget_result.has_value()) {
+            const std::string what = past_budget_result.error().what();
+            expect(what.find("constexpr evaluation exceeded recursion budget") != std::string::npos,
+                   case_name + ": expected the recursion-budget diagnostic but got '" + what + "'");
+        }
+    }
+
+    {
+        // What runs out is host stack bytes, not levels, and a count cannot
+        // measure bytes: the per-level cost differs between an optimized and
+        // an unoptimized build of this compiler and changes with any edit to
+        // the evaluation walk. Raising the depth budget out of the way and
+        // lowering the byte budget must therefore still yield the documented
+        // diagnostic rather than a crash. That is the guarantee the depth
+        // constant cannot make on its own, and it is why one exists.
+        std::string case_name = "recursion_budget_is_enforced_from_stack_bytes";
+        cases_run++;
+        scpp::Program program = parse_with_std_imports(
+            "consteval int count(int n) { if (n <= 0) { return 0; } return count(n - 1) + 1; }\n"
+            "int main() { return count(100000); }\n");
+        scpp::ConstexprLimits limits{};
+        limits.max_recursion_depth = 1000000;
+        limits.max_stack_bytes = 16 * 1024;
+        auto result = scpp::fold_immediate_calls(program, limits);
+        expect(!result.has_value(), case_name + ": expected the stack-byte budget to stop the recursion");
+        if (!result.has_value()) {
+            const std::string what = result.error().what();
+            expect(what.find("constexpr evaluation exceeded recursion budget") != std::string::npos,
+                   case_name + ": expected the recursion-budget diagnostic but got '" + what + "'");
+        }
+    }
 }
 
 } // namespace
