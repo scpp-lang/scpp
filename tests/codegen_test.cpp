@@ -1734,13 +1734,19 @@ void run_constexpr_diagnostic_text_tests() {
         // outright: the host stack died at 227 levels in a Debug build, 29
         // levels before max_recursion_depth (then 256) could ever be reached,
         // so the budget was unreachable and the limit did not exist.
+        //
+        // The depths are relative to the budget rather than absolute. They
+        // were absolute, and 256 -- once past the budget -- became a depth
+        // the compiler is now required to *accept*, so the case asserted
+        // the old limit rather than the property.
         struct RecursionDepthCase {
             std::string case_name;
             int depth;
         };
+        const int budget = scpp::ConstexprLimits{}.max_recursion_depth;
         const std::vector<RecursionDepthCase> recursion_depth_cases = {
-            {"diagnostic_recursion_budget_at_old_unreachable_limit", 256},
-            {"diagnostic_recursion_budget_at_old_original_limit", 512},
+            {"diagnostic_recursion_budget_just_past_limit", budget},
+            {"diagnostic_recursion_budget_well_past_limit", budget * 2},
             {"diagnostic_recursion_budget_far_past_limit", 20000},
         };
         for (const RecursionDepthCase& recursion_case : recursion_depth_cases) {
@@ -1770,6 +1776,20 @@ void run_constexpr_diagnostic_text_tests() {
         // walk's frames makes the documented depth overflow the stack again,
         // this case crashes instead of quietly passing -- which is how the
         // previous two values for this constant went wrong unnoticed.
+        // ch06 (6.4) requires an implementation to support "no less than
+        // 512 nested evaluations". Every previous value of this constant
+        // either violated that (128, 256) or violated it in practice by
+        // segfaulting before reaching it (512, as first written). It is
+        // reachable now only because the evaluator's per-level host-stack
+        // cost fell from 36,802 bytes to 10,714, so pin the conformance
+        // floor next to the margin proof below: if a later change regrows
+        // the frames, the case below crashes rather than passing quietly,
+        // and if someone answers that by lowering the constant, this one
+        // fails.
+        expect(scpp::ConstexprLimits{}.max_recursion_depth >= 512,
+               "recursion_budget_conformance: ch06 (6.4) requires at least 512 nested evaluations");
+        cases_run++;
+
         const int recursion_budget = scpp::ConstexprLimits{}.max_recursion_depth;
         const std::string count_source =
             "consteval int count(int n) { if (n <= 0) { return 0; } return count(n - 1) + 1; }\n";

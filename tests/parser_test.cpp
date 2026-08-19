@@ -5992,11 +5992,42 @@ void test_deeply_nested_parens_are_rejected() {
     }
 }
 
+// C++ recommends implementations support 256 levels of nested
+// parenthesised expressions and compound statements. scpp inherits no such
+// clause -- ch06 (6.3)-(6.4) covers constant evaluation only -- but the
+// recommendation is the only published number for this quantity, and a
+// limit below it would reject code every C++ implementation accepts. 128
+// was below it, and was below it because the codegen frames the limit is
+// divided into were 22,432 bytes; they are now 768. If a later change
+// regrows them, the honest response is to shrink the frames again rather
+// than to lower this, so pin the floor.
+void test_nesting_limit_meets_the_recommended_minimum() {
+    expect(scpp::kMaxNestingDepth >= 264,
+           "nesting_limit_minimum: kMaxNestingDepth must admit the 256 levels C++ recommends, plus "
+           "the fixed enclosing context the counter also charges for");
+}
+
+// The widening half of the same statement: 256 nested compound statements
+// is the shape the recommendation names, and it must actually parse rather
+// than merely be under a constant. This is the case that fails against a
+// pre-fix compiler, where the limit was 128.
+void test_recommended_nesting_depth_is_accepted() {
+    auto result = scpp::parse(nested_blocks_source(256));
+    expect(result.has_value(), "recommended_nesting_depth: 256 nested blocks must parse");
+}
+
 void test_moderately_nested_parens_are_accepted() {
-    // A quarter of the budget, which is far more parenthesis nesting than
-    // anything in this repository, has to keep working -- a limit that
-    // rejects ordinary code is not a fix.
-    auto result = scpp::parse(nested_parens_source(scpp::kMaxNestingDepth / 8));
+    // Far more parenthesis nesting than anything in this repository has to
+    // keep working -- a limit that rejects ordinary code is not a fix.
+    //
+    // This depth is deliberately absolute rather than a fraction of
+    // kMaxNestingDepth. Parsing nested parentheses costs exponential time
+    // (a separate, reported defect: 16 levels 0.46s, 20 levels 2.7s, 24
+    // levels 39s, 26 levels 156s, doubling about every two levels), so a
+    // depth that tracks the limit turns this case into a hang the moment
+    // the limit rises. It did: at kMaxNestingDepth/8 this ran for over
+    // half an hour when the limit went from 128 to 264.
+    auto result = scpp::parse(nested_parens_source(16));
     expect(result.has_value(), "moderately_nested_parens: nesting well inside the budget must still parse");
 }
 
@@ -6340,6 +6371,8 @@ int main() {
     test_union_field_loc_is_its_own_declaration();
     test_class_def_loc_is_the_class_declaration();
 
+    test_nesting_limit_meets_the_recommended_minimum();
+    test_recommended_nesting_depth_is_accepted();
     test_deeply_nested_parens_are_rejected();
     test_moderately_nested_parens_are_accepted();
     test_deeply_nested_blocks_are_rejected();

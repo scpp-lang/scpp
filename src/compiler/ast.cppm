@@ -19,25 +19,39 @@ export namespace scpp {
 //
 // It is derived rather than picked. Measured on this project's default
 // Debug build with the usual 8 MiB stack, the whole pipeline dies in
-// codegen at 93 levels of nested `for`, 186 of nested `if`, 372 of
-// nested blocks, 240 of nested lambdas and 552 of nested parentheses;
-// the per-level cost that produces those numbers is 89,513 bytes for a
-// `for` (four scpp::Codegen::codegen_stmt frames at 22,432 bytes each),
-// 44,893 for an `if` and 22,447 for a block. What this counter counts is
-// parser recursion, which is a several-times-over-count of source
-// nesting -- one `if` costs about six counted levels -- so the honest way
-// to size it is by the *ratio* between what it admits and what actually
-// crashes. At 128 the tightest of those ratios, for nested blocks and
-// nested `if`, is 2.95x; every other shape has more room than that.
+// codegen at 428 levels of nested `for`, 858 of nested `if`, 1,716 of
+// nested blocks and 306 of nested lambdas. Those depths are 4.6x what
+// they were when this constant was first sized, because the codegen
+// frames they are divided into shrank: scpp::Codegen::codegen_stmt was
+// 22,432 bytes and is now 768, after its switch arms were moved into
+// callees so that only the taken arm's frame is live. What this counter
+// counts is parser recursion, which is a several-times-over-count of
+// source nesting -- one block costs one counted level, an `if` or a `for`
+// two, a lambda four -- plus about eight counted levels of fixed enclosing
+// context before the first `{` of a function body.
+//
+// 264 is 256 + that fixed context, so that the 256 levels of nested
+// compound statement C++ recommends an implementation support actually
+// parse: at 256 only 252 did. The remaining sizing question is safety
+// margin, and the honest measure of it is the *ratio* between the source
+// nesting admitted and the depth that actually crashes. At 264 this
+// admits 131 nested `for`, 132 nested `if`, 260 nested blocks and 62
+// nested lambdas, giving ratios of 3.3x, 6.5x, 6.6x and 4.9x against the
+// crash depths above; the tightest still beats the 2.95x that 128 bought
+// before the frames shrank.
+//
+// Nested parentheses are the one recommended shape this does not reach --
+// 264 admits about 132 of them, not 256 -- and raising the constant to
+// cover them would take nested `for` below that margin. That is a
+// documented gap rather than a guess: closing it needs the same treatment
+// applied to the expression path that this constant's rise already
+// required of codegen_stmt. Note also that nested parentheses cost
+// exponential *parse time* (a separate, reported defect: 16 levels 0.46s,
+// 20 levels 2.7s, 24 levels 39s, 26 levels 156s), so the paren cases in
+// tests/parser_test.cpp deliberately do not scale with this constant.
 // tests/parser_test.cpp pins both sides of the boundary so CI notices if
 // the per-level cost ever grows and eats that margin.
-//
-// For comparison, the deepest nesting anywhere in this repository's own
-// sources -- including the self-hosted compiler, which is the most deeply
-// nested scpp that exists -- is 20 levels of braces, and the whole
-// workspace, the standard library and the sample applications all build
-// unchanged under this limit.
-constexpr int kMaxNestingDepth = 128;
+constexpr int kMaxNestingDepth = 264;
 
 class Expr;
 class Stmt;
