@@ -10566,6 +10566,30 @@ private:
             return std::move(node);
         }
         if (match(TokenKind::LParen)) {
+            // A '(' begins one of three things: a left fold `(... op pack)`,
+            // a right fold `(pack op ...)`, or an ordinary parenthesised
+            // expression. Only the folds contain a '...' directly inside
+            // these parentheses, and that is decidable from the token
+            // stream alone, so decide it here rather than by parsing a
+            // candidate and rewinding.
+            //
+            // Rewinding is what this did, and it cost exponential time.
+            // Detecting the right fold meant running a full parse_unary()
+            // over the parenthesised contents, then throwing the result
+            // away and parsing the same tokens again with parse_expr().
+            // Each nesting level therefore parsed its interior twice, so
+            // the innermost token of `((((...1...))))` was visited 2^depth
+            // times -- measured at exactly 2^depth: 256 visits at depth 8,
+            // 262,144 at depth 18, with 24 levels taking 42 seconds to
+            // parse. The scan below is linear in the tokens it skips and
+            // builds no AST, so the ordinary case now parses once.
+            if (!parenthesized_group_contains_fold_ellipsis()) {
+                auto inner_result = parse_expr();
+                if (!inner_result.has_value()) return std::unexpected(std::move(inner_result).error());
+                ExprPtr inner = std::move(inner_result).value();
+                if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                return std::move(inner);
+            }
             std::size_t saved_pos = pos_;
             if (match(TokenKind::Ellipsis)) {
                 std::optional<BinaryOp> op = parse_fold_operator();
@@ -10638,6 +10662,37 @@ private:
         node->lhs = std::move(lhs);
         node->rhs = std::move(rhs);
         return node;
+    }
+
+    // True if a '...' appears directly inside the parenthesised group that
+    // starts at pos_ (the '(' having already been consumed), i.e. at nesting
+    // depth zero within it. Both fold forms, `(... op pack)` and
+    // `(pack op ...)`, spell their ellipsis there; a '...' belonging to
+    // something nested, as in `(f(xs...))`, sits at a deeper level and is
+    // correctly not reported.
+    //
+    // This is a conservative over-approximation on purpose: it answers
+    // "could this be a fold?", not "is it one". A group containing a
+    // top-level '...' that turns out not to be a fold still falls through
+    // to the parse-and-rewind path below and is parsed exactly as before,
+    // so no input changes meaning -- only inputs that cannot be folds skip
+    // the speculative parse, which is what makes the common case linear.
+    [[nodiscard]] bool parenthesized_group_contains_fold_ellipsis() const {
+        int depth = 0;
+        std::size_t scan = pos_;
+        while (scan < tokens_.size()) {
+            TokenKind kind = tokens_[scan].kind;
+            if (kind == TokenKind::EndOfFile) return false;
+            if (kind == TokenKind::Ellipsis && depth == 0) return true;
+            if (kind == TokenKind::LParen || kind == TokenKind::LBracket || kind == TokenKind::LBrace) {
+                depth++;
+            } else if (kind == TokenKind::RParen || kind == TokenKind::RBracket || kind == TokenKind::RBrace) {
+                if (depth == 0) return false;
+                depth--;
+            }
+            scan++;
+        }
+        return false;
     }
 
     std::optional<BinaryOp> parse_fold_operator() {

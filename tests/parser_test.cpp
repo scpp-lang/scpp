@@ -6016,6 +6016,60 @@ void test_recommended_nesting_depth_is_accepted() {
     expect(result.has_value(), "recommended_nesting_depth: 256 nested blocks must parse");
 }
 
+// Parsing a parenthesised group used to cost exponential time: to decide
+// whether `(` began a right fold `(pack op ...)`, parse_primary ran a full
+// parse_unary() over the contents and threw the result away before parsing
+// them again, so every nesting level parsed its interior twice and the
+// innermost token of `((((1))))` was visited 2^depth times -- 256 visits at
+// depth 8, 262,144 at depth 18, 42 seconds to parse depth 24.
+//
+// This case is deliberately structural rather than timed: it asserts that
+// an input which the pre-fix parser could not finish now parses. At depth
+// 100 the pre-fix parser would visit the innermost token 2^100 times, so
+// against a pre-fix compiler this does not fail an assertion -- it fails by
+// never terminating. A wall-clock threshold would be the fragile
+// alternative, and 80 is inside the 86 parentheses kMaxNestingDepth admits,
+// so this stays a pure correctness assertion at whatever speed the parser
+// happens to run.
+void test_deeply_nested_parens_do_not_reparse_exponentially() {
+    auto result = scpp::parse(nested_parens_source(80));
+    expect(result.has_value(), "nested_parens_no_reparse: 80 nested parens must parse");
+}
+
+// The lookahead that replaced the speculative parse is deliberately a
+// conservative over-approximation -- it asks "could this group be a fold?",
+// not "is it one" -- so both fold spellings must still reach the fold path,
+// and a '...' that belongs to something nested must not drag an ordinary
+// parenthesised expression onto it.
+void test_fold_expressions_still_parse_after_lookahead() {
+    const std::string prefix = "template<typename T> concept Any = requires(T t) { t.use(); };\n";
+    auto return_expr_kind = [](const scpp::Program& program, const std::string& name) {
+        for (const scpp::Function& fn : program.functions) {
+            if (fn.name == name && fn.body != nullptr && !fn.body->statements.empty() &&
+                fn.body->statements[0]->expr != nullptr) {
+                return fn.body->statements[0]->expr->kind;
+            }
+        }
+        return scpp::ExprKind::IntegerLiteral;
+    };
+
+    scpp::Program right = expect_parse_ok(prefix + "int sum(const Any auto&... args) { return (args + ...); }\n"
+                                          "int main() { return 0; }\n");
+    expect(return_expr_kind(right, "sum") == scpp::ExprKind::Fold,
+           "fold_after_lookahead: `(args + ...)` must still parse as a fold");
+
+    scpp::Program left = expect_parse_ok(prefix + "int sum(const Any auto&... args) { return (... + args); }\n"
+                                         "int main() { return 0; }\n");
+    expect(return_expr_kind(left, "sum") == scpp::ExprKind::Fold,
+           "fold_after_lookahead: `(... + args)` must still parse as a fold");
+
+    scpp::Program nested = expect_parse_ok(prefix + "int take(const Any auto&... args) { return 0; }\n"
+                                           "int call(const Any auto&... args) { return (take(args...)); }\n"
+                                           "int main() { return 0; }\n");
+    expect(return_expr_kind(nested, "call") == scpp::ExprKind::Call,
+           "fold_after_lookahead: a '...' nested inside a call must not make the group a fold");
+}
+
 void test_moderately_nested_parens_are_accepted() {
     // Far more parenthesis nesting than anything in this repository has to
     // keep working -- a limit that rejects ordinary code is not a fix.
@@ -6371,6 +6425,8 @@ int main() {
     test_union_field_loc_is_its_own_declaration();
     test_class_def_loc_is_the_class_declaration();
 
+    test_deeply_nested_parens_do_not_reparse_exponentially();
+    test_fold_expressions_still_parse_after_lookahead();
     test_nesting_limit_meets_the_recommended_minimum();
     test_recommended_nesting_depth_is_accepted();
     test_deeply_nested_parens_are_rejected();
