@@ -40,15 +40,23 @@ export namespace scpp {
 // crash depths above; the tightest still beats the 2.95x that 128 bought
 // before the frames shrank.
 //
-// Nested parentheses are the one recommended shape this does not reach --
-// 264 admits about 132 of them, not 256 -- and raising the constant to
-// cover them would take nested `for` below that margin. That is a
-// documented gap rather than a guess: closing it needs the same treatment
-// applied to the expression path that this constant's rise already
-// required of codegen_stmt. Note also that nested parentheses cost
-// exponential *parse time* (a separate, reported defect: 16 levels 0.46s,
-// 20 levels 2.7s, 24 levels 39s, 26 levels 156s), so the paren cases in
-// tests/parser_test.cpp deliberately do not scale with this constant.
+// Nested parentheses are the one recommended shape this does not reach:
+// 264 admits 86 of them, not 256, a parenthesis costing about three counted
+// levels. What binds there is the *parser's* own recursion rather than
+// codegen's -- nested parentheses die at 383 levels, in parse and not in
+// any later pass, at a measured 21,693 bytes of host stack per level, so
+// the margin is 4.5x and `for` above remains the tightest shape. Admitting
+// the recommended 256 would need the parser to survive some 760 levels with
+// a comparable margin, i.e. the expression path's frames roughly halved --
+// the same treatment codegen_stmt already received. That is a documented,
+// measured gap rather than a guess.
+//
+// Both of those depths were unmeasurable when this constant was last set,
+// because parsing nested parentheses then cost exponential time; the
+// earlier "about 132" here was inferred from a diagnostic's column rather
+// than measured, and was wrong. That defect is fixed -- parse_primary no
+// longer speculatively parses a parenthesised group to test for a fold --
+// which is what made 86 and 383 observable.
 // tests/parser_test.cpp pins both sides of the boundary so CI notices if
 // the per-level cost ever grows and eats that margin.
 constexpr int kMaxNestingDepth = 264;
