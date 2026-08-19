@@ -6,6 +6,39 @@ import std;
 
 export namespace scpp {
 
+// The maximum depth to which any one construct may be nested: statements
+// inside statements, expressions inside expressions, and pointer/array/
+// template types inside one another.
+//
+// This is a *safety* limit rather than a language rule -- the spec says
+// nothing about parse nesting (ch06 §6(3)-(4) is the only implementation
+// limits clause and it covers constant evaluation only), so it exists
+// purely because every pass after parsing walks the tree with ordinary
+// host stack recursion, and a deep enough tree overflows the host stack
+// instead of producing a diagnostic.
+//
+// It is derived rather than picked. Measured on this project's default
+// Debug build with the usual 8 MiB stack, the whole pipeline dies in
+// codegen at 93 levels of nested `for`, 186 of nested `if`, 372 of
+// nested blocks, 240 of nested lambdas and 552 of nested parentheses;
+// the per-level cost that produces those numbers is 89,513 bytes for a
+// `for` (four scpp::Codegen::codegen_stmt frames at 22,432 bytes each),
+// 44,893 for an `if` and 22,447 for a block. What this counter counts is
+// parser recursion, which is a several-times-over-count of source
+// nesting -- one `if` costs about six counted levels -- so the honest way
+// to size it is by the *ratio* between what it admits and what actually
+// crashes. At 128 the tightest of those ratios, for nested blocks and
+// nested `if`, is 2.95x; every other shape has more room than that.
+// tests/parser_test.cpp pins both sides of the boundary so CI notices if
+// the per-level cost ever grows and eats that margin.
+//
+// For comparison, the deepest nesting anywhere in this repository's own
+// sources -- including the self-hosted compiler, which is the most deeply
+// nested scpp that exists -- is 20 levels of braces, and the whole
+// workspace, the standard library and the sample applications all build
+// unchanged under this limit.
+constexpr int kMaxNestingDepth = 128;
+
 class Expr;
 class Stmt;
 class SwitchCase;
@@ -254,6 +287,32 @@ class Type {
     // enclosing function template's own concrete Tail binding in place.
     bool is_pack_expansion = false;
 };
+
+// True when `type` nests more than `budget` levels deep through any of
+// its recursive links. Pointer and array types are built *iteratively* by
+// the parser (see the `while (match(TokenKind::Star))` loops in
+// parse_unqualified_type), so an `int` with two thousand stars parses
+// without the parser recursing at all and then kills whichever later pass
+// walks the two-thousand-link pointee chain -- counting parser recursion
+// would not see it, which is why the type itself is measured here.
+//
+// Like the other depth checks, this one never recurses deeper than the
+// budget it is handed, so it cannot overflow the stack it exists to
+// protect.
+bool type_nesting_exceeds(const Type& type, int budget) {
+    if (budget <= 0) return true;
+    const int child_budget = budget - 1;
+    if (type.pointee != nullptr && type_nesting_exceeds(*type.pointee, child_budget)) return true;
+    if (type.element != nullptr && type_nesting_exceeds(*type.element, child_budget)) return true;
+    if (type.function_return != nullptr && type_nesting_exceeds(*type.function_return, child_budget)) return true;
+    for (const Type& param : type.function_params) {
+        if (type_nesting_exceeds(param, child_budget)) return true;
+    }
+    for (const Type& template_arg : type.template_args) {
+        if (type_nesting_exceeds(template_arg, child_budget)) return true;
+    }
+    return false;
+}
 
 class AlignmentSpecifier {
   public:

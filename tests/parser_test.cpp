@@ -5954,6 +5954,108 @@ void test_class_def_loc_is_the_class_declaration() {
 }
 } // namespace
 
+
+// ch06 has the only implementation-limits clause in the spec and it
+// covers constant evaluation only, so the nesting limit is not a language
+// rule -- it exists because every pass after the parser walks the tree
+// with host-stack recursion, and before scpp.ast's kMaxNestingDepth a
+// deeply enough nested source crashed the compiler (SIGSEGV) instead of
+// diagnosing anything. These tests pin *both* sides of the boundary: the
+// accept side matters as much as the reject side, because the limit is
+// only defensible while the margin between what it admits and what
+// actually overflows the host stack survives, and that margin erodes
+// silently if a per-frame cost grows.
+std::string nested_parens_source(int depth) {
+    std::string source = "int main() {\n    int k = ";
+    for (int i = 0; i < depth; i++) source += "(";
+    source += "1";
+    for (int i = 0; i < depth; i++) source += ")";
+    source += ";\n    return k - k;\n}\n";
+    return source;
+}
+
+std::string nested_blocks_source(int depth) {
+    std::string source = "int main() {\n";
+    for (int i = 0; i < depth; i++) source += "{";
+    source += "\n    return 0;\n";
+    for (int i = 0; i < depth; i++) source += "}";
+    source += "\n}\n";
+    return source;
+}
+
+void test_deeply_nested_parens_are_rejected() {
+    auto result = scpp::parse(nested_parens_source(scpp::kMaxNestingDepth + 8));
+    expect(!result.has_value(), "deeply_nested_parens: over-deep nesting should be rejected, not accepted");
+    if (!result.has_value()) {
+        expect(std::string(result.error().what()).find("nesting is too deep") != std::string::npos,
+               "deeply_nested_parens: diagnostic should name the nesting limit");
+    }
+}
+
+void test_moderately_nested_parens_are_accepted() {
+    // A quarter of the budget, which is far more parenthesis nesting than
+    // anything in this repository, has to keep working -- a limit that
+    // rejects ordinary code is not a fix.
+    auto result = scpp::parse(nested_parens_source(scpp::kMaxNestingDepth / 8));
+    expect(result.has_value(), "moderately_nested_parens: nesting well inside the budget must still parse");
+}
+
+void test_deeply_nested_blocks_are_rejected() {
+    auto result = scpp::parse(nested_blocks_source(scpp::kMaxNestingDepth + 8));
+    expect(!result.has_value(), "deeply_nested_blocks: over-deep nesting should be rejected, not accepted");
+    if (!result.has_value()) {
+        expect(std::string(result.error().what()).find("nesting is too deep") != std::string::npos,
+               "deeply_nested_blocks: diagnostic should name the nesting limit");
+    }
+}
+
+void test_deeply_nested_namespaces_are_rejected() {
+    std::string source;
+    for (int i = 0; i < scpp::kMaxNestingDepth + 8; i++) source += "namespace n {\n";
+    source += "int x = 0;\n";
+    for (int i = 0; i < scpp::kMaxNestingDepth + 8; i++) source += "}\n";
+    auto result = scpp::parse(source);
+    expect(!result.has_value(), "deeply_nested_namespaces: over-deep namespace nesting should be rejected");
+    if (!result.has_value()) {
+        expect(std::string(result.error().what()).find("nesting is too deep") != std::string::npos,
+               "deeply_nested_namespaces: diagnostic should name the nesting limit");
+    }
+}
+
+// Pointer types are built by a loop rather than by recursion (see the
+// `while (match(TokenKind::Star))` in parse_unqualified_type), so an
+// over-deep type costs the parser no recursion at all and is caught by
+// measuring the finished type instead. Without that separate check this
+// case crashed while every recursive shape was already diagnosed.
+void test_deeply_nested_pointer_type_is_rejected() {
+    std::string source = "int main() {\n    int";
+    for (int i = 0; i < scpp::kMaxNestingDepth + 8; i++) source += " *";
+    source += " p = nullptr;\n    if (p == nullptr) { return 0; }\n    return 1;\n}\n";
+    auto result = scpp::parse(source);
+    expect(!result.has_value(), "deeply_nested_pointer_type: over-deep pointer type should be rejected");
+    if (!result.has_value()) {
+        expect(std::string(result.error().what()).find("nesting is too deep") != std::string::npos,
+               "deeply_nested_pointer_type: diagnostic should name the nesting limit");
+    }
+}
+
+// Left-associative operator chains are assembled by loops too, so a long
+// chain parses with almost no recursion and still produces a tree as deep
+// as the chain is long. This is the shape a parser-recursion counter
+// cannot see, which is why the loops count their own iterations.
+void test_long_binary_chain_is_rejected() {
+    std::string source = "int main() {\n    int k = 1";
+    for (int i = 0; i < scpp::kMaxNestingDepth + 8; i++) source += " + 1";
+    source += ";\n    return k - k;\n}\n";
+    auto result = scpp::parse(source);
+    expect(!result.has_value(), "long_binary_chain: an over-long operator chain should be rejected");
+    if (!result.has_value()) {
+        expect(std::string(result.error().what()).find("nesting is too deep") != std::string::npos,
+               "long_binary_chain: diagnostic should name the nesting limit");
+    }
+}
+
+
 int main() {
     test_int_main_return();
     test_function_with_params();
@@ -6237,6 +6339,13 @@ int main() {
     test_struct_field_loc_is_its_own_declaration();
     test_union_field_loc_is_its_own_declaration();
     test_class_def_loc_is_the_class_declaration();
+
+    test_deeply_nested_parens_are_rejected();
+    test_moderately_nested_parens_are_accepted();
+    test_deeply_nested_blocks_are_rejected();
+    test_deeply_nested_namespaces_are_rejected();
+    test_deeply_nested_pointer_type_is_rejected();
+    test_long_binary_chain_is_rejected();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
