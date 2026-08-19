@@ -3494,6 +3494,140 @@ llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
     return llvm::LLVMCodeGenLevelAggressive;
 }
 
+// The parser bounds its own recursion (see nesting_depth_ in
+// scpp.parser), but that counts *parse* depth, and two shapes build a
+// deep tree without a deep parse: left-associative operator chains are
+// assembled by loops rather than by recursion, and a Program can also
+// arrive here by being read back out of a .scppm module file by
+// read_expr/read_stmt below rather than by being parsed at all. Since
+// every pass after parsing -- codegen, movecheck's dataflow and interface
+// walks, monomorphize, the constant evaluator, mir's lowering, the
+// serializer in this file and cli's AST printer, thirteen separate
+// recursive descents in total -- walks the finished tree on the host
+// stack, the depth of the *tree* is checked here once, rather than asking
+// each of the thirteen to guard itself.
+//
+// This check cannot itself overflow: it never recurses deeper than the
+// budget it is given, because it stops as soon as that budget runs out.
+
+[[nodiscard]] std::optional<SourceLocation> stmt_nesting_overflow(const Stmt& stmt, int budget);
+
+// The child links enumerated here and in stmt_nesting_overflow are the
+// same set scpp.ast's rewrite_expr_locs walks; that function is the
+// closest thing this AST has to a canonical child enumeration, so the two
+// are meant to be read (and changed) together.
+[[nodiscard]] std::optional<SourceLocation> expr_nesting_overflow(const Expr& expr, int budget) {
+    if (budget <= 0) return expr.loc;
+    const int child_budget = budget - 1;
+    if (expr.lhs != nullptr) {
+        if (auto over = expr_nesting_overflow(*expr.lhs, child_budget); over.has_value()) return over;
+    }
+    if (expr.rhs != nullptr) {
+        if (auto over = expr_nesting_overflow(*expr.rhs, child_budget); over.has_value()) return over;
+    }
+    if (expr.third != nullptr) {
+        if (auto over = expr_nesting_overflow(*expr.third, child_budget); over.has_value()) return over;
+    }
+    for (const ExprPtr& arg : expr.args) {
+        if (arg == nullptr) continue;
+        if (auto over = expr_nesting_overflow(*arg, child_budget); over.has_value()) return over;
+    }
+    for (const ExplicitTemplateArg& template_arg : expr.explicit_template_args) {
+        if (template_arg.is_type || template_arg.value == nullptr) continue;
+        if (auto over = expr_nesting_overflow(*template_arg.value, child_budget); over.has_value()) return over;
+    }
+    for (const LambdaCapture& capture : expr.lambda_captures) {
+        if (capture.init == nullptr) continue;
+        if (auto over = expr_nesting_overflow(*capture.init, child_budget); over.has_value()) return over;
+    }
+    for (const Param& param : expr.lambda_params) {
+        if (param.default_expr == nullptr) continue;
+        if (auto over = expr_nesting_overflow(*param.default_expr, child_budget); over.has_value()) return over;
+    }
+    if (expr.lambda_body != nullptr) {
+        if (auto over = stmt_nesting_overflow(*expr.lambda_body, child_budget); over.has_value()) return over;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<SourceLocation> stmt_nesting_overflow(const Stmt& stmt, int budget) {
+    if (budget <= 0) return stmt.loc;
+    const int child_budget = budget - 1;
+    if (stmt.init != nullptr) {
+        if (auto over = expr_nesting_overflow(*stmt.init, child_budget); over.has_value()) return over;
+    }
+    for (const ExprPtr& ctor_arg : stmt.ctor_args) {
+        if (ctor_arg == nullptr) continue;
+        if (auto over = expr_nesting_overflow(*ctor_arg, child_budget); over.has_value()) return over;
+    }
+    if (stmt.expr != nullptr) {
+        if (auto over = expr_nesting_overflow(*stmt.expr, child_budget); over.has_value()) return over;
+    }
+    if (stmt.condition != nullptr) {
+        if (auto over = expr_nesting_overflow(*stmt.condition, child_budget); over.has_value()) return over;
+    }
+    if (stmt.then_branch != nullptr) {
+        if (auto over = stmt_nesting_overflow(*stmt.then_branch, child_budget); over.has_value()) return over;
+    }
+    if (stmt.else_branch != nullptr) {
+        if (auto over = stmt_nesting_overflow(*stmt.else_branch, child_budget); over.has_value()) return over;
+    }
+    for (const SwitchCase& switch_case : stmt.switch_cases) {
+        if (switch_case.value != nullptr) {
+            if (auto over = expr_nesting_overflow(*switch_case.value, child_budget); over.has_value()) return over;
+        }
+        for (const StmtPtr& case_stmt : switch_case.statements) {
+            if (case_stmt == nullptr) continue;
+            if (auto over = stmt_nesting_overflow(*case_stmt, child_budget); over.has_value()) return over;
+        }
+    }
+    for (const StmtPtr& nested : stmt.statements) {
+        if (nested == nullptr) continue;
+        if (auto over = stmt_nesting_overflow(*nested, child_budget); over.has_value()) return over;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::expected<void, DriverError> reject_over_nested_ast(const Program& program) {
+    std::optional<SourceLocation> over{};
+    for (const Function& fn : program.functions) {
+        for (const Param& param : fn.params) {
+            if (param.default_expr == nullptr) continue;
+            over = expr_nesting_overflow(*param.default_expr, kMaxNestingDepth);
+            if (over.has_value()) break;
+        }
+        if (!over.has_value()) {
+            for (const MemberInitializer& member_init : fn.member_initializers) {
+                if (member_init.initializer.expr != nullptr) {
+                    over = expr_nesting_overflow(*member_init.initializer.expr, kMaxNestingDepth);
+                    if (over.has_value()) break;
+                }
+                for (const ExprPtr& brace_arg : member_init.initializer.brace_args) {
+                    if (brace_arg == nullptr) continue;
+                    over = expr_nesting_overflow(*brace_arg, kMaxNestingDepth);
+                    if (over.has_value()) break;
+                }
+                if (over.has_value()) break;
+            }
+        }
+        if (!over.has_value() && fn.body != nullptr) over = stmt_nesting_overflow(*fn.body, kMaxNestingDepth);
+        if (over.has_value()) break;
+    }
+    if (!over.has_value()) {
+        for (const GlobalVar& global : program.globals) {
+            if (global.decl == nullptr) continue;
+            over = stmt_nesting_overflow(*global.decl, kMaxNestingDepth);
+            if (over.has_value()) break;
+        }
+    }
+    if (!over.has_value()) return {};
+    std::string message;
+    message += "nesting is too deep: this construct is more than ";
+    message += std::to_string(kMaxNestingDepth);
+    message += " levels deep, which exceeds the maximum nesting depth the compiler supports";
+    return std::unexpected(DriverError(message, *over));
+}
+
 // Move-checks an already-parsed (and, if it has imports of its own,
 // already import-merged -- see scpp.parser's merge_imported_module)
 // Program and lowers it to a native object file at `object_path`. Shared
@@ -3537,6 +3671,13 @@ llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
     // catch; this function's own former `try`/`catch (const
     // ConstexprError&)` is gone, since nothing can throw through it
     // anymore.)
+    // The nesting gate runs before any other pass touches the tree: every
+    // pass below (and monomorphize itself) descends it recursively on the
+    // host stack, so this has to reject an over-deep tree while the stack
+    // is still empty.
+    if (auto nesting_result = reject_over_nested_ast(program); !nesting_result.has_value()) {
+        return std::unexpected(nesting_result.error());
+    }
     auto monomorphize_result = monomorphize_generics(program);
     if (!monomorphize_result.has_value()) {
         const DataflowError& error = monomorphize_result.error();

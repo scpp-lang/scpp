@@ -609,6 +609,13 @@ private:
     std::size_t synthesized_for_temp_counter_ = 0;
     int loop_depth_ = 0;
     int switch_depth_ = 0;
+    // How deep the recursive descent currently is, counted across the
+    // statement and expression cycles (parse_statement -> parse_block ->
+    // parse_statement, parse_primary -> parse_expr -> parse_primary, and
+    // parse_unary -> parse_unary). Bounded by kMaxNestingDepth so that a
+    // deeply nested source file is diagnosed rather than overflowing the
+    // host stack; see the derivation on kMaxNestingDepth in scpp.ast.
+    int nesting_depth_ = 0;
 
     [[nodiscard]] const Token& peek() const { return tokens_[pos_]; }
     [[nodiscard]] bool check(TokenKind kind) const { return peek().kind == kind; }
@@ -3728,6 +3735,20 @@ private:
     // struct/class field, or return type) keeps the original rejection.
     [[nodiscard]] std::expected<Type, ParseError> parse_type(bool allow_rvalue_ref = false, bool* out_bare_const = nullptr,
                     bool allow_const_qualified_value_type = false) {
+        // Types are checked on the finished type rather than by counting
+        // recursion, because the parser builds pointer and array types
+        // with loops -- `int` followed by two thousand stars costs the
+        // parser no depth at all and still produces a two-thousand-link
+        // chain for every later pass to recurse over.
+        auto type_result = parse_type_inner(allow_rvalue_ref, out_bare_const, allow_const_qualified_value_type);
+        if (type_result.has_value() && type_nesting_exceeds(type_result.value(), kMaxNestingDepth)) {
+            return std::unexpected(nesting_too_deep_error("type"));
+        }
+        return type_result;
+    }
+
+    [[nodiscard]] std::expected<Type, ParseError> parse_type_inner(bool allow_rvalue_ref, bool* out_bare_const,
+                    bool allow_const_qualified_value_type) {
         bool has_const_prefix = match(TokenKind::KwConst);
         auto type_result = parse_unqualified_type(/*const_qualifies_first_pointer=*/has_const_prefix);
         if (!type_result.has_value()) return std::unexpected(std::move(type_result).error());
@@ -5226,6 +5247,17 @@ private:
     // ... { ... }`: every direct top-level item inside the block behaves
     // as though it had its own leading `export`.
     [[nodiscard]] std::expected<void, ParseError> parse_namespace_block(Program& program, bool export_contents = false) {
+        nesting_depth_++;
+        if (nesting_depth_ > kMaxNestingDepth) {
+            nesting_depth_--;
+            return std::unexpected(nesting_too_deep_error("namespace"));
+        }
+        auto result = parse_namespace_block_inner(program, export_contents);
+        nesting_depth_--;
+        return result;
+    }
+
+    [[nodiscard]] std::expected<void, ParseError> parse_namespace_block_inner(Program& program, bool export_contents) {
         if (auto _r = expect(TokenKind::KwNamespace, "'namespace'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         std::size_t pushed = 0;
         for (;;) {
@@ -8818,6 +8850,31 @@ private:
     }
 
     [[nodiscard]] std::expected<StmtPtr, ParseError> parse_statement() {
+        // Depth-checking wrapper; parse_statement_inner is the parser
+        // proper. Written as a wrapper rather than as increments spread
+        // through the body because the body has dozens of return
+        // statements and every one of them would have to decrement.
+        nesting_depth_++;
+        if (nesting_depth_ > kMaxNestingDepth) {
+            nesting_depth_--;
+            return std::unexpected(nesting_too_deep_error("statement"));
+        }
+        auto result = parse_statement_inner();
+        nesting_depth_--;
+        return result;
+    }
+
+    [[nodiscard]] ParseError nesting_too_deep_error(const std::string& what) {
+        std::string message{};
+        message += "nesting is too deep: this ";
+        message += what;
+        message += " is more than ";
+        message += std::to_string(static_cast<std::int64_t>(kMaxNestingDepth));
+        message += " levels deep, which exceeds the maximum nesting depth the compiler supports";
+        return ParseError(peek().line, peek().column, message);
+    }
+
+    [[nodiscard]] std::expected<StmtPtr, ParseError> parse_statement_inner() {
         // ch00 §2/ch01 §1.3: `[[scpp::unsafe]] { ... }` -- attribute-
         // driven now, not a keyword. Parses (and discards) any leading
         // attribute-specifier-seq first (real C++ grammar already
@@ -9397,6 +9454,17 @@ private:
     }
 
     [[nodiscard]] std::expected<ExprPtr, ParseError> parse_assignment() {
+        nesting_depth_++;
+        if (nesting_depth_ > kMaxNestingDepth) {
+            nesting_depth_--;
+            return std::unexpected(nesting_too_deep_error("expression"));
+        }
+        auto result = parse_assignment_inner();
+        nesting_depth_--;
+        return result;
+    }
+
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_assignment_inner() {
         auto lhs_result = parse_conditional();
         if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
         ExprPtr lhs = std::move(lhs_result).value();
@@ -9440,7 +9508,17 @@ private:
         auto lhs_result = parse_logic_and();
         if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
         ExprPtr lhs = std::move(lhs_result).value();
+        int chain_depth = 0;
         while (check(TokenKind::PipePipe)) {
+            // Left-associative chains are built by this loop, not by
+            // recursion, so each iteration deepens the tree by one level
+            // without deepening the parse -- count it explicitly or a
+            // long chain slips past the recursion guard and overflows a
+            // later pass instead. See kMaxNestingDepth in scpp.ast.
+            chain_depth++;
+            if (nesting_depth_ + chain_depth > kMaxNestingDepth) {
+                return std::unexpected(nesting_too_deep_error("expression"));
+            }
             advance();
             auto rhs_result = parse_logic_and();
             if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
@@ -9454,7 +9532,13 @@ private:
         auto lhs_result = parse_equality();
         if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
         ExprPtr lhs = std::move(lhs_result).value();
+        int chain_depth = 0;
         while (check(TokenKind::AmpAmp)) {
+            // One tree level per iteration; see parse_logic_or's note.
+            chain_depth++;
+            if (nesting_depth_ + chain_depth > kMaxNestingDepth) {
+                return std::unexpected(nesting_too_deep_error("expression"));
+            }
             advance();
             auto rhs_result = parse_equality();
             if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
@@ -9468,7 +9552,13 @@ private:
         auto lhs_result = parse_relational();
         if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
         ExprPtr lhs = std::move(lhs_result).value();
+        int chain_depth = 0;
         for (;;) {
+            // One tree level per iteration; see parse_logic_or's note.
+            chain_depth++;
+            if (nesting_depth_ + chain_depth > kMaxNestingDepth) {
+                return std::unexpected(nesting_too_deep_error("expression"));
+            }
             if (match(TokenKind::EqualEqual)) {
                 auto rhs_result = parse_relational();
                 if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
@@ -9490,7 +9580,13 @@ private:
         auto lhs_result = parse_additive();
         if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
         ExprPtr lhs = std::move(lhs_result).value();
+        int chain_depth = 0;
         for (;;) {
+            // One tree level per iteration; see parse_logic_or's note.
+            chain_depth++;
+            if (nesting_depth_ + chain_depth > kMaxNestingDepth) {
+                return std::unexpected(nesting_too_deep_error("expression"));
+            }
             if (match(TokenKind::Less)) {
                 auto rhs_result = parse_additive();
                 if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
@@ -9522,7 +9618,13 @@ private:
         auto lhs_result = parse_multiplicative();
         if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
         ExprPtr lhs = std::move(lhs_result).value();
+        int chain_depth = 0;
         for (;;) {
+            // One tree level per iteration; see parse_logic_or's note.
+            chain_depth++;
+            if (nesting_depth_ + chain_depth > kMaxNestingDepth) {
+                return std::unexpected(nesting_too_deep_error("expression"));
+            }
             if (match(TokenKind::Plus)) {
                 auto rhs_result = parse_multiplicative();
                 if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
@@ -9544,7 +9646,13 @@ private:
         auto lhs_result = parse_unary();
         if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
         ExprPtr lhs = std::move(lhs_result).value();
+        int chain_depth = 0;
         for (;;) {
+            // One tree level per iteration; see parse_logic_or's note.
+            chain_depth++;
+            if (nesting_depth_ + chain_depth > kMaxNestingDepth) {
+                return std::unexpected(nesting_too_deep_error("expression"));
+            }
             if (match(TokenKind::Star)) {
                 auto rhs_result = parse_unary();
                 if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
@@ -9563,6 +9671,17 @@ private:
     }
 
     [[nodiscard]] std::expected<ExprPtr, ParseError> parse_unary() {
+        nesting_depth_++;
+        if (nesting_depth_ > kMaxNestingDepth) {
+            nesting_depth_--;
+            return std::unexpected(nesting_too_deep_error("expression"));
+        }
+        auto result = parse_unary_inner();
+        nesting_depth_--;
+        return result;
+    }
+
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_unary_inner() {
         SourceLocation loc = current_loc();
         if (match(TokenKind::KwAlignof)) {
             if (auto _r = expect(TokenKind::LParen, "'(' after 'alignof'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
@@ -9779,7 +9898,13 @@ private:
     // e.g. `p.x`, `arr[i]`, `p.inner.x`, `arr[i].x`, `p->x`,
     // `obj.method(args)`.
     [[nodiscard]] std::expected<ExprPtr, ParseError> parse_postfix(ExprPtr expr) {
+        int chain_depth = 0;
         for (;;) {
+            // One tree level per iteration; see parse_logic_or's note.
+            chain_depth++;
+            if (nesting_depth_ + chain_depth > kMaxNestingDepth) {
+                return std::unexpected(nesting_too_deep_error("expression"));
+            }
             if (match(TokenKind::Dot)) {
                 if (match(TokenKind::Tilde)) {
                     auto destroyed_type_result = parse_type();
@@ -10111,6 +10236,17 @@ private:
     }
 
     [[nodiscard]] std::expected<ExprPtr, ParseError> parse_primary() {
+        nesting_depth_++;
+        if (nesting_depth_ > kMaxNestingDepth) {
+            nesting_depth_--;
+            return std::unexpected(nesting_too_deep_error("expression"));
+        }
+        auto result = parse_primary_inner();
+        nesting_depth_--;
+        return result;
+    }
+
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_primary_inner() {
         const Token& tok = peek();
         // current_loc() (not a bare make_source_location(tok.line,
         // tok.column)) so every primary expression this function builds
