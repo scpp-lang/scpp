@@ -302,31 +302,35 @@ namespace {
             case ExprKind::Binary:
                 switch (expr.binary_op) {
                     case BinaryOp::Add:
-                        if (std::optional<Type> lhs = infer_type(*expr.lhs), rhs = infer_type(*expr.rhs);
-                            lhs.has_value() && rhs.has_value()) {
-                            if (std::optional<Type> result = pointer_arithmetic_result_type(expr.binary_op, *lhs, *rhs)) {
-                                return result;
-                            }
-                        }
-                        [[fallthrough]];
                     case BinaryOp::Sub:
-                        if (expr.binary_op == BinaryOp::Sub) {
-                            if (std::optional<Type> lhs = infer_type(*expr.lhs), rhs = infer_type(*expr.rhs);
-                                lhs.has_value() && rhs.has_value()) {
-                                if (std::optional<Type> result = pointer_arithmetic_result_type(expr.binary_op, *lhs, *rhs)) {
-                                    return result;
-                                }
-                            }
-                        }
-                        [[fallthrough]];
                     case BinaryOp::Mul:
                     case BinaryOp::Div:
                     case BinaryOp::AddAssign:
                     case BinaryOp::SubAssign:
                     case BinaryOp::MulAssign:
                     case BinaryOp::DivAssign:
-                    case BinaryOp::Assign:
-                        return infer_type(*expr.lhs);
+                    case BinaryOp::Assign: {
+                        // Each operand is inferred at most once, and the
+                        // answer reused. Inferring the left operand for the
+                        // pointer-arithmetic test and then inferring it
+                        // again to produce the result made an n-term
+                        // left-leaning `a + b + c + ...` cost 2^n, because
+                        // each level re-walked its entire prefix -- 4.2
+                        // million Type constructions for 22 terms, which is
+                        // 2^22. movecheck's infer_expr_type had the same
+                        // shape and is corrected the same way.
+                        if (expr.binary_op != BinaryOp::Add && expr.binary_op != BinaryOp::Sub) {
+                            return infer_type(*expr.lhs);
+                        }
+                        std::optional<Type> lhs = infer_type(*expr.lhs);
+                        std::optional<Type> rhs = infer_type(*expr.rhs);
+                        if (lhs.has_value() && rhs.has_value()) {
+                            if (std::optional<Type> result = pointer_arithmetic_result_type(expr.binary_op, *lhs, *rhs)) {
+                                return result;
+                            }
+                        }
+                        return lhs;
+                    }
                     case BinaryOp::Eq:
                     case BinaryOp::Ne:
                     case BinaryOp::Lt:

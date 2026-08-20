@@ -320,6 +320,22 @@ void run_test_case_files() {
 // test_parse_returns_disengaged_expected_on_failure_without_throwing and
 // movecheck_test.cpp's analogous pair, added when parser.cppm/DataflowError
 // made this same exceptions -> std::expected transition.
+// Codegen::infer_type carried the same 2^n shape movecheck's
+// infer_expr_type did -- inferring the left operand for the
+// pointer-arithmetic test and then inferring it again for the result --
+// which showed up as 4,194,304 Type constructions (2^22) while compiling a
+// 22-term chain. Structural rather than timed, for the same reason as
+// movecheck's counterpart: pre-fix this input does not terminate at 40
+// terms, so there is nothing to threshold.
+void test_long_binary_chain_generates_without_re_walking_its_prefix() {
+    cases_run++;
+    std::string chain = "1";
+    for (int term = 2; term <= 40; term++) chain += " + " + std::to_string(term);
+    std::string source = "int main() {\n    int k = " + chain + ";\n    return k - k;\n}\n";
+    auto ir_result = try_generate_ir(source);
+    expect(ir_result.has_value(), "long_binary_chain_generates: a 40-term chain must reach codegen");
+}
+
 void test_generate_returns_engaged_expected_on_success() {
     cases_run++;
     scpp::Program program = parse_with_std_imports(
@@ -2656,6 +2672,7 @@ void run_call_resolution_diagnostic_tests() {
 
 int main() {
     run_test_case_files();
+    test_long_binary_chain_generates_without_re_walking_its_prefix();
     test_generate_returns_engaged_expected_on_success();
     test_generate_returns_disengaged_expected_on_failure_without_throwing();
     run_constexpr_engine_direct_api_tests();
