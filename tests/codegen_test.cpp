@@ -549,6 +549,124 @@ void test_partial_brace_list_for_an_array_of_class_type_constructs_the_rest() {
                (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
 }
 
+// A multi-dimensional declarator binds left-to-right ([dcl.array], adopted
+// unchanged by ch05 §9.4(1)): `int a[2][3]` is an array of 2 arrays of 3
+// int. The parser built the type by wrapping the element in a new Array as
+// each bracket was read, which made the *last* bracket the outermost one and
+// silently transposed every bound -- so this asserts the shape from both
+// sides. `a[1][2]` is the in-bounds subscript and was rejected; `a[2][1]` is
+// out of bounds and was accepted. Asserting only the first would pass again
+// if the bounds were transposed back.
+void test_multidimensional_array_binds_its_bounds_left_to_right() {
+    cases_run++;
+    auto in_bounds = try_generate_ir(
+        "int main() {\n"
+        "    int a[2][3];\n"
+        "    a[1][2] = 0;\n"
+        "    return a[1][2];\n"
+        "}\n");
+    expect(in_bounds.has_value(),
+           "multidim_bounds: expected a[1][2] of an int[2][3] to be in bounds, got " +
+               (in_bounds.has_value() ? std::string{} : in_bounds.error().kind + ": " + in_bounds.error().message));
+
+    auto transposed = try_generate_ir(
+        "int main() {\n"
+        "    int a[2][3];\n"
+        "    a[2][1] = 0;\n"
+        "    return a[2][1];\n"
+        "}\n");
+    expect(!transposed.has_value(),
+           "multidim_bounds: expected a[2][1] of an int[2][3] to be out of bounds");
+    if (!transposed.has_value()) {
+        expect(transposed.error().kind == "CodegenError",
+               "multidim_bounds: expected a CodegenError, got " + transposed.error().kind);
+        expect(transposed.error().message.find("out of bounds for array of size 2") != std::string::npos,
+               "multidim_bounds: expected the outer bound to be 2, got " + transposed.error().message);
+    }
+}
+
+// The transposition kept `sizeof(a)` correct -- the same elements in the
+// same total storage -- so only the *nested* size distinguishes the two
+// shapes: a row of `int[2][3]` is 12 bytes, and was 8. Folding the
+// constexpr call reduces both to one literal, which also pins that the
+// constant evaluator walks the same nesting codegen does.
+void test_multidimensional_array_row_spans_the_inner_bound() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "constexpr int shape() {\n"
+        "    int a[2][3];\n"
+        "    std::size_t whole = sizeof(a);\n"
+        "    std::size_t row = sizeof(a[0]);\n"
+        "    return static_cast<int>(whole) * 1000 + static_cast<int>(row);\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int folded = shape();\n"
+        "    return folded;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "multidim_sizeof: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+    if (!ir_result.has_value()) return;
+    expect(ir_result.value().find("24012") != std::string::npos,
+           "multidim_sizeof: expected sizeof(a)==24 and sizeof(a[0])==12 to fold to 24012, so a row "
+           "spans the inner bound rather than the outer one");
+}
+
+// A fix that reversed exactly two bounds would be the same list-not-model
+// error: three dimensions have to nest in source order too, and the middle
+// bound must not be the one that stays put by accident.
+void test_three_dimensional_array_bounds_are_not_reversed() {
+    cases_run++;
+    auto in_bounds = try_generate_ir(
+        "int main() {\n"
+        "    int a[2][3][4];\n"
+        "    a[1][2][3] = 0;\n"
+        "    return a[1][2][3];\n"
+        "}\n");
+    expect(in_bounds.has_value(),
+           "multidim_3d: expected a[1][2][3] of an int[2][3][4] to be in bounds, got " +
+               (in_bounds.has_value() ? std::string{} : in_bounds.error().kind + ": " + in_bounds.error().message));
+
+    auto reversed = try_generate_ir(
+        "int main() {\n"
+        "    int a[2][3][4];\n"
+        "    a[3][2][1] = 0;\n"
+        "    return a[3][2][1];\n"
+        "}\n");
+    expect(!reversed.has_value(),
+           "multidim_3d: expected the fully reversed a[3][2][1] to be out of bounds");
+    if (!reversed.has_value()) {
+        expect(reversed.error().message.find("out of bounds for array of size 2") != std::string::npos,
+               "multidim_3d: expected the outermost bound to be 2, got " + reversed.error().message);
+    }
+}
+
+// Indexing in bounds is not the same as indexing the right cell: this walks
+// both dimensions and reads two distinct cells back, so a shape that merely
+// admitted the subscripts without addressing them consistently would not
+// fold to 1201.
+void test_multidimensional_array_addresses_each_cell_distinctly() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "constexpr int fill() {\n"
+        "    int a[2][3]{};\n"
+        "    for (int i = 0; i < 2; i = i + 1) {\n"
+        "        for (int j = 0; j < 3; j = j + 1) { a[i][j] = i * 10 + j; }\n"
+        "    }\n"
+        "    return a[1][2] * 100 + a[0][1];\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int folded = fill();\n"
+        "    return folded;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "multidim_cells: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+    if (!ir_result.has_value()) return;
+    expect(ir_result.value().find("1201") != std::string::npos,
+           "multidim_cells: expected a[1][2]==12 and a[0][1]==1 to fold to 1201");
+}
+
 void test_generate_returns_engaged_expected_on_success() {
     cases_run++;
     scpp::Program program = parse_with_std_imports(
@@ -2938,6 +3056,10 @@ int main() {
     test_too_many_array_initializers_are_rejected_by_both_implementations();
     test_array_brace_list_checks_each_element_against_the_element_type();
     test_partial_brace_list_for_an_array_of_class_type_constructs_the_rest();
+    test_multidimensional_array_binds_its_bounds_left_to_right();
+    test_multidimensional_array_row_spans_the_inner_bound();
+    test_three_dimensional_array_bounds_are_not_reversed();
+    test_multidimensional_array_addresses_each_cell_distinctly();
     test_auto_reference_to_a_reference_returning_call_collapses();
     test_auto_reference_to_a_reference_returning_method_collapses();
     test_generate_returns_engaged_expected_on_success();
