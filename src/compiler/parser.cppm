@@ -3950,6 +3950,13 @@ private:
     // template-parameter-dependent bound such as `sizeof(T)`, at each
     // point of instantiation -- see monomorphize.cppm), then fills in
     // `array_size` and clears `array_size_expr`.
+    //
+    // Multi-dimensional declarators bind left-to-right ([dcl.array], adopted
+    // unchanged by ch05 §9.4(1)): `int a[2][3]` is "array of 2 arrays of 3
+    // int", so the FIRST bracket names the outermost bound. The brackets are
+    // therefore collected in source order and the Type built up from the last
+    // one inward -- wrapping `base` as each bracket is read would make the
+    // last bracket outermost and silently transpose every bound.
     [[nodiscard]] std::expected<Type, ParseError> parse_array_suffix(Type base) {
         // ch00 §2/ch01 §1.3: `[[` (a doubled bracket) starts an
         // attribute-specifier-seq, never an array declarator -- stop
@@ -3958,6 +3965,7 @@ private:
         // own type is a Reference) array-of-references suffix. A real
         // array declarator's own size is always a single `[` (never
         // doubled), so this check never rejects a legitimate one.
+        std::vector<std::shared_ptr<Expr>> bounds{};
         while (check(TokenKind::LBracket) && peek_at(1).kind != TokenKind::LBracket) {
             const Token& bracket_tok = peek();
             if (base.kind == TypeKind::Reference) {
@@ -3968,12 +3976,14 @@ private:
             if (!size_expr_result.has_value()) return std::unexpected(std::move(size_expr_result).error());
             ExprPtr size_expr = std::move(size_expr_result).value();
             if (auto _r = expect(TokenKind::RBracket, "']'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
-            auto element = std::make_shared<Type>(base);
+            bounds.push_back(std::shared_ptr<Expr>(std::move(size_expr)));
+        }
+        for (std::size_t i = bounds.size(); i > 0; --i) {
             Type array_type{};
             array_type.kind = TypeKind::Array;
-            array_type.element = std::move(element);
-            array_type.array_size_expr = std::shared_ptr<Expr>(std::move(size_expr));
-            base = array_type;
+            array_type.element = std::make_shared<Type>(std::move(base));
+            array_type.array_size_expr = bounds[i - 1];
+            base = std::move(array_type);
         }
         return base;
     }
