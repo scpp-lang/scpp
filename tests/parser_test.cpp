@@ -6141,6 +6141,103 @@ void test_long_binary_chain_is_rejected() {
 }
 
 
+// A reference binding to a deduced type. `auto& v = expr;` was a parse
+// error -- "expected variable name but found '&'" -- because the
+// `auto` declaration grammar was written twice and only the range-for
+// copy (parse_for_range_decl) accepted `const` and `&`. Both callers
+// now share parse_auto_declared_type, so the two spellings cannot
+// disagree again. The `auto` sentinel inside the Reference is what
+// monomorphize already resolves for any VarDecl of this shape.
+void test_auto_reference_declaration_parses_as_a_reference_to_auto() {
+    scpp::Program program = expect_parse_ok("int f() { int a = 1; auto& r = a; return r; }");
+    const scpp::Stmt& decl = *program.functions[0].body->statements[1];
+    expect(decl.kind == scpp::StmtKind::VarDecl && decl.var_name == "r",
+           "auto_reference_declaration: statement 1 should declare 'r'");
+    expect(decl.type.kind == scpp::TypeKind::Reference, "auto_reference_declaration: type should be a Reference");
+    expect(decl.type.pointee != nullptr && is_named_type(*decl.type.pointee, "auto"),
+           "auto_reference_declaration: referent should be the 'auto' placeholder");
+    expect(decl.type.is_mutable_ref, "auto_reference_declaration: a bare 'auto&' should be mutable");
+}
+
+void test_const_auto_reference_declaration_is_a_read_only_reference() {
+    scpp::Program program = expect_parse_ok("int f() { int a = 1; const auto& r = a; return r; }");
+    const scpp::Stmt& decl = *program.functions[0].body->statements[1];
+    expect(decl.type.kind == scpp::TypeKind::Reference && decl.type.pointee != nullptr &&
+               is_named_type(*decl.type.pointee, "auto"),
+           "const_auto_reference_declaration: type should be a Reference to 'auto'");
+    expect(!decl.type.is_mutable_ref, "const_auto_reference_declaration: 'const auto&' should not be mutable");
+}
+
+// `const auto v = expr;` was "expected a type name": the declaration
+// path only looked for `auto` as the *first* token, so a leading
+// `const` sent it into parse_type, which has no `auto` to find.
+void test_const_auto_value_declaration_is_const() {
+    scpp::Program program = expect_parse_ok("int f() { int a = 1; const auto v = a; return v; }");
+    const scpp::Stmt& decl = *program.functions[0].body->statements[1];
+    expect(is_named_type(decl.type, "auto") && decl.var_name == "v",
+           "const_auto_value_declaration: type should be the 'auto' placeholder");
+    expect(decl.is_const, "const_auto_value_declaration: 'const auto' should be const");
+}
+
+// Two spellings the language does not have. Both were reported as raw
+// parse failures naming the punctuation ("expected variable name but
+// found '&&'"), which says nothing about the rule being enforced.
+void test_auto_rvalue_reference_declaration_reports_the_parameter_only_rule() {
+    bool threw = false;
+    if (auto _r = scpp::parse("int f() { int a = 1; auto&& r = a; return r; }"); !_r.has_value()) {
+        threw = true;
+        const std::string message = _r.error().what();
+        expect(message.find("rvalue reference") != std::string::npos,
+               "auto_rvalue_reference_declaration: expected the rvalue-reference rule in " + message);
+        expect(message.find("parameter") != std::string::npos,
+               "auto_rvalue_reference_declaration: expected the parameter-only restriction in " + message);
+    }
+    expect(threw, "auto_rvalue_reference_declaration: expected a ParseError");
+}
+
+void test_auto_pointer_declaration_points_at_plain_auto() {
+    bool threw = false;
+    if (auto _r = scpp::parse("int f() { int a = 1; auto* p = &a; return *p; }"); !_r.has_value()) {
+        threw = true;
+        const std::string message = _r.error().what();
+        expect(message.find("'auto p = &x;'") != std::string::npos,
+               "auto_pointer_declaration: expected the working spelling in " + message);
+    }
+    expect(threw, "auto_pointer_declaration: expected a ParseError");
+}
+
+// The two callers of the shared grammar, pinned against each other: a
+// range-for loop variable and an ordinary declaration must produce the
+// same type for the same spelling. This is the property that was
+// violated -- one accepted `auto&`, the other did not.
+void test_range_for_and_variable_declaration_agree_on_auto_reference() {
+    scpp::Program loop_program = expect_parse_ok(
+        "int f() { int values[3]{}; for (const auto& v : values) { return v; } return 0; }");
+    scpp::Program decl_program = expect_parse_ok("int f() { int a = 1; const auto& v = a; return v; }");
+
+    // The loop variable is the desugaring's inner declaration; find it
+    // by name rather than by position, which the desugaring owns.
+    const scpp::Stmt* loop_var = nullptr;
+    std::function<void(const scpp::Stmt&)> find = [&](const scpp::Stmt& stmt) {
+        if (stmt.kind == scpp::StmtKind::VarDecl && stmt.var_name == "v") loop_var = &stmt;
+        for (const auto& child : stmt.statements) {
+            if (child != nullptr) find(*child);
+        }
+        if (stmt.then_branch != nullptr) find(*stmt.then_branch);
+        if (stmt.else_branch != nullptr) find(*stmt.else_branch);
+    };
+    find(*loop_program.functions[0].body);
+    expect(loop_var != nullptr, "range_for_and_variable_declaration_agree: loop variable 'v' not found");
+    if (loop_var == nullptr) return;
+
+    const scpp::Stmt& decl = *decl_program.functions[0].body->statements[1];
+    expect(loop_var->type.kind == decl.type.kind && loop_var->type.is_mutable_ref == decl.type.is_mutable_ref,
+           "range_for_and_variable_declaration_agree: the two spellings should produce the same reference type");
+    expect(loop_var->type.pointee != nullptr && decl.type.pointee != nullptr &&
+               is_named_type(*loop_var->type.pointee, "auto") && is_named_type(*decl.type.pointee, "auto"),
+           "range_for_and_variable_declaration_agree: both should refer to the 'auto' placeholder");
+}
+
 int main() {
     test_int_main_return();
     test_function_with_params();
@@ -6435,6 +6532,13 @@ int main() {
     test_deeply_nested_namespaces_are_rejected();
     test_deeply_nested_pointer_type_is_rejected();
     test_long_binary_chain_is_rejected();
+
+    test_auto_reference_declaration_parses_as_a_reference_to_auto();
+    test_const_auto_reference_declaration_is_a_read_only_reference();
+    test_const_auto_value_declaration_is_const();
+    test_auto_rvalue_reference_declaration_reports_the_parameter_only_rule();
+    test_auto_pointer_declaration_points_at_plain_auto();
+    test_range_for_and_variable_declaration_agree_on_auto_reference();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

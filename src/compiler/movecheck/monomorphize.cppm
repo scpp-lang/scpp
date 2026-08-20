@@ -5639,7 +5639,35 @@ private:
                         return std::unexpected(DataflowError(
                             "cannot infer 'auto' variable '" + stmt.var_name + "'s type from its initializer", stmt.loc));
                     }
-                    stmt.type.pointee = std::make_shared<Type>(*inferred);
+                    // Reference collapsing. `auto& v = ref_helper(x);`
+                    // infers `int&` for the initializer, and wrapping
+                    // that in the declared `&` would build `int& &` --
+                    // "a reference to a reference is not supported",
+                    // rejecting a binding the written-out `int& v =
+                    // ref_helper(x);` accepts. The range-for spelling
+                    // never reached this because its synthesized
+                    // element initializer infers a value type, so the
+                    // case only appeared once a declaration could spell
+                    // `auto&` at all.
+                    Type bound = *inferred;
+                    if (bound.kind == TypeKind::Reference && bound.pointee != nullptr) {
+                        // Only the reference itself is dropped; the
+                        // referent keeps its own qualification, and the
+                        // declared `&` keeps the mutability that was
+                        // written. So `auto&` against a read-only
+                        // initializer stays a mutable reference to a
+                        // read-only referent and is rejected by the
+                        // ordinary binding check, with the same
+                        // diagnostic the written-out `int& r = cref(a);`
+                        // gets. Real C++ would instead deduce `const T&`
+                        // and accept, moving the mutability of the
+                        // binding out of the declaration and into the
+                        // initializer's type; matching the spelled-out
+                        // form keeps one answer rather than making the
+                        // rule depend on how the type was written.
+                        bound = *bound.pointee;
+                    }
+                    stmt.type.pointee = std::make_shared<Type>(std::move(bound));
                     refine_declared_type(stmt, body, stmt.type);
                 }
                 // The variable-initializer boundary, once `stmt.type` is
