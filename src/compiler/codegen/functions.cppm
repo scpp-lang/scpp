@@ -318,7 +318,7 @@ namespace scpp {
             return {};
         }
 
-        auto find_record_equality = [&](const std::string& record_name) -> const Function* {
+        auto find_record_equality = [&, this](const std::string& record_name) -> const Function* {
             for (const Function& candidate : program_->functions) {
                 if (candidate.name != record_name + "_operator_equal") continue;
                 if (!is_equality_operator_function(candidate)) continue;
@@ -329,7 +329,7 @@ namespace scpp {
             return nullptr;
         };
 
-        auto compare_field = [&](auto&& self, llvm::LLVMValueRef lhs_ptr, llvm::LLVMValueRef rhs_ptr, const Type& type,
+        auto compare_field = [&, this](auto&& self, llvm::LLVMValueRef lhs_ptr, llvm::LLVMValueRef rhs_ptr, const Type& type,
                                  std::string_view field_name) -> std::expected<llvm::LLVMValueRef, CodegenError> {
             if (type.kind == TypeKind::Array && type.element != nullptr) {
                 auto array_type_result = to_llvm_type(type);

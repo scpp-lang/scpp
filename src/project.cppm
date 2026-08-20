@@ -1830,7 +1830,7 @@ public:
                 erase_from_stack();
                 return std::unexpected(BuildError(failure));
             }
-            cv_.wait(lock, [&] {
+            cv_.wait(lock, [&, this] {
                 return !states_.contains(key) || states_.at(key) != PackageState::Building;
             });
         }
@@ -1841,7 +1841,7 @@ public:
         // on this same package key observe PackageState::Failed with the
         // same message, then unwinds the recursion-guard entry before
         // propagating the error onward.
-        auto fail = [&](BuildError error) -> std::expected<std::reference_wrapper<PackageBuildResult>, BuildError> {
+        auto fail = [&, this](BuildError error) -> std::expected<std::reference_wrapper<PackageBuildResult>, BuildError> {
             {
                 std::lock_guard fail_lock(mutex_);
                 states_[key] = PackageState::Failed;

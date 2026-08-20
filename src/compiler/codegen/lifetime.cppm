@@ -238,7 +238,7 @@ namespace scpp {
             llvm::LLVMTypeRef array_llvm_type = std::move(array_llvm_type_result).value();
             return emit_array_element_loop(
                 field_type, dest_ptr, /*reverse=*/false,
-                [&](llvm::LLVMValueRef dest_element, llvm::LLVMValueRef index) -> std::expected<void, CodegenError> {
+                [&, this](llvm::LLVMValueRef dest_element, llvm::LLVMValueRef index) -> std::expected<void, CodegenError> {
                     return codegen_copy_construct_field(dest_element, build_array_element_gep(array_llvm_type, src_ptr, index),
                                                         *field_type.element);
                 });
@@ -270,7 +270,7 @@ namespace scpp {
             llvm::LLVMTypeRef array_llvm_type = std::move(array_llvm_type_result).value();
             return emit_array_element_loop(
                 field_type, dest_ptr, /*reverse=*/false,
-                [&](llvm::LLVMValueRef dest_element, llvm::LLVMValueRef index) -> std::expected<void, CodegenError> {
+                [&, this](llvm::LLVMValueRef dest_element, llvm::LLVMValueRef index) -> std::expected<void, CodegenError> {
                     return codegen_copy_assign_field(dest_element, build_array_element_gep(array_llvm_type, src_ptr, index),
                                                      *field_type.element);
                 });
@@ -451,7 +451,7 @@ namespace scpp {
             // Reverse of construction order, exactly as for a derived
             // object's base subobjects.
             (void)emit_array_element_loop(type, ptr, /*reverse=*/true,
-                                          [&](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef) -> std::expected<void, CodegenError> {
+                                          [&, this](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef) -> std::expected<void, CodegenError> {
                                               emit_storage_destruction(*type.element, element_ptr);
                                               return {};
                                           });
@@ -486,7 +486,7 @@ namespace scpp {
         if (type.kind == TypeKind::Array) {
             if (!type_has_destructor(type)) return;
             (void)emit_array_element_loop(type, ptr, /*reverse=*/true,
-                                          [&](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef) -> std::expected<void, CodegenError> {
+                                          [&, this](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef) -> std::expected<void, CodegenError> {
                                               codegen_destroy_old_state_for_move_assign(*type.element, element_ptr);
                                               return {};
                                           });

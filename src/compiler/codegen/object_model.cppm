@@ -796,7 +796,7 @@ namespace scpp {
     [[nodiscard]] bool Codegen::class_has_any_constructor(const std::string& class_name) const
 {
         return std::any_of(program_->functions.begin(), program_->functions.end(),
-                           [&](const Function& fn) { return is_constructor_function(fn) && fn.member_owner_class == class_name; });
+                           [&, this](const Function& fn) { return is_constructor_function(fn) && fn.member_owner_class == class_name; });
     }
 
 

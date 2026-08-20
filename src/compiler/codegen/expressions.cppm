@@ -339,7 +339,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             }
         }
         if (expr.lhs != nullptr && expr.name.empty())
-            return [&]() -> std::expected<Codegen::CallResult, CodegenError> {
+            return [&, this]() -> std::expected<Codegen::CallResult, CodegenError> {
                 const Expr* callee_expr = expr.lhs.get();
                 if (callee_expr->kind == ExprKind::Unary && callee_expr->unary_op == UnaryOp::Deref && callee_expr->lhs) {
                     callee_expr = callee_expr->lhs.get();
@@ -580,7 +580,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
     [[nodiscard]] std::expected<bool, CodegenError> Codegen::try_initialize_class_storage_from_same_type_source(const Codegen::LValue& target, const std::vector<ExprPtr>& args)
 {
-        auto same_type_moved_source_ptr = [&](const Expr& expr) -> std::expected<std::optional<llvm::LLVMValueRef>, CodegenError> {
+        auto same_type_moved_source_ptr = [&, this](const Expr& expr) -> std::expected<std::optional<llvm::LLVMValueRef>, CodegenError> {
             if (expr.kind != ExprKind::Move || expr.lhs == nullptr) return std::optional<llvm::LLVMValueRef>(std::nullopt);
             std::optional<Type> moved_source_type = infer_type(*expr.lhs);
             if (!moved_source_type.has_value()) return std::optional<llvm::LLVMValueRef>(std::nullopt);
@@ -754,7 +754,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 type_needs_nontrivial_default_init(target.type)) {
                 return emit_array_element_loop(
                     target.type, target.ptr, /*reverse=*/false,
-                    [&](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef) -> std::expected<void, CodegenError> {
+                    [&, this](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef) -> std::expected<void, CodegenError> {
                         return initialize_storage_from_brace_args(
                             LValue{element_ptr, *target.type.element, alignment_for_type(*target.type.element)}, {});
                     });
@@ -959,7 +959,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                                                   std::size_t param_offset)
 {
         std::vector<llvm::LLVMValueRef> result;
-        auto emit_arg = [&](const Expr& arg, std::size_t i) -> std::expected<llvm::LLVMValueRef, CodegenError> {
+        auto emit_arg = [&, this](const Expr& arg, std::size_t i) -> std::expected<llvm::LLVMValueRef, CodegenError> {
             Type effective_param_type;
             bool have_effective_param_type = false;
             bool collapsed_forwarding_reference_value = false;
@@ -1483,7 +1483,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 return llvm::LLVMBuildGlobalString(builder_, expr.name.c_str(), "str");
 
             case ExprKind::Conditional:
-                return [&]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
+                return [&, this]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
                     // ch05/ch06: a conditional *usually* yields a value, so each
                     // arm is generated against the one type both agree on (see
                     // movecheck's conditional_arm_types_agree, which decides
@@ -1497,7 +1497,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     // are `void` the conditional is a `void` expression and
                     // yields no value at all, which this case used to assume
                     // could not happen -- see the merge block.
-                    auto arm_value_type = [&](const Expr& arm) -> std::optional<Type> {
+                    auto arm_value_type = [&, this](const Expr& arm) -> std::optional<Type> {
                         std::optional<Type> arm_type = infer_type(arm);
                         if (!arm_type.has_value()) return std::nullopt;
                         if (arm_type->kind == TypeKind::Reference && arm_type->pointee != nullptr) return *arm_type->pointee;
@@ -1522,7 +1522,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     } else if (is_scalar_target(else_type) && is_untyped_numeric_literal(*expr.rhs)) {
                         common_type = else_type;
                     }
-                    auto codegen_arm = [&](const Expr& arm) -> std::expected<llvm::LLVMValueRef, CodegenError> {
+                    auto codegen_arm = [&, this](const Expr& arm) -> std::expected<llvm::LLVMValueRef, CodegenError> {
                         return common_type.has_value() ? codegen_value_for_target(arm, *common_type) : codegen_expr(arm);
                     };
 
@@ -1588,7 +1588,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 }();
 
             case ExprKind::Cast:
-                return [&]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
+                return [&, this]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
                     // ch06 §6 / spec §5.1(5.2): `static_cast<T>(expr)`/`(T)expr`
                     // converts either between scalar types, or between raw
                     // pointer types (movecheck already enforces the latter's
@@ -1639,7 +1639,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 }();
 
             case ExprKind::Identifier:
-                return [&]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
+                return [&, this]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
                     if (find_local(expr) == nullptr) {
                         if (find_visible_global_slot(expr.name, expr.explicit_global_qualification) != nullptr) {
                             auto lv_result = codegen_lvalue(expr);
@@ -1668,14 +1668,14 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 }();
 
             case ExprKind::Subscript:
-                return [&]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
+                return [&, this]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
                     auto lv_result = codegen_lvalue(expr);
                     if (!lv_result.has_value()) return std::unexpected(std::move(lv_result).error());
                     return load_value(std::move(lv_result).value());
                 }();
 
             case ExprKind::Member:
-                return [&]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
+                return [&, this]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
                     // `s.size` on a std::span<T> is a computed, read-only
                     // property (there's no backing storage to take the
                     // address of at the *scpp* type level -- it's an i64
@@ -1701,7 +1701,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 }();
 
             case ExprKind::Unary:
-                return [&]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
+                return [&, this]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
                     if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
                         auto lv_result = codegen_lvalue(expr);
                         if (!lv_result.has_value()) return std::unexpected(std::move(lv_result).error());
@@ -1816,7 +1816,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 return codegen_binary(expr);
 
             case ExprKind::Call:
-                return [&]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
+                return [&, this]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
                     if (is_for_range_size_builtin(expr)) {
                         std::optional<Type> range_type = infer_type(*expr.args[0]);
                         if (!range_type.has_value()) {
@@ -1881,7 +1881,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 }();
 
             case ExprKind::Move:
-                return [&]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
+                return [&, this]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
                     // The move checker has already verified `expr.lhs` is a
                     // plain, currently-Initialized unique_ptr or class-typed
                     // variable. At the IR level a move is: read the old
@@ -2482,7 +2482,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         refresh_debug_location(expr.loc);
         switch (expr.kind) {
             case ExprKind::Identifier:
-                return [&]() -> std::expected<Codegen::LValue, CodegenError> {
+                return [&, this]() -> std::expected<Codegen::LValue, CodegenError> {
                     const LocalSlot* local = find_local(expr);
                     if (local == nullptr) {
                         if (const GlobalSlot* global = find_visible_global_slot(expr.name, expr.explicit_global_qualification)) {
@@ -2514,7 +2514,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 }();
 
             case ExprKind::Member:
-                return [&]() -> std::expected<Codegen::LValue, CodegenError> {
+                return [&, this]() -> std::expected<Codegen::LValue, CodegenError> {
                     auto base_result = codegen_lvalue(*expr.lhs);
                     if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
                     LValue base = std::move(base_result).value();
@@ -2561,7 +2561,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 }();
 
             case ExprKind::Subscript:
-                return [&]() -> std::expected<Codegen::LValue, CodegenError> {
+                return [&, this]() -> std::expected<Codegen::LValue, CodegenError> {
                     auto base_result = codegen_lvalue(*expr.lhs);
                     if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
                     LValue base = std::move(base_result).value();
@@ -2686,7 +2686,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 }();
 
             case ExprKind::Call:
-                return [&]() -> std::expected<Codegen::LValue, CodegenError> {
+                return [&, this]() -> std::expected<Codegen::LValue, CodegenError> {
                     // Reachable whenever a call to a reference-returning
                     // function is itself used as a reference-binding source
                     // (`T& r = f(x);`), a reference argument (`g(f(x))`), or
@@ -2743,7 +2743,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 }();
 
             case ExprKind::Lambda:
-                return [&]() -> std::expected<Codegen::LValue, CodegenError> {
+                return [&, this]() -> std::expected<Codegen::LValue, CodegenError> {
                     // ch05 §5.12: an IIFE's receiver (`[](...){...}(args)`,
                     // parser.cppm's own Lambda-followed-by-`(` case) needs
                     // the constructed closure's *address* to invoke its
@@ -2759,7 +2759,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 }();
 
             case ExprKind::Conditional:
-                return [&]() -> std::expected<Codegen::LValue, CodegenError> {
+                return [&, this]() -> std::expected<Codegen::LValue, CodegenError> {
                     auto cond_result = codegen_contextual_bool_i1(*expr.lhs);
                     if (!cond_result.has_value()) return std::unexpected(std::move(cond_result).error());
                     llvm::LLVMValueRef cond = std::move(cond_result).value();
@@ -2799,7 +2799,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 return codegen_lvalue(*expr.lhs);
 
             case ExprKind::Cast:
-                return [&]() -> std::expected<Codegen::LValue, CodegenError> {
+                return [&, this]() -> std::expected<Codegen::LValue, CodegenError> {
                     if (expr.type.kind != TypeKind::Pointer) {
                         return std::unexpected(CodegenError("expression is not assignable", current_loc_));
                     }
@@ -2814,7 +2814,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 }();
 
             case ExprKind::Unary:
-                return [&]() -> std::expected<Codegen::LValue, CodegenError> {
+                return [&, this]() -> std::expected<Codegen::LValue, CodegenError> {
                     if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
                         auto lv_result = codegen_lvalue(*expr.lhs);
                         if (!lv_result.has_value()) return std::unexpected(std::move(lv_result).error());
@@ -2987,7 +2987,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::codegen_binary(const Expr& expr)
 {
         if (expr.binary_op == BinaryOp::Assign)
-            return [&]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
+            return [&, this]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
                 auto lv_result = codegen_lvalue(*expr.lhs);
                 if (!lv_result.has_value()) return std::unexpected(std::move(lv_result).error());
                 LValue lv = std::move(lv_result).value();
@@ -3083,7 +3083,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 return value;
             }();
         if (is_compound_assignment(expr.binary_op))
-            return [&]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
+            return [&, this]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
                 auto lv_result = codegen_lvalue(*expr.lhs);
                 if (!lv_result.has_value()) return std::unexpected(std::move(lv_result).error());
                 LValue lv = std::move(lv_result).value();
@@ -3180,7 +3180,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         // `&&`/`||` short-circuit like ordinary C++; everything else is a
         // plain eager binary op on the operand values.
         if (expr.binary_op == BinaryOp::And || expr.binary_op == BinaryOp::Or)
-            return [&]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
+            return [&, this]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
                 return codegen_short_circuit(expr);
             }();
 
@@ -3261,7 +3261,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                                      : nullptr;
             std::string operator_name = equality_operator_method_name(expr.binary_op);
             auto resolve_equality_receiver =
-                [&](const Expr& receiver_expr, const Expr& arg_expr,
+                [&, this](const Expr& receiver_expr, const Expr& arg_expr,
                     const Type* receiver_named) -> std::expected<std::optional<llvm::LLVMValueRef>, CodegenError> {
                 if (receiver_named == nullptr || receiver_named->kind != TypeKind::Named) return std::nullopt;
                 std::vector<ExprPtr> overload_args;

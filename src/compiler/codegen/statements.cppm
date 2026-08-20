@@ -36,7 +36,7 @@ namespace scpp {
                 return {};
 
             case StmtKind::VarDecl:
-                return [&]() -> std::expected<void, CodegenError> {
+                return [&, this]() -> std::expected<void, CodegenError> {
                     // Every declaration is resolved (resolve_program_locals runs
                     // over the whole program before this point, and again after
                     // monomorphization synthesizes new functions), so an
@@ -62,7 +62,7 @@ namespace scpp {
                         if (current_function_def_ == nullptr) {
                             return std::unexpected(CodegenError("internal error: function-local static outside a function body", current_loc_));
                         }
-                        auto add_internal_global = [&](llvm::LLVMTypeRef llvm_type, const std::string& name,
+                        auto add_internal_global = [&, this](llvm::LLVMTypeRef llvm_type, const std::string& name,
                                                        llvm::LLVMValueRef init) {
                             llvm::LLVMValueRef global = llvm::LLVMAddGlobal(module_, llvm_type, name.c_str());
                             llvm::LLVMSetLinkage(global, llvm::LLVMInternalLinkage);
@@ -70,13 +70,13 @@ namespace scpp {
                             llvm::LLVMSetInitializer(global, init);
                             return global;
                         };
-                        auto get_or_declare_runtime_fn = [&](const std::string& name, llvm::LLVMTypeRef fn_type) {
+                        auto get_or_declare_runtime_fn = [&, this](const std::string& name, llvm::LLVMTypeRef fn_type) {
                             llvm::LLVMValueRef fn = llvm::LLVMGetNamedFunction(module_, name.c_str());
                             if (fn == nullptr) fn = llvm::LLVMAddFunction(module_, name.c_str(), fn_type);
                             return fn;
                         };
                         auto define_static_local_destructor_helper =
-                            [&](const std::string& helper_name, llvm::LLVMValueRef storage,
+                            [&, this](const std::string& helper_name, llvm::LLVMValueRef storage,
                                 llvm::LLVMValueRef moved_flag) -> llvm::LLVMValueRef {
                             llvm::LLVMTypeRef fn_type =
                                 llvm::LLVMFunctionType(llvm::LLVMVoidTypeInContext(context_), nullptr, 0, /*IsVarArg=*/0);
@@ -139,7 +139,7 @@ namespace scpp {
                                                    /*IsVarArg=*/0));
                         llvm::LLVMValueRef atexit_fn = get_or_declare_runtime_fn(
                             "atexit",
-                            [&] {
+                            [&, this] {
                                 llvm::LLVMTypeRef atexit_params[] = {guard_ptr_type};
                                 return llvm::LLVMFunctionType(llvm::LLVMInt32TypeInContext(context_), atexit_params,
                                                               1, /*IsVarArg=*/0);
@@ -583,7 +583,7 @@ namespace scpp {
                 }();
 
             case StmtKind::Return:
-                return [&]() -> std::expected<void, CodegenError> {
+                return [&, this]() -> std::expected<void, CodegenError> {
                     // Evaluate the return value *before* freeing owned locals:
                     // `return std::move(a);` nulls out `a`'s slot as a side
                     // effect of the move, so by the time we free every
@@ -683,7 +683,7 @@ namespace scpp {
                 return {};
 
             case StmtKind::If:
-                return [&]() -> std::expected<void, CodegenError> {
+                return [&, this]() -> std::expected<void, CodegenError> {
                     // `stmt.condition` is a `bool` expression, stored/passed
                     // as i8 (see to_llvm_type) -- CreateCondBr needs a 1-bit
                     // condition, so narrow it right here (see bool_to_i1).
@@ -733,7 +733,7 @@ namespace scpp {
                 }();
 
             case StmtKind::While:
-                return [&]() -> std::expected<void, CodegenError> {
+                return [&, this]() -> std::expected<void, CodegenError> {
                     llvm::LLVMBasicBlockRef cond_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "while.cond");
                     llvm::LLVMBasicBlockRef body_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "while.body");
                     llvm::LLVMBasicBlockRef end_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "while.end");
@@ -788,7 +788,7 @@ namespace scpp {
                 }();
 
             case StmtKind::Switch:
-                return [&]() -> std::expected<void, CodegenError> {
+                return [&, this]() -> std::expected<void, CodegenError> {
                     auto condition_result = codegen_expr(*stmt.condition);
                     if (!condition_result.has_value()) return std::unexpected(std::move(condition_result).error());
                     llvm::LLVMValueRef condition = std::move(condition_result).value();

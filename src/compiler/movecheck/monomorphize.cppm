@@ -2730,7 +2730,7 @@ private:
         std::size_t classes_before_instantiation = program_.classes.size();
         std::size_t structs_before_instantiation = program_.structs.size();
         std::size_t functions_before_instantiation = program_.functions.size();
-        auto fail = [&](DataflowError err) -> std::unexpected<DataflowError> {
+        auto fail = [&, this](DataflowError err) -> std::unexpected<DataflowError> {
             for (std::size_t k = functions_before_instantiation; k < program_.functions.size(); ++k) {
                 known_function_names_.erase(program_.functions[k].name);
                 generic_template_indices_.erase(program_.functions[k].name);
@@ -3070,7 +3070,7 @@ private:
         std::size_t classes_before_instantiation = program_.classes.size();
         std::size_t structs_before_instantiation = program_.structs.size();
         std::size_t functions_before_instantiation = program_.functions.size();
-        auto fail = [&](DataflowError err) -> std::unexpected<DataflowError> {
+        auto fail = [&, this](DataflowError err) -> std::unexpected<DataflowError> {
             for (std::size_t k = functions_before_instantiation; k < program_.functions.size(); ++k) {
                 known_function_names_.erase(program_.functions[k].name);
                 generic_template_indices_.erase(program_.functions[k].name);
@@ -3253,7 +3253,7 @@ private:
         std::size_t classes_before_instantiation = program_.classes.size();
         std::size_t structs_before_instantiation = program_.structs.size();
         std::size_t functions_before_instantiation = program_.functions.size();
-        auto fail = [&](DataflowError err) -> std::unexpected<DataflowError> {
+        auto fail = [&, this](DataflowError err) -> std::unexpected<DataflowError> {
             for (std::size_t k = functions_before_instantiation; k < program_.functions.size(); ++k) {
                 known_function_names_.erase(program_.functions[k].name);
                 generic_template_indices_.erase(program_.functions[k].name);
@@ -3731,7 +3731,7 @@ private:
         std::unordered_map<std::string, std::vector<Type>>& pack_bindings) {
         (void)value_bindings;
         std::function<bool(const std::vector<Type>&, const std::vector<Type>&)> deduce_type_list =
-            [&](const std::vector<Type>& patterns, const std::vector<Type>& concretes) -> bool {
+            [&, this](const std::vector<Type>& patterns, const std::vector<Type>& concretes) -> bool {
             if (!patterns.empty()) {
                 const Type& last = patterns.back();
                 if (last.is_pack_expansion && last.kind == TypeKind::Named && last.template_args.empty() &&
@@ -4210,7 +4210,7 @@ private:
         }
         for (std::size_t candidate_index : candidate_indices) {
             const Function& tmpl = program_.functions[candidate_index];
-            auto _candidate = [&]() -> std::expected<void, DataflowError> {
+            auto _candidate = [&, this]() -> std::expected<void, DataflowError> {
                 std::unordered_map<std::string, Type> type_bindings;
                 std::unordered_map<std::string, int> value_bindings;
                 std::unordered_map<std::string, std::vector<Type>> pack_bindings;
@@ -6027,7 +6027,7 @@ private:
         }
         auto template_it = generic_template_indices_.find(generic_template_name);
         if (template_it == generic_template_indices_.end()) return {};
-        const bool ordinary_overload_exists = [&]() {
+        const bool ordinary_overload_exists = [&, this]() {
             for (const Function& fn : program_.functions) {
                 if (fn.name == generic_template_name && !fn.is_generic_template &&
                     compile_time_dependency_visible(fn, body)) {
@@ -6155,23 +6155,58 @@ private:
     // like an ordinary class construction (see codegen's own Lambda
     // case).
     [[nodiscard]] std::expected<void, DataflowError> resolve_lambda(Expr& expr, Body& enclosing_body, const std::optional<Type>& enclosing_this_type) {
-        if (expr.lambda_blanket_mode != LambdaCaptureMode::None) {
-            std::unordered_set<std::string> excluded;
-            for (const Param& p : expr.lambda_params) excluded.insert(p.name);
-            for (const LambdaCapture& c : expr.lambda_captures) excluded.insert(c.name);
-            if (expr.lambda_body) collect_locally_declared_names(*expr.lambda_body, excluded);
-            excluded.insert(known_function_names_.begin(), known_function_names_.end());
-            excluded.insert(known_type_names_.begin(), known_type_names_.end());
+        std::unordered_set<std::string> excluded;
+        for (const Param& p : expr.lambda_params) excluded.insert(p.name);
+        for (const LambdaCapture& c : expr.lambda_captures) excluded.insert(c.name);
+        if (expr.lambda_body) collect_locally_declared_names(*expr.lambda_body, excluded);
+        excluded.insert(known_function_names_.begin(), known_function_names_.end());
+        excluded.insert(known_type_names_.begin(), known_type_names_.end());
 
-            FreeIdentifierMap free_names;
-            if (expr.lambda_body) collect_free_identifiers(*expr.lambda_body, excluded, free_names);
+        // Computed for every capture list, not just a blanket one: the
+        // ch05 §5.12 check below applies to `[]` and `[x]` exactly as it
+        // does to `[&]`, and an explicitly captured `this` is already in
+        // `excluded`, so a list that names it never reaches the check.
+        FreeIdentifierMap free_names;
+        if (expr.lambda_body) collect_free_identifiers(*expr.lambda_body, excluded, free_names);
+
+        // ch05 §5.12's own hard rule: `this` is never captured
+        // implicitly, by a blanket `[=]`/`[&]` or by anything else -- it
+        // must be named (`[this]`/`[*this]`/`[=, this]`/`[&, this]`).
+        //
+        // Diagnosed here rather than skipped. Declining to capture it and
+        // saying nothing left the body's `this` to resolve against the
+        // closure type instead, so the rule announced itself as `call to
+        // unknown function '__lambda0::helper'` -- naming a synthesized
+        // type the program never mentions -- or, when the result was
+        // bound with `auto`, as `cannot infer 'auto' variable's type from
+        // its initializer`, neither of which says anything about
+        // captures. The rule was real and deliberate; only its diagnostic
+        // was missing. Note the member use need not spell `this` at all:
+        // an unqualified `helper()` inside a method is rewritten to
+        // `this->helper()` before this point (see
+        // rewrite_unqualified_member_calls), which is why an
+        // ordinary-looking member call inside `[&]` lands here.
+        if (free_names.contains("this") && enclosing_this_type.has_value()) {
+            std::string message = "a lambda inside a member function must capture 'this' explicitly to use the "
+                                  "enclosing object's members (ch05 §5.12): ";
+            if (expr.lambda_blanket_mode == LambdaCaptureMode::ByReference) {
+                message += "a blanket '[&]' capture never captures 'this'";
+            } else if (expr.lambda_blanket_mode == LambdaCaptureMode::ByValue) {
+                message += "a blanket '[=]' capture never captures 'this'";
+            } else {
+                message += "this lambda's capture list does not name it";
+            }
+            message += " -- write '[this]', '[*this]', '[=, this]', or '[&, this]'";
+            return std::unexpected(DataflowError(message, expr.loc));
+        }
+
+        if (expr.lambda_blanket_mode != LambdaCaptureMode::None) {
             bool by_reference = expr.lambda_blanket_mode == LambdaCaptureMode::ByReference;
             for (const auto& [name, resolved] : free_names) {
-                // ch05 §5.12's own hard rule: `this` is never implicitly
-                // captured by a bare `[=]`/`[&]`, even though it would
-                // otherwise look like just another free identifier here
-                // -- must be named explicitly (`[this]`/`[=, this]`/
-                // `[&, this]`).
+                // Handled above, for every capture list rather than
+                // only a blanket one: `this` is never implicitly
+                // captured (ch05 §5.12). Reaching here with it would
+                // mean the check above let it through.
                 if (name == "this") continue;
                 // Not a real local in the enclosing scope -- but it may
                 // still be a capture chained out of an enclosing closure
