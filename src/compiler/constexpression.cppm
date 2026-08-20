@@ -1987,6 +1987,44 @@ private:
         return {};
     }
 
+    // `int values[3]{1, 2, 3};` during constant evaluation. Spec §9.4(1)
+    // adopts [dcl.array] unchanged, so this is [dcl.init.aggr]: element
+    // i takes initializer i, and any element the list does not reach
+    // keeps the value-initialization make_default_cell already gave it.
+    // Both places a braced list can meet an array -- a local declaration
+    // and a member/field initializer -- call this, because the evaluator
+    // previously answered the question twice and identically wrongly:
+    // each assumed a braced list meant a *constructor call*, built
+    // `type.name + "_new"`, and an array type's name is empty, so even
+    // `int a[3]{}` failed with "no constexpr/consteval constructor
+    // matches for type ''".
+    [[nodiscard]] std::expected<void, ConstexprError> initialize_array_cell_from_brace_args(
+        const std::shared_ptr<Cell>& cell, const Type& array_type, const std::vector<ExprPtr>& args,
+        const SourceLocation& loc) {
+        if (!array_type.element) return std::unexpected(ConstexprError(loc, "malformed array type in constexpr evaluator"));
+        if (!cell->data.is_array()) {
+            return std::unexpected(ConstexprError(loc, "internal error: expected array storage for an array initializer"));
+        }
+        std::vector<std::shared_ptr<Cell>>& elements = cell->data.array.elements;
+        if (args.size() > elements.size()) {
+            std::string message{};
+            message += "too many initializers for array of ";
+            message += std::to_string(elements.size());
+            message += (elements.size() == 1 ? " element: " : " elements: ");
+            message += std::to_string(args.size());
+            message += " given";
+            return std::unexpected(ConstexprError(loc, message));
+        }
+        for (std::size_t i = 0; i < args.size(); ++i) {
+            auto value_result = evaluate_expr_in_context(*args[i], array_type.element.get());
+            if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+            if (auto result = copy_into(elements[i], std::move(value_result).value(), loc); !result.has_value()) {
+                return std::unexpected(std::move(result).error());
+            }
+        }
+        return {};
+    }
+
     [[nodiscard]] std::expected<void, ConstexprError> apply_initializer_to_field(std::shared_ptr<Cell>& field_cell, const Type& field_type, const Initializer& init,
                                     const SourceLocation& loc) {
         if (field_type.kind == TypeKind::Reference) {
@@ -2032,6 +2070,9 @@ private:
             if (!span_result.has_value()) return std::unexpected(std::move(span_result).error());
             field_cell = std::move(span_result).value();
             return {};
+        }
+        if (field_type.kind == TypeKind::Array && init.has_brace_args) {
+            return initialize_array_cell_from_brace_args(field_cell, field_type, init.brace_args, loc);
         }
         if (field_type.kind == TypeKind::Named &&
             (is_class_name(field_type.name) || structs_by_name_.contains(field_type.name)) && init.has_brace_args) {
@@ -3335,6 +3376,14 @@ private:
                     auto cell_result = make_default_cell(stmt.type, stmt.loc);
                     if (!cell_result.has_value()) return std::unexpected(std::move(cell_result).error());
                     auto cell = std::move(cell_result).value();
+                    if (stmt.has_ctor_args && stmt.type.kind == TypeKind::Array) {
+                        if (auto result = initialize_array_cell_from_brace_args(cell, stmt.type, stmt.ctor_args, stmt.loc);
+                            !result.has_value()) {
+                            return std::unexpected(std::move(result).error());
+                        }
+                        frames_.back()[stmt.var_name] = Binding{cell, stmt.is_const || stmt.is_constexpr};
+                        return ExecOutcome{};
+                    }
                     if (stmt.has_ctor_args) {
                         std::vector<Binding> ctor_bindings{};
                         ctor_bindings.reserve(stmt.ctor_args.size() + 1);

@@ -1352,15 +1352,24 @@ private:
     // itself create basic blocks -- nested arrays and the moved-flag
     // guard both do -- so the loop's back edge is wired from wherever the
     // body actually ended, not from the header.
+    // `begin_index` is the first element the loop visits going forward
+    // (and the last one it visits going in reverse): every element is
+    // still visited exactly once, just over the sub-range
+    // [begin_index, count). Aggregate initialization needs it, to
+    // value-initialize only the elements a braced list did not reach --
+    // expressed as a bound on this one loop rather than as a second loop
+    // that would then have to be kept in step with this one.
     template <typename ElemFn>
     [[nodiscard]] std::expected<void, CodegenError> emit_array_element_loop(const Type& array_type,
                                                                             llvm::LLVMValueRef array_ptr, bool reverse,
+                                                                            std::int64_t begin_index,
                                                                             ElemFn&& emit_element) {
         if (array_type.kind != TypeKind::Array || array_type.element == nullptr) {
             return std::unexpected(CodegenError("internal error: expected an array type for element iteration", current_loc_));
         }
         std::int64_t count = array_type.array_size;
-        if (count <= 0) return {};
+        if (begin_index < 0) begin_index = 0;
+        if (count <= begin_index) return {};
         auto array_llvm_type_result = to_llvm_type(array_type);
         if (!array_llvm_type_result.has_value()) return std::unexpected(std::move(array_llvm_type_result).error());
         llvm::LLVMTypeRef array_llvm_type = std::move(array_llvm_type_result).value();
@@ -1374,7 +1383,9 @@ private:
 
         llvm::LLVMPositionBuilderAtEnd(builder_, body_bb);
         llvm::LLVMValueRef index = llvm::LLVMBuildPhi(builder_, i64, "arrayelem.i");
-        llvm::LLVMValueRef first = llvm::LLVMConstInt(i64, reverse ? static_cast<unsigned long long>(count - 1) : 0ULL,
+        llvm::LLVMValueRef first = llvm::LLVMConstInt(i64,
+                                                       reverse ? static_cast<unsigned long long>(count - 1)
+                                                               : static_cast<unsigned long long>(begin_index),
                                                        /*SignExtend=*/0);
         llvm::LLVMValueRef element_ptr = build_array_element_gep(array_llvm_type, array_ptr, index);
         if (auto r = emit_element(element_ptr, index); !r.has_value()) return std::unexpected(std::move(r).error());
@@ -1383,7 +1394,9 @@ private:
         llvm::LLVMValueRef next = reverse ? llvm::LLVMBuildSub(builder_, index, llvm::LLVMConstInt(i64, 1, 0), "arrayelem.prev")
                                           : llvm::LLVMBuildAdd(builder_, index, llvm::LLVMConstInt(i64, 1, 0), "arrayelem.next");
         llvm::LLVMValueRef done =
-            reverse ? llvm::LLVMBuildICmp(builder_, llvm::LLVMIntEQ, index, llvm::LLVMConstInt(i64, 0, 0), "arrayelem.done")
+            reverse ? llvm::LLVMBuildICmp(builder_, llvm::LLVMIntEQ, index,
+                                          llvm::LLVMConstInt(i64, static_cast<unsigned long long>(begin_index), 0),
+                                          "arrayelem.done")
                     : llvm::LLVMBuildICmp(builder_, llvm::LLVMIntEQ, next,
                                           llvm::LLVMConstInt(i64, static_cast<unsigned long long>(count), 0), "arrayelem.done");
         llvm::LLVMBuildCondBr(builder_, done, end_bb, body_bb);
