@@ -336,6 +336,219 @@ void test_long_binary_chain_generates_without_re_walking_its_prefix() {
     expect(ir_result.has_value(), "long_binary_chain_generates: a 40-term chain must reach codegen");
 }
 
+// Spec §9.4(1) adopts [dcl.array] unchanged, so `int values[3]{1, 2, 3};`
+// is [dcl.init.aggr] aggregate initialization -- the spelling spec §10's
+// own iteration-statement examples use. Every array with a non-empty
+// braced list was previously rejected outright, in every position, by
+// initialize_storage_from_brace_args' "exactly one expression" gate.
+void test_array_brace_list_initializes_each_element() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "int main() {\n"
+        "    int values[3]{1, 2, 3};\n"
+        "    return values[0] + values[1] + values[2] - 6;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "array_brace_list_initializes_each_element: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+}
+
+// The braced list is not the only way an array reaches storage: a default
+// member initializer and a member-initializer-list entry both route
+// through the same worker, and all three were rejected by the same gate.
+void test_array_brace_list_initializes_a_member_and_a_mem_init_entry() {
+    cases_run++;
+    auto dmi_result = try_generate_ir(
+        "class K {\n"
+        "  public:\n"
+        "    int values[3]{1, 2, 3};\n"
+        "    K() {}\n"
+        "    virtual ~K() {}\n"
+        "};\n"
+        "int main() { K k{}; return k.values[2] - 3; }\n");
+    expect(dmi_result.has_value(),
+           "array_brace_list_member: expected IR for an array default member initializer, got " +
+               (dmi_result.has_value() ? std::string{} : dmi_result.error().kind + ": " + dmi_result.error().message));
+
+    cases_run++;
+    auto mem_init_result = try_generate_ir(
+        "class M {\n"
+        "  public:\n"
+        "    int values[3];\n"
+        "    M() : values{4, 5, 6} {}\n"
+        "    virtual ~M() {}\n"
+        "};\n"
+        "int main() { M m{}; return m.values[2] - 6; }\n");
+    expect(mem_init_result.has_value(),
+           "array_brace_list_mem_init: expected IR for an array member-initializer entry, got " +
+               (mem_init_result.has_value() ? std::string{} : mem_init_result.error().kind + ": " + mem_init_result.error().message));
+}
+
+// [dcl.init.aggr]: elements the list does not reach are value-initialized,
+// not left indeterminate. Folding the constexpr call turns the whole
+// computation into one literal, so the emitted constant is the
+// evaluator's own answer for `{9, 8}` over four elements -- 9800 only if
+// elements 2 and 3 really are zero.
+void test_array_brace_list_value_initializes_the_elements_it_does_not_reach() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "constexpr int digits() {\n"
+        "    int values[4]{9, 8};\n"
+        "    return values[0] * 1000 + values[1] * 100 + values[2] * 10 + values[3];\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int folded = digits();\n"
+        "    return folded - 9800;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "array_brace_list_partial: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+    if (!ir_result.has_value()) return;
+    expect(ir_result.value().find("9800") != std::string::npos,
+           "array_brace_list_partial: expected the folded constant 9800 in the IR, so the unreached "
+           "elements were value-initialized rather than left indeterminate");
+}
+
+// An array with *any* braced list was rejected during constant evaluation
+// even when the list was empty, because that path assumed a braced list
+// meant a constructor call and an array type's name is empty -- "no
+// constexpr/consteval constructor matches for type ''".
+void test_empty_array_brace_list_is_accepted_during_constant_evaluation() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "constexpr int zero() {\n"
+        "    int values[3]{};\n"
+        "    return values[0] + values[1] + values[2];\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int folded = zero();\n"
+        "    return folded;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "empty_array_brace_list_constexpr: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+}
+
+// The bound check has to hold in both implementations, so each is pinned
+// against the stage that owns it: an array initialized at runtime is
+// codegen's answer, the same array inside a constexpr function is the
+// evaluator's. Asserting the stage is what keeps one of the two from
+// silently going unchecked.
+void test_too_many_array_initializers_are_rejected_by_both_implementations() {
+    cases_run++;
+    auto codegen_result = try_generate_ir(
+        "int main() {\n"
+        "    int values[3]{1, 2, 3, 4};\n"
+        "    return values[0];\n"
+        "}\n");
+    expect(!codegen_result.has_value(),
+           "too_many_array_initializers: expected an overlong list to be rejected at runtime");
+    if (!codegen_result.has_value()) {
+        expect(codegen_result.error().kind == "CodegenError",
+               "too_many_array_initializers: expected a CodegenError, got " + codegen_result.error().kind);
+        expect(codegen_result.error().message.find("too many initializers for array of 3 elements") != std::string::npos,
+               "too_many_array_initializers: expected the diagnostic to name the bound, got " +
+                   codegen_result.error().message);
+    }
+
+    cases_run++;
+    auto constexpr_result = try_generate_ir(
+        "constexpr int overlong() {\n"
+        "    int values[3]{1, 2, 3, 4};\n"
+        "    return values[0];\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int folded = overlong();\n"
+        "    return folded;\n"
+        "}\n");
+    expect(!constexpr_result.has_value(),
+           "too_many_array_initializers: expected an overlong list to be rejected during constant evaluation");
+    if (!constexpr_result.has_value()) {
+        expect(constexpr_result.error().kind == "ConstexprError",
+               "too_many_array_initializers: expected a ConstexprError, got " + constexpr_result.error().kind);
+        expect(constexpr_result.error().message.find("too many initializers for array of 3 elements") != std::string::npos,
+               "too_many_array_initializers: expected the constant evaluator to name the bound too, got " +
+                   constexpr_result.error().message);
+    }
+}
+
+// Each element of a braced list is a binding position, so the declared
+// element type has to be checked at every one of them -- a list must not
+// become a hole through which a value of the wrong type reaches storage
+// that the written-out `values[1] = true;` would reject.
+void test_array_brace_list_checks_each_element_against_the_element_type() {
+    cases_run++;
+    auto bool_result = try_generate_ir(
+        "int main() {\n"
+        "    int values[3]{1, true, 3};\n"
+        "    return values[0];\n"
+        "}\n");
+    expect(!bool_result.has_value(),
+           "array_brace_list_element_type: expected a 'bool' element in an int array to be rejected");
+    // Rejection alone would also be satisfied by the arity gate this
+    // change removes, so the reason is asserted rather than the verdict:
+    // the element must be rejected for its *type*.
+    if (!bool_result.has_value()) {
+        expect(bool_result.error().message.find("no implicit conversion") != std::string::npos,
+               "array_brace_list_element_type: expected the element to be rejected for its type, got " +
+                   bool_result.error().message);
+    }
+
+    cases_run++;
+    auto double_result = try_generate_ir(
+        "int main() {\n"
+        "    int values[3]{1, 2.5, 3};\n"
+        "    return values[0];\n"
+        "}\n");
+    expect(!double_result.has_value(),
+           "array_brace_list_element_type: expected a 'double' element in an int array to be rejected");
+    if (!double_result.has_value()) {
+        expect(double_result.error().message.find("no implicit conversion") != std::string::npos,
+               "array_brace_list_element_type: expected the element to be rejected for its type, got " +
+                   double_result.error().message);
+    }
+
+    cases_run++;
+    auto constexpr_result = try_generate_ir(
+        "constexpr int mismatched() {\n"
+        "    int values[3]{1, true, 3};\n"
+        "    return values[0];\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int folded = mismatched();\n"
+        "    return folded;\n"
+        "}\n");
+    expect(!constexpr_result.has_value(),
+           "array_brace_list_element_type: expected the constant evaluator to reject a mismatched element too");
+    if (!constexpr_result.has_value()) {
+        expect(constexpr_result.error().message.find("matching types") != std::string::npos,
+               "array_brace_list_element_type: expected the constant evaluator to reject the element for its "
+               "type rather than for the shape of the list, got " + constexpr_result.error().message);
+    }
+}
+
+// An array of class type is where "value-initialize the elements the list
+// does not reach" stops being a zero fill: element 2 has to run C's
+// constructor and default member initializers, exactly as `C c{};` would.
+void test_partial_brace_list_for_an_array_of_class_type_constructs_the_rest() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "class C {\n"
+        "  public:\n"
+        "    int v{7};\n"
+        "    C() {}\n"
+        "    C(int a) : v{a} {}\n"
+        "    virtual ~C() {}\n"
+        "};\n"
+        "int main() {\n"
+        "    C values[3]{C{1}, C{2}};\n"
+        "    return values[0].v + values[1].v + values[2].v - 10;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "partial_brace_list_class_array: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+}
+
 void test_generate_returns_engaged_expected_on_success() {
     cases_run++;
     scpp::Program program = parse_with_std_imports(
@@ -2718,6 +2931,13 @@ void test_auto_reference_to_a_reference_returning_method_collapses() {
 int main() {
     run_test_case_files();
     test_long_binary_chain_generates_without_re_walking_its_prefix();
+    test_array_brace_list_initializes_each_element();
+    test_array_brace_list_initializes_a_member_and_a_mem_init_entry();
+    test_array_brace_list_value_initializes_the_elements_it_does_not_reach();
+    test_empty_array_brace_list_is_accepted_during_constant_evaluation();
+    test_too_many_array_initializers_are_rejected_by_both_implementations();
+    test_array_brace_list_checks_each_element_against_the_element_type();
+    test_partial_brace_list_for_an_array_of_class_type_constructs_the_rest();
     test_auto_reference_to_a_reference_returning_call_collapses();
     test_auto_reference_to_a_reference_returning_method_collapses();
     test_generate_returns_engaged_expected_on_success();

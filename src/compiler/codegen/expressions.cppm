@@ -753,7 +753,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             if (target.type.kind == TypeKind::Array && target.type.element != nullptr &&
                 type_needs_nontrivial_default_init(target.type)) {
                 return emit_array_element_loop(
-                    target.type, target.ptr, /*reverse=*/false,
+                    target.type, target.ptr, /*reverse=*/false, /*begin_index=*/0,
                     [&, this](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef) -> std::expected<void, CodegenError> {
                         return initialize_storage_from_brace_args(
                             LValue{element_ptr, *target.type.element, alignment_for_type(*target.type.element)}, {});
@@ -769,6 +769,77 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 return emit_default_initializers_for_record_storage(target.ptr, target.type.name, /*initialize_virtual_interface_bases=*/false);
             }
             return zero_initialize_storage(target.ptr, target.type, target.alignment);
+        }
+        // `int values[3]{1, 2, 3};` -- aggregate initialization
+        // ([dcl.init.aggr]). Spec §9.4(1) adopts [dcl.array] unchanged,
+        // so an array's braced list means exactly what ISO C++ says it
+        // means: element i is initialized from initializer i, and any
+        // element the list does not reach is value-initialized. Without
+        // this branch every array fell through to the single-expression
+        // gate below and was rejected outright, so an array could be
+        // default-initialized but never given values at its declaration
+        // -- including in spec §10's own `int values[3]{1, 2, 3};`
+        // example.
+        //
+        // The whole array is value-initialized first and the covered
+        // elements then overwritten, rather than value-initializing only
+        // the tail: that keeps the "elements this list does not reach"
+        // answer literally the empty-args logic above instead of a
+        // second copy of it, and a zero fill of storage that is about to
+        // be overwritten is not observable (an element type whose
+        // value-initialization *is* observable -- a class with a
+        // constructor -- is handled by that same recursion, which runs
+        // per element and is therefore skipped for covered elements by
+        // the loop bound below).
+        if (target.type.kind == TypeKind::Array && target.type.element != nullptr) {
+            std::int64_t element_count = target.type.array_size;
+            if (static_cast<std::int64_t>(args.size()) > element_count) {
+                std::string message{};
+                message += "too many initializers for array of ";
+                message += std::to_string(element_count);
+                message += (element_count == 1 ? " element: " : " elements: ");
+                message += std::to_string(args.size());
+                message += " given";
+                return std::unexpected(CodegenError(message, current_loc_));
+            }
+            auto array_llvm_type_result = to_llvm_type(target.type);
+            if (!array_llvm_type_result.has_value()) return std::unexpected(std::move(array_llvm_type_result).error());
+            llvm::LLVMTypeRef array_llvm_type = std::move(array_llvm_type_result).value();
+            llvm::LLVMTypeRef i64 = llvm::LLVMInt64TypeInContext(context_);
+            const Type& element_type = *target.type.element;
+            std::optional<unsigned int> element_alignment = alignment_for_type(element_type);
+
+            if (static_cast<std::int64_t>(args.size()) < element_count) {
+                if (auto r = zero_initialize_storage(target.ptr, target.type, target.alignment); !r.has_value())
+                    return std::unexpected(std::move(r).error());
+                if (type_needs_nontrivial_default_init(target.type)) {
+                    if (auto r = emit_array_element_loop(
+                            target.type, target.ptr, /*reverse=*/false,
+                            /*begin_index=*/static_cast<std::int64_t>(args.size()),
+                            [&, this](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef) -> std::expected<void, CodegenError> {
+                                return initialize_storage_from_brace_args(
+                                    LValue{element_ptr, element_type, element_alignment}, {});
+                            });
+                        !r.has_value()) {
+                        return std::unexpected(std::move(r).error());
+                    }
+                }
+            }
+
+            for (std::size_t i = 0; i < args.size(); ++i) {
+                llvm::LLVMValueRef index = llvm::LLVMConstInt(i64, static_cast<unsigned long long>(i), /*SignExtend=*/0);
+                llvm::LLVMValueRef element_ptr = build_array_element_gep(array_llvm_type, target.ptr, index);
+                // Per element, through the same routine any other
+                // initialization boundary uses -- so each element's value
+                // is checked against the element type by the one check
+                // that already answers that question, rather than a
+                // list-specific relaxation of it.
+                if (auto r = initialize_storage_from_expr(LValue{element_ptr, element_type, element_alignment}, *args[i]);
+                    !r.has_value()) {
+                    return std::unexpected(std::move(r).error());
+                }
+            }
+            return {};
         }
         if (args.size() != 1) {
             return std::unexpected(CodegenError("brace-initialization of this member requires exactly one expression", current_loc_));
