@@ -179,6 +179,58 @@ void test_range_for_const_reference_rejects_mutation() {
            "range_for_const_reference_rejects_mutation: expected mutation through const auto& to be rejected");
 }
 
+// A left-leaning `a + b + c + ...` used to cost 2^n to typecheck:
+// infer_expr_type's Add arm inferred both operands to test for pointer
+// arithmetic, discarded the answers, and then inferred the left operand a
+// second time to produce the result, so every term re-walked the whole
+// prefix. Measured directly, the worst node was visited 892 times for 8
+// terms and 229,372 times for 16 -- exactly 2^n growth -- and 22 terms took
+// half a minute to compile.
+//
+// This is a structural assertion rather than a timing one: 40 terms is a
+// program a person could write, and it either typechecks or it does not.
+// Against the pre-fix compiler this case does not fail an assertion, it
+// fails by not terminating -- 2^40 node visits -- which is why no wall-clock
+// threshold appears here.
+void test_long_binary_chain_typechecks_without_re_walking_its_prefix() {
+    cases_run++;
+    std::string chain = "1";
+    for (int term = 2; term <= 40; term++) chain += " + " + std::to_string(term);
+    std::string source = "int main() {\n    int k = " + chain + ";\n    return k - k;\n}\n";
+    expect(!throws_move_error(source),
+           "long_binary_chain_typechecks: a 40-term chain must typecheck");
+}
+
+// Inferring each operand once must not lose the pointer-arithmetic test
+// that the discarded inference existed to perform: `p + 1` outside an
+// unsafe block is still rejected (spec §5.1(5.1)), which only happens if
+// Add still learns both operand types.
+void test_pointer_arithmetic_is_still_detected_after_single_inference() {
+    cases_run++;
+    expect(throws_move_error("int main() {\n"
+                             "    int values[4];\n"
+                             "    values[0] = 1;\n"
+                             "    int* p = &values[0];\n"
+                             "    int* q = p + 1;\n"
+                             "    return *q - *q;\n"
+                             "}\n"),
+           "pointer_arithmetic_still_detected: `p + 1` outside unsafe must still be rejected");
+}
+
+// The other answer the Add/Mul arm produces: spec §6's rule that an
+// untyped literal adopts the other operand's type, so `2 * len` is a
+// size_t and not an int. Reusing the already-inferred operand types must
+// not change which one is returned.
+void test_untyped_literal_still_adopts_the_other_operands_type() {
+    cases_run++;
+    expect(!throws_move_error("int main() {\n"
+                              "    size_t len = 4;\n"
+                              "    size_t total = 2 * len;\n"
+                              "    return (int)(total - total);\n"
+                              "}\n"),
+           "untyped_literal_adopts_other_operand: `2 * len` must still be a size_t");
+}
+
 void test_mutable_reborrow_is_allowed_while_nested() {
     cases_run++;
     expect(!throws_move_error(
@@ -1930,6 +1982,9 @@ int main() {
     test_scalar_predicates_derive_from_the_model();
     test_scalar_width_and_layout_agree();
     test_scalar_value_ranges_follow_width_and_signedness();
+    test_long_binary_chain_typechecks_without_re_walking_its_prefix();
+    test_pointer_arithmetic_is_still_detected_after_single_inference();
+    test_untyped_literal_still_adopts_the_other_operands_type();
     test_mutable_reborrow_is_allowed_while_nested();
     test_mutable_reborrow_allows_parent_read_while_live();
     test_mutable_reborrow_rejects_parent_write_while_live();
