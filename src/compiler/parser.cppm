@@ -2034,12 +2034,14 @@ private:
         // Must capture 'this' explicitly (not just '[&]') so the
         // implicit `type_aliases_` -> `this->type_aliases_` member-field
         // rewrite that runs before lambda-capture analysis has an
-        // actual 'this' capture to resolve through -- see this
-        // session's manager-agent report for the full root-cause
-        // analysis of this compiler bug (blanket [&]/[=] capture modes
-        // never auto-capture 'this', matching real C++, but nothing
-        // else fills that gap for an already-rewritten `this->member`
-        // reference).
+        // actual 'this' capture to resolve through. Not a compiler bug,
+        // as this comment previously claimed, and not "matching real
+        // C++" either -- C++ `[&]`/`[=]` *does* capture `this`
+        // implicitly (only deprecated for `[=]`, P0806R2). ch05 §5.12
+        // deliberately makes scpp stricter: `this` must always be named.
+        // This lambda is one of the sites that rule requires, and the
+        // rule is now diagnosed rather than silently applied (see
+        // resolve_lambda in movecheck/monomorphize.cppm).
         auto lookup = [this](const std::string& candidate) -> std::optional<Type> {
             if (!type_aliases_.contains(candidate)) return std::optional<Type>{};
             return std::optional<Type>{type_aliases_.at(candidate)};

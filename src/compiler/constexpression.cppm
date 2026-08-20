@@ -1605,14 +1605,14 @@ private:
         if (auto result = tick(expr.loc, "resolving an lvalue"); !result.has_value()) return std::unexpected(std::move(result).error());
         switch (expr.kind) {
             case ExprKind::Identifier:
-                return [&]() -> std::expected<LValue, ConstexprError> {
+                return [&, this]() -> std::expected<LValue, ConstexprError> {
                     auto binding_result = lookup_binding(expr.name, expr.loc, expr.explicit_global_qualification);
                     if (!binding_result.has_value()) return std::unexpected(std::move(binding_result).error());
                     Binding binding = std::move(binding_result).value();
                     return LValue{binding.cell, binding.read_only};
                 }();
             case ExprKind::Member:
-                return [&]() -> std::expected<LValue, ConstexprError> {
+                return [&, this]() -> std::expected<LValue, ConstexprError> {
                     auto base_result = resolve_lvalue(*expr.lhs);
                     if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
                     LValue base = std::move(base_result).value();
@@ -1631,7 +1631,7 @@ private:
                     return LValue{object.fields[static_cast<std::size_t>(field_slot)].cell, base.read_only};
                 }();
             case ExprKind::Subscript:
-                return [&]() -> std::expected<LValue, ConstexprError> {
+                return [&, this]() -> std::expected<LValue, ConstexprError> {
                     std::shared_ptr<Cell> base{};
                     bool base_read_only = false;
                     // Speculatively try lvalue resolution first (needed so
@@ -2432,7 +2432,7 @@ private:
         }
         ++call_depth_;
         if (call_depth_ > limits_.max_recursion_depth)
-            return [&]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+            return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                 --call_depth_;
                 return std::unexpected(ConstexprError(loc, "constexpr evaluation exceeded recursion budget"));
             }();
@@ -2460,7 +2460,7 @@ private:
         if (!init_result.has_value()) return std::unexpected(std::move(init_result).error());
         if (!body_result.has_value()) return std::unexpected(std::move(body_result).error());
         if (body_result.value().flow == ExecFlow::Return)
-            return [&]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+            return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                 if (body_result.value().return_value) return clone_cell(body_result.value().return_value);
                 return make_default_cell(fn.return_type, loc);
             }();
@@ -2477,7 +2477,7 @@ private:
         std::vector<Binding> bindings{};
         bindings.reserve(fn.params.size());
         for (std::size_t i = 0; i < fn.params.size(); ++i) {
-            auto bind_result = [&]() -> std::expected<void, ConstexprError> {
+            auto bind_result = [&, this]() -> std::expected<void, ConstexprError> {
                 const Param& param = fn.params[i];
                 const Expr& arg_expr = *args[i];
                 if (param.type.kind == TypeKind::Reference) {
@@ -2736,7 +2736,7 @@ private:
 
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_call_expr(const Expr& expr) {
         if (expr.lhs)
-            return [&]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+            return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                 std::vector<std::shared_ptr<Cell>> arg_values{};
                 arg_values.reserve(expr.args.size());
                 for (const ExprPtr& arg : expr.args) {
@@ -2771,7 +2771,7 @@ private:
         OptionalFunctionRef callee_ref =
             find_callable(expr.name, arg_values, /*require_constexpr=*/true, expr.explicit_global_qualification);
         if (!callee_ref.has_value())
-            return [&]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+            return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                 if (has_runtime_only_match(expr.name, arg_values)) {
                     return std::unexpected(ConstexprError(expr.loc, "immediate evaluation may only call constexpr/consteval functions"));
                 }
@@ -2815,7 +2815,7 @@ private:
             case ExprKind::Destroy: return named_type("void");
             case ExprKind::StringLiteral: return make_const_char_pointer_type();
             case ExprKind::Identifier:
-                return [&]() -> std::optional<Type> {
+                return [&, this]() -> std::optional<Type> {
                     // Speculative: prefer a real binding; an identifier that
                     // isn't currently bound (e.g. an enum variant name used
                     // as a value) falls back to enum-variant lookup, else
@@ -2830,7 +2830,7 @@ private:
                     return std::nullopt;
                 }();
             case ExprKind::Move:
-            return [&]() -> std::optional<Type> {
+            return [&, this]() -> std::optional<Type> {
                     return expr.lhs ? infer_unevaluated_expr_type(*expr.lhs) : std::nullopt;
             }();
             case ExprKind::New:
@@ -2854,7 +2854,7 @@ private:
                     return expr.name.empty() ? std::nullopt : std::optional<Type>(named_type(expr.name));
             }();
             case ExprKind::Conditional:
-                return [&]() -> std::optional<Type> {
+                return [&, this]() -> std::optional<Type> {
                     if (!expr.rhs || !expr.third) return std::nullopt;
                     std::optional<Type> lhs_type = infer_unevaluated_expr_type(*expr.rhs);
                     std::optional<Type> rhs_type = infer_unevaluated_expr_type(*expr.third);
@@ -2862,7 +2862,7 @@ private:
                     return lhs_type;
                 }();
             case ExprKind::Member:
-                return [&]() -> std::optional<Type> {
+                return [&, this]() -> std::optional<Type> {
                     std::optional<Type> base = infer_unevaluated_expr_type(*expr.lhs);
                     if (!base.has_value()) return std::nullopt;
                     bool base_is_sized_span = base->kind == TypeKind::Span && base->pointee != nullptr;
@@ -2892,7 +2892,7 @@ private:
                     return std::nullopt;
                 }();
             case ExprKind::Subscript:
-                return [&]() -> std::optional<Type> {
+                return [&, this]() -> std::optional<Type> {
                     std::optional<Type> base = infer_unevaluated_expr_type(*expr.lhs);
                     if (!base.has_value()) return std::nullopt;
                     const Type& effective = base->kind == TypeKind::Reference && base->pointee ? *base->pointee : *base;
@@ -2903,7 +2903,7 @@ private:
                     return std::nullopt;
                 }();
             case ExprKind::Unary:
-            return [&]() -> std::optional<Type> {
+            return [&, this]() -> std::optional<Type> {
                     if (!expr.lhs) return std::nullopt;
                     switch (expr.unary_op) {
                         case UnaryOp::Neg: return infer_unevaluated_expr_type(*expr.lhs);
@@ -2930,7 +2930,7 @@ private:
                     return std::nullopt;
             }();
             case ExprKind::Binary:
-            return [&]() -> std::optional<Type> {
+            return [&, this]() -> std::optional<Type> {
                     if (!expr.lhs || !expr.rhs) return std::nullopt;
                     if (expr.binary_op == BinaryOp::Assign || expr.binary_op == BinaryOp::AddAssign ||
                         expr.binary_op == BinaryOp::SubAssign || expr.binary_op == BinaryOp::MulAssign ||
@@ -2945,7 +2945,7 @@ private:
                     return infer_unevaluated_expr_type(*expr.lhs);
             }();
             case ExprKind::Call:
-            return [&]() -> std::optional<Type> {
+            return [&, this]() -> std::optional<Type> {
                     if (expr.lhs == nullptr && expr.name == "$for_range_size" && expr.args.size() == 1) {
                         std::optional<Type> range_type = infer_unevaluated_expr_type(*expr.args[0]);
                         if (!range_type.has_value()) return std::nullopt;
@@ -3024,11 +3024,11 @@ private:
                     return std::unexpected(ConstexprError(expr.loc, "explicit destructor calls are not supported during constant evaluation"));
             }();
             case ExprKind::ValueInit:
-            return [&]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+            return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                     return make_default_cell(expr.type, expr.loc);
             }();
             case ExprKind::Alignof:
-                return [&]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+                return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                     if (auto result = reject_if_incomplete(expr.type, expr.loc, "alignof"); !result.has_value()) {
                         return std::unexpected(std::move(result).error());
                     }
@@ -3037,7 +3037,7 @@ private:
                     return make_scalar_cell(named_type("size_t"), static_cast<std::int64_t>(layout->abi_align_bytes));
                 }();
             case ExprKind::Sizeof:
-                return [&]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+                return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                     Type queried_type{};
                     if (expr.sizeof_operand_is_type) {
                         queried_type = expr.type;
@@ -3058,13 +3058,13 @@ private:
                     return make_scalar_cell(named_type("size_t"), static_cast<std::int64_t>(layout->size_bytes));
                 }();
             case ExprKind::Identifier:
-                return [&]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+                return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                     auto binding_result = lookup_binding(expr.name, expr.loc, expr.explicit_global_qualification);
                     if (!binding_result.has_value()) return std::unexpected(std::move(binding_result).error());
                     return clone_cell(binding_result.value().cell);
                 }();
             case ExprKind::Conditional:
-                return [&]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+                return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                     auto cond_result = evaluate_expr(*expr.lhs);
                     if (!cond_result.has_value()) return std::unexpected(std::move(cond_result).error());
                     auto cond_bool = as_bool(cond_result.value(), expr.loc);
@@ -3073,7 +3073,7 @@ private:
                                              : evaluate_expr_in_context(*expr.third, context_type);
                 }();
             case ExprKind::Member:
-                return [&]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+                return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                     auto base_result = evaluate_expr(*expr.lhs);
                     if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
                     std::shared_ptr<Cell> base = std::move(base_result).value();
@@ -3085,13 +3085,13 @@ private:
                     return clone_cell(lvalue_result.value().cell);
                 }();
             case ExprKind::Subscript:
-                return [&]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+                return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                     auto lvalue_result = resolve_lvalue(expr);
                     if (!lvalue_result.has_value()) return std::unexpected(std::move(lvalue_result).error());
                     return clone_cell(lvalue_result.value().cell);
                 }();
             case ExprKind::Call:
-            return [&]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+            return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                     if (expr.lhs == nullptr && expr.name == "$for_range_size" && expr.args.size() == 1) {
                         std::optional<Type> range_type = infer_unevaluated_expr_type(*expr.args[0]);
                         if (!range_type.has_value()) return std::unexpected(ConstexprError(expr.loc, "cannot determine range-for operand type"));
@@ -3112,13 +3112,13 @@ private:
                     return evaluate_call_expr(expr);
             }();
             case ExprKind::Cast:
-                return [&]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+                return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                     auto operand_result = evaluate_expr_in_context(*expr.lhs, &expr.type);
                     if (!operand_result.has_value()) return std::unexpected(std::move(operand_result).error());
                     return cast_value(expr.type, operand_result.value(), expr.loc);
                 }();
             case ExprKind::Binary:
-            return [&]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+            return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                     if (expr.binary_op == BinaryOp::Assign || expr.binary_op == BinaryOp::AddAssign ||
                         expr.binary_op == BinaryOp::SubAssign || expr.binary_op == BinaryOp::MulAssign ||
                         expr.binary_op == BinaryOp::DivAssign) {
@@ -3148,7 +3148,7 @@ private:
                         return clone_cell(target.cell);
                     }
                     if (expr.binary_op == BinaryOp::And)
-                        return [&]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+                        return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                         auto lhs_result = evaluate_expr(*expr.lhs);
                         if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
                         auto lhs_bool = as_bool(lhs_result.value(), expr.loc);
@@ -3161,7 +3161,7 @@ private:
                         return make_bool_cell(rhs_bool.value());
                     }();
                     if (expr.binary_op == BinaryOp::Or)
-                        return [&]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+                        return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                         auto lhs_result = evaluate_expr(*expr.lhs);
                         if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
                         auto lhs_bool = as_bool(lhs_result.value(), expr.loc);
@@ -3202,7 +3202,7 @@ private:
                     }
             }();
             case ExprKind::Unary:
-            return [&]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+            return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                     switch (expr.unary_op) {
                         case UnaryOp::Neg: {
                             auto operand_result = evaluate_expr_in_context(*expr.lhs, context_type);
@@ -3318,7 +3318,7 @@ private:
         if (auto result = tick(stmt.loc, "executing a statement"); !result.has_value()) return std::unexpected(std::move(result).error());
         switch (stmt.kind) {
             case StmtKind::VarDecl:
-                return [&]() -> std::expected<ExecOutcome, ConstexprError> {
+                return [&, this]() -> std::expected<ExecOutcome, ConstexprError> {
                     if (stmt.type.kind == TypeKind::Span) {
                         if (!stmt.init) {
                             return std::unexpected(ConstexprError(stmt.loc, "std::span<const T> must be initialized during constant evaluation"));
@@ -3396,7 +3396,7 @@ private:
                     return ExecOutcome{};
                 }();
             case StmtKind::Return:
-                return [&]() -> std::expected<ExecOutcome, ConstexprError> {
+                return [&, this]() -> std::expected<ExecOutcome, ConstexprError> {
                     if (stmt.expr) {
                         auto value_result = evaluate_expr_in_context(*stmt.expr, &return_type);
                         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
@@ -3437,7 +3437,7 @@ private:
                 }
                 return ExecOutcome{};
             case StmtKind::While:
-                return [&]() -> std::expected<ExecOutcome, ConstexprError> {
+                return [&, this]() -> std::expected<ExecOutcome, ConstexprError> {
                     int iterations = 0;
                     while (true) {
                         auto condition_result = evaluate_expr(*stmt.condition);
@@ -3461,7 +3461,7 @@ private:
                     return ExecOutcome{};
                 }();
             case StmtKind::Switch:
-                return [&]() -> std::expected<ExecOutcome, ConstexprError> {
+                return [&, this]() -> std::expected<ExecOutcome, ConstexprError> {
                     auto condition_value_result = evaluate_expr(*stmt.condition);
                     if (!condition_value_result.has_value()) return std::unexpected(std::move(condition_value_result).error());
                     std::shared_ptr<Cell> condition_value = std::move(condition_value_result).value();
@@ -3534,7 +3534,7 @@ private:
             case StmtKind::Continue: return ExecOutcome{ExecFlow::Continue, nullptr};
             case StmtKind::Fallthrough: return ExecOutcome{};
             case StmtKind::Block:
-                return [&]() -> std::expected<ExecOutcome, ConstexprError> {
+                return [&, this]() -> std::expected<ExecOutcome, ConstexprError> {
                     if (stmt.is_unsafe) return std::unexpected(ConstexprError(stmt.loc, "unsafe blocks are not allowed in constant evaluation"));
                     frames_.emplace_back();
                     std::expected<ExecOutcome, ConstexprError> result = ExecOutcome{};

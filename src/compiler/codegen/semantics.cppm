@@ -147,7 +147,7 @@ namespace {
                 if (const GlobalSlot* global = find_visible_global_slot(expr.name, expr.explicit_global_qualification)) {
                     return global->type;
                 }
-                if (const EnumDef* def = [&]() {
+                if (const EnumDef* def = [&, this]() {
                         const EnumDef* enum_def = nullptr;
                         [[maybe_unused]] const EnumVariant* variant = find_enum_variant(program_, expr.name, &enum_def);
                         return enum_def;
@@ -381,7 +381,7 @@ namespace {
                         return *callee_local->type.function_return;
                     }
                 }
-                auto inferred_call_argument_type = [&](const Expr& arg, const Type& param_type) -> std::optional<Type> {
+                auto inferred_call_argument_type = [&, this](const Expr& arg, const Type& param_type) -> std::optional<Type> {
                     std::optional<Type> inferred = infer_type(arg);
                     if (inferred.has_value()) return inferred;
                     if (arg.kind == ExprKind::Identifier && param_type.kind == TypeKind::Reference &&
@@ -655,7 +655,7 @@ namespace {
     bool Codegen::argument_matches_parameter(const Expr& arg, const Type& param_type)
 {
         if (is_nullptr_literal(arg) && param_type.kind == TypeKind::Pointer) return true;
-        auto argument_type_matches_or_converts = [&](const Type& arg_type, const Type& candidate_param_type) {
+        auto argument_type_matches_or_converts = [&, this](const Type& arg_type, const Type& candidate_param_type) {
             return argument_type_matches_parameter(arg_type, candidate_param_type) ||
                    pointer_to_void_parameter_accepts_pointer_in_unsafe_context(arg_type, candidate_param_type,
                                                                                unsafe_depth_) ||
@@ -704,7 +704,7 @@ namespace {
 
     bool Codegen::constructor_parameter_accepts_argument_directly(const Expr& arg, const Type& param_type)
 {
-        auto inferred_argument_type = [&]() -> std::optional<Type> {
+        auto inferred_argument_type = [&, this]() -> std::optional<Type> {
             std::optional<Type> inferred = infer_type(arg);
             if (inferred.has_value()) return inferred;
             if (arg.kind == ExprKind::Identifier) {
@@ -1043,7 +1043,7 @@ namespace {
                                               std::size_t param_offset, bool receiver_is_mutable ,
                                               const Expr* receiver_expr)
 {
-        auto scalar_exact_match_score = [&](const Function* fn) {
+        auto scalar_exact_match_score = [&, this](const Function* fn) {
             int score = 0;
             std::size_t fixed_param_count = fn->params.size() - param_offset;
             for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
@@ -1074,7 +1074,7 @@ namespace {
         }
         if (matches.empty()) return nullptr;
         if (matches.size() == 1) return matches[0];
-        auto exact_non_reference_match = [&](const Function* fn) {
+        auto exact_non_reference_match = [&, this](const Function* fn) {
             std::size_t fixed_param_count = fn->params.size() - param_offset;
             for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
                 std::optional<Type> arg_type = infer_type(*args[i]);
@@ -1133,7 +1133,7 @@ namespace {
         // parameters (including `this`) among positions where the
         // argument/receiver is itself a mutable place. Falls back to the
         // first match if that still doesn't produce a unique winner.
-        auto mutable_ref_score = [&](const Function* fn) {
+        auto mutable_ref_score = [&, this](const Function* fn) {
             int score = 0;
             if (param_offset == 1 && fn->params[0].type.is_mutable_ref && receiver_is_mutable) score++;
             if (param_offset == 1 && receiver_expr != nullptr && fn->params[0].type.pointee != nullptr) {
@@ -1154,7 +1154,7 @@ namespace {
             }
             return score;
         };
-        auto value_vs_reference_axis_score = [&](const Function* fn) {
+        auto value_vs_reference_axis_score = [&, this](const Function* fn) {
             int score = 0;
             std::size_t fixed_param_count = fn->params.size() - param_offset;
             for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
@@ -1233,7 +1233,7 @@ namespace {
             if (all_match) matches.push_back(&fn);
         }
         if (matches.empty()) return nullptr;
-        auto exact_type_match = [&](const Function* fn) {
+        auto exact_type_match = [&, this](const Function* fn) {
             for (std::size_t i = 0; i < args.size(); i++) {
                 std::optional<Type> inferred = infer_type(*args[i]);
                 if (!inferred.has_value()) return false;
@@ -1245,7 +1245,7 @@ namespace {
             if (exact_type_match(fn)) return fn;
         }
         if (matches.size() == 1) return matches[0];
-        auto mutable_ref_score = [&](const Function* fn) {
+        auto mutable_ref_score = [&, this](const Function* fn) {
             int score = 0;
             for (std::size_t i = 0; i < args.size(); i++) {
                 const Type& param_type = fn->params[i + 1].type;

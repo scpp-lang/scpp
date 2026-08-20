@@ -689,7 +689,7 @@ private:
     // about an *expression* and so apply to every position without
     // exception, which is the part that was missing.
     [[nodiscard]] std::expected<void, DataflowError> validate_initializer_scopes() {
-        return for_each_initializer_scope(program_, [&](const InitializerScope& scope)
+        return for_each_initializer_scope(program_, [&, this](const InitializerScope& scope)
                                                         -> std::expected<void, DataflowError> {
             if (scope.declares_namespace_scope_variable) {
                 if (auto _r = validate_declared_type(*scope.declared_type, "global variable '" + scope.name + "'", scope.loc);

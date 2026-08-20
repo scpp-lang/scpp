@@ -1974,6 +1974,146 @@ void test_literal_adoption_covers_every_scalar_type() {
            "literal_adoption: nullptr does not adopt a bool place");
 }
 
+// ch05 §5.12 requires `this` to be captured explicitly: a blanket `[&]`
+// or `[=]` never captures it. The rule was already enforced -- but by
+// omission, so the program was rejected with `call to unknown function
+// '__lambda0::helper'` (naming a synthesized closure type the source
+// never mentions) or, when the call's result was bound with `auto`,
+// with `cannot infer 'auto' variable 'v's type from its initializer`.
+// Neither said anything about captures. These pin the message, not just
+// the rejection, because the rejection was never in doubt.
+void test_blanket_reference_capture_of_a_member_call_names_the_rule() {
+    cases_run++;
+    std::optional<std::string> message = move_error_message(
+        "class C {\n"
+        "public:\n"
+        "    virtual ~C() {}\n"
+        "    int helper() { return 3; }\n"
+        "    int run() {\n"
+        "        auto f = [&]() -> int { return helper(); };\n"
+        "        return f();\n"
+        "    }\n"
+        "};\n"
+        "int main() { C c{}; return c.run() - 3; }\n");
+    expect(message.has_value(),
+           "blanket_reference_capture_of_a_member_call: expected the program to be rejected");
+    if (!message.has_value()) return;
+    expect(message->find("capture 'this'") != std::string::npos,
+           "blanket_reference_capture_of_a_member_call: expected the rule in " + *message);
+    expect(message->find("5.12") != std::string::npos,
+           "blanket_reference_capture_of_a_member_call: expected the spec citation in " + *message);
+    expect(message->find("'[&, this]'") != std::string::npos,
+           "blanket_reference_capture_of_a_member_call: expected the fix spelling in " + *message);
+    expect(message->find("__lambda") == std::string::npos,
+           "blanket_reference_capture_of_a_member_call: expected no synthesized closure name in " + *message);
+}
+
+// The same rule, reached through a member *field* rather than a call,
+// and spelled `this->` explicitly -- writing the qualification out by
+// hand does not supply the capture it needs. (An unqualified `helper()`
+// inside a method is rewritten to `this->helper()` before capture
+// analysis anyway, which is why the two spellings meet here.)
+void test_blanket_value_capture_of_a_member_field_names_the_rule() {
+    cases_run++;
+    std::optional<std::string> message = move_error_message(
+        "class C {\n"
+        "public:\n"
+        "    virtual ~C() {}\n"
+        "    int value_{7};\n"
+        "    int run() {\n"
+        "        auto f = [=]() -> int { return this->value_; };\n"
+        "        return f();\n"
+        "    }\n"
+        "};\n"
+        "int main() { C c{}; return c.run() - 7; }\n");
+    expect(message.has_value(),
+           "blanket_value_capture_of_a_member_field: expected the program to be rejected");
+    if (!message.has_value()) return;
+    expect(message->find("capture 'this'") != std::string::npos,
+           "blanket_value_capture_of_a_member_field: expected the rule in " + *message);
+    expect(message->find("'[=]'") != std::string::npos,
+           "blanket_value_capture_of_a_member_field: expected the capture actually written in " + *message);
+}
+
+// An empty capture list is not a blanket mode, so it never entered the
+// implicit-capture analysis at all and reached the same dead end by a
+// different route. The rule is about naming `this`, not about `[&]`.
+void test_empty_capture_list_using_a_member_names_the_rule() {
+    cases_run++;
+    std::optional<std::string> message = move_error_message(
+        "class C {\n"
+        "public:\n"
+        "    virtual ~C() {}\n"
+        "    int helper() { return 3; }\n"
+        "    int run() {\n"
+        "        auto f = []() -> int { return helper(); };\n"
+        "        return f();\n"
+        "    }\n"
+        "};\n"
+        "int main() { C c{}; return c.run() - 3; }\n");
+    expect(message.has_value(),
+           "empty_capture_list_using_a_member: expected the program to be rejected");
+    if (!message.has_value()) return;
+    expect(message->find("capture 'this'") != std::string::npos,
+           "empty_capture_list_using_a_member: expected the rule in " + *message);
+}
+
+// The four spellings the diagnostic offers must all actually work --
+// otherwise it advises a fix that does not compile. These already
+// passed before the diagnostic existed; they are here so the new
+// rejection cannot widen into them.
+void test_every_explicit_this_capture_spelling_is_accepted() {
+    const char* prefix =
+        "class C {\n"
+        "public:\n"
+        "    virtual ~C() {}\n"
+        "    int helper() { return 3; }\n"
+        "    int run() {\n"
+        "        auto f = ";
+    const char* suffix =
+        "() -> int { return helper(); };\n"
+        "        return f();\n"
+        "    }\n"
+        "};\n"
+        "int main() { C c{}; return c.run() - 3; }\n";
+    for (const char* capture : {"[this]", "[*this]", "[&, this]", "[=, this]"}) {
+        cases_run++;
+        std::string source = std::string(prefix) + capture + suffix;
+        std::optional<std::string> message = move_error_message(source);
+        expect(!message.has_value(),
+               std::string("explicit_this_capture_spelling ") + capture + ": expected acceptance, got " +
+                   message.value_or(""));
+    }
+}
+
+// The rejection is scoped to a lambda that actually needs `this`: a
+// blanket capture in a method that touches no member, or one that calls
+// a free function or a static member, is untouched -- as is any lambda
+// in a free function, where there is no `this` to name.
+void test_blanket_capture_without_a_member_use_is_still_accepted() {
+    cases_run++;
+    std::optional<std::string> message = move_error_message(
+        "int free_helper() { return 1; }\n"
+        "class C {\n"
+        "public:\n"
+        "    virtual ~C() {}\n"
+        "    static int static_helper() { return 1; }\n"
+        "    int run() {\n"
+        "        int local = 1;\n"
+        "        auto f = [&]() -> int { return local + free_helper() + static_helper(); };\n"
+        "        return f();\n"
+        "    }\n"
+        "};\n"
+        "int free_run() {\n"
+        "    int local = 3;\n"
+        "    auto g = [&]() -> int { return local + free_helper(); };\n"
+        "    return g();\n"
+        "}\n"
+        "int main() { C c{}; return c.run() + free_run() - 7; }\n");
+    expect(!message.has_value(),
+           "blanket_capture_without_a_member_use: expected acceptance, got " + message.value_or(""));
+}
+
 int main() {
     run_test_case_files();
     test_literal_adoption_covers_every_scalar_type();
@@ -2045,6 +2185,12 @@ int main() {
     test_pointer_write_between_unsubstituted_type_parameters_is_allowed();
     test_pointer_write_wrong_after_substitution_is_still_rejected();
     test_out_of_range_literal_reports_the_value_not_a_conversion();
+
+    test_blanket_reference_capture_of_a_member_call_names_the_rule();
+    test_blanket_value_capture_of_a_member_field_names_the_rule();
+    test_empty_capture_list_using_a_member_names_the_rule();
+    test_every_explicit_this_capture_spelling_is_accepted();
+    test_blanket_capture_without_a_member_use_is_still_accepted();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

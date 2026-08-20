@@ -125,7 +125,7 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
         llvm::LLVMMetadataRef result = nullptr;
         switch (type.kind) {
             case TypeKind::Named: {
-                auto basic = [&](llvm::LLVMDWARFTypeEncoding encoding) -> std::expected<llvm::LLVMMetadataRef, CodegenError> {
+                auto basic = [&, this](llvm::LLVMDWARFTypeEncoding encoding) -> std::expected<llvm::LLVMMetadataRef, CodegenError> {
                     auto llvm_type_result = to_llvm_type(type);
                     if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
                     return llvm::LLVMDIBuilderCreateBasicType(dibuilder_, type.name.c_str(), type.name.size(),
