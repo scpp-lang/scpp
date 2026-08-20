@@ -2670,9 +2670,56 @@ void run_call_resolution_diagnostic_tests() {
     }
 }
 
+// Reference collapsing for a deduced reference. `auto& r = idem(a);`
+// infers `int&` for the initializer, so wrapping that in the declared
+// `&` builds a reference to a reference -- which codegen, not
+// movecheck, is the one to reject ("a reference to a reference is not
+// supported", layout.cppm). The written-out `int& r = idem(a);` has
+// always been accepted, so this is the deduced spelling catching up
+// with it, and it has to be tested here: monomorphize and check_moves
+// both accept the un-collapsed form and hand it on.
+void test_auto_reference_to_a_reference_returning_call_collapses() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "int& idem(int& x) { return x; }\n"
+        "int main() {\n"
+        "    int a{1};\n"
+        "    auto& r = idem(a);\n"
+        "    r = r + 10;\n"
+        "    return r - 11;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "auto_reference_to_a_reference_returning_call_collapses: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().message));
+}
+
+// The same shape reached through a method call on the enclosing
+// object, which is the form the compiler's own source uses most.
+void test_auto_reference_to_a_reference_returning_method_collapses() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "class C {\n"
+        "public:\n"
+        "    virtual ~C() {}\n"
+        "    int f_{5};\n"
+        "    int& mref() { return f_; }\n"
+        "    int run() {\n"
+        "        auto& r = this->mref();\n"
+        "        r = r + 1;\n"
+        "        return r - 6;\n"
+        "    }\n"
+        "};\n"
+        "int main() { C c{}; return c.run(); }\n");
+    expect(ir_result.has_value(),
+           "auto_reference_to_a_reference_returning_method_collapses: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().message));
+}
+
 int main() {
     run_test_case_files();
     test_long_binary_chain_generates_without_re_walking_its_prefix();
+    test_auto_reference_to_a_reference_returning_call_collapses();
+    test_auto_reference_to_a_reference_returning_method_collapses();
     test_generate_returns_engaged_expected_on_success();
     test_generate_returns_disengaged_expected_on_failure_without_throwing();
     run_constexpr_engine_direct_api_tests();

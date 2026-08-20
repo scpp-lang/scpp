@@ -2114,6 +2114,130 @@ void test_blanket_capture_without_a_member_use_is_still_accepted() {
            "blanket_capture_without_a_member_use: expected acceptance, got " + message.value_or(""));
 }
 
+// A deduced reference is a real borrow, not a copy: the whole point of
+// spelling `auto&` is that the borrow checker tracks it. Pinned as a
+// pair -- the binding is accepted, and a second mutable borrow of the
+// same local through it is rejected, which only holds if movecheck
+// sees a Reference and not a value.
+void test_auto_reference_is_tracked_as_a_borrow() {
+    cases_run++;
+    expect(!throws_move_error(
+               "int main() {\n"
+               "    int a{1};\n"
+               "    auto& r = a;\n"
+               "    r = r + 10;\n"
+               "    return r - 11;\n"
+               "}\n"),
+           "auto_reference_is_tracked_as_a_borrow: expected the binding to be accepted");
+    cases_run++;
+    std::optional<std::string> second_borrow_message = move_error_message(
+        "int main() {\n"
+        "    int a{1};\n"
+        "    auto& r = a;\n"
+        "    int& second = a;\n"
+        "    return r + second;\n"
+        "}\n");
+    expect(second_borrow_message.has_value(),
+           "auto_reference_is_tracked_as_a_borrow: expected a second mutable borrow to be rejected");
+    expect(second_borrow_message.value_or("").find("already borrowed") != std::string::npos,
+           "auto_reference_is_tracked_as_a_borrow: expected the borrow diagnostic in " +
+               second_borrow_message.value_or(""));
+}
+
+void test_const_auto_reference_rejects_a_write() {
+    cases_run++;
+    std::optional<std::string> message = move_error_message(
+        "int main() {\n"
+        "    int a{1};\n"
+        "    const auto& r = a;\n"
+        "    r = r + 1;\n"
+        "    return a;\n"
+        "}\n");
+    expect(message.has_value(), "const_auto_reference_rejects_a_write: expected the write to be rejected");
+    if (!message.has_value()) return;
+    expect(message->find("read-only") != std::string::npos,
+           "const_auto_reference_rejects_a_write: expected a read-only-reference diagnostic in " + *message);
+}
+
+// Collapsing must not launder constness away. `auto&` asks for a
+// mutable binding, so a read-only initializer is rejected -- with the
+// same diagnostic the written-out `int& r = cref(a);` gets, since the
+// deduced spelling should not answer this question differently from
+// the spelled-out one. `const auto&` is the form that binds it.
+void test_auto_reference_to_a_read_only_source_matches_the_written_out_form() {
+    cases_run++;
+    const char* deduced =
+        "const int& cref(const int& x) { return x; }\n"
+        "int main() {\n"
+        "    int a{1};\n"
+        "    auto& r = cref(a);\n"
+        "    return r - 1;\n"
+        "}\n";
+    const char* written_out =
+        "const int& cref(const int& x) { return x; }\n"
+        "int main() {\n"
+        "    int a{1};\n"
+        "    int& r = cref(a);\n"
+        "    return r - 1;\n"
+        "}\n";
+    std::optional<std::string> deduced_message = move_error_message(deduced);
+    std::optional<std::string> written_out_message = move_error_message(written_out);
+    expect(deduced_message.has_value(),
+           "auto_reference_to_a_read_only_source: expected 'auto&' against a read-only source to be rejected");
+    expect(deduced_message == written_out_message,
+           "auto_reference_to_a_read_only_source: expected the same diagnostic as the written-out form, got " +
+               deduced_message.value_or("<accepted>") + " vs " + written_out_message.value_or("<accepted>"));
+
+    cases_run++;
+    std::optional<std::string> const_message = move_error_message(
+        "const int& cref(const int& x) { return x; }\n"
+        "int main() {\n"
+        "    int a{1};\n"
+        "    const auto& r = cref(a);\n"
+        "    return r - 1;\n"
+        "}\n");
+    expect(!const_message.has_value(),
+           "auto_reference_to_a_read_only_source: expected 'const auto&' to bind it, got " +
+               const_message.value_or(""));
+}
+
+// The risk direction for a deduced reference is that it outlives what
+// it borrows. Each of these is rejected for the written-out spelling
+// too; pinned so that deducing the referent cannot quietly lose the
+// lender.
+void test_auto_reference_cannot_outlive_or_escape_its_lender() {
+    // Each asserts the *reason*, not merely that something was
+    // rejected: before `auto&` parsed at all, every one of these was
+    // rejected by the parser, so a bare "is it rejected?" check would
+    // have passed for the wrong reason.
+    cases_run++;
+    std::optional<std::string> temporary_message = move_error_message(
+        "int val() { return 5; }\n"
+        "int main() {\n"
+        "    auto& r = val();\n"
+        "    return r - 5;\n"
+        "}\n");
+    expect(temporary_message.has_value(),
+           "auto_reference_cannot_outlive_its_lender: expected a borrow of a call result to be rejected");
+    expect(temporary_message.value_or("").find("doesn't return a reference") != std::string::npos,
+           "auto_reference_cannot_outlive_its_lender: expected the borrow diagnostic in " +
+               temporary_message.value_or(""));
+    cases_run++;
+    std::optional<std::string> moved_message = move_error_message(
+        "import std;\n"
+        "int main() {\n"
+        "    std::string s{\"x\"};\n"
+        "    auto& r = s;\n"
+        "    std::string t = std::move(s);\n"
+        "    return static_cast<int>(r.size() + t.size());\n"
+        "}\n");
+    expect(moved_message.has_value(),
+           "auto_reference_cannot_outlive_its_lender: expected a move out from under the borrow to be rejected");
+    expect(moved_message.value_or("").find("while it is borrowed") != std::string::npos,
+           "auto_reference_cannot_outlive_its_lender: expected the borrow diagnostic in " +
+               moved_message.value_or(""));
+}
+
 int main() {
     run_test_case_files();
     test_literal_adoption_covers_every_scalar_type();
@@ -2191,6 +2315,11 @@ int main() {
     test_empty_capture_list_using_a_member_names_the_rule();
     test_every_explicit_this_capture_spelling_is_accepted();
     test_blanket_capture_without_a_member_use_is_still_accepted();
+
+    test_auto_reference_is_tracked_as_a_borrow();
+    test_const_auto_reference_rejects_a_write();
+    test_auto_reference_to_a_read_only_source_matches_the_written_out_form();
+    test_auto_reference_cannot_outlive_or_escape_its_lender();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

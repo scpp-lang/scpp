@@ -1533,8 +1533,7 @@ private:
     }
 
     [[nodiscard]] bool is_range_for_decl_start() const {
-        return check(TokenKind::KwAuto) || (check(TokenKind::KwConst) && peek_at(1).kind == TokenKind::KwAuto) ||
-               looks_like_type_start();
+        return at_auto_declaration_start() || looks_like_type_start();
     }
 
     [[nodiscard]] StmtPtr rewrite_loop_continue_with_epilogue(StmtPtr stmt, const Expr& epilogue) {
@@ -8928,6 +8927,71 @@ private:
         return parse_expr_stmt();
     }
 
+    // Whether the declaration starting here is spelled with `auto`
+    // rather than a written type -- `auto`, or `const auto`, in either
+    // case possibly followed by `&`.
+    [[nodiscard]] bool at_auto_declaration_start() const {
+        return check(TokenKind::KwAuto) || (check(TokenKind::KwConst) && peek_at(1).kind == TokenKind::KwAuto);
+    }
+
+    // The `[const] auto[&]` prefix of a declaration, in the one place
+    // every declaration form asks about it. A range-for loop variable
+    // (`for (auto& value : values)`, spec §10(7)-(8)) and an ordinary
+    // variable declaration (`auto& v = ref_helper(x);`) are the same
+    // grammar and must not be able to disagree: they did, because this
+    // was written twice. parse_for_range_decl accepted `const` and `&`;
+    // parse_var_decl_impl consumed `auto` and demanded a name straight
+    // afterwards, so a reference binding to a deduced type -- the one
+    // spelling for "borrow whatever this returns" -- was a *parse*
+    // error, `expected variable name but found '&'`, and `const auto`
+    // was `expected a type name`.
+    //
+    // `Reference` wrapping the `auto` sentinel is what the rest of the
+    // pipeline already expects: monomorphize resolves the pointee from
+    // the initializer for any VarDecl of this shape (its
+    // `stmt.type.pointee->name == "auto"` case), which is how the
+    // range-for spelling has always worked. Nothing downstream is
+    // range-for-specific, so nothing downstream needed changing.
+    //
+    // The pointee is deliberately left unqualified even for `const
+    // auto&`: constness rides on `is_mutable_ref`, and monomorphize
+    // overwrites the placeholder pointee wholesale with the inferred
+    // type, so qualifying it here would be discarded rather than
+    // honoured -- exactly as the range-for path has always done it.
+    [[nodiscard]] std::expected<Type, ParseError> parse_auto_declared_type(bool& out_is_const) {
+        bool has_const = match(TokenKind::KwConst);
+        if (auto _r = expect(TokenKind::KwAuto, "'auto'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        Type declared = named_type("auto");
+        if (check(TokenKind::AmpAmp)) {
+            const Token& tok = peek();
+            {
+                std::string _msg_auto_rvalue{"'&&' (rvalue reference) is only supported for a function/method/"};
+                _msg_auto_rvalue += "constructor parameter's declared type in this version (ch03) -- not ";
+                _msg_auto_rvalue += "a variable, field, return type, or nested type argument, so 'auto&&' ";
+                _msg_auto_rvalue += "is not a declaration form either";
+                return std::unexpected(ParseError(tok.line, tok.column, _msg_auto_rvalue));
+            }
+        }
+        if (check(TokenKind::Star)) {
+            const Token& tok = peek();
+            {
+                std::string _msg_auto_pointer{"'auto*' is not a declaration form -- a plain 'auto' already deduces "};
+                _msg_auto_pointer += "a pointer type from a pointer initializer, so write 'auto p = &x;'";
+                return std::unexpected(ParseError(tok.line, tok.column, _msg_auto_pointer));
+            }
+        }
+        if (match(TokenKind::Amp)) {
+            auto pointee = std::make_shared<Type>(std::move(declared));
+            Type reference_type{};
+            reference_type.kind = TypeKind::Reference;
+            reference_type.pointee = std::move(pointee);
+            reference_type.is_mutable_ref = !has_const;
+            return reference_type;
+        }
+        out_is_const = has_const;
+        return declared;
+    }
+
     [[nodiscard]] std::expected<StmtPtr, ParseError> parse_var_decl_impl(std::vector<AlignmentSpecifier> leading_alignments, bool require_semicolon,
                                 bool require_explicit_initializer, bool qualify_variable_name) {
         SourceLocation loc = current_loc();
@@ -8937,7 +9001,7 @@ private:
         stmt->alignment_specs = std::move(leading_alignments);
         if (!qualify_variable_name && match(TokenKind::KwStatic)) stmt->is_static_local = true;
         stmt->is_constexpr = match(TokenKind::KwConstexpr);
-        if (match(TokenKind::KwAuto)) {
+        if (at_auto_declaration_start()) {
             // ch05 §5.12: `auto name = expr;` infers the local's type
             // from its initializer -- the only way to name a closure's
             // own compiler-synthesized, otherwise unspellable class
@@ -8948,8 +9012,12 @@ private:
             // Monomorphizer pass (monomorphize_generics), in the same
             // pre-check_moves phase that resolves a Lambda literal's own
             // synthesized class -- see its VarDecl case. Never reaches
-            // check_moves/codegen unresolved.
-            stmt->type = named_type("auto");
+            // check_moves/codegen unresolved. `const auto` and `auto&`
+            // are the same declaration, parsed by the same helper the
+            // range-for loop variable uses.
+            auto auto_type_result = parse_auto_declared_type(stmt->is_const);
+            if (!auto_type_result.has_value()) return std::unexpected(std::move(auto_type_result).error());
+            stmt->type = std::move(auto_type_result).value();
             auto var_name_result = expect(TokenKind::Identifier, "variable name");
             if (!var_name_result.has_value()) return std::unexpected(std::move(var_name_result).error());
             stmt->var_name = std::string(var_name_result.value().text.data(), var_name_result.value().text.size());
@@ -9097,20 +9165,10 @@ private:
         if (!alignments_result.has_value()) return std::unexpected(std::move(alignments_result).error());
         stmt->alignment_specs = std::move(alignments_result).value();
 
-        if (check(TokenKind::KwAuto) || (check(TokenKind::KwConst) && peek_at(1).kind == TokenKind::KwAuto)) {
-            bool has_const = match(TokenKind::KwConst);
-            if (auto _r = expect(TokenKind::KwAuto, "'auto'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
-            Type declared = named_type("auto");
-            if (match(TokenKind::Amp)) {
-                auto pointee = std::make_shared<Type>(std::move(declared));
-                Type reference_type{};
-                reference_type.kind = TypeKind::Reference;
-                reference_type.pointee = std::move(pointee);
-                reference_type.is_mutable_ref = !has_const;
-                declared = reference_type;
-            } else if (has_const) {
-                stmt->is_const = true;
-            }
+        if (at_auto_declaration_start()) {
+            auto auto_type_result = parse_auto_declared_type(stmt->is_const);
+            if (!auto_type_result.has_value()) return std::unexpected(std::move(auto_type_result).error());
+            Type declared = std::move(auto_type_result).value();
             auto var_name_result = expect(TokenKind::Identifier, "variable name");
             if (!var_name_result.has_value()) return std::unexpected(std::move(var_name_result).error());
             stmt->var_name = std::string(var_name_result.value().text.data(), var_name_result.value().text.size());
