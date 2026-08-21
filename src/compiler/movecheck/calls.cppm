@@ -510,6 +510,111 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
     return false;
 }
 
+// The struct sibling of is_named_class_type: a plain aggregate record,
+// which a brace-enclosed initializer list may initialize directly.
+[[nodiscard]] const StructDef* find_struct_def_for_brace_binding(const Type& type, const Body& body) {
+    if (type.kind != TypeKind::Named || body.program == nullptr) return nullptr;
+    if (is_named_class_type(type, body)) return nullptr;
+    for (const StructDef& def : body.program->structs) {
+        if (def.name == type.name) {
+            for (const StructField& field : def.fields) {
+                if (field.access != AccessSpecifier::Public) return nullptr;
+            }
+            return &def;
+        }
+    }
+    return nullptr;
+}
+
+[[nodiscard]] bool type_absorbs_brace_initializer_run(const Type& type, const Body& body) {
+    if (type.kind == TypeKind::Array && type.element != nullptr) return true;
+    return find_struct_def_for_brace_binding(type, body) != nullptr;
+}
+
+void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& args, std::size_t& index,
+                                 const Body& body, const Signatures& signatures);
+
+// Movecheck's copy of codegen's cursor walk (see
+// Codegen::count_braced_init_list_cursor). It answers the same question
+// -- can this braced list initialize this parameter type? -- because
+// movecheck resolves overloads independently, and a different answer
+// here would move-check a call against a signature codegen does not
+// select.
+void count_braced_init_list_cursor(const Type& type, const std::vector<ExprPtr>& args, std::size_t& index,
+                                   const Body& body, const Signatures& signatures) {
+    if (index >= args.size()) return;
+    const Expr& next = *args[index];
+    if (next.kind == ExprKind::BracedInitList) {
+        ++index;
+        return;
+    }
+    if (!type_absorbs_brace_initializer_run(type, body)) {
+        ++index;
+        return;
+    }
+    if (type.kind == TypeKind::Named) {
+        std::optional<Type> source_type = infer_expr_type(next, body, signatures);
+        if (source_type.has_value() && types_equal(*source_type, type)) {
+            ++index;
+            return;
+        }
+    }
+    count_braced_init_list_fill(type, args, index, body, signatures);
+}
+
+void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& args, std::size_t& index,
+                                 const Body& body, const Signatures& signatures) {
+    if (type.kind == TypeKind::Array && type.element != nullptr) {
+        for (std::int64_t covered = 0; covered < type.array_size && index < args.size(); ++covered) {
+            count_braced_init_list_cursor(*type.element, args, index, body, signatures);
+        }
+        return;
+    }
+    const StructDef* def = find_struct_def_for_brace_binding(type, body);
+    if (def == nullptr) return;
+    for (std::size_t field = 0; field < def->fields.size() && index < args.size(); ++field) {
+        count_braced_init_list_cursor(def->fields[field].type, args, index, body, signatures);
+    }
+}
+
+[[nodiscard]] bool braced_init_list_can_initialize(const Type& type, const std::vector<ExprPtr>& args, const Body& body,
+                                                   const Signatures& signatures);
+
+[[nodiscard]] bool braced_init_list_can_initialize(const Type& type, const std::vector<ExprPtr>& args, const Body& body,
+                                                   const Signatures& signatures) {
+    // Mirrors codegen's identically named rule: a reference target binds
+    // to the temporary the list materializes (lifetime of the full call
+    // expression), except a *mutable* reference, which has no observable
+    // place for the callee's writes to reach.
+    if (is_reference(type)) {
+        if (type.pointee == nullptr) return false;
+        if (type.is_mutable_ref && !type.is_rvalue_ref) return false;
+        return braced_init_list_can_initialize(*type.pointee, args, body, signatures);
+    }
+    if (type_absorbs_brace_initializer_run(type, body)) {
+        std::size_t index = 0;
+        count_braced_init_list_fill(type, args, index, body, signatures);
+        return index == args.size();
+    }
+    if (is_named_class_type(type, body)) {
+        // A class-typed target makes the list a constructor call, whose
+        // arity is a real filter even before argument types are
+        // considered; codegen's own braced_init_list_can_initialize
+        // resolves the overload exactly and rejects what does not match.
+        std::string ctor_name = type.name;
+        ctor_name += "_new";
+        for (const auto& [name, overloads] : signatures) {
+            if (name != ctor_name && !(!name.empty() && name.starts_with(ctor_name + "."))) continue;
+            for (const FunctionSignature& candidate : overloads) {
+                if (candidate.member_owner_class != type.name) continue;
+                if (function_signature_accepts_argument_count(candidate, args.size(), /*param_offset=*/1)) return true;
+            }
+        }
+        return args.empty();
+    }
+    return args.size() <= 1;
+}
+
 [[nodiscard]] bool is_named_record_type_for_call_binding(const Type& type, const Body& body) {
     if (is_named_class_type(type, body)) return true;
     if (type.kind != TypeKind::Named || body.program == nullptr) return false;
@@ -660,6 +765,9 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 
 [[nodiscard]] bool argument_matches_parameter(const Expr& arg, const Type& param_type, const Body& body,
                                                 const Signatures& signatures) {
+    if (arg.kind == ExprKind::BracedInitList) {
+        return braced_init_list_can_initialize(param_type, arg.args, body, signatures);
+    }
     if (is_nullptr_literal(arg) && param_type.kind == TypeKind::Pointer) return true;
     if (is_reference(param_type) && param_type.is_rvalue_ref) {
         // ch03/ch05 §5.11: `T&&`/`Concept auto&&` -- the mirror image of
@@ -864,6 +972,17 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
         for (std::size_t i = 0; i < call_expr.args.size() && i < fixed_param_count; i++) {
             const Type& param_type = sig->param_types[i + callee.param_offset];
             if (argument_matches_parameter(*call_expr.args[i], param_type, body, signatures)) continue;
+            // Mirrors codegen's identical special case: a braced list has
+            // no type to name and no static_cast to suggest.
+            if (call_expr.args[i]->kind == ExprKind::BracedInitList) {
+                return "no overload of '" + display_name + "' matches these argument types: argument " +
+                       std::to_string(i + 1) + " is a brace-enclosed initializer list of " +
+                       std::to_string(call_expr.args[i]->args.size()) +
+                       (call_expr.args[i]->args.size() == 1 ? " initializer" : " initializers") +
+                       ", which does not initialize parameter type '" + describe_type_brief(param_type) +
+                       "': check that its elements match that type's members in number and type" +
+                       (candidates.size() > 1 ? candidate_list : std::string());
+            }
             std::optional<Type> actual = infer_expr_type(*call_expr.args[i], body, signatures);
             return "no overload of '" + display_name + "' matches these argument types: argument " +
                    std::to_string(i + 1) + " is " +
@@ -1567,6 +1686,20 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             // parameter (ch05 §5.11), e.g. passing a closure directly to
             // a generic function.
             break;
+        case ExprKind::BracedInitList:
+            // A brace-enclosed initializer list is the same situation as
+            // the ExprKind::ValueInit case just below -- a brand new,
+            // alias-free temporary carrying no type of its own, adapting
+            // to whatever `expected_type` the context supplies (which is
+            // why infer_expr_type deliberately returns nullopt for it) --
+            // but unlike `{}` it has elements, so the question "can this
+            // list initialize that type?" has a real answer and is worth
+            // asking rather than assuming. Answering it here with the
+            // same walk codegen uses keeps movecheck's independent
+            // overload resolution in step with codegen's: a more
+            // permissive answer here would move-check a call against a
+            // signature codegen does not select.
+            return braced_init_list_can_initialize(expected_type, expr.args, body, signatures);
         case ExprKind::ValueInit:
             // A bare `{}` always value-initializes a brand new,
             // alias-free temporary -- but unlike every other case in

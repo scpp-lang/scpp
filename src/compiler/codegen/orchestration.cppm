@@ -776,6 +776,20 @@ namespace scpp {
                 create_store(referent, it->second.global, std::nullopt);
                 continue;
             }
+            // A braced list initializes the variable's own storage in
+            // place rather than producing a value to store: an array or
+            // record has no single loadable value to route through
+            // codegen_value_for_target's materialize-then-copy.
+            if (global.decl->init->kind == ExprKind::BracedInitList) {
+                LValue target{it->second.global, global.decl->type,
+                              global.decl->resolved_alignment != 0
+                                  ? std::optional<unsigned>(global.decl->resolved_alignment)
+                                  : alignment_for_type(global.decl->type)};
+                if (auto r = initialize_storage_from_brace_args(target, global.decl->init->args); !r.has_value()) {
+                    return std::unexpected(std::move(r).error());
+                }
+                continue;
+            }
             auto init_value_result = codegen_value_for_target(*global.decl->init, global.decl->type);
             if (!init_value_result.has_value()) return std::unexpected(std::move(init_value_result).error());
             create_store(std::move(init_value_result).value(), it->second.global,

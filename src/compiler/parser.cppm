@@ -6147,6 +6147,16 @@ private:
         }
     }
 
+    // A parameter's own `= {...}` default is a context-typed brace
+    // position exactly like every other one (see
+    // parse_brace_initializer_element), the context being the
+    // parameter's declared type -- so it produces the same
+    // BracedInitList the other positions do, and is bound to that type
+    // by whichever call site the default is cloned into. It used to
+    // fabricate a `T(args...)` constructor call from the spelled-out
+    // parameter type instead, which reported "call to unknown function
+    // 'S'" for every aggregate and is the same fabricated-call pattern
+    // removed elsewhere.
     [[nodiscard]] std::expected<ExprPtr, ParseError> parse_default_argument_expr(const Type& param_type) {
         if (!check(TokenKind::LBrace)) return parse_expr();
         SourceLocation loc = current_loc();
@@ -6154,7 +6164,7 @@ private:
         if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
         std::vector<ExprPtr> args = std::move(args_result).value();
         if (args.empty()) return make_value_initialized_expr(loc, param_type);
-        return make_call_expr(loc, type_to_string(param_type), std::move(args));
+        return make_braced_init_list_expr(loc, std::move(args));
     }
 
     // Builds the implicit `this` parameter every class member function
@@ -6255,16 +6265,28 @@ private:
     // found '{'". The nested list becomes a BracedInitList expression,
     // whose meaning is supplied by whatever initialization boundary
     // consumes it, since a braced list has no type of its own.
+    // Also the production for every position where a brace-enclosed
+    // initializer list may stand in for an expression whose type comes
+    // from context rather than from the list: `= {...}`, `return {...}`
+    // and a call argument. [dcl.init.list] calls these
+    // copy-list-initialization; what they share is that the target type
+    // is known to the *consumer*, which is exactly what a BracedInitList
+    // needs and exactly what it does not carry itself.
+    [[nodiscard]] ExprPtr make_braced_init_list_expr(SourceLocation loc, std::vector<ExprPtr> args) {
+        auto list = std::make_unique<Expr>();
+        list->kind = ExprKind::BracedInitList;
+        list->loc = loc;
+        list->args = std::move(args);
+        return list;
+    }
+
     [[nodiscard]] std::expected<ExprPtr, ParseError> parse_brace_initializer_element() {
         if (check(TokenKind::LBrace)) {
             SourceLocation nested_loc = current_loc();
             auto nested_result = parse_brace_initializer_args();
             if (!nested_result.has_value()) return std::unexpected(std::move(nested_result).error());
-            auto nested = std::make_unique<Expr>();
-            nested->kind = ExprKind::BracedInitList;
-            nested->loc = nested_loc;
-            nested->args = std::move(nested_result).value();
-            return std::move(nested);
+            std::vector<ExprPtr> nested_args = std::move(nested_result).value();
+            return make_braced_init_list_expr(nested_loc, std::move(nested_args));
         }
         return parse_expr();
     }
@@ -9260,7 +9282,7 @@ private:
         }
         if (qualify_variable_name) stmt->var_name = qualify_name(stmt->var_name);
         if (match(TokenKind::Assign)) {
-            auto init_result = parse_expr();
+            auto init_result = parse_brace_initializer_element();
             if (!init_result.has_value()) return std::unexpected(std::move(init_result).error());
             stmt->init = std::move(init_result).value();
         } else if (check(TokenKind::LBrace)) {
@@ -9425,7 +9447,7 @@ private:
                 if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 return std::move(stmt);
             }
-            auto expr_result = parse_expr();
+            auto expr_result = parse_brace_initializer_element();
             if (!expr_result.has_value()) return std::unexpected(std::move(expr_result).error());
             stmt->expr = std::move(expr_result).value();
             if (stmt->expr != nullptr && stmt->expr->kind == ExprKind::Identifier && check(TokenKind::LBrace)) {
@@ -10287,7 +10309,7 @@ private:
                 }
                 if (!check(TokenKind::RParen)) {
                     while (true) {
-                        auto arg_result = parse_expr();
+                        auto arg_result = parse_brace_initializer_element();
                         if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
                         ExprPtr __arg_result_value = std::move(arg_result).value();
                         node->args.push_back(std::move(__arg_result_value));
@@ -10333,7 +10355,7 @@ private:
             node->through_arrow = through_arrow;
             if (!check(TokenKind::RParen)) {
                 while (true) {
-                    auto arg_result = parse_expr();
+                    auto arg_result = parse_brace_initializer_element();
                     if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
                     ExprPtr __arg_result_value = std::move(arg_result).value();
                     node->args.push_back(std::move(__arg_result_value));

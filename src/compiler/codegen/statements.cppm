@@ -262,6 +262,14 @@ namespace scpp {
                                 } else {
                                     if (auto r = codegen_memberwise_copy_construct(storage, src.ptr, stmt.type.name); !r.has_value()) return std::unexpected(std::move(r).error());
                                 }
+                            } else if (stmt.init->kind == ExprKind::BracedInitList) {
+                                // In place, not materialize-then-copy: an
+                                // array or record target has no single
+                                // loadable value (see the same dispatch in
+                                // define_global_initializers).
+                                LValue target{storage, stmt.type, declared_alignment};
+                                if (auto r = initialize_storage_from_brace_args(target, stmt.init->args); !r.has_value())
+                                    return std::unexpected(std::move(r).error());
                             } else {
                                 auto init_value_result = codegen_value_for_target(*stmt.init, stmt.type);
                                 if (!init_value_result.has_value()) return std::unexpected(std::move(init_value_result).error());
@@ -563,6 +571,20 @@ namespace scpp {
                             if (!scope_stack_.empty()) {
                                 scope_stack_.back().push_back(declared_local_of(stmt));
                             }
+                            return {};
+                        }
+                        if (stmt.init->kind == ExprKind::BracedInitList) {
+                            // See the static-storage path above: a braced
+                            // list initializes the slot in place.
+                            LValue target{slot, stmt.type, declared_alignment};
+                            if (auto r = initialize_storage_from_brace_args(target, stmt.init->args); !r.has_value())
+                                return std::unexpected(std::move(r).error());
+                            locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
+                            locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
+                            locals_[declared_local_of(stmt)].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
+                            if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value())
+                                return std::unexpected(std::move(r).error());
+                            if (!scope_stack_.empty()) scope_stack_.back().push_back(declared_local_of(stmt));
                             return {};
                         }
                         auto init_value_result = codegen_value_for_target(*stmt.init, stmt.type);

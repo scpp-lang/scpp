@@ -1003,6 +1003,267 @@ void test_a_braced_member_default_initializer_is_evaluated_as_an_aggregate() {
            "o.i.x==4 and o.i.y==5 during constant evaluation");
 }
 
+// The three aggregate positions #484 scoped out -- namespace scope,
+// `return {...}` and a call argument -- all failed for one shared reason:
+// `{` was not an expression, so the only brace positions that worked were
+// the ones the *declaration* grammar spelled out. Routing each
+// context-typed brace position through the same
+// parse_brace_initializer_element #485 introduced makes all of them
+// produce a BracedInitList, whose target type each consumer supplies.
+void test_a_braced_list_initializes_a_returned_aggregate() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "S make() { return {3, 4}; }\n"
+        "int main() { S s = make(); return s.a * 10 + s.b; }\n");
+    expect(ir_result.has_value(),
+           "return_brace_list: expected IR for `return {3, 4};`, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+
+    cases_run++;
+    auto nested_result = try_generate_ir(
+        "struct In { int x; int y; };\n"
+        "struct Out { In i; int z; };\n"
+        "Out make() { return {{1, 2}, 3}; }\n"
+        "int main() { Out o = make(); return o.i.y + o.z; }\n");
+    expect(nested_result.has_value(),
+           "return_brace_list: expected IR for a nested `return {{1, 2}, 3};`, got " +
+               (nested_result.has_value() ? std::string{}
+                                          : nested_result.error().kind + ": " + nested_result.error().message));
+
+    cases_run++;
+    auto elided_result = try_generate_ir(
+        "struct In { int x; int y; };\n"
+        "struct Out { In i; int z; };\n"
+        "Out make() { return {1, 2, 3}; }\n"
+        "int main() { Out o = make(); return o.i.y + o.z; }\n");
+    expect(elided_result.has_value(),
+           "return_brace_list: expected brace elision to hold in return position too, got " +
+               (elided_result.has_value() ? std::string{}
+                                          : elided_result.error().kind + ": " + elided_result.error().message));
+
+    cases_run++;
+    auto array_member_result = try_generate_ir(
+        "struct W { int v[2]; int z; };\n"
+        "W make() { return {{7, 8}, 9}; }\n"
+        "int main() { W w = make(); return w.v[1] + w.z; }\n");
+    expect(array_member_result.has_value(),
+           "return_brace_list: expected IR for a returned struct with an array member, got " +
+               (array_member_result.has_value()
+                    ? std::string{}
+                    : array_member_result.error().kind + ": " + array_member_result.error().message));
+}
+
+// `return {...}` is the first aggregate position whose target type comes
+// from context rather than from a declaration -- the enclosing function's
+// declared return type. BracedInitList deliberately has no inferable type
+// of its own (#485), and this pins that the return path supplies the type
+// instead of asking the list for one, in the constant evaluator as well as
+// in codegen.
+void test_a_returned_braced_list_takes_its_type_from_the_return_type() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "constexpr S make() { return {6, 7}; }\n"
+        "constexpr int folded() { S s = make(); return s.a * 10000 + s.b * 10; }\n"
+        "int main() {\n"
+        "    constexpr int packed = folded();\n"
+        "    return packed;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "return_brace_list_constexpr: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+    if (!ir_result.has_value()) return;
+    expect(ir_result.value().find("60070") != std::string::npos,
+           "return_brace_list_constexpr: expected the returned list to give s.a==6 and s.b==7 during "
+           "constant evaluation");
+}
+
+// A call argument is the sharper version of the same problem: overload
+// resolution has to decide which callee to bind *before* the list has a
+// type. Codegen, movecheck and the constant evaluator each resolve
+// overloads independently, so each has to answer "can this list
+// initialize this parameter type?" the same way.
+void test_a_braced_list_initializes_a_call_argument() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "int use(S s) { return s.a * 10 + s.b; }\n"
+        "int main() { return use({3, 4}); }\n");
+    expect(ir_result.has_value(),
+           "call_arg_brace_list: expected IR for `use({3, 4})`, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+
+    cases_run++;
+    auto nested_result = try_generate_ir(
+        "struct In { int x; int y; };\n"
+        "struct Out { In i; int z; };\n"
+        "int use(Out o) { return o.i.y + o.z; }\n"
+        "int main() { return use({{1, 2}, 3}); }\n");
+    expect(nested_result.has_value(),
+           "call_arg_brace_list: expected IR for a nested list argument, got " +
+               (nested_result.has_value() ? std::string{}
+                                          : nested_result.error().kind + ": " + nested_result.error().message));
+
+    cases_run++;
+    auto const_ref_result = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "int use(const S& s) { return s.a * 10 + s.b; }\n"
+        "int main() { return use({3, 4}); }\n");
+    expect(const_ref_result.has_value(),
+           "call_arg_brace_list: expected a `const S&` parameter to bind the materialized temporary, got " +
+               (const_ref_result.has_value() ? std::string{}
+                                             : const_ref_result.error().kind + ": " + const_ref_result.error().message));
+
+    cases_run++;
+    auto default_arg_result = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "int use(S s = {2, 3}) { return s.a * s.b; }\n"
+        "int main() { return use(); }\n");
+    expect(default_arg_result.has_value(),
+           "call_arg_brace_list: expected a parameter's own `= {2, 3}` default to be an aggregate, got " +
+               (default_arg_result.has_value()
+                    ? std::string{}
+                    : default_arg_result.error().kind + ": " + default_arg_result.error().message));
+}
+
+// The named risk of giving a braced list a call-argument position: an
+// imprecise viability rule lets the list bind to an overload it does not
+// fit, and codegen's own overload resolution silently scores ties rather
+// than reporting them. The list here fits only the `S` candidate, so
+// selecting on arity alone would pick the wrong one.
+void test_a_braced_list_argument_selects_the_overload_it_fits() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "int use(S s) { return s.a * 10 + s.b; }\n"
+        "int use(bool f) { return f ? 1 : 0; }\n"
+        "int main() { return use({3, 4}); }\n");
+    expect(ir_result.has_value(),
+           "call_arg_overload: expected the two-element list to select `use(S)`, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+
+    cases_run++;
+    auto constexpr_result = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "constexpr int use(S s) { return s.a * 10000 + s.b * 10; }\n"
+        "constexpr int use(bool f) { return f ? 1 : 0; }\n"
+        "int main() {\n"
+        "    constexpr int packed = use({6, 7});\n"
+        "    return packed;\n"
+        "}\n");
+    expect(constexpr_result.has_value(),
+           "call_arg_overload: expected the constant evaluator to select `use(S)` too, got " +
+               (constexpr_result.has_value()
+                    ? std::string{}
+                    : constexpr_result.error().kind + ": " + constexpr_result.error().message));
+    if (!constexpr_result.has_value()) return;
+    expect(constexpr_result.value().find("60070") != std::string::npos,
+           "call_arg_overload: expected the constant evaluator to bind the list to `use(S)` and fold to "
+           "60070");
+}
+
+// Element checking has to survive the move into the new positions: a
+// braced list reaching a return statement or a call argument is still a
+// binding position per element, in codegen and in the constant evaluator
+// alike.
+void test_a_braced_list_in_a_new_position_still_checks_its_elements() {
+    cases_run++;
+    auto return_overlong = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "S make() { return {1, 2, 3}; }\n"
+        "int main() { S s = make(); return s.a; }\n");
+    expect(!return_overlong.has_value(),
+           "new_position_elements: expected an overlong `return {1, 2, 3};` for a 2-member struct to be "
+           "rejected");
+    if (!return_overlong.has_value()) {
+        expect(return_overlong.error().message.find("too many initializers") != std::string::npos,
+               "new_position_elements: expected the overlong return list to be reported as such, got " +
+                   return_overlong.error().message);
+    }
+
+    cases_run++;
+    auto return_mistyped = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "S make() { return {1, true}; }\n"
+        "int main() { S s = make(); return s.a; }\n");
+    expect(!return_mistyped.has_value(),
+           "new_position_elements: expected a 'bool' for an int member to be rejected in return position");
+    if (!return_mistyped.has_value()) {
+        expect(return_mistyped.error().message.find("no implicit conversion") != std::string::npos,
+               "new_position_elements: expected the return element to be rejected for its type, got " +
+                   return_mistyped.error().message);
+    }
+
+    cases_run++;
+    auto arg_overlong = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "int use(S s) { return s.a; }\n"
+        "int main() { return use({1, 2, 3}); }\n");
+    expect(!arg_overlong.has_value(),
+           "new_position_elements: expected an overlong list argument to be rejected");
+    if (!arg_overlong.has_value()) {
+        expect(arg_overlong.error().message.find("does not initialize parameter type 'S'") != std::string::npos,
+               "new_position_elements: expected the overlong list argument to be rejected for not fitting "
+               "the parameter type, got " + arg_overlong.error().kind + ": " + arg_overlong.error().message);
+    }
+
+    cases_run++;
+    auto arg_mistyped_constexpr = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "constexpr int use(S s) { return s.a; }\n"
+        "int main() {\n"
+        "    constexpr int packed = use({1, true});\n"
+        "    return packed;\n"
+        "}\n");
+    expect(!arg_mistyped_constexpr.has_value(),
+           "new_position_elements: expected the constant evaluator to reject a 'bool' for an int member in "
+           "a list argument");
+    if (!arg_mistyped_constexpr.has_value()) {
+        expect(arg_mistyped_constexpr.error().kind == "ConstexprError",
+               "new_position_elements: expected a ConstexprError, got " + arg_mistyped_constexpr.error().kind +
+                   ": " + arg_mistyped_constexpr.error().message);
+    }
+}
+
+// Namespace scope had two spellings and only one of them is an aggregate
+// question: `S g = {1, 2};` is a braced list in an initializer position
+// and now works, while `S g{1, 2};` is rejected by a blanket
+// "global constructor-call initialization is not supported" that rejects
+// `int g{7};` just as flatly and is a separate defect. `int a[3] = {1, 2,
+// 3};` is pinned here because the list must initialize the variable's own
+// storage in place -- materializing a value and storing it silently
+// produced the wrong array contents.
+void test_a_braced_list_initializes_a_namespace_scope_variable() {
+    cases_run++;
+    auto record_result = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "S g = {5, 6};\n"
+        "int main() { return g.a + g.b; }\n");
+    expect(record_result.has_value(),
+           "namespace_brace_list: expected IR for `S g = {5, 6};`, got " +
+               (record_result.has_value() ? std::string{}
+                                          : record_result.error().kind + ": " + record_result.error().message));
+
+    cases_run++;
+    auto array_result = try_generate_ir(
+        "int arr[3] = {1, 2, 3};\n"
+        "int main() { return arr[0] + arr[1] + arr[2]; }\n");
+    expect(array_result.has_value(),
+           "namespace_brace_list: expected IR for `int arr[3] = {1, 2, 3};` at namespace scope, got " +
+               (array_result.has_value() ? std::string{}
+                                         : array_result.error().kind + ": " + array_result.error().message));
+
+    cases_run++;
+    auto local_array_result = try_generate_ir(
+        "int main() { int a[3] = {1, 2, 3}; return a[0] + a[1] + a[2]; }\n");
+    expect(local_array_result.has_value(),
+           "namespace_brace_list: expected IR for a local `int a[3] = {1, 2, 3};`, got " +
+               (local_array_result.has_value()
+                    ? std::string{}
+                    : local_array_result.error().kind + ": " + local_array_result.error().message));
+}
+
 // A nested list multiplies the binding positions, so the checks #480 and
 // #484 put on a flat list have to hold at every depth and in both
 // implementations -- an inner list must be measured against the *inner*
@@ -3818,6 +4079,12 @@ int main() {
     test_nested_brace_list_reaches_every_brace_position();
     test_a_braced_member_default_initializer_is_evaluated_as_an_aggregate();
     test_nested_brace_list_checks_every_level_in_both_implementations();
+    test_a_braced_list_initializes_a_returned_aggregate();
+    test_a_returned_braced_list_takes_its_type_from_the_return_type();
+    test_a_braced_list_initializes_a_call_argument();
+    test_a_braced_list_argument_selects_the_overload_it_fits();
+    test_a_braced_list_in_a_new_position_still_checks_its_elements();
+    test_a_braced_list_initializes_a_namespace_scope_variable();
     test_brace_elision_fills_an_aggregate_from_a_flat_run();
     test_brace_elision_still_reports_initializers_left_over();
     test_brace_elision_does_not_consume_a_same_typed_initializer();

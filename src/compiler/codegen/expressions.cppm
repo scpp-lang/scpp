@@ -989,6 +989,79 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         return fill_aggregate_from_cursor(target, args, index, covered);
     }
 
+    // Overload resolution has to choose a callee before a braced list has
+    // any type, so viability is decided by walking the list against the
+    // candidate parameter type -- the same cursor
+    // initialize_storage_from_brace_args_cursor uses, counting what each
+    // sub-object consumes instead of emitting it. Without this the
+    // scoring tiebreak in resolve_overload_by_type would silently pick
+    // one of several candidates for which the list is not even
+    // well-formed.
+    void Codegen::count_braced_init_list_cursor(const Type& type, const std::vector<ExprPtr>& args, std::size_t& index)
+    {
+        if (index >= args.size()) return;
+        const Expr& next = *args[index];
+        if (next.kind == ExprKind::BracedInitList) {
+            ++index;
+            return;
+        }
+        if (!type_is_elidable_aggregate(type)) {
+            ++index;
+            return;
+        }
+        if (type.kind == TypeKind::Named) {
+            std::optional<Type> source_type = infer_type(next);
+            if (source_type.has_value() && types_equal(*source_type, type)) {
+                ++index;
+                return;
+            }
+        }
+        count_braced_init_list_fill(type, args, index);
+    }
+
+    void Codegen::count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& args, std::size_t& index)
+    {
+        if (type.kind == TypeKind::Array && type.element != nullptr) {
+            for (std::int64_t covered = 0; covered < type.array_size && index < args.size(); ++covered) {
+                count_braced_init_list_cursor(*type.element, args, index);
+            }
+            return;
+        }
+        const StructDef* def = (type.kind == TypeKind::Named) ? find_struct_def(type.name) : nullptr;
+        if (def == nullptr) return;
+        for (std::size_t field = 0; field < def->fields.size() && index < args.size(); ++field) {
+            count_braced_init_list_cursor(def->fields[field].type, args, index);
+        }
+    }
+
+    [[nodiscard]] bool Codegen::braced_init_list_can_initialize(const Type& type, const std::vector<ExprPtr>& args)
+    {
+        // A reference target binds to the temporary the list
+        // materializes, whose lifetime is the full call expression --
+        // exactly like every other rvalue argument bound to a
+        // `const T&`/`T&&` parameter (see
+        // const_reference_binds_materialized_temporary). A *mutable*
+        // reference is the one shape that cannot: there is no
+        // observable place for the callee's writes to reach.
+        if (type.kind == TypeKind::Reference) {
+            if (type.pointee == nullptr) return false;
+            if (type.is_mutable_ref && !type.is_rvalue_ref) return false;
+            return braced_init_list_can_initialize(*type.pointee, args);
+        }
+        if (type_is_elidable_aggregate(type)) {
+            std::size_t index = 0;
+            count_braced_init_list_fill(type, args, index);
+            return index == args.size();
+        }
+        if (type.kind == TypeKind::Named && find_class_def(type.name) != nullptr) {
+            return resolve_overload_by_type(type.name + "_new", args, /*param_offset=*/1) != nullptr ||
+                   (args.empty() && record_is_implicitly_default_initializable(type.name));
+        }
+        // A scalar target: `int x = {7}` is list-initialization too, and
+        // `{}` value-initializes it.
+        return args.size() <= 1;
+    }
+
     [[nodiscard]] std::expected<void, CodegenError> Codegen::report_leftover_initializers(
         const Type& type, const std::vector<ExprPtr>& args, std::size_t index)
     {
@@ -1108,6 +1181,16 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::codegen_class_value_for_boundary(const Expr& expr, const Type& target_type,
                                                   bool allow_implicit_converting_ctor)
 {
+        // A braced list carries no type of its own, so none of the
+        // same-type/converting-constructor reasoning below applies to
+        // it: the target type *is* the answer. Routing it here as well
+        // as through codegen_value_for_target is what makes a class- or
+        // struct-typed by-value parameter (codegen_call_args diverts
+        // record targets to this function before reaching
+        // codegen_value_for_target) accept `f({1, 2})`.
+        if (expr.kind == ExprKind::BracedInitList) {
+            return codegen_braced_init_list_value(expr, target_type);
+        }
         auto llvm_type_result = to_llvm_type(target_type);
         if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
         llvm::LLVMTypeRef llvm_type = std::move(llvm_type_result).value();
@@ -1318,9 +1401,12 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 // genuine rvalue (produces_rvalue_of_type), which may not
                 // itself be an addressable place (a literal, a fresh
                 // std::make_unique<T>(...)/call result, ...).
-                return param_is_rvalue_reference ? codegen_materialize_rvalue_reference_source(arg)
-                                                  : codegen_materialize_const_reference_source(
-                                                        arg, *ref_param_type->pointee);
+                // A braced list always takes the materializing path,
+                // rvalue-reference parameter or not: it has no value to
+                // load, only a temporary to initialize in place.
+                return param_is_rvalue_reference && arg.kind != ExprKind::BracedInitList
+                           ? codegen_materialize_rvalue_reference_source(arg)
+                           : codegen_materialize_const_reference_source(arg, *ref_param_type->pointee);
             } else if (param_is_reference && !collapsed_forwarding_reference_value) {
                 // Bind the reference parameter to the argument's address
                 // rather than passing its value, exactly like a local
@@ -1385,8 +1471,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                 result.push_back(std::move(value_result).value());
             } else if (param_is_rvalue_reference || param_is_const_reference_bound_to_rvalue) {
-                auto value_result = param_is_rvalue_reference ? codegen_materialize_rvalue_reference_source(*args[i])
-                                                           : codegen_materialize_const_reference_source(
+                auto value_result = param_is_rvalue_reference && args[i]->kind != ExprKind::BracedInitList
+                                        ? codegen_materialize_rvalue_reference_source(*args[i])
+                                        : codegen_materialize_const_reference_source(
                                                                  *args[i], *ref_param_type->pointee);
                 if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                 result.push_back(std::move(value_result).value());
@@ -1546,8 +1633,42 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     }
 
 
+    // Materializes a braced list into a temporary of the target type and
+    // reads it back. Storage is what aggregate initialization needs (it
+    // writes members in place) and a value is what the context wants, so
+    // the temporary is the whole of the translation between them.
+    [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::codegen_braced_init_list_value(
+        const Expr& expr, const Type& target_type)
+    {
+        if (target_type.kind == TypeKind::Reference) {
+            return std::unexpected(CodegenError(
+                "a brace-enclosed initializer list cannot initialize the reference type here: it would bind "
+                "to a temporary that does not outlive the initialization",
+                expr.loc));
+        }
+        auto storage_type_result = to_llvm_type(target_type);
+        if (!storage_type_result.has_value()) return std::unexpected(std::move(storage_type_result).error());
+        std::optional<unsigned int> alignment = alignment_for_type(target_type);
+        llvm::LLVMValueRef storage =
+            create_entry_block_alloca(std::move(storage_type_result).value(), "listinit", alignment);
+        if (auto r = initialize_storage_from_brace_args(LValue{storage, target_type, alignment}, expr.args);
+            !r.has_value()) {
+            return std::unexpected(std::move(r).error());
+        }
+        return load_value(LValue{storage, target_type, alignment});
+    }
+
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::codegen_value_for_target(const Expr& expr, const Type& target_type)
 {
+        // A brace-enclosed initializer list has no type of its own, so it
+        // can only ever be a *value* by being materialized into storage
+        // of the type the context supplies. This is the one place that
+        // has to know how, and it is why `= {...}`, `return {...}` and a
+        // by-value call argument all work from a single change: each of
+        // them already asks for a value of a known target type.
+        if (expr.kind == ExprKind::BracedInitList) {
+            return codegen_braced_init_list_value(expr, target_type);
+        }
         if (is_interface_representation_type(target_type)) {
             return codegen_interface_value_for_target(expr, target_type);
         }

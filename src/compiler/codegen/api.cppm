@@ -1011,6 +1011,10 @@ private:
     [[nodiscard]] std::expected<void, CodegenError> fill_aggregate_from_cursor(
         const LValue& target, const std::vector<ExprPtr>& args, std::size_t& index, std::int64_t& covered);
 
+    void count_braced_init_list_cursor(const Type& type, const std::vector<ExprPtr>& args, std::size_t& index);
+    void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& args, std::size_t& index);
+    [[nodiscard]] bool braced_init_list_can_initialize(const Type& type, const std::vector<ExprPtr>& args);
+
     // Reports initializers left over after every sub-object of an
     // aggregate has been initialized.
     [[nodiscard]] std::expected<void, CodegenError> report_leftover_initializers(
@@ -1114,6 +1118,7 @@ private:
     // exactly as before. Shared by every site that already knows its own
     // target type up front: a VarDecl initializer, a plain assignment's
     // RHS, and std::make_unique<T>(...)'s scalar argument.
+    [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_braced_init_list_value(const Expr& expr, const Type& target_type);
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_value_for_target(const Expr& expr, const Type& target_type);
 
     // Verifies `value`'s llvm::LLVM type exactly matches `expected` before it's
