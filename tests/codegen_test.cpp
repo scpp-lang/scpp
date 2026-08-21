@@ -336,6 +336,84 @@ void test_long_binary_chain_generates_without_re_walking_its_prefix() {
     expect(ir_result.has_value(), "long_binary_chain_generates: a 40-term chain must reach codegen");
 }
 
+// ch11 [class.mem]: naming a member type from outside its enclosing type
+// needs the qualified spelling `Outer::Inner`, which resolves through the
+// same branch of the parser's type lookup that already serves a
+// namespace-scope `app::Inner`. Declaring the member type was previously
+// rejected outright with "expected a type name", so none of this path
+// could run.
+void test_member_type_is_usable_through_its_qualified_name() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "class Outer {\n"
+        "  public:\n"
+        "    struct Inner { int v; };\n"
+        "    Outer() {}\n"
+        "    virtual ~Outer() {}\n"
+        "};\n"
+        "Outer::Inner make() {\n"
+        "    Outer::Inner i{};\n"
+        "    i.v = 5;\n"
+        "    return i;\n"
+        "}\n"
+        "int main() {\n"
+        "    Outer::Inner r = make();\n"
+        "    return r.v - 5;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "member_type_is_usable_through_its_qualified_name: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+}
+
+// [basic.scope.class]: inside the enclosing body the bare name is enough,
+// and it names the member type rather than a namespace-scope type that
+// happens to share the name.
+void test_member_type_shadows_a_namespace_scope_type_inside_its_own_body() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct Inner { int wrong; };\n"
+        "class Outer {\n"
+        "  public:\n"
+        "    struct Inner { int right; };\n"
+        "    int make() {\n"
+        "        Inner i{};\n"
+        "        i.right = 7;\n"
+        "        return i.right;\n"
+        "    }\n"
+        "    Outer() {}\n"
+        "    virtual ~Outer() {}\n"
+        "};\n"
+        "int main() {\n"
+        "    Outer o{};\n"
+        "    return o.make() - 7;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "member_type_shadows_a_namespace_scope_type_inside_its_own_body: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+}
+
+// A member `enum class`'s enumerators are reached as `Outer::Kind::Deep`
+// -- one more qualification level than a namespace-scope enum, and the
+// only member-type kind whose *constants* also need qualified lookup.
+void test_member_enum_constants_are_reachable_through_the_enclosing_type() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "class Outer {\n"
+        "  public:\n"
+        "    enum class Kind { Flat, Deep };\n"
+        "    Outer() {}\n"
+        "    virtual ~Outer() {}\n"
+        "};\n"
+        "int main() {\n"
+        "    Outer::Kind k = Outer::Kind::Deep;\n"
+        "    if (k == Outer::Kind::Deep) { return 0; }\n"
+        "    return 1;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "member_enum_constants_are_reachable_through_the_enclosing_type: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+}
+
 // Spec §9.4(1) adopts [dcl.array] unchanged, so `int values[3]{1, 2, 3};`
 // is [dcl.init.aggr] aggregate initialization -- the spelling spec §10's
 // own iteration-statement examples use. Every array with a non-empty
@@ -3049,6 +3127,9 @@ void test_auto_reference_to_a_reference_returning_method_collapses() {
 int main() {
     run_test_case_files();
     test_long_binary_chain_generates_without_re_walking_its_prefix();
+    test_member_type_is_usable_through_its_qualified_name();
+    test_member_type_shadows_a_namespace_scope_type_inside_its_own_body();
+    test_member_enum_constants_are_reachable_through_the_enclosing_type();
     test_array_brace_list_initializes_each_element();
     test_array_brace_list_initializes_a_member_and_a_mem_init_entry();
     test_array_brace_list_value_initializes_the_elements_it_does_not_reach();

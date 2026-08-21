@@ -531,6 +531,19 @@ private:
     std::unordered_map<std::string, Type> type_aliases_{};
     std::vector<std::unordered_map<std::string, std::string>> local_type_name_scopes_{};
     std::size_t next_local_type_id_ = 0;
+    // Set by parse_record_body_into immediately before it parses a member
+    // type definition ([class.mem]: a `struct`/`class`/`enum class`
+    // declared inside another type's body), and *consumed* by
+    // parse_struct_def/parse_class_def/parse_enum_def at the single point
+    // each computes the new type's name. Holds the enclosing type's own
+    // already-qualified name, so the member type is named `Outer::Inner`
+    // -- the same `A::B` shape a namespace-scope type already has, which
+    // is why every later phase (layout, codegen, mangling, module
+    // serialization) needs no change to handle one.
+    // Consuming it before the nested body is parsed is what makes
+    // arbitrary nesting depth work: the inner body's own member loop sets
+    // it again, from a `qualified_owner_name` that is by then `A::B`.
+    std::string pending_nested_type_owner_{};
     // ch05 §5.11: true once parse_param_type has seen at least one bare
     // (unconstrained) `auto` parameter anywhere in the program --
     // consulted by parse_program at the very end to decide whether to
@@ -1999,6 +2012,16 @@ private:
             }
         }
         return std::optional<std::string>{};
+    }
+
+    // Returns the enclosing type name a member type definition should be
+    // qualified with, and clears it so it applies to exactly one
+    // definition (see pending_nested_type_owner_'s own declaration).
+    // Empty when the definition being parsed is not a member type.
+    [[nodiscard]] std::string take_pending_nested_type_owner() {
+        std::string owner = pending_nested_type_owner_;
+        pending_nested_type_owner_.clear();
+        return owner;
     }
 
     [[nodiscard]] std::string fresh_local_type_name(const std::string& bare_name) {
@@ -5597,7 +5620,15 @@ private:
         auto bare_name_result = expect(TokenKind::Identifier, "enum class name");
         if (!bare_name_result.has_value()) return std::unexpected(std::move(bare_name_result).error());
         std::string bare_name = std::string(bare_name_result.value().text.data(), bare_name_result.value().text.size());
-        def.name = qualify_name(bare_name);
+        std::string nested_type_owner = take_pending_nested_type_owner();
+        if (!nested_type_owner.empty()) {
+            def.name = nested_type_owner;
+            def.name += "::";
+            def.name += bare_name;
+            if (auto _rv = register_local_type_name(bare_name, def.name, loc); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+        } else {
+            def.name = qualify_name(bare_name);
+        }
         def.namespace_path = namespace_stack_;
         if (match(TokenKind::Colon)) {
             auto _tmp_result = parse_type();
@@ -5709,8 +5740,13 @@ private:
             return std::unexpected(ParseError(tok.line, tok.column,
                              "'alignas' must appear before a struct name, not after it (spec §9.3)"));
         }
+        std::string nested_type_owner = take_pending_nested_type_owner();
         if (forced_qualified_name.has_value()) {
             def.name = *forced_qualified_name;
+        } else if (!nested_type_owner.empty()) {
+            def.name = nested_type_owner;
+            def.name += "::";
+            def.name += bare_name;
         } else if (is_local_definition) {
             def.name = fresh_local_type_name(bare_name);
         } else {
@@ -5719,7 +5755,7 @@ private:
         def.namespace_path = namespace_stack_;
         def.is_exported = is_exported || exported_forward_struct_exists(program, def.name);
         if (auto _rv = register_record_tag_kind(def.name, RecordTagKind::Struct, loc); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
-        if (is_local_definition || forced_qualified_name.has_value()) { if (auto _rv = register_local_type_name(bare_name, def.name, loc); !_rv.has_value()) return std::unexpected(std::move(_rv).error()); }
+        if (is_local_definition || forced_qualified_name.has_value() || !nested_type_owner.empty()) { if (auto _rv = register_local_type_name(bare_name, def.name, loc); !_rv.has_value()) return std::unexpected(std::move(_rv).error()); }
         // Register the (fully-qualified) name before parsing the body so
         // a field can refer to the enclosing struct via a pointer (e.g.
         // `Node* next;`).
@@ -5917,7 +5953,15 @@ private:
             return std::unexpected(ParseError(tok.line, tok.column,
                              "'alignas' must appear before a union name, not after it (spec §9.3)"));
         }
-        def.name = qualify_name(bare_name);
+        std::string nested_union_owner = take_pending_nested_type_owner();
+        if (!nested_union_owner.empty()) {
+            def.name = nested_union_owner;
+            def.name += "::";
+            def.name += bare_name;
+            if (auto _rv = register_local_type_name(bare_name, def.name, loc); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+        } else {
+            def.name = qualify_name(bare_name);
+        }
         def.namespace_path = namespace_stack_;
         if (auto _rv = register_record_tag_kind(def.name, RecordTagKind::Union, loc); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
         struct_names_.insert(def.name);
@@ -7622,7 +7666,15 @@ private:
         auto class_name_result = expect(TokenKind::Identifier, "class name");
         if (!class_name_result.has_value()) return std::unexpected(std::move(class_name_result).error());
         std::string class_name = std::string(class_name_result.value().text.data(), class_name_result.value().text.size());
-        std::string qualified_class_name = qualify_name(class_name);
+        std::string nested_type_owner = take_pending_nested_type_owner();
+        std::string qualified_class_name{};
+        if (!nested_type_owner.empty()) {
+            qualified_class_name = nested_type_owner;
+            qualified_class_name += "::";
+            qualified_class_name += class_name;
+        } else {
+            qualified_class_name = qualify_name(class_name);
+        }
         // Register the name before parsing the body so a field/method can
         // refer to the enclosing class via a pointer, and so a
         // self-referential constructor call/access-control decision below
@@ -7631,7 +7683,7 @@ private:
         struct_names_.insert(qualified_class_name);
         class_names_.insert(qualified_class_name);
         if (auto _rv = register_record_tag_kind(qualified_class_name, RecordTagKind::Class, loc); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
-        if (is_local_definition || forced_qualified_name.has_value()) {
+        if (is_local_definition || forced_qualified_name.has_value() || !nested_type_owner.empty()) {
             if (auto _rv = register_local_type_name(class_name, qualified_class_name, loc); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
         }
         if (is_generic) {
@@ -7814,6 +7866,98 @@ private:
     // all. `def`'s own name/namespace_path/is_exported/template_params/
     // base_specifiers/is_variadic_specialization must
     // already be set by the caller; only `fields` is populated here.
+    // Parses one member type definition -- a `struct`, `class`,
+    // `union`, or `enum class` declared inside another type's body
+    // ([class.mem]). SCPP26 restricts neither: ch11 §11.1(4) says rules
+    // (2) and (3) "do not otherwise restrict a `struct`", ch11 §11.1(5)
+    // itself writes a rule about "a member function of a nested class",
+    // and the erasure model (§3.1/Clause 4) adopts the ordinary C++
+    // rules for everything this document does not modify.
+    //
+    // The member type is *not* stored in the enclosing type. It is
+    // parsed straight into `program` under the qualified name
+    // `Outer::Inner`, which is the same `A::B` shape a namespace-scope
+    // type already carries -- so layout, mangling, codegen and module
+    // serialization need no change to handle one, and `Outer::Inner`
+    // resolves from outside through the qualified branch of
+    // resolve_visible_type_name that already serves namespaces. Its bare
+    // name is registered in the enclosing body's scope frame (pushed by
+    // parse_record_body_into) so the rest of that body can say `Inner`.
+    [[nodiscard]] std::expected<void, ParseError> parse_member_type_definition(
+        Program& program, const std::string& qualified_owner_name,
+        const std::vector<GenericTypeParam>& owner_template_params, const SourceLocation& member_loc,
+        bool member_is_template, bool member_is_static, bool member_is_virtual, bool member_is_explicit,
+        bool member_requested_unsafe, bool member_requested_nodiscard, bool member_has_eval_mode,
+        bool owner_is_exported, std::vector<AlignmentSpecifier> member_alignments) {
+        if (member_is_template) {
+            return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                             "a member type definition cannot be a member template in this version"));
+        }
+        if (!owner_template_params.empty()) {
+            return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                             "a member type definition inside a generic type is not supported in this version (the member type would have to be instantiated once per enclosing specialization)"));
+        }
+        if (member_is_static || member_is_virtual || member_is_explicit || member_has_eval_mode) {
+            return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                             "a member type definition cannot carry 'static', 'virtual', 'explicit', 'constexpr' or 'consteval'"));
+        }
+        if (member_requested_unsafe || member_requested_nodiscard) {
+            return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                             "an attribute on a member type definition belongs after its class-key, as in 'struct [[scpp::packed]] Inner { ... };'"));
+        }
+        if (check(TokenKind::KwEnum)) {
+            if (auto _rv = reject_alignment_specifiers(member_alignments, "an 'enum class' declaration"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+            pending_nested_type_owner_ = qualified_owner_name;
+            auto enum_def_result = parse_enum_def();
+            if (!enum_def_result.has_value()) {
+                pending_nested_type_owner_.clear();
+                return std::unexpected(std::move(enum_def_result).error());
+            }
+            EnumDef enum_def = std::move(enum_def_result).value();
+            // ch11 §11.3: exporting a type exports its whole member
+            // surface as one unit, so a member type follows its owner.
+            enum_def.is_exported = owner_is_exported;
+            program.enums.push_back(std::move(enum_def));
+            return {};
+        }
+        if (check(TokenKind::KwUnion)) {
+            pending_nested_type_owner_ = qualified_owner_name;
+            auto union_def_result = parse_union_def(std::move(member_alignments));
+            if (!union_def_result.has_value()) {
+                pending_nested_type_owner_.clear();
+                return std::unexpected(std::move(union_def_result).error());
+            }
+            StructDef union_def = std::move(union_def_result).value();
+            union_def.is_exported = owner_is_exported;
+            program.structs.push_back(std::move(union_def));
+            return {};
+        }
+        std::vector<GenericTypeParam> no_template_params{};
+        std::optional<std::string> no_forced_name{};
+        if (check(TokenKind::KwStruct)) {
+            pending_nested_type_owner_ = qualified_owner_name;
+            auto struct_result = parse_struct_def(program, owner_is_exported, std::move(no_template_params),
+                                                  std::move(member_alignments), std::move(no_forced_name), false);
+            if (!struct_result.has_value()) {
+                pending_nested_type_owner_.clear();
+                return std::unexpected(std::move(struct_result).error());
+            }
+            StructDef __struct_result_value = std::move(struct_result).value();
+            program.structs.push_back(std::move(__struct_result_value));
+            return {};
+        }
+        pending_nested_type_owner_ = qualified_owner_name;
+        // parse_class_def pushes the finished ClassDef into `program`
+        // itself, at the end of its own parse_class_body_into call.
+        if (auto _rv = parse_class_def(program, owner_is_exported, std::move(no_template_params),
+                                       std::move(member_alignments), std::move(no_forced_name), false);
+            !_rv.has_value()) {
+            pending_nested_type_owner_.clear();
+            return std::unexpected(std::move(_rv).error());
+        }
+        return {};
+    }
+
     [[nodiscard]] std::expected<void, ParseError> parse_record_body_into(Program& program, const std::string& owner_name, const std::string& qualified_owner_name,
                                 const std::string& synthesized_member_owner_name,
                                 const std::vector<GenericTypeParam>& template_params, bool is_exported,
@@ -7848,6 +7992,16 @@ private:
         }
 
         if (auto _r = expect(TokenKind::LBrace, "'{'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        // A member type's bare name is visible to the rest of the
+        // enclosing body ([basic.scope.class]), so the body gets its own
+        // frame in the same scope stack local types already use --
+        // register_local_type_name writes into the innermost frame, and
+        // resolve_visible_local_type_name searches innermost-first, which
+        // is what makes an inner member type shadow an outer one of the
+        // same name. Popped at the single success exit below; an early
+        // return here abandons the whole parse anyway (same as
+        // parse_block's own push/pop).
+        local_type_name_scopes_.emplace_back();
         AccessSpecifier current_access = default_access;
         while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
             if (match(TokenKind::KwPublic)) {
@@ -7934,6 +8088,20 @@ private:
                                         peek_at(1).kind == TokenKind::LParen)) {
                 return std::unexpected(ParseError(member_loc.line, member_loc.column,
                                  "'explicit' is only allowed directly before a constructor declaration"));
+            }
+            if (check(TokenKind::KwStruct) || check(TokenKind::KwClass) || check(TokenKind::KwEnum) ||
+                check(TokenKind::KwUnion)) {
+                if (auto _rv = parse_member_type_definition(program, qualified_owner_name, template_params, member_loc,
+                                                            member_is_template, member_is_static, member_is_virtual,
+                                                            member_is_explicit, member_requested_unsafe,
+                                                            member_requested_nodiscard,
+                                                            member_eval_mode != FunctionEvalMode::RuntimeOnly,
+                                                            is_exported, member_alignments);
+                    !_rv.has_value()) {
+                    return std::unexpected(std::move(_rv).error());
+                }
+                current_function_template_params_ = std::move(saved_function_template_params);
+                continue;
             }
             if (check(TokenKind::KwUsing)) {
                 if (!allow_using_declarations) {
@@ -8454,6 +8622,7 @@ private:
         }
         if (auto _r = expect(TokenKind::RBrace, "'}'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        local_type_name_scopes_.pop_back();
         if (!template_params.empty()) injected_generic_type_name_stack_.pop_back();
         current_class_template_params_ = std::move(saved_class_template_params);
         std::expected<void, ParseError> body_ok{};

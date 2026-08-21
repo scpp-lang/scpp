@@ -247,6 +247,130 @@ void test_class_var_decl_with_paren_init_is_rejected() {
     expect(threw, "class_var_decl_with_paren_init_is_rejected: expected a ParseError");
 }
 
+// ch11 [class.mem]: a member type definition. SCPP26 restricts neither
+// -- ch11 §11.1(4) says rules (2) and (3) "do not otherwise restrict a
+// `struct`", and §11.1(5) itself writes a rule about "a member function
+// of a nested class". The member type is stored in the Program under the
+// qualified name `Outer::Inner`, not inside the enclosing ClassDef, which
+// is what lets every later phase treat it exactly like a namespace-scope
+// type.
+void test_member_struct_definition_is_named_for_its_enclosing_type() {
+    auto _r = scpp::parse(
+        "class Outer {\n"
+        "  public:\n"
+        "    struct Inner { int v; };\n"
+        "    Outer() {}\n"
+        "    virtual ~Outer() {}\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    expect(_r.has_value(), "member_struct_definition_is_named_for_its_enclosing_type: expected the parse to succeed");
+    if (!_r.has_value()) return;
+    bool found = false;
+    for (const scpp::StructDef& def : _r.value().structs) {
+        found = found || def.name == "Outer::Inner";
+    }
+    expect(found, "member_struct_definition_is_named_for_its_enclosing_type: expected a struct named 'Outer::Inner'");
+}
+
+void test_member_enum_definition_is_named_for_its_enclosing_type() {
+    auto _r = scpp::parse(
+        "class Outer {\n"
+        "  public:\n"
+        "    enum class Kind { Flat, Deep };\n"
+        "    Outer() {}\n"
+        "    virtual ~Outer() {}\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    expect(_r.has_value(), "member_enum_definition_is_named_for_its_enclosing_type: expected the parse to succeed");
+    if (!_r.has_value()) return;
+    bool found = false;
+    for (const scpp::EnumDef& def : _r.value().enums) {
+        found = found || def.name == "Outer::Kind";
+    }
+    expect(found, "member_enum_definition_is_named_for_its_enclosing_type: expected an enum named 'Outer::Kind'");
+}
+
+// Each nesting level qualifies against the already-qualified name of its
+// own enclosing type, so depth is not special-cased anywhere.
+void test_member_struct_definitions_nest_to_arbitrary_depth() {
+    auto _r = scpp::parse(
+        "struct A { struct B { struct C { int v; }; }; };\n"
+        "int main() { return 0; }\n");
+    expect(_r.has_value(), "member_struct_definitions_nest_to_arbitrary_depth: expected the parse to succeed");
+    if (!_r.has_value()) return;
+    bool found = false;
+    for (const scpp::StructDef& def : _r.value().structs) {
+        found = found || def.name == "A::B::C";
+    }
+    expect(found, "member_struct_definitions_nest_to_arbitrary_depth: expected a struct named 'A::B::C'");
+}
+
+// A member type's bare name is visible only inside its enclosing body
+// ([basic.scope.class]), so a namespace-scope type of the same name keeps
+// its own identity rather than being replaced.
+void test_member_struct_does_not_replace_a_namespace_scope_type_of_the_same_name() {
+    auto _r = scpp::parse(
+        "struct Inner { int v; };\n"
+        "class Outer {\n"
+        "  public:\n"
+        "    struct Inner { int w; };\n"
+        "    Outer() {}\n"
+        "    virtual ~Outer() {}\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    expect(_r.has_value(),
+           "member_struct_does_not_replace_a_namespace_scope_type_of_the_same_name: expected the parse to succeed");
+    if (!_r.has_value()) return;
+    bool found_outer_scope = false;
+    bool found_member = false;
+    for (const scpp::StructDef& def : _r.value().structs) {
+        found_outer_scope = found_outer_scope || def.name == "Inner";
+        found_member = found_member || def.name == "Outer::Inner";
+    }
+    expect(found_outer_scope && found_member,
+           "member_struct_does_not_replace_a_namespace_scope_type_of_the_same_name: expected both 'Inner' and 'Outer::Inner'");
+}
+
+// A member type of a generic type would have to be instantiated once per
+// enclosing specialization, which nothing downstream does yet. Rejecting
+// it by name is the honest boundary; silently emitting one shared
+// definition that ignores the enclosing type's parameters would not be.
+void test_member_type_definition_inside_a_generic_type_is_rejected() {
+    bool rejected = false;
+    if (auto _r = scpp::parse(
+            "template <typename T>\n"
+            "class Outer {\n"
+            "  public:\n"
+            "    struct Inner { int v; };\n"
+            "    Outer() {}\n"
+            "    virtual ~Outer() {}\n"
+            "};\n"
+            "int main() { return 0; }\n"); !_r.has_value()) {
+        rejected = true;
+        expect(std::string(_r.error().what()).find("member type definition inside a generic type") != std::string::npos,
+               "member_type_definition_inside_a_generic_type_is_rejected: expected the generic-enclosing reason");
+    }
+    expect(rejected, "member_type_definition_inside_a_generic_type_is_rejected: expected a ParseError");
+}
+
+void test_member_type_definition_cannot_be_a_member_template() {
+    bool rejected = false;
+    if (auto _r = scpp::parse(
+            "class Outer {\n"
+            "  public:\n"
+            "    template <typename T>\n"
+            "    struct Inner { int v; };\n"
+            "    Outer() {}\n"
+            "    virtual ~Outer() {}\n"
+            "};\n"
+            "int main() { return 0; }\n"); !_r.has_value()) {
+        rejected = true;
+        expect(std::string(_r.error().what()).find("cannot be a member template") != std::string::npos,
+               "member_type_definition_cannot_be_a_member_template: expected the member-template reason");
+    }
+    expect(rejected, "member_type_definition_cannot_be_a_member_template: expected a ParseError");
+}
+
 void test_bare_local_var_decl_is_rejected() {
     bool threw = false;
     if (auto _r = scpp::parse("int main() { int x; return 0; }"); !_r.has_value()) {
@@ -6244,6 +6368,12 @@ int main() {
     test_var_decl_and_if_else();
     test_class_var_decl_with_brace_init_parses_ctor_args();
     test_class_var_decl_with_paren_init_is_rejected();
+    test_member_struct_definition_is_named_for_its_enclosing_type();
+    test_member_enum_definition_is_named_for_its_enclosing_type();
+    test_member_struct_definitions_nest_to_arbitrary_depth();
+    test_member_struct_does_not_replace_a_namespace_scope_type_of_the_same_name();
+    test_member_type_definition_inside_a_generic_type_is_rejected();
+    test_member_type_definition_cannot_be_a_member_template();
     test_bare_local_var_decl_is_rejected();
     test_static_local_var_decl_parses_and_allows_no_initializer();
     test_fixed_width_integer_keywords_and_std_qualification_parse();
