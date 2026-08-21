@@ -720,27 +720,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 }
                 return std::unexpected(CodegenError("class '" + target.type.name + "' has no constructor matching this call", current_loc_));
             }
-            if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
-                auto value_result = codegen_constructed_class_value(target.type.name, args, ctor_def);
-                if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
-                create_store(std::move(value_result).value(), target.ptr, target.alignment);
-                if (class_has_ordinary_vtable(target.type.name)) {
-                    if (auto r = initialize_ordinary_vtable_pointer(target.type.name, target.ptr); !r.has_value())
-                        return std::unexpected(std::move(r).error());
-                }
-                return {};
-            }
-            llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(ctor_def).c_str());
-            if (ctor == nullptr) {
-                return std::unexpected(CodegenError("class '" + target.type.name + "' has no constructor matching this call", current_loc_));
-            }
-            auto ctor_args_result =
-                emit_constructor_arguments_and_virtual_bases(target.type.name, ctor_def, args, target.ptr);
-            if (!ctor_args_result.has_value()) return std::unexpected(std::move(ctor_args_result).error());
-            std::vector<llvm::LLVMValueRef> ctor_args = std::move(ctor_args_result).value();
-            ctor_args.insert(ctor_args.begin(), target.ptr);
-            build_call(ctor, ctor_args);
-            return {};
+            return initialize_record_storage_by_constructor(target, args);
         }
         if (args.empty()) {
             // An array of class type is not "trivially" initialized by a
@@ -841,10 +821,155 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             }
             return {};
         }
+        // `S s{1, 2};` -- aggregate initialization ([dcl.init.aggr]) of a
+        // record. The spec adopts no separate rule for it, so under the
+        // erasure model (§3.1, Clause 4) the ordinary C++ rule applies
+        // unchanged: this is the struct sibling of the array branch
+        // above, and it is reached the same way from every position a
+        // braced list can appear.
+        //
+        // A constructor still wins where one matches: this branch is
+        // only reached for a type that has none, which is also what
+        // [dcl.init.aggr] requires of an aggregate. Without it a record
+        // with fields could not be given values at its declaration in
+        // any position -- the single-expression gate below accepted
+        // exactly one argument and then stored it *through*
+        // initialize_storage_from_expr as if the record itself were that
+        // expression's type, so `struct I { int* p; }; I f{7};` silently
+        // compiled an int into a pointer field. Routing every element
+        // through the same per-binding check the array branch uses is
+        // what closes that.
+        if (target.type.kind == TypeKind::Named && find_struct_def(target.type.name) != nullptr &&
+            find_class_def(target.type.name) == nullptr) {
+            // Same-type source first and a constructor second, exactly as
+            // the class branch above orders them: `S f{other};` is
+            // copy-initialization and `S f{7}` on a struct that declares
+            // S(int) selects that constructor. Aggregate initialization is
+            // the fallback for a struct that has neither, which is also
+            // the only shape [dcl.init.aggr] describes.
+            auto same_type_source_result = try_initialize_class_storage_from_same_type_source(target, args);
+            if (!same_type_source_result.has_value()) return std::unexpected(std::move(same_type_source_result).error());
+            if (std::move(same_type_source_result).value()) return {};
+            // A struct that declares *any* constructor is not an
+            // aggregate ([dcl.init.aggr]), so the list is a call to one
+            // whether or not an overload accepts it -- reporting the
+            // mismatch rather than silently bypassing the constructor
+            // the author wrote.
+            if (!collect_call_candidates(target.type.name + "_new", /*param_offset=*/1, /*receiver_expr=*/nullptr).empty()) {
+                if (auto r = zero_initialize_storage(target.ptr, target.type, target.alignment); !r.has_value())
+                    return std::unexpected(std::move(r).error());
+                return initialize_record_storage_by_constructor(target, args);
+            }
+            return aggregate_initialize_record_storage(target, args);
+        }
         if (args.size() != 1) {
             return std::unexpected(CodegenError("brace-initialization of this member requires exactly one expression", current_loc_));
         }
         return initialize_storage_from_expr(target, *args[0]);
+    }
+
+    // The constructor-selection tail shared by every braced-list
+    // initialization of a record: a `class`, which always reaches it,
+    // and a `struct` that declares a constructor, which reaches it
+    // instead of aggregate initialization.
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::initialize_record_storage_by_constructor(
+        const Codegen::LValue& target, const std::vector<ExprPtr>& args)
+    {
+        const Function* ctor_def = resolve_overload_by_type(target.type.name + "_new", args, /*param_offset=*/1);
+        if (ctor_def == nullptr) {
+            return std::unexpected(CodegenError("class '" + target.type.name + "' has no constructor matching this call", current_loc_));
+        }
+        if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
+            auto value_result = codegen_constructed_class_value(target.type.name, args, ctor_def);
+            if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+            create_store(std::move(value_result).value(), target.ptr, target.alignment);
+            if (class_has_ordinary_vtable(target.type.name)) {
+                if (auto r = initialize_ordinary_vtable_pointer(target.type.name, target.ptr); !r.has_value())
+                    return std::unexpected(std::move(r).error());
+            }
+            return {};
+        }
+        llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(ctor_def).c_str());
+        if (ctor == nullptr) {
+            return std::unexpected(CodegenError("class '" + target.type.name + "' has no constructor matching this call", current_loc_));
+        }
+        auto ctor_args_result =
+            emit_constructor_arguments_and_virtual_bases(target.type.name, ctor_def, args, target.ptr);
+        if (!ctor_args_result.has_value()) return std::unexpected(std::move(ctor_args_result).error());
+        std::vector<llvm::LLVMValueRef> ctor_args = std::move(ctor_args_result).value();
+        ctor_args.insert(ctor_args.begin(), target.ptr);
+        build_call(ctor, ctor_args);
+        return {};
+    }
+
+    [[nodiscard]] bool Codegen::record_is_aggregate(const std::string& type_name)
+    {
+        // [dcl.init.aggr]: an aggregate is a class type with no
+        // user-declared constructors and no private or protected members.
+        // In scpp the first clause of that definition -- no virtual
+        // functions -- is what makes this exactly a `struct`: SS11.5(1)
+        // requires every `class` to declare a virtual destructor, and
+        // SS11.1(2.3) forbids a `struct` from declaring any virtual member.
+        if (find_class_def(type_name) != nullptr) return false;
+        const StructDef* def = find_struct_def(type_name);
+        if (def == nullptr) return false;
+        for (const StructField& field : def->fields) {
+            if (field.access != AccessSpecifier::Public) return false;
+        }
+        // A struct that declares a constructor is not an aggregate, even
+        // when no overload of it accepts this particular list. Without
+        // this the list would silently bypass the constructor the author
+        // wrote rather than being reported as not matching it.
+        return collect_call_candidates(type_name + "_new", /*param_offset=*/1, /*receiver_expr=*/nullptr).empty();
+    }
+
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::aggregate_initialize_record_storage(
+        const Codegen::LValue& target, const std::vector<ExprPtr>& args)
+    {
+        const StructDef* def = find_struct_def(target.type.name);
+        if (def == nullptr) {
+            return std::unexpected(CodegenError("class '" + target.type.name + "' has no constructor matching this call", current_loc_));
+        }
+        if (!record_is_aggregate(target.type.name)) {
+            return std::unexpected(CodegenError("'" + target.type.name +
+                                                "' is not an aggregate ([dcl.init.aggr]) because it has a non-public data member, so a braced list cannot initialize its members directly",
+                                                current_loc_));
+        }
+        if (args.size() > def->fields.size()) {
+            std::string message{};
+            message += "too many initializers for '";
+            message += target.type.name;
+            message += "': ";
+            message += std::to_string(def->fields.size());
+            message += (def->fields.size() == 1 ? " member, " : " members, ");
+            message += std::to_string(args.size());
+            message += " given";
+            return std::unexpected(CodegenError(message, current_loc_));
+        }
+        // Value-initialize the whole object first and overwrite the
+        // members the list reaches, so "every member the list does not
+        // reach is value-initialized" stays literally the empty-args
+        // path rather than a second copy of it -- including that
+        // member's own default member initializer, which [dcl.init.aggr]
+        // prefers over value-initialization.
+        if (auto r = initialize_storage_from_brace_args(target, {}); !r.has_value()) return std::unexpected(std::move(r).error());
+        auto record_llvm_type_result = to_llvm_type(target.type);
+        if (!record_llvm_type_result.has_value()) return std::unexpected(std::move(record_llvm_type_result).error());
+        llvm::LLVMTypeRef record_llvm_type = std::move(record_llvm_type_result).value();
+        for (std::size_t i = 0; i < args.size(); ++i) {
+            const StructField& field = def->fields[i];
+            llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, record_llvm_type, target.ptr,
+                                                                     static_cast<unsigned int>(i), "agg.field");
+            // Per member, through the same routine every other
+            // initialization boundary uses, so a member's value is
+            // checked against its declared type by the one check that
+            // already answers that question.
+            if (auto r = initialize_storage_from_expr(LValue{field_ptr, field.type, alignment_for_type(field.type)}, *args[i]);
+                !r.has_value()) {
+                return std::unexpected(std::move(r).error());
+            }
+        }
+        return {};
     }
 
 

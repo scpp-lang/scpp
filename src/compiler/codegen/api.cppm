@@ -982,6 +982,24 @@ private:
     // constructor".
     [[nodiscard]] bool record_is_implicitly_default_initializable(const std::string& type_name) const;
 
+    // [dcl.init.aggr]: whether a braced list initializes `type_name`'s
+    // members directly rather than selecting a constructor. In SCPP26
+    // this lands exactly on `struct`: ch11 §11.5(1) requires every
+    // `class` to declare a virtual destructor, [dcl.init.aggr]
+    // disqualifies any type with a virtual function, and ch11 §11.1(2.3)
+    // forbids a `struct` from declaring one -- so the ordinary C++ rule
+    // needs no SCPP-specific restatement to separate the two.
+    [[nodiscard]] std::expected<void, CodegenError> initialize_record_storage_by_constructor(
+        const LValue& target, const std::vector<ExprPtr>& args);
+    [[nodiscard]] bool record_is_aggregate(const std::string& type_name);
+    // Initializes `target`'s members from `args` per [dcl.init.aggr]:
+    // member i from initializer i, every member the list does not reach
+    // value-initialized. The single implementation of that rule -- a
+    // local declaration, a default member initializer, a
+    // member-initializer-list entry and a nested member all reach it.
+    [[nodiscard]] std::expected<void, CodegenError> aggregate_initialize_record_storage(
+        const LValue& target, const std::vector<ExprPtr>& args);
+
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_class_value_for_boundary(const Expr& expr, const Type& target_type,
                                                   bool allow_implicit_converting_ctor = false);
 

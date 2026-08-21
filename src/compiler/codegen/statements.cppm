@@ -209,6 +209,19 @@ namespace scpp {
                                             storage, stmt.type.name, /*initialize_virtual_interface_bases=*/true); !r.has_value()) return std::unexpected(std::move(r).error());
                                     } else if (stmt.ctor_args.empty() && find_class_def(stmt.type.name) == nullptr &&
                                                find_struct_def(stmt.type.name) == nullptr) {
+                                    } else if (!stmt.ctor_args.empty() && find_struct_def(stmt.type.name) != nullptr &&
+                                               find_class_def(stmt.type.name) == nullptr) {
+                                    // A braced list on a struct is
+                                    // handed to the one routine that
+                                    // decides what it means -- copy,
+                                    // constructor, or [dcl.init.aggr]
+                                    // aggregate initialization -- for
+                                    // every other position a braced list
+                                    // appears in. Deciding it here too
+                                    // would be a second copy of that rule.
+                                        if (auto r = initialize_storage_from_brace_args(
+                                                LValue{storage, stmt.type, declared_alignment}, stmt.ctor_args); !r.has_value())
+                                            return std::unexpected(std::move(r).error());
                                     } else {
                                         return std::unexpected(CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
                                             current_loc_));
@@ -478,6 +491,14 @@ namespace scpp {
                             if (stmt.ctor_args.empty() && find_class_def(stmt.type.name) == nullptr &&
                                 find_struct_def(stmt.type.name) == nullptr) {
                                 return {};
+                            }
+                            if (!stmt.ctor_args.empty() && find_struct_def(stmt.type.name) != nullptr &&
+                                find_class_def(stmt.type.name) == nullptr) {
+                                // See the static-local path's own note: one
+                                // routine decides what a braced list on a
+                                // struct means, reached from every position.
+                                return initialize_storage_from_brace_args(
+                                    LValue{slot, stmt.type, declared_alignment}, stmt.ctor_args);
                             }
                             // spec §6.5: `ClassName y{x};` with no matching
                             // user-declared constructor found by ordinary
