@@ -2025,6 +2025,48 @@ private:
         return {};
     }
 
+    // `S s{1, 2};` during constant evaluation -- [dcl.init.aggr] for a
+    // record, the struct sibling of initialize_array_cell_from_brace_args
+    // above. The evaluator is a second implementation of this rule and
+    // failed differently from codegen: it assumed a braced list always
+    // meant a *constructor call*, so a struct with no constructor was
+    // rejected as "no constexpr/consteval constructor matches" however
+    // well-formed the list was.
+    [[nodiscard]] std::expected<void, ConstexprError> initialize_record_cell_from_brace_args(
+        const std::shared_ptr<Cell>& cell, const StructDef& struct_def, const std::vector<ExprPtr>& args,
+        const SourceLocation& loc) {
+        if (!cell->data.is_object()) {
+            return std::unexpected(ConstexprError(loc, "internal error: expected object storage for a record initializer"));
+        }
+        if (args.size() > struct_def.fields.size()) {
+            std::string message{};
+            message += "too many initializers for '";
+            message += struct_def.name;
+            message += "': ";
+            message += std::to_string(struct_def.fields.size());
+            message += (struct_def.fields.size() == 1 ? " member, " : " members, ");
+            message += std::to_string(args.size());
+            message += " given";
+            return std::unexpected(ConstexprError(loc, message));
+        }
+        ObjectValue& object = cell->data.object;
+        for (std::size_t i = 0; i < args.size(); ++i) {
+            const StructField& field = struct_def.fields[i];
+            std::int64_t field_slot = object.field_index(field.name);
+            if (field_slot < 0) {
+                return std::unexpected(ConstexprError(loc, "internal error: missing member storage for '" + field.name + "'"));
+            }
+            auto value_result = evaluate_expr_in_context(*args[i], &field.type);
+            if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+            if (auto result = copy_into(object.fields[static_cast<std::size_t>(field_slot)].cell,
+                                        std::move(value_result).value(), loc);
+                !result.has_value()) {
+                return std::unexpected(std::move(result).error());
+            }
+        }
+        return {};
+    }
+
     [[nodiscard]] std::expected<void, ConstexprError> apply_initializer_to_field(std::shared_ptr<Cell>& field_cell, const Type& field_type, const Initializer& init,
                                     const SourceLocation& loc) {
         if (field_type.kind == TypeKind::Reference) {
@@ -2224,6 +2266,20 @@ private:
 
     [[nodiscard]] bool is_record_name(const std::string& name) const {
         return classes_by_name_.contains(name) || structs_by_name_.contains(name);
+    }
+
+    // [dcl.init.aggr], stated once for the evaluator's two
+    // constructor-call sites (evaluate_constructor_expr and the
+    // local-declaration path) so they cannot drift apart. The codegen
+    // side answers the same question in Codegen::record_is_aggregate;
+    // the two tables differ but the rule does not.
+    [[nodiscard]] bool record_is_aggregate(const std::string& name) const {
+        if (classes_by_name_.contains(name)) return false;
+        if (!structs_by_name_.contains(name)) return false;
+        for (const StructField& field : program_.structs[structs_by_name_.at(name)].fields) {
+            if (field.access != AccessSpecifier::Public) return false;
+        }
+        return !functions_by_name_.contains(name + "_new");
     }
 
     // ch11 §11.5(1) requires every class to *declare* an explicit virtual
@@ -2716,6 +2772,21 @@ private:
             if (expr.args.empty() &&
                 (classes_by_name_.contains(expr.name) || structs_by_name_.contains(expr.name))) {
                 if (auto result = apply_default_initializers_to_named_object(object, object_type, expr.loc); !result.has_value()) {
+                    return std::unexpected(std::move(result).error());
+                }
+                return object;
+            }
+            // [dcl.init.aggr]: a struct with no matching constructor
+            // takes its members from the list directly. Reached only
+            // after constructor selection has already declined, which is
+            // the same order codegen uses.
+            if (!expr.args.empty() && record_is_aggregate(expr.name)) {
+                const StructDef& struct_def = program_.structs[structs_by_name_.at(expr.name)];
+                if (auto result = apply_default_initializers_to_named_object(object, object_type, expr.loc); !result.has_value()) {
+                    return std::unexpected(std::move(result).error());
+                }
+                if (auto result = initialize_record_cell_from_brace_args(object, struct_def, expr.args, expr.loc);
+                    !result.has_value()) {
                     return std::unexpected(std::move(result).error());
                 }
                 return object;
@@ -3404,6 +3475,25 @@ private:
                             if (stmt.ctor_args.empty() &&
                                 (classes_by_name_.contains(stmt.type.name) || structs_by_name_.contains(stmt.type.name))) {
                                 if (auto result = apply_default_initializers_to_named_object(cell, stmt.type, stmt.loc);
+                                    !result.has_value()) {
+                                    return std::unexpected(std::move(result).error());
+                                }
+                                frames_.back()[stmt.var_name] = Binding{cell, stmt.is_const || stmt.is_constexpr};
+                                return ExecOutcome{};
+                            }
+                            // [dcl.init.aggr], reached from the second
+                            // of the evaluator's two constructor-call
+                            // sites -- see evaluate_constructor_expr's
+                            // matching branch. Both delegate to the one
+                            // record-aggregate routine so the rule is
+                            // stated once.
+                            if (!stmt.ctor_args.empty() && record_is_aggregate(stmt.type.name)) {
+                                const StructDef& struct_def = program_.structs[structs_by_name_.at(stmt.type.name)];
+                                if (auto result = apply_default_initializers_to_named_object(cell, stmt.type, stmt.loc);
+                                    !result.has_value()) {
+                                    return std::unexpected(std::move(result).error());
+                                }
+                                if (auto result = initialize_record_cell_from_brace_args(cell, struct_def, stmt.ctor_args, stmt.loc);
                                     !result.has_value()) {
                                     return std::unexpected(std::move(result).error());
                                 }

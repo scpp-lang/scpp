@@ -550,6 +550,270 @@ void test_too_many_array_initializers_are_rejected_by_both_implementations() {
     }
 }
 
+// The spec adopts no rule of its own for aggregate initialization, so
+// under the erasure model (§3.1, Clause 4) [dcl.init.aggr] applies
+// unchanged -- the same reasoning §9.4(1) makes explicit for arrays. A
+// `struct` with fields could not be given values at its declaration in
+// any position: every non-empty braced list was rejected, with a
+// different message per position because three separate paths each
+// answered the question.
+void test_struct_brace_list_initializes_each_member() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "int main() {\n"
+        "    S s{4, 5};\n"
+        "    return s.a * 10 + s.b - 45;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "struct_brace_list_initializes_each_member: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+}
+
+// The local declaration is only one of the positions, and each was served
+// by its own copy of the decision: a default member initializer and a
+// member-initializer-list entry reached the shared worker and were
+// rejected there with "requires exactly one expression", while the local
+// declaration had its own resolution in statements.cppm and said "has no
+// constructor matching this call" instead.
+void test_struct_brace_list_initializes_a_member_and_a_mem_init_entry() {
+    cases_run++;
+    auto dmi_result = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "class K {\n"
+        "  public:\n"
+        "    S s{4, 5};\n"
+        "    K() {}\n"
+        "    virtual ~K() {}\n"
+        "};\n"
+        "int main() { K k{}; return k.s.b - 5; }\n");
+    expect(dmi_result.has_value(),
+           "struct_brace_list_member: expected IR for a struct default member initializer, got " +
+               (dmi_result.has_value() ? std::string{} : dmi_result.error().kind + ": " + dmi_result.error().message));
+
+    cases_run++;
+    auto mem_init_result = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "class M {\n"
+        "  public:\n"
+        "    S s;\n"
+        "    M() : s{6, 7} {}\n"
+        "    virtual ~M() {}\n"
+        "};\n"
+        "int main() { M m{}; return m.s.b - 7; }\n");
+    expect(mem_init_result.has_value(),
+           "struct_brace_list_mem_init: expected IR for a struct member-initializer entry, got " +
+               (mem_init_result.has_value() ? std::string{} : mem_init_result.error().kind + ": " + mem_init_result.error().message));
+}
+
+// The constant evaluator answers this question twice more -- once for
+// `S{...}` as an expression and once for a local declaration -- and both
+// assumed a braced list meant a constructor call, so a struct literal
+// inside a `constexpr` function failed with "no constexpr/consteval
+// constructor matches" however few members it had.
+void test_struct_brace_list_is_accepted_during_constant_evaluation() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "constexpr int packed() {\n"
+        "    S s{4, 5};\n"
+        "    return s.a * 10 + s.b;\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int folded = packed();\n"
+        "    return folded - 45;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "struct_brace_list_constexpr: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+}
+
+// [dcl.init.aggr]: members the list does not reach are initialized from
+// their default member initializer if they have one and value-initialized
+// otherwise -- not left indeterminate. Folding the call makes the emitted
+// constant the evaluator's own answer, so 150 appears only if `b` really
+// took its DMI and `c` really became zero.
+void test_struct_brace_list_value_initializes_the_members_it_does_not_reach() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct D { int a; int b = 5; int c; };\n"
+        "constexpr int digits() {\n"
+        "    D d{1};\n"
+        "    return d.a * 100 + d.b * 10 + d.c;\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int folded = digits();\n"
+        "    return folded - 150;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "struct_brace_list_partial: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+    if (!ir_result.has_value()) return;
+    expect(ir_result.value().find("150") != std::string::npos,
+           "struct_brace_list_partial: expected the folded constant 150 in the IR, so the unreached "
+           "members took their default member initializer and value-initialization rather than being "
+           "left indeterminate");
+}
+
+// The member count bounds the list in both implementations, so each is
+// pinned against the stage that owns it. Asserting the *reason* matters
+// here beyond the usual: before the fix every one of these lists was
+// rejected too, by the arity gate, so a bare "is rejected" assertion
+// would pass against the unfixed compiler and prove nothing.
+void test_too_many_struct_initializers_are_rejected_by_both_implementations() {
+    cases_run++;
+    auto codegen_result = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "int main() {\n"
+        "    S s{1, 2, 3};\n"
+        "    return s.a;\n"
+        "}\n");
+    expect(!codegen_result.has_value(),
+           "too_many_struct_initializers: expected an overlong list to be rejected at runtime");
+    if (!codegen_result.has_value()) {
+        expect(codegen_result.error().kind == "CodegenError",
+               "too_many_struct_initializers: expected a CodegenError, got " + codegen_result.error().kind);
+        expect(codegen_result.error().message.find("too many initializers for 'S': 2 members, 3 given") !=
+                   std::string::npos,
+               "too_many_struct_initializers: expected the diagnostic to name the member count, got " +
+                   codegen_result.error().message);
+    }
+
+    cases_run++;
+    auto constexpr_result = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "constexpr int overlong() {\n"
+        "    S s{1, 2, 3};\n"
+        "    return s.a;\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int folded = overlong();\n"
+        "    return folded;\n"
+        "}\n");
+    expect(!constexpr_result.has_value(),
+           "too_many_struct_initializers: expected an overlong list to be rejected during constant evaluation");
+    if (!constexpr_result.has_value()) {
+        expect(constexpr_result.error().kind == "ConstexprError",
+               "too_many_struct_initializers: expected a ConstexprError, got " + constexpr_result.error().kind);
+        expect(constexpr_result.error().message.find("too many initializers for 'S': 2 members, 3 given") !=
+                   std::string::npos,
+               "too_many_struct_initializers: expected the constant evaluator to name the member count too, got " +
+                   constexpr_result.error().message);
+    }
+}
+
+// Every member of the list is a binding position. The path this replaces
+// accepted a single-expression list for a record target and stored the
+// expression *through* the record's storage as if the record were that
+// expression's type, so an `int` reached an `int*` member and compiled --
+// the list was a hole in the type system, not merely unsupported.
+void test_struct_brace_list_checks_each_member_against_the_member_type() {
+    cases_run++;
+    auto pointer_result = try_generate_ir(
+        "struct I { int* p; };\n"
+        "class W {\n"
+        "  public:\n"
+        "    I f{7};\n"
+        "    W() {}\n"
+        "    virtual ~W() {}\n"
+        "};\n"
+        "int main() { W w{}; return 0; }\n");
+    expect(!pointer_result.has_value(),
+           "struct_brace_list_member_type: expected an int initializing a pointer member to be rejected");
+    if (!pointer_result.has_value()) {
+        expect(pointer_result.error().message.find("type mismatch") != std::string::npos,
+               "struct_brace_list_member_type: expected a type mismatch, got " + pointer_result.error().message);
+    }
+
+    cases_run++;
+    auto bool_result = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "int main() {\n"
+        "    S s{1, true};\n"
+        "    return s.a;\n"
+        "}\n");
+    expect(!bool_result.has_value(),
+           "struct_brace_list_member_type: expected a bool initializing an int member to be rejected -- "
+           "scpp has no implicit scalar conversions");
+    if (!bool_result.has_value()) {
+        expect(bool_result.error().message.find("type mismatch") != std::string::npos,
+               "struct_brace_list_member_type: expected a type mismatch, got " + bool_result.error().message);
+    }
+}
+
+// [dcl.init.aggr] excludes a type with user-declared constructors, so a
+// braced list on such a struct is a call to one whether or not an
+// overload accepts it. Reporting the mismatch is the point: aggregating
+// it instead would silently bypass the constructor the author wrote and
+// leave members it would have set holding zero.
+//
+// Honest note: this one passes against the pre-fix compiler as well,
+// because before the fix *every* braced list on a struct was rejected, so
+// there is no pre-fix behaviour for it to distinguish. It is kept as a
+// regression guard rather than as coverage of the fix -- and it earned
+// that place: an earlier version of this change tried aggregate
+// initialization before constructor selection, and this program compiled
+// and returned 3, silently bypassing the constructor.
+void test_a_declared_constructor_wins_over_aggregate_initialization() {
+    cases_run++;
+    auto matching_result = try_generate_ir(
+        "struct S { int a; int b; S(int x) { this.a = x; this.b = x; } };\n"
+        "int main() { S s{6}; return s.a + s.b - 12; }\n");
+    expect(matching_result.has_value(),
+           "declared_constructor_wins: expected a matching constructor to be selected, got " +
+               (matching_result.has_value() ? std::string{} : matching_result.error().kind + ": " + matching_result.error().message));
+
+    cases_run++;
+    auto codegen_result = try_generate_ir(
+        "struct S { int a; int b; S(int x) { this.a = x; this.b = x; } };\n"
+        "int main() { S s{1, 2}; return s.a; }\n");
+    expect(!codegen_result.has_value(),
+           "declared_constructor_wins: expected a list no constructor accepts to be rejected rather than "
+           "aggregate-initialized");
+    if (!codegen_result.has_value()) {
+        expect(codegen_result.error().message.find("no constructor matching this call") != std::string::npos,
+               "declared_constructor_wins: expected the diagnostic to name the constructor mismatch, got " +
+                   codegen_result.error().message);
+    }
+
+    cases_run++;
+    auto constexpr_result = try_generate_ir(
+        "struct S { int a; int b; S(int x) { this.a = x; this.b = x; } };\n"
+        "constexpr int bypass() { S s{1, 2}; return s.a; }\n"
+        "int main() { constexpr int folded = bypass(); return folded; }\n");
+    expect(!constexpr_result.has_value(),
+           "declared_constructor_wins: expected the constant evaluator to reject it too");
+    if (!constexpr_result.has_value()) {
+        expect(constexpr_result.error().kind == "ConstexprError",
+               "declared_constructor_wins: expected a ConstexprError, got " + constexpr_result.error().kind);
+        expect(constexpr_result.error().message.find("no constexpr/consteval constructor matches") != std::string::npos,
+               "declared_constructor_wins: expected the evaluator to name the constructor mismatch, got " +
+                   constexpr_result.error().message);
+    }
+}
+
+// The other half of [dcl.init.aggr]'s exclusion list. In scpp its first
+// clause -- no virtual functions -- makes aggregates exactly the
+// `struct`s, because §11.5(1) requires every `class` to declare a virtual
+// destructor and §11.1(2.3) forbids a `struct` from declaring any virtual
+// member. A non-public data member is the remaining disqualifier, and the
+// diagnostic has to say which rule it is rather than blaming a
+// constructor the author never wrote.
+void test_struct_with_a_non_public_member_is_not_an_aggregate() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct S { private: int a; public: int b; };\n"
+        "int main() { S s{1, 2}; return s.b; }\n");
+    expect(!ir_result.has_value(),
+           "non_public_member_is_not_an_aggregate: expected a struct with a private member to be rejected");
+    if (!ir_result.has_value()) {
+        expect(ir_result.error().message.find("[dcl.init.aggr]") != std::string::npos &&
+                   ir_result.error().message.find("non-public data member") != std::string::npos,
+               "non_public_member_is_not_an_aggregate: expected the diagnostic to name the rule and the "
+               "reason, got " + ir_result.error().message);
+    }
+}
+
 // Each element of a braced list is a binding position, so the declared
 // element type has to be checked at every one of them -- a list must not
 // become a hole through which a value of the wrong type reaches storage
@@ -3135,6 +3399,14 @@ int main() {
     test_array_brace_list_value_initializes_the_elements_it_does_not_reach();
     test_empty_array_brace_list_is_accepted_during_constant_evaluation();
     test_too_many_array_initializers_are_rejected_by_both_implementations();
+    test_struct_brace_list_initializes_each_member();
+    test_struct_brace_list_initializes_a_member_and_a_mem_init_entry();
+    test_struct_brace_list_is_accepted_during_constant_evaluation();
+    test_struct_brace_list_value_initializes_the_members_it_does_not_reach();
+    test_too_many_struct_initializers_are_rejected_by_both_implementations();
+    test_struct_brace_list_checks_each_member_against_the_member_type();
+    test_a_declared_constructor_wins_over_aggregate_initialization();
+    test_struct_with_a_non_public_member_is_not_an_aggregate();
     test_array_brace_list_checks_each_element_against_the_element_type();
     test_partial_brace_list_for_an_array_of_class_type_constructs_the_rest();
     test_multidimensional_array_binds_its_bounds_left_to_right();
