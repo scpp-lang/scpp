@@ -539,6 +539,131 @@ void test_mutable_range_for_still_borrows_the_container_exclusively() {
                                  "container inside a mutable loop to stay rejected");
 }
 
+// A user type whose name happens to match a template's own parameter
+// must not break that template. Any global `T` used to make
+// std_memory.scpp's `shared_ptr<T>` fail to compile, because the raw
+// pointer check decided whether a pointee was a real type -- rather
+// than a still-unsubstituted placeholder -- by looking the name up in
+// the program's own struct/class/enum tables. Declaring `T` made the
+// unrelated parameter `T` answer that lookup.
+//
+// Reproduced here without importing anything: inside `Box`'s abstract
+// check the member reads as the bare witness while the callee's
+// declared return type is still spelled `T`, and only a user-declared
+// `T` turns that pair into a reported mismatch.
+void test_a_user_type_named_like_a_template_parameter_is_accepted() {
+    cases_run++;
+    const std::string generic_using_a_callees_parameter_name =
+        "template <typename T>\n"
+        "T* unerase(void* raw) {\n"
+        "    [[scpp::unsafe]] { return static_cast<T*>(raw); }\n"
+        "}\n"
+        "template <typename U>\n"
+        "class Box {\n"
+        "  public:\n"
+        "    U* ptr_{};\n"
+        "    void* raw_{};\n"
+        "    virtual ~Box() = default;\n"
+        "    void refresh() { this->ptr_ = unerase<U>(this->raw_); }\n"
+        "};\n"
+        "int main() { return 0; }\n";
+
+    std::optional<std::string> without_user_type = move_error_message(generic_using_a_callees_parameter_name);
+    expect(!without_user_type.has_value(),
+           "user_type_named_like_a_template_parameter: expected the generic alone to be accepted, got '" +
+               without_user_type.value_or(std::string()) + "'");
+
+    std::optional<std::string> as_struct =
+        move_error_message("struct T { int v; };\n" + generic_using_a_callees_parameter_name);
+    expect(!as_struct.has_value(),
+           "user_type_named_like_a_template_parameter: declaring a global 'struct T' must not change whether an "
+           "unrelated template compiles, got '" +
+               as_struct.value_or(std::string()) + "'");
+
+    // The three spellings are the three tables that lookup consulted, so
+    // each is a distinct way to have reintroduced the collision.
+    std::optional<std::string> as_class =
+        move_error_message("class T {\n  public:\n    int v{};\n    virtual ~T() = default;\n};\n" +
+                           generic_using_a_callees_parameter_name);
+    expect(!as_class.has_value(), "user_type_named_like_a_template_parameter: expected a global 'class T' to be "
+                                  "accepted, got '" +
+                                      as_class.value_or(std::string()) + "'");
+
+    std::optional<std::string> as_enum =
+        move_error_message("enum class T { A, B };\n" + generic_using_a_callees_parameter_name);
+    expect(!as_enum.has_value(), "user_type_named_like_a_template_parameter: expected a global 'enum class T' to be "
+                                 "accepted, got '" +
+                                     as_enum.value_or(std::string()) + "'");
+
+    // The library shape this was found as, which needs std imported.
+    std::optional<std::string> with_std = move_error_message(
+        "import std;\n"
+        "struct T { int v; };\n"
+        "int main() {\n"
+        "    std::shared_ptr<int> p = std::make_shared<int>(41);\n"
+        "    std::shared_ptr<int> q = p;\n"
+        "    return *q - 41;\n"
+        "}\n");
+    expect(!with_std.has_value(),
+           "user_type_named_like_a_template_parameter: expected a global 'struct T' to coexist with std::shared_ptr, "
+           "got '" +
+               with_std.value_or(std::string()) + "'");
+}
+
+// Declining to judge pointee types inside an uninstantiated generic
+// must not cost any checking, because the same body is checked again
+// per instantiation where the types are real. Both halves matter: the
+// first is the rule that was always enforced, and the second is the one
+// the generic-body exemption could have silently dropped.
+void test_raw_pointer_mismatch_is_still_rejected_where_the_types_are_real() {
+    cases_run++;
+    std::optional<std::string> non_generic = move_error_message(
+        "import std;\n"
+        "class Holder {\n"
+        "  public:\n"
+        "    double* ptr_{};\n"
+        "    virtual ~Holder() = default;\n"
+        "    void take(int* p) {\n"
+        "        [[scpp::unsafe]] { this->ptr_ = p; }\n"
+        "    }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    expect(non_generic.has_value(),
+           "raw_pointer_mismatch_still_rejected: expected an 'int*' stored into a 'double*' to stay rejected "
+           "outside a generic");
+    if (non_generic.has_value()) {
+        expect(non_generic.value().find("incompatible pointer type") != std::string::npos,
+               "raw_pointer_mismatch_still_rejected: expected the pointer diagnostic, got '" + non_generic.value() + "'");
+    }
+
+    std::optional<std::string> at_instantiation = move_error_message(
+        "import std;\n"
+        "template <typename T>\n"
+        "class Box {\n"
+        "  public:\n"
+        "    double* ptr_{};\n"
+        "    virtual ~Box() = default;\n"
+        "    void store(T* p) {\n"
+        "        [[scpp::unsafe]] { this->ptr_ = p; }\n"
+        "    }\n"
+        "};\n"
+        "int main() {\n"
+        "    Box<int> b{};\n"
+        "    int x{1};\n"
+        "    [[scpp::unsafe]] { b.store(&x); }\n"
+        "    return 0;\n"
+        "}\n");
+    expect(at_instantiation.has_value(),
+           "raw_pointer_mismatch_still_rejected: expected 'Box<int>' storing an 'int*' into a 'double*' to be "
+           "rejected at instantiation, where the pointees are real");
+    if (at_instantiation.has_value()) {
+        expect(at_instantiation.value().find("incompatible pointer type") != std::string::npos,
+               "raw_pointer_mismatch_still_rejected: expected the pointer diagnostic at instantiation, got '" +
+                   at_instantiation.value() + "'");
+    }
+}
+
+
 // A `const` loop variable must not become a mutation channel just
 // because the range storage behind it was demoted to a shared binding.
 void test_read_only_range_for_still_rejects_mutation_through_the_loop_variable() {
@@ -2264,6 +2389,8 @@ int main() {
     test_by_value_range_for_over_a_member_accessor_allows_other_member_borrows();
     test_mutable_range_for_still_borrows_the_container_exclusively();
     test_read_only_range_for_still_rejects_mutation_through_the_loop_variable();
+    test_a_user_type_named_like_a_template_parameter_is_accepted();
+    test_raw_pointer_mismatch_is_still_rejected_where_the_types_are_real();
     test_read_only_range_for_survives_generic_instantiation();
     test_converting_constructor_is_accepted_as_a_call_argument();
     test_converting_constructor_is_accepted_as_a_return_operand();
