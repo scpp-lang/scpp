@@ -1756,7 +1756,8 @@ private:
     // argument, or one naming a sibling of an *enclosing* namespace was
     // left unqualified and then failed here.
     [[nodiscard]] OptionalFunctionRef find_callable(const std::string& name, const std::vector<std::shared_ptr<Cell>>& args,
-                                                bool require_constexpr, bool explicit_global_qualification = false) {
+                                                bool require_constexpr, bool explicit_global_qualification = false,
+                                                const std::vector<ExprPtr>* arg_exprs = nullptr) {
         if (!explicit_global_qualification) {
             for (std::size_t depth = lookup_namespace_path_.size(); depth > 0; --depth) {
                 std::string candidate{};
@@ -1766,16 +1767,17 @@ private:
                 }
                 candidate += "::";
                 candidate += name;
-                if (OptionalFunctionRef found = find_callable_exact(candidate, args, require_constexpr); found.has_value()) {
+                if (OptionalFunctionRef found = find_callable_exact(candidate, args, require_constexpr, arg_exprs);
+                    found.has_value()) {
                     return found;
                 }
             }
         }
-        return find_callable_exact(name, args, require_constexpr);
+        return find_callable_exact(name, args, require_constexpr, arg_exprs);
     }
 
     [[nodiscard]] OptionalFunctionRef find_callable_exact(const std::string& name, const std::vector<std::shared_ptr<Cell>>& args,
-                                                bool require_constexpr) {
+                                                bool require_constexpr, const std::vector<ExprPtr>* arg_exprs = nullptr) {
         if (!functions_by_name_.contains(name)) return {};
         for (std::size_t fn_index : functions_by_name_.at(name)) {
             const Function& fn = program_.functions[fn_index];
@@ -1784,6 +1786,14 @@ private:
             if (fn.params.size() != args.size()) continue;
             bool params_match = true;
             for (std::size_t i = 0; i < args.size(); ++i) {
+                const Expr* arg_expr = arg_exprs != nullptr && i < arg_exprs->size() ? (*arg_exprs)[i].get() : nullptr;
+                if (arg_expr != nullptr && arg_expr->kind == ExprKind::BracedInitList) {
+                    if (!braced_init_list_can_initialize(fn.params[i].type, arg_expr->args, arg_expr->loc)) {
+                        params_match = false;
+                        break;
+                    }
+                    continue;
+                }
                 if (!constexpr_argument_matches_parameter(fn.params[i].type, args[i], require_constexpr)) {
                     params_match = false;
                     break;
@@ -1885,6 +1895,28 @@ private:
         return false;
     }
 
+    // Can this brace-enclosed initializer list initialize a parameter of
+    // this type? A braced list has no type of its own, so it cannot be
+    // pre-evaluated into a Cell and matched by type the way every other
+    // argument is -- yet the question still has an exact answer, and
+    // overload selection needs it: accepting on arity alone would let a
+    // list silently bind to an overload it does not fit.
+    //
+    // The answer is obtained by *performing* the initialization against a
+    // default cell of the parameter type and discarding the result, so it
+    // is the same answer initialize_cell_from_brace_args will give when
+    // the call is actually bound (call_with_expr_arg_views evaluates each
+    // argument with its parameter type as the context type). Deriving it
+    // from the real worker rather than from a separate predicate is what
+    // keeps selection and binding from ever disagreeing.
+    [[nodiscard]] bool braced_init_list_can_initialize(const Type& param_type, const std::vector<ExprPtr>& args,
+                                                       const SourceLocation& loc) {
+        if (param_type.kind == TypeKind::Reference) return false;
+        auto cell_result = make_default_cell(param_type, loc);
+        if (!cell_result.has_value()) return false;
+        return initialize_cell_from_brace_args(std::move(cell_result).value(), param_type, args, loc).has_value();
+    }
+
     [[nodiscard]] OptionalFunctionRef find_constructor(const std::string& class_name,
                                                    const std::vector<std::shared_ptr<Cell>>& args,
                                                    bool require_constexpr) {
@@ -1926,13 +1958,22 @@ private:
         return {};
     }
 
-    [[nodiscard]] bool has_runtime_only_match(const std::string& name, const std::vector<std::shared_ptr<Cell>>& args) {
+    [[nodiscard]] bool has_runtime_only_match(const std::string& name, const std::vector<std::shared_ptr<Cell>>& args,
+                                              const std::vector<ExprPtr>* arg_exprs = nullptr) {
         if (!functions_by_name_.contains(name)) return false;
         for (std::size_t fn_index : functions_by_name_.at(name)) {
             const Function& fn = program_.functions[fn_index];
             if (!fn.body || fn.eval_mode != FunctionEvalMode::RuntimeOnly || fn.params.size() != args.size()) continue;
             bool params_match = true;
             for (std::size_t i = 0; i < args.size(); ++i) {
+                const Expr* arg_expr = arg_exprs != nullptr && i < arg_exprs->size() ? (*arg_exprs)[i].get() : nullptr;
+                if (arg_expr != nullptr && arg_expr->kind == ExprKind::BracedInitList) {
+                    if (!braced_init_list_can_initialize(fn.params[i].type, arg_expr->args, arg_expr->loc)) {
+                        params_match = false;
+                        break;
+                    }
+                    continue;
+                }
                 if (!constexpr_argument_matches_parameter(fn.params[i].type, args[i], /*require_constexpr=*/false)) {
                     params_match = false;
                     break;
@@ -2871,7 +2912,8 @@ private:
 
     [[nodiscard]] std::expected<OptionalFunctionRef, ConstexprError> find_method_callable(const Expr& receiver_expr, const std::string& method_name,
                                                        const std::vector<std::shared_ptr<Cell>>& arg_values,
-                                                       bool require_constexpr) {
+                                                       bool require_constexpr,
+                                                       const std::vector<ExprPtr>* arg_exprs = nullptr) {
         std::shared_ptr<Cell> receiver_value{};
         bool receiver_is_lvalue = false;
         bool receiver_read_only = false;
@@ -2918,6 +2960,14 @@ private:
 
             bool params_match = true;
             for (std::size_t i = 0; i < arg_values.size(); ++i) {
+                const Expr* arg_expr = arg_exprs != nullptr && i < arg_exprs->size() ? (*arg_exprs)[i].get() : nullptr;
+                if (arg_expr != nullptr && arg_expr->kind == ExprKind::BracedInitList) {
+                    if (!braced_init_list_can_initialize(fn.params[i + 1].type, arg_expr->args, arg_expr->loc)) {
+                        params_match = false;
+                        break;
+                    }
+                    continue;
+                }
                 if (!constexpr_argument_matches_parameter(fn.params[i + 1].type, arg_values[i], require_constexpr)) {
                     params_match = false;
                     break;
@@ -3036,11 +3086,19 @@ private:
                 std::vector<std::shared_ptr<Cell>> arg_values{};
                 arg_values.reserve(expr.args.size());
                 for (const ExprPtr& arg : expr.args) {
+                    // See the free-function path below: a braced-list
+                    // argument is left unevaluated and answered from its
+                    // expression against each candidate's parameter type.
+                    if (arg != nullptr && arg->kind == ExprKind::BracedInitList) {
+                        arg_values.push_back(nullptr);
+                        continue;
+                    }
                     auto arg_result = evaluate_expr(*arg);
                     if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
                     arg_values.push_back(std::move(arg_result).value());
                 }
-                auto fn_result = find_method_callable(*expr.lhs, expr.name, arg_values, /*require_constexpr=*/true);
+                auto fn_result = find_method_callable(*expr.lhs, expr.name, arg_values, /*require_constexpr=*/true,
+                                                      &expr.args);
                 if (!fn_result.has_value()) return std::unexpected(std::move(fn_result).error());
                 OptionalFunctionRef method_ref = fn_result.value();
                 if (!method_ref.has_value()) {
@@ -3060,15 +3118,25 @@ private:
         std::vector<std::shared_ptr<Cell>> arg_values{};
         arg_values.reserve(expr.args.size());
         for (const ExprPtr& arg : expr.args) {
+            // A braced-list argument is deliberately left unevaluated
+            // (a null placeholder, keeping the vector index-aligned):
+            // it has no type of its own to pre-evaluate into, and the
+            // overload-selection loops it feeds consult the argument
+            // *expressions* for exactly these positions instead.
+            if (arg != nullptr && arg->kind == ExprKind::BracedInitList) {
+                arg_values.push_back(nullptr);
+                continue;
+            }
             auto arg_result = evaluate_expr(*arg);
             if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
             arg_values.push_back(std::move(arg_result).value());
         }
         OptionalFunctionRef callee_ref =
-            find_callable(expr.name, arg_values, /*require_constexpr=*/true, expr.explicit_global_qualification);
+            find_callable(expr.name, arg_values, /*require_constexpr=*/true, expr.explicit_global_qualification,
+                          &expr.args);
         if (!callee_ref.has_value())
             return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
-                if (has_runtime_only_match(expr.name, arg_values)) {
+                if (has_runtime_only_match(expr.name, arg_values, &expr.args)) {
                     return std::unexpected(ConstexprError(expr.loc, "immediate evaluation may only call constexpr/consteval functions"));
                 }
                 std::string message{};

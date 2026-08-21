@@ -25,6 +25,21 @@ namespace scpp {
 
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::codegen_materialize_const_reference_source(const Expr& expr, const Type& target_type)
 {
+        // A braced list has no value to load and store: it initializes
+        // the temporary in place, which is what makes `f({1, 2})` work
+        // for a `const S&` parameter. Handled before the rvalue path
+        // below because that one goes through codegen_expr, which a
+        // list -- having no type of its own -- cannot go through.
+        if (expr.kind == ExprKind::BracedInitList) {
+            auto llvm_type_result = to_llvm_type(target_type);
+            if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
+            llvm::LLVMValueRef temp = create_entry_block_alloca(std::move(llvm_type_result).value(), "listreftmp");
+            LValue target{temp, target_type, alignment_for_type(target_type)};
+            if (auto r = initialize_storage_from_brace_args(target, expr.args); !r.has_value()) {
+                return std::unexpected(std::move(r).error());
+            }
+            return temp;
+        }
         if (produces_rvalue_of_type(expr, target_type)) {
             return codegen_materialize_rvalue_reference_source(expr);
         }

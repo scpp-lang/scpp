@@ -470,6 +470,17 @@ namespace {
             case ExprKind::Lambda:
             case ExprKind::ValueInit:
                 break;
+            case ExprKind::BracedInitList:
+                // codegen_braced_init_list_value materializes the list
+                // into a brand new temporary, so it is exactly as fresh
+                // and alias-free as a literal -- and, like ValueInit
+                // just above, it carries no type of its own and adapts
+                // to whatever the context asks for. Unlike `{}` it has
+                // elements, so whether it actually *fits* the requested
+                // type is a real question with an exact answer, and
+                // overload resolution needs that answer rather than an
+                // unconditional yes.
+                return braced_init_list_can_initialize(expected_type, arg.args);
             case ExprKind::Call: {
                 std::optional<Type> t = infer_type(arg);
                 if (!t.has_value() || t->kind == TypeKind::Reference) return false;
@@ -660,6 +671,7 @@ namespace {
 
     bool Codegen::argument_matches_parameter(const Expr& arg, const Type& param_type)
 {
+        if (arg.kind == ExprKind::BracedInitList) return braced_init_list_can_initialize(param_type, arg.args);
         if (is_nullptr_literal(arg) && param_type.kind == TypeKind::Pointer) return true;
         auto argument_type_matches_or_converts = [&, this](const Type& arg_type, const Type& candidate_param_type) {
             return argument_type_matches_parameter(arg_type, candidate_param_type) ||
@@ -1019,6 +1031,21 @@ namespace {
         }
 
         if (type_mismatch_fn != nullptr) {
+            // A braced list has no type of its own, so "argument N is a
+            // different type" describes nothing and the static_cast
+            // advice below is meaningless for it: the only way it can
+            // fail is by not fitting the parameter's type.
+            const Expr& mismatched_arg = *args[type_mismatch.argument_index];
+            if (mismatched_arg.kind == ExprKind::BracedInitList) {
+                return "no overload of '" + display_name + "' matches these argument types: argument " +
+                       std::to_string(type_mismatch.argument_index + 1) + " is a brace-enclosed initializer list of " +
+                       std::to_string(mismatched_arg.args.size()) +
+                       (mismatched_arg.args.size() == 1 ? " initializer" : " initializers") +
+                       ", which does not initialize parameter type '" +
+                       describe_type_brief(type_mismatch.expected_param_type) +
+                       "': check that its elements match that type's members in number and type" +
+                       (candidates.size() > 1 ? candidate_list() : std::string());
+            }
             std::optional<Type> actual = infer_type(*args[type_mismatch.argument_index]);
             std::string actual_text =
                 actual.has_value() ? "'" + describe_type_brief(*actual) + "'" : "a different type";
