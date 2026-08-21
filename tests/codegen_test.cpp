@@ -814,6 +814,410 @@ void test_struct_with_a_non_public_member_is_not_an_aggregate() {
     }
 }
 
+// #480 gave arrays braced initializers, #481 fixed multi-dimensional
+// bounds and #484 gave structs aggregate initialization, and all three
+// stopped at one level: `parse_brace_initializer_args` called
+// `parse_expr` for every element and `{` starts no expression, so a
+// struct containing a struct, or a 2-D array, could not be given values
+// at all. Every shape failed identically -- "expected an expression but
+// found '{'" -- in every position.
+//
+// The fold pins more than acceptance: it reads four cells back in an
+// order that no transposition or off-by-one survives, so a list that
+// merely parsed without addressing the cells it was written next to
+// would not reach 6143.
+void test_nested_brace_list_initializes_a_two_dimensional_array() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "constexpr int folded() {\n"
+        "    int a[2][3]{{1, 2, 3}, {4, 5, 6}};\n"
+        "    return a[1][2] * 1000 + a[0][0] * 100 + a[1][0] * 10 + a[0][2];\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int packed = folded();\n"
+        "    return packed;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "nested_brace_2d: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+    if (!ir_result.has_value()) return;
+    expect(ir_result.value().find("6143") != std::string::npos,
+           "nested_brace_2d: expected a[1][2]==6, a[0][0]==1, a[1][0]==4 and a[0][2]==3, so every value "
+           "lands in the cell it was written next to");
+}
+
+// Two levels can be reached by a special case; three cannot. Nesting is
+// a property of the model or it is not there at all, so the inner-most
+// list has to be interpreted by the same code as the outer-most one.
+void test_nested_brace_list_nests_to_three_levels() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "constexpr int folded() {\n"
+        "    int a[2][2][2]{{{1, 2}, {3, 4}}, {{5, 6}, {7, 8}}};\n"
+        "    return a[1][0][1] * 1000 + a[0][1][0] * 100 + a[1][1][1] * 10 + a[0][0][0];\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int packed = folded();\n"
+        "    return packed;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "nested_brace_3d: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+    if (!ir_result.has_value()) return;
+    expect(ir_result.value().find("6381") != std::string::npos,
+           "nested_brace_3d: expected a[1][0][1]==6, a[0][1][0]==3, a[1][1][1]==8 and a[0][0][0]==1 at "
+           "three levels of nesting");
+}
+
+// An array of aggregates and an aggregate holding an array are the two
+// ways the shapes compose, and a nested list must not be misassigned
+// across the boundary between one element and the next.
+void test_nested_brace_list_composes_arrays_and_records() {
+    cases_run++;
+    auto array_of_structs = try_generate_ir(
+        "struct S { int x; int y; };\n"
+        "constexpr int folded() {\n"
+        "    S a[2]{{1, 2}, {3, 4}};\n"
+        "    return a[1].x * 1000 + a[0].y * 100 + a[1].y * 10 + a[0].x;\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int packed = folded();\n"
+        "    return packed;\n"
+        "}\n");
+    expect(array_of_structs.has_value(),
+           "nested_brace_compose: expected IR for an array of structs, got " +
+               (array_of_structs.has_value() ? std::string{}
+                                             : array_of_structs.error().kind + ": " + array_of_structs.error().message));
+    if (array_of_structs.has_value()) {
+        expect(array_of_structs.value().find("3241") != std::string::npos,
+               "nested_brace_compose: expected a[1].x==3, a[0].y==2, a[1].y==4 and a[0].x==1");
+    }
+
+    cases_run++;
+    auto struct_with_array = try_generate_ir(
+        "struct S { int v[3]; int z; };\n"
+        "constexpr int folded() {\n"
+        "    S s{{1, 2, 3}, 9};\n"
+        "    return s.v[0] * 1000 + s.v[2] * 100 + s.z * 10 + s.v[1];\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int packed = folded();\n"
+        "    return packed;\n"
+        "}\n");
+    expect(struct_with_array.has_value(),
+           "nested_brace_compose: expected IR for a struct with an array member, got " +
+               (struct_with_array.has_value() ? std::string{}
+                                              : struct_with_array.error().kind + ": " + struct_with_array.error().message));
+    if (struct_with_array.has_value()) {
+        expect(struct_with_array.value().find("1392") != std::string::npos,
+               "nested_brace_compose: expected s.v[0]==1, s.v[2]==3, s.z==9 and s.v[1]==2, so the scalar "
+               "after the inner list lands in the member after the array");
+    }
+
+    cases_run++;
+    auto struct_in_struct = try_generate_ir(
+        "struct In { int x; int y; };\n"
+        "struct Out { In i; int z; };\n"
+        "constexpr int folded() {\n"
+        "    Out o{{1, 2}, 3};\n"
+        "    return o.i.x * 10000 + o.i.y * 100 + o.z;\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int packed = folded();\n"
+        "    return packed;\n"
+        "}\n");
+    expect(struct_in_struct.has_value(),
+           "nested_brace_compose: expected IR for a struct inside a struct, got " +
+               (struct_in_struct.has_value() ? std::string{}
+                                             : struct_in_struct.error().kind + ": " + struct_in_struct.error().message));
+    if (struct_in_struct.has_value()) {
+        expect(struct_in_struct.value().find("10203") != std::string::npos,
+               "nested_brace_compose: expected o.i.x==1, o.i.y==2 and o.z==3");
+    }
+}
+
+// The parser reaches a braced list from three places -- a local
+// declaration, a default member initializer and a member-initializer-list
+// entry -- and #484's grid found each position answered by its own copy
+// of the rule. A nested list has to arrive at all three.
+void test_nested_brace_list_reaches_every_brace_position() {
+    cases_run++;
+    auto dmi_result = try_generate_ir(
+        "struct In { int x; int y; };\n"
+        "class K {\n"
+        "  public:\n"
+        "    In i{4, 5};\n"
+        "    int v[2][2]{{1, 2}, {3, 4}};\n"
+        "    K() {}\n"
+        "    virtual ~K() {}\n"
+        "};\n"
+        "int main() { K k{}; return k.v[1][1] - k.i.y + 1; }\n");
+    expect(dmi_result.has_value(),
+           "nested_brace_positions: expected IR for a nested default member initializer, got " +
+               (dmi_result.has_value() ? std::string{} : dmi_result.error().kind + ": " + dmi_result.error().message));
+
+    cases_run++;
+    auto mem_init_result = try_generate_ir(
+        "struct In { int x; int y; };\n"
+        "struct Out { In i; int z; };\n"
+        "class M {\n"
+        "  public:\n"
+        "    Out o;\n"
+        "    M() : o{{6, 7}, 8} {}\n"
+        "    virtual ~M() {}\n"
+        "};\n"
+        "int main() { M m{}; return m.o.i.y - 7; }\n");
+    expect(mem_init_result.has_value(),
+           "nested_brace_positions: expected IR for a nested member-initializer entry, got " +
+               (mem_init_result.has_value() ? std::string{}
+                                            : mem_init_result.error().kind + ": " + mem_init_result.error().message));
+}
+
+// A member's own braced default initializer was answered by a *third*
+// evaluator site, `apply_initializer_to_field`, which #484 never reached:
+// it kept an arity gate of its own and rejected any list of more than one
+// expression. So `struct Out { In i{4, 5}; };` used from a `constexpr`
+// function failed with "requires exactly one expression" even though the
+// list is flat and #484 had made the identical list work everywhere else.
+// Verified against origin/main as a pre-existing gap rather than fallout
+// of nesting.
+void test_a_braced_member_default_initializer_is_evaluated_as_an_aggregate() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct In { int x; int y; };\n"
+        "struct Out { In i{4, 5}; };\n"
+        "constexpr int folded() {\n"
+        "    Out o{};\n"
+        "    return o.i.x * 10000 + o.i.y * 10;\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int packed = folded();\n"
+        "    return packed;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "braced_member_dmi_constexpr: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+    if (!ir_result.has_value()) return;
+    expect(ir_result.value().find("40050") != std::string::npos,
+           "braced_member_dmi_constexpr: expected the member's own braced default initializer to give "
+           "o.i.x==4 and o.i.y==5 during constant evaluation");
+}
+
+// A nested list multiplies the binding positions, so the checks #480 and
+// #484 put on a flat list have to hold at every depth and in both
+// implementations -- an inner list must be measured against the *inner*
+// bound and its elements against the *inner* element type, not against
+// the outer ones.
+void test_nested_brace_list_checks_every_level_in_both_implementations() {
+    cases_run++;
+    auto inner_overlong = try_generate_ir(
+        "int main() {\n"
+        "    int a[2][3]{{1, 2, 3, 4}, {5, 6, 7}};\n"
+        "    return a[0][0];\n"
+        "}\n");
+    expect(!inner_overlong.has_value(),
+           "nested_brace_levels: expected a 4-element inner list for an int[3] row to be rejected");
+    if (!inner_overlong.has_value()) {
+        expect(inner_overlong.error().message.find("array of 3 elements") != std::string::npos,
+               "nested_brace_levels: expected the inner bound of 3 to be named rather than the outer bound "
+               "of 2, got " + inner_overlong.error().message);
+    }
+
+    cases_run++;
+    auto inner_overlong_constexpr = try_generate_ir(
+        "constexpr int folded() {\n"
+        "    int a[2][3]{{1, 2, 3, 4}, {5, 6, 7}};\n"
+        "    return a[0][0];\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int packed = folded();\n"
+        "    return packed;\n"
+        "}\n");
+    expect(!inner_overlong_constexpr.has_value(),
+           "nested_brace_levels: expected the constant evaluator to reject the overlong inner list too");
+    if (!inner_overlong_constexpr.has_value()) {
+        expect(inner_overlong_constexpr.error().kind == "ConstexprError" &&
+                   inner_overlong_constexpr.error().message.find("array of 3 elements") != std::string::npos,
+               "nested_brace_levels: expected the constant evaluator to name the inner bound, got " +
+                   inner_overlong_constexpr.error().kind + ": " + inner_overlong_constexpr.error().message);
+    }
+
+    cases_run++;
+    auto inner_mistyped = try_generate_ir(
+        "int main() {\n"
+        "    int a[2][3]{{1, true, 3}, {4, 5, 6}};\n"
+        "    return a[0][0];\n"
+        "}\n");
+    expect(!inner_mistyped.has_value(),
+           "nested_brace_levels: expected a 'bool' inside an inner int list to be rejected");
+    if (!inner_mistyped.has_value()) {
+        expect(inner_mistyped.error().message.find("no implicit conversion") != std::string::npos,
+               "nested_brace_levels: expected the inner element to be rejected for its type, got " +
+                   inner_mistyped.error().message);
+    }
+
+    cases_run++;
+    auto inner_mistyped_record = try_generate_ir(
+        "struct In { int x; };\n"
+        "struct Out { In i; };\n"
+        "constexpr int folded() {\n"
+        "    Out o{{true}};\n"
+        "    return o.i.x;\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int packed = folded();\n"
+        "    return packed;\n"
+        "}\n");
+    expect(!inner_mistyped_record.has_value(),
+           "nested_brace_levels: expected a 'bool' for an inner int member to be rejected during constant "
+           "evaluation");
+    if (!inner_mistyped_record.has_value()) {
+        expect(inner_mistyped_record.error().kind == "ConstexprError",
+               "nested_brace_levels: expected the constant evaluator to be the one rejecting it, got " +
+                   inner_mistyped_record.error().kind + ": " + inner_mistyped_record.error().message);
+    }
+}
+
+// [dcl.init.aggr]/15 lets the braces of a sub-aggregate be omitted, and
+// the spec adopts no aggregate-initialization rule of its own -- #484
+// established there is no [dcl.init.aggr] adoption clause -- so under the
+// erasure model (§3.1, Clause 4) the ordinary C++ rule applies unchanged
+// and elision is part of it. Rejecting it would be inventing a deviation
+// no clause authorises.
+//
+// The fold is the same constant as the fully-braced form above, which is
+// the actual claim: elided and explicit braces describe the same object.
+void test_brace_elision_fills_an_aggregate_from_a_flat_run() {
+    cases_run++;
+    auto array_result = try_generate_ir(
+        "constexpr int folded() {\n"
+        "    int a[2][3]{1, 2, 3, 4, 5, 6};\n"
+        "    return a[1][2] * 1000 + a[0][0] * 100 + a[1][0] * 10 + a[0][2];\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int packed = folded();\n"
+        "    return packed;\n"
+        "}\n");
+    expect(array_result.has_value(),
+           "brace_elision: expected IR for an elided 2-D array initializer, got " +
+               (array_result.has_value() ? std::string{} : array_result.error().kind + ": " + array_result.error().message));
+    if (array_result.has_value()) {
+        expect(array_result.value().find("6143") != std::string::npos,
+               "brace_elision: expected the elided form to describe the same object as the fully braced one");
+    }
+
+    cases_run++;
+    auto record_result = try_generate_ir(
+        "struct In { int x; int y; };\n"
+        "struct Out { In i; int z; };\n"
+        "constexpr int folded() {\n"
+        "    Out o{1, 2, 3};\n"
+        "    return o.i.x * 10000 + o.i.y * 100 + o.z;\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int packed = folded();\n"
+        "    return packed;\n"
+        "}\n");
+    expect(record_result.has_value(),
+           "brace_elision: expected IR for an elided struct-in-struct initializer, got " +
+               (record_result.has_value() ? std::string{} : record_result.error().kind + ": " + record_result.error().message));
+    if (record_result.has_value()) {
+        expect(record_result.value().find("10203") != std::string::npos,
+               "brace_elision: expected the elided run to fill the nested struct before the scalar after it");
+    }
+
+    cases_run++;
+    auto mixed_result = try_generate_ir(
+        "constexpr int folded() {\n"
+        "    int a[2][3]{{1, 2, 3}, 4, 5, 6};\n"
+        "    return a[1][2] * 1000 + a[0][0] * 100 + a[1][0] * 10 + a[0][2];\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int packed = folded();\n"
+        "    return packed;\n"
+        "}\n");
+    expect(mixed_result.has_value(),
+           "brace_elision: expected IR when one row is braced and the next is elided, got " +
+               (mixed_result.has_value() ? std::string{} : mixed_result.error().kind + ": " + mixed_result.error().message));
+    if (mixed_result.has_value()) {
+        expect(mixed_result.value().find("6143") != std::string::npos,
+               "brace_elision: expected elision to resume at the sub-object after an explicitly braced one");
+    }
+}
+
+// Elision makes the initializer count no longer equal to the member count,
+// so the arity gate #480 and #484 rely on cannot answer "too many" on its
+// own any more. The leftover check is what replaces it, and it has to
+// hold in both implementations or an overlong run would be silently
+// dropped in one of them.
+void test_brace_elision_still_reports_initializers_left_over() {
+    cases_run++;
+    auto array_result = try_generate_ir(
+        "int main() {\n"
+        "    int a[2][3]{1, 2, 3, 4, 5, 6, 7};\n"
+        "    return a[0][0];\n"
+        "}\n");
+    expect(!array_result.has_value(),
+           "brace_elision_leftover: expected a 7th initializer for an int[2][3] to be rejected");
+    if (!array_result.has_value()) {
+        expect(array_result.error().message.find("left over") != std::string::npos,
+               "brace_elision_leftover: expected the leftover initializer to be named, got " +
+                   array_result.error().message);
+    }
+
+    cases_run++;
+    auto record_result = try_generate_ir(
+        "struct In { int x; int y; };\n"
+        "struct Out { In i; int z; };\n"
+        "constexpr int folded() {\n"
+        "    Out o{1, 2, 3, 4};\n"
+        "    return o.z;\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int packed = folded();\n"
+        "    return packed;\n"
+        "}\n");
+    expect(!record_result.has_value(),
+           "brace_elision_leftover: expected a 4th initializer for a 3-scalar aggregate to be rejected");
+    if (!record_result.has_value()) {
+        expect(record_result.error().kind == "ConstexprError" &&
+                   record_result.error().message.find("left over") != std::string::npos,
+               "brace_elision_leftover: expected the constant evaluator to report the leftover too, got " +
+                   record_result.error().kind + ": " + record_result.error().message);
+    }
+}
+
+// The risk elision carries is that a sub-object which *could* absorb a run
+// swallows an initializer that was meant for it whole. An expression
+// already of the sub-object's own type is the ordinary case and must win
+// over elision, or `Out o{v, 6}` would try to fill `In` from `v` and `6`.
+//
+// This one passes against the pre-fix compiler and proves nothing about
+// the defect: the list is flat, so #484 already handled it. It is a
+// regression guard for the cursor introduced here -- the case that would
+// break if elision were tried before the same-type check.
+void test_brace_elision_does_not_consume_a_same_typed_initializer() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct In { int x; int y; };\n"
+        "struct Out { In i; int z; };\n"
+        "constexpr int folded() {\n"
+        "    In v{4, 5};\n"
+        "    Out o{v, 6};\n"
+        "    return o.i.x * 10000 + o.i.y * 100 + o.z;\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int packed = folded();\n"
+        "    return packed;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "brace_elision_same_type: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+    if (!ir_result.has_value()) return;
+    expect(ir_result.value().find("40506") != std::string::npos,
+           "brace_elision_same_type: expected `v` to initialize the whole `In` member and 6 to land in `z`");
+}
+
 // Each element of a braced list is a binding position, so the declared
 // element type has to be checked at every one of them -- a list must not
 // become a hole through which a value of the wrong type reaches storage
@@ -3408,6 +3812,15 @@ int main() {
     test_a_declared_constructor_wins_over_aggregate_initialization();
     test_struct_with_a_non_public_member_is_not_an_aggregate();
     test_array_brace_list_checks_each_element_against_the_element_type();
+    test_nested_brace_list_initializes_a_two_dimensional_array();
+    test_nested_brace_list_nests_to_three_levels();
+    test_nested_brace_list_composes_arrays_and_records();
+    test_nested_brace_list_reaches_every_brace_position();
+    test_a_braced_member_default_initializer_is_evaluated_as_an_aggregate();
+    test_nested_brace_list_checks_every_level_in_both_implementations();
+    test_brace_elision_fills_an_aggregate_from_a_flat_run();
+    test_brace_elision_still_reports_initializers_left_over();
+    test_brace_elision_does_not_consume_a_same_typed_initializer();
     test_partial_brace_list_for_an_array_of_class_type_constructs_the_rest();
     test_multidimensional_array_binds_its_bounds_left_to_right();
     test_multidimensional_array_row_spans_the_inner_bound();

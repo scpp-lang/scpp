@@ -570,6 +570,20 @@ enum class ExprKind {
                 // either a type operand (stored in `type`) or an unevaluated
                 // expression operand (stored in `lhs`), distinguished by
                 // `sizeof_operand_is_type` below.
+    // A brace-enclosed initializer list appearing as one element of an
+    // enclosing brace-enclosed initializer list: the inner `{1, 2}` of
+    // `int a[2][2]{{1, 2}, {3, 4}}` or of `Out o{{1, 2}, 3}`. Its
+    // elements are stored in `args`, the same field a Call uses.
+    //
+    // In ISO C++ a braced-init-list is not an expression at all, and
+    // this is not one either: it is only ever produced by
+    // parse_brace_initializer_args for a nested list, and only ever
+    // consumed at an initialization boundary that already knows the
+    // target type (codegen's initialize_storage_from_expr, the constant
+    // evaluator's evaluate_expr_in_context). Reaching any other
+    // expression context is a diagnostic, not a type -- a braced list
+    // has no type of its own to infer.
+    BracedInitList,
     ValueInit,  // A bare `{}` used as a complete expression (e.g.
                 // `return {};`) rather than as a postfix constructor
                 // applied to a named type (`TypeName{}`, which parses as

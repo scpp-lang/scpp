@@ -992,6 +992,29 @@ private:
     [[nodiscard]] std::expected<void, CodegenError> initialize_record_storage_by_constructor(
         const LValue& target, const std::vector<ExprPtr>& args);
     [[nodiscard]] bool record_is_aggregate(const std::string& type_name);
+
+    // [dcl.init.aggr]/15 brace elision: whether `type` is an aggregate
+    // whose own members may be filled from a run of initializers taken
+    // from the enclosing list, and whether any member of `type` is such
+    // an aggregate (which is exactly when elision can occur inside it).
+    [[nodiscard]] bool type_is_elidable_aggregate(const Type& type);
+    [[nodiscard]] bool aggregate_has_elidable_member(const Type& type);
+
+    // Initializes `target` by consuming initializers from `args`
+    // starting at `index`, which it advances past whatever it used.
+    [[nodiscard]] std::expected<void, CodegenError> initialize_storage_from_brace_args_cursor(
+        const LValue& target, const std::vector<ExprPtr>& args, std::size_t& index);
+
+    // Fills an aggregate's sub-objects in declaration order from the
+    // cursor, stopping when the initializers run out, and reports how
+    // many sub-objects it reached.
+    [[nodiscard]] std::expected<void, CodegenError> fill_aggregate_from_cursor(
+        const LValue& target, const std::vector<ExprPtr>& args, std::size_t& index, std::int64_t& covered);
+
+    // Reports initializers left over after every sub-object of an
+    // aggregate has been initialized.
+    [[nodiscard]] std::expected<void, CodegenError> report_leftover_initializers(
+        const Type& type, const std::vector<ExprPtr>& args, std::size_t index);
     // Initializes `target`'s members from `args` per [dcl.init.aggr]:
     // member i from initializer i, every member the list does not reach
     // value-initialized. The single implementation of that rule -- a

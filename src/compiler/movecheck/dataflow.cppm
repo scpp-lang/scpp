@@ -1798,6 +1798,23 @@ struct ConvertingConstructorBinding {
         case ExprKind::TypeTrait:
             return {};
 
+        // A nested brace-enclosed initializer list is not a leaf. Its
+        // elements are ordinary expressions and are evaluated exactly
+        // where they are written, so each one is walked here: a
+        // `std::move` or a borrow inside `Out o{{std::move(x)}, 3}` has
+        // to be seen by the move checker just as it would inside a
+        // call's argument list.
+        case ExprKind::BracedInitList:
+            for (const ExprPtr& element : expr.args) {
+                if (element == nullptr) continue;
+                if (auto _r = apply_expr(*element, /*is_move_target_context=*/false, state, body, signatures,
+                                         report_errors);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+            return {};
+
         case ExprKind::Sizeof:
             if (report_errors) {
                 if (auto _r = validate_sizeof_operand(expr, body, signatures, state.current_loc); !_r.has_value()) {

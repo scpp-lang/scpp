@@ -1987,6 +1987,127 @@ private:
         return {};
     }
 
+    // A sub-object that can absorb a whole run of initializers on its
+    // own: an array, or a struct whose members a braced list may
+    // initialize directly. Only such a sub-object can have had its
+    // braces elided ([dcl.init.aggr]/15).
+    [[nodiscard]] bool type_is_elidable_aggregate(const Type& type) const {
+        if (type.kind == TypeKind::Array && type.element != nullptr) return true;
+        return type.kind == TypeKind::Named && structs_by_name_.contains(type.name) && record_is_aggregate(type.name);
+    }
+
+    [[nodiscard]] bool aggregate_has_elidable_member(const Type& type) const {
+        if (type.kind == TypeKind::Array && type.element != nullptr) {
+            return type_is_elidable_aggregate(*type.element);
+        }
+        if (type.kind != TypeKind::Named || !structs_by_name_.contains(type.name)) return false;
+        for (const StructField& field : program_.structs[structs_by_name_.at(type.name)].fields) {
+            if (type_is_elidable_aggregate(field.type)) return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] std::expected<void, ConstexprError> report_leftover_cell_initializers(
+        const Type& type, const std::vector<ExprPtr>& args, std::size_t index, const SourceLocation& loc) const {
+        if (index >= args.size()) return {};
+        std::string message{};
+        message += "too many initializers for '";
+        message += (type.name.empty() ? std::string{"array"} : type.name);
+        message += "': every member is initialized and ";
+        message += std::to_string(args.size() - index);
+        message += (args.size() - index == 1 ? " initializer is" : " initializers are");
+        message += " left over";
+        return std::unexpected(ConstexprError(loc, message));
+    }
+
+    // One sub-object's worth of a brace-enclosed initializer list, taken
+    // from `args` at `index`. This is the constant evaluator's copy of
+    // the cursor model in Codegen::initialize_storage_from_brace_args_cursor
+    // and must answer identically: a `constexpr` program and its runtime
+    // twin are the same program, so if only one implementation elides
+    // braces they disagree about what the program means.
+    [[nodiscard]] std::expected<void, ConstexprError> initialize_cell_from_brace_args_cursor(
+        const std::shared_ptr<Cell>& cell, const Type& type, const std::vector<ExprPtr>& args, std::size_t& index,
+        const SourceLocation& loc) {
+        if (index >= args.size()) return {};
+        const Expr& next = *args[index];
+        if (next.kind == ExprKind::BracedInitList) {
+            ++index;
+            return initialize_cell_from_brace_args(cell, type, next.args, loc);
+        }
+        if (!type_is_elidable_aggregate(type)) {
+            ++index;
+            auto value_result = evaluate_expr_in_context(next, &type);
+            if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+            return copy_into(cell, std::move(value_result).value(), loc);
+        }
+        if (type.kind == TypeKind::Named) {
+            std::optional<Type> source_type = infer_unevaluated_expr_type(next);
+            if (source_type.has_value() && types_equal(*source_type, type)) {
+                ++index;
+                auto value_result = evaluate_expr_in_context(next, &type);
+                if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                return copy_into(cell, std::move(value_result).value(), loc);
+            }
+            // Reached only when the braces were elided, so this record
+            // never passed through initialize_cell_from_brace_args and
+            // its default member initializers have not run yet.
+            if (auto result = apply_default_initializers_to_named_object(cell, type, loc); !result.has_value()) {
+                return std::unexpected(std::move(result).error());
+            }
+        }
+        std::int64_t covered = 0;
+        return fill_aggregate_cell_from_cursor(cell, type, args, index, covered, loc);
+    }
+
+    // Walks an aggregate's sub-objects in declaration order, giving each
+    // one the cursor and stopping when the run is exhausted. `covered`
+    // reports how many sub-objects an initializer reached; sub-objects
+    // past it keep the value make_default_cell and the default member
+    // initializers gave them.
+    [[nodiscard]] std::expected<void, ConstexprError> fill_aggregate_cell_from_cursor(
+        const std::shared_ptr<Cell>& cell, const Type& type, const std::vector<ExprPtr>& args, std::size_t& index,
+        std::int64_t& covered, const SourceLocation& loc) {
+        covered = 0;
+        if (type.kind == TypeKind::Array && type.element != nullptr) {
+            if (!cell->data.is_array()) {
+                return std::unexpected(ConstexprError(loc, "internal error: expected array storage for an array initializer"));
+            }
+            std::vector<std::shared_ptr<Cell>>& elements = cell->data.array.elements;
+            while (static_cast<std::size_t>(covered) < elements.size() && index < args.size()) {
+                if (auto result = initialize_cell_from_brace_args_cursor(elements[static_cast<std::size_t>(covered)],
+                                                                        *type.element, args, index, loc);
+                    !result.has_value()) {
+                    return std::unexpected(std::move(result).error());
+                }
+                ++covered;
+            }
+            return {};
+        }
+        if (type.kind != TypeKind::Named || !structs_by_name_.contains(type.name)) {
+            return std::unexpected(ConstexprError(loc, "internal error: expected an aggregate type for a brace-enclosed initializer list"));
+        }
+        if (!cell->data.is_object()) {
+            return std::unexpected(ConstexprError(loc, "internal error: expected object storage for a record initializer"));
+        }
+        const StructDef& struct_def = program_.structs[structs_by_name_.at(type.name)];
+        ObjectValue& object = cell->data.object;
+        while (static_cast<std::size_t>(covered) < struct_def.fields.size() && index < args.size()) {
+            const StructField& field = struct_def.fields[static_cast<std::size_t>(covered)];
+            std::int64_t field_slot = object.field_index(field.name);
+            if (field_slot < 0) {
+                return std::unexpected(ConstexprError(loc, "internal error: missing member storage for '" + field.name + "'"));
+            }
+            if (auto result = initialize_cell_from_brace_args_cursor(
+                    object.fields[static_cast<std::size_t>(field_slot)].cell, field.type, args, index, loc);
+                !result.has_value()) {
+                return std::unexpected(std::move(result).error());
+            }
+            ++covered;
+        }
+        return {};
+    }
+
     // `int values[3]{1, 2, 3};` during constant evaluation. Spec §9.4(1)
     // adopts [dcl.array] unchanged, so this is [dcl.init.aggr]: element
     // i takes initializer i, and any element the list does not reach
@@ -2006,7 +2127,12 @@ private:
             return std::unexpected(ConstexprError(loc, "internal error: expected array storage for an array initializer"));
         }
         std::vector<std::shared_ptr<Cell>>& elements = cell->data.array.elements;
-        if (args.size() > elements.size()) {
+        // The element count answers "too many initializers?" directly
+        // only when no element can absorb more than one of them. Once an
+        // element is itself an aggregate its braces may be elided
+        // ([dcl.init.aggr]/15), so the run is longer than the array and
+        // the leftover check below is what reports an overlong list.
+        if (!aggregate_has_elidable_member(array_type) && args.size() > elements.size()) {
             std::string message{};
             message += "too many initializers for array of ";
             message += std::to_string(elements.size());
@@ -2015,14 +2141,13 @@ private:
             message += " given";
             return std::unexpected(ConstexprError(loc, message));
         }
-        for (std::size_t i = 0; i < args.size(); ++i) {
-            auto value_result = evaluate_expr_in_context(*args[i], array_type.element.get());
-            if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
-            if (auto result = copy_into(elements[i], std::move(value_result).value(), loc); !result.has_value()) {
-                return std::unexpected(std::move(result).error());
-            }
+        std::size_t index = 0;
+        std::int64_t covered = 0;
+        if (auto result = fill_aggregate_cell_from_cursor(cell, array_type, args, index, covered, loc);
+            !result.has_value()) {
+            return std::unexpected(std::move(result).error());
         }
-        return {};
+        return report_leftover_cell_initializers(array_type, args, index, loc);
     }
 
     // `S s{1, 2};` during constant evaluation -- [dcl.init.aggr] for a
@@ -2038,7 +2163,10 @@ private:
         if (!cell->data.is_object()) {
             return std::unexpected(ConstexprError(loc, "internal error: expected object storage for a record initializer"));
         }
-        if (args.size() > struct_def.fields.size()) {
+        Type record_type = named_type(struct_def.name);
+        // See the array sibling: the member count is the right answer
+        // only when braces cannot have been elided inside this record.
+        if (!aggregate_has_elidable_member(record_type) && args.size() > struct_def.fields.size()) {
             std::string message{};
             message += "too many initializers for '";
             message += struct_def.name;
@@ -2049,22 +2177,52 @@ private:
             message += " given";
             return std::unexpected(ConstexprError(loc, message));
         }
-        ObjectValue& object = cell->data.object;
-        for (std::size_t i = 0; i < args.size(); ++i) {
-            const StructField& field = struct_def.fields[i];
-            std::int64_t field_slot = object.field_index(field.name);
-            if (field_slot < 0) {
-                return std::unexpected(ConstexprError(loc, "internal error: missing member storage for '" + field.name + "'"));
-            }
-            auto value_result = evaluate_expr_in_context(*args[i], &field.type);
-            if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
-            if (auto result = copy_into(object.fields[static_cast<std::size_t>(field_slot)].cell,
-                                        std::move(value_result).value(), loc);
-                !result.has_value()) {
+        std::size_t index = 0;
+        std::int64_t covered = 0;
+        if (auto result = fill_aggregate_cell_from_cursor(cell, record_type, args, index, covered, loc);
+            !result.has_value()) {
+            return std::unexpected(std::move(result).error());
+        }
+        return report_leftover_cell_initializers(record_type, args, index, loc);
+    }
+
+    // True when any element of a braced list is itself a braced list.
+    // Such an element has no type of its own, so it cannot take part in
+    // constructor overload resolution -- the enclosing list can only be
+    // aggregate initialization, and the paths that would otherwise
+    // pre-evaluate their arguments to select a constructor consult this
+    // first.
+    [[nodiscard]] static bool args_contain_braced_init_list(const std::vector<ExprPtr>& args) {
+        for (const ExprPtr& arg : args) {
+            if (arg != nullptr && arg->kind == ExprKind::BracedInitList) return true;
+        }
+        return false;
+    }
+
+    // Initializes a cell of an arbitrary type from a braced list,
+    // dispatching to the array or record worker. This is the evaluator's
+    // counterpart to codegen's initialize_storage_from_brace_args, and
+    // exists so a *nested* list has exactly one place to be interpreted
+    // however deep it sits and whichever shape encloses it.
+    [[nodiscard]] std::expected<void, ConstexprError> initialize_cell_from_brace_args(
+        const std::shared_ptr<Cell>& cell, const Type& type, const std::vector<ExprPtr>& args,
+        const SourceLocation& loc) {
+        if (type.kind == TypeKind::Array) {
+            return initialize_array_cell_from_brace_args(cell, type, args, loc);
+        }
+        if (type.kind == TypeKind::Named && record_is_aggregate(type.name)) {
+            if (auto result = apply_default_initializers_to_named_object(cell, type, loc); !result.has_value()) {
                 return std::unexpected(std::move(result).error());
             }
+            return initialize_record_cell_from_brace_args(cell, program_.structs[structs_by_name_.at(type.name)], args,
+                                                          loc);
         }
-        return {};
+        if (args.empty()) return {};
+        std::string message{};
+        message += "a brace-enclosed initializer list cannot initialize '";
+        message += (type.name.empty() ? std::string{"this type"} : type.name);
+        message += "': only an array or an aggregate struct ([dcl.init.aggr]) takes its members from a list";
+        return std::unexpected(ConstexprError(loc, message));
     }
 
     [[nodiscard]] std::expected<void, ConstexprError> apply_initializer_to_field(std::shared_ptr<Cell>& field_cell, const Type& field_type, const Initializer& init,
@@ -2118,6 +2276,11 @@ private:
         }
         if (field_type.kind == TypeKind::Named &&
             (is_class_name(field_type.name) || structs_by_name_.contains(field_type.name)) && init.has_brace_args) {
+            // See the VarDecl path's note: a braced-list element has no
+            // type to resolve a constructor with.
+            if (args_contain_braced_init_list(init.brace_args) && record_is_aggregate(field_type.name)) {
+                return initialize_cell_from_brace_args(field_cell, field_type, init.brace_args, loc);
+            }
             std::vector<std::shared_ptr<Cell>> arg_values{};
             arg_values.reserve(init.brace_args.size());
             for (const ExprPtr& arg : init.brace_args) {
@@ -2165,6 +2328,16 @@ private:
             }
             if (init.brace_args.empty()) {
                 return apply_default_initializers_to_named_object(field_cell, field_type, loc);
+            }
+            // [dcl.init.aggr] for a member whose own initializer is a
+            // braced list -- `struct Out { In i{4, 5}; };`. This is the
+            // evaluator's *third* constructor-call site, and #484 gave
+            // the aggregate branch only to the other two, so a
+            // record-typed member with a multi-element default member
+            // initializer still failed here with "requires exactly one
+            // expression" even with no nesting involved.
+            if (record_is_aggregate(field_type.name)) {
+                return initialize_cell_from_brace_args(field_cell, field_type, init.brace_args, loc);
             }
         }
         if (init.has_brace_args) {
@@ -2760,6 +2933,17 @@ private:
         auto object_result = make_default_cell(object_type, expr.loc);
         if (!object_result.has_value()) return std::unexpected(std::move(object_result).error());
         auto object = std::move(object_result).value();
+        // See the VarDecl path's note: a braced-list element has no type
+        // to resolve a constructor with, so the list is aggregate
+        // initialization and is decided before the arguments are
+        // evaluated.
+        if (args_contain_braced_init_list(expr.args) && record_is_aggregate(expr.name)) {
+            if (auto result = initialize_cell_from_brace_args(object, object_type, expr.args, expr.loc);
+                !result.has_value()) {
+                return std::unexpected(std::move(result).error());
+            }
+            return object;
+        }
         std::vector<std::shared_ptr<Cell>> arg_values{};
         arg_values.reserve(expr.args.size());
         for (const ExprPtr& arg : expr.args) {
@@ -2908,7 +3092,11 @@ private:
     }
 
     [[nodiscard]] std::optional<Type> infer_unevaluated_expr_type(const Expr& expr) {
+        // A braced-init-list has no type of its own; only the
+        // initialization boundary that consumes it knows what it means.
+        if (expr.kind == ExprKind::BracedInitList) return std::nullopt;
         switch (expr.kind) {
+            case ExprKind::BracedInitList: return std::nullopt;
             case ExprKind::IntegerLiteral: return named_type("int");
             case ExprKind::FloatLiteral: return named_type("double");
             case ExprKind::BoolLiteral: return named_type("bool");
@@ -3124,7 +3312,31 @@ private:
             literal_adopts_type(expr, *context_type, scpp::host_pointer_bit_width())) {
             return make_adopted_literal_cell(expr, literal_adoption_target(*context_type));
         }
+        if (expr.kind == ExprKind::BracedInitList) {
+            // A nested list is bound to whatever the enclosing
+            // initialization says it is. Every braced-list element --
+            // array element and struct member alike -- is evaluated
+            // through this one function against its target's declared
+            // type, so handling the nested list here is what makes
+            // nesting work at every depth and in every shape.
+            if (context_type == nullptr) {
+                return std::unexpected(ConstexprError(
+                    expr.loc,
+                    "a brace-enclosed initializer list has no type of its own and cannot be used here"));
+            }
+            auto cell_result = make_default_cell(*context_type, expr.loc);
+            if (!cell_result.has_value()) return std::unexpected(std::move(cell_result).error());
+            auto cell = std::move(cell_result).value();
+            if (auto result = initialize_cell_from_brace_args(cell, *context_type, expr.args, expr.loc);
+                !result.has_value()) {
+                return std::unexpected(std::move(result).error());
+            }
+            return cell;
+        }
         switch (expr.kind) {
+            case ExprKind::BracedInitList:
+                return std::unexpected(ConstexprError(
+                    expr.loc, "a brace-enclosed initializer list has no type of its own and cannot be used here"));
             case ExprKind::IntegerLiteral: return make_scalar_cell(named_type("int"), expr.int_value);
             case ExprKind::FloatLiteral: return make_double_cell(expr.float_value);
             case ExprKind::BoolLiteral: return make_bool_cell(expr.bool_value);
@@ -3449,6 +3661,22 @@ private:
                     auto cell = std::move(cell_result).value();
                     if (stmt.has_ctor_args && stmt.type.kind == TypeKind::Array) {
                         if (auto result = initialize_array_cell_from_brace_args(cell, stmt.type, stmt.ctor_args, stmt.loc);
+                            !result.has_value()) {
+                            return std::unexpected(std::move(result).error());
+                        }
+                        frames_.back()[stmt.var_name] = Binding{cell, stmt.is_const || stmt.is_constexpr};
+                        return ExecOutcome{};
+                    }
+                    // An element that is itself a braced list has no
+                    // type, so it cannot take part in the constructor
+                    // overload resolution below -- and the list can only
+                    // mean aggregate initialization. Deciding that here,
+                    // before the arguments are evaluated, is what keeps
+                    // a nested list from being evaluated with no target
+                    // type to give it meaning.
+                    if (stmt.has_ctor_args && args_contain_braced_init_list(stmt.ctor_args) &&
+                        record_is_aggregate(stmt.type.name)) {
+                        if (auto result = initialize_cell_from_brace_args(cell, stmt.type, stmt.ctor_args, stmt.loc);
                             !result.has_value()) {
                             return std::unexpected(std::move(result).error());
                         }

@@ -651,7 +651,18 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
 
     [[nodiscard]] std::expected<void, CodegenError> Codegen::initialize_storage_from_expr(const Codegen::LValue& target, const Expr& expr)
-{
+    {
+        // A nested brace-enclosed initializer list -- the inner `{1, 2}`
+        // of `int a[2][2]{{1, 2}, {3, 4}}`. Every braced-list element,
+        // for arrays and for structs alike, is bound to its target
+        // through this one function, so recognizing the nested list here
+        // is what makes nesting work at every depth, in every shape, and
+        // in every position at once: the list is simply the enclosing
+        // initialization applied one level down, against the element's
+        // or member's own declared type.
+        if (expr.kind == ExprKind::BracedInitList) {
+            return initialize_storage_from_brace_args(target, expr.args);
+        }
         if (target.type.kind == TypeKind::Reference) {
             return initialize_reference_storage(target, expr);
         }
@@ -773,7 +784,14 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         // the loop bound below).
         if (target.type.kind == TypeKind::Array && target.type.element != nullptr) {
             std::int64_t element_count = target.type.array_size;
-            if (static_cast<std::int64_t>(args.size()) > element_count) {
+            // When no element can absorb more than one initializer, one
+            // initializer means one element and the count answers the
+            // question directly -- the message a reader of
+            // `int a[3]{1, 2, 3, 4}` wants. Where braces may have been
+            // elided the arithmetic no longer holds, and the leftover
+            // check after the fill reports it instead.
+            if (!aggregate_has_elidable_member(target.type) &&
+                static_cast<std::int64_t>(args.size()) > element_count) {
                 std::string message{};
                 message += "too many initializers for array of ";
                 message += std::to_string(element_count);
@@ -782,44 +800,32 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 message += " given";
                 return std::unexpected(CodegenError(message, current_loc_));
             }
-            auto array_llvm_type_result = to_llvm_type(target.type);
-            if (!array_llvm_type_result.has_value()) return std::unexpected(std::move(array_llvm_type_result).error());
-            llvm::LLVMTypeRef array_llvm_type = std::move(array_llvm_type_result).value();
-            llvm::LLVMTypeRef i64 = llvm::LLVMInt64TypeInContext(context_);
             const Type& element_type = *target.type.element;
             std::optional<unsigned int> element_alignment = alignment_for_type(element_type);
-
-            if (static_cast<std::int64_t>(args.size()) < element_count) {
-                if (auto r = zero_initialize_storage(target.ptr, target.type, target.alignment); !r.has_value())
-                    return std::unexpected(std::move(r).error());
-                if (type_needs_nontrivial_default_init(target.type)) {
-                    if (auto r = emit_array_element_loop(
-                            target.type, target.ptr, /*reverse=*/false,
-                            /*begin_index=*/static_cast<std::int64_t>(args.size()),
-                            [&, this](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef) -> std::expected<void, CodegenError> {
-                                return initialize_storage_from_brace_args(
-                                    LValue{element_ptr, element_type, element_alignment}, {});
-                            });
-                        !r.has_value()) {
-                        return std::unexpected(std::move(r).error());
-                    }
-                }
-            }
-
-            for (std::size_t i = 0; i < args.size(); ++i) {
-                llvm::LLVMValueRef index = llvm::LLVMConstInt(i64, static_cast<unsigned long long>(i), /*SignExtend=*/0);
-                llvm::LLVMValueRef element_ptr = build_array_element_gep(array_llvm_type, target.ptr, index);
-                // Per element, through the same routine any other
-                // initialization boundary uses -- so each element's value
-                // is checked against the element type by the one check
-                // that already answers that question, rather than a
-                // list-specific relaxation of it.
-                if (auto r = initialize_storage_from_expr(LValue{element_ptr, element_type, element_alignment}, *args[i]);
+            if (auto r = zero_initialize_storage(target.ptr, target.type, target.alignment); !r.has_value())
+                return std::unexpected(std::move(r).error());
+            std::size_t index = 0;
+            std::int64_t covered = 0;
+            if (auto r = fill_aggregate_from_cursor(target, args, index, covered); !r.has_value())
+                return std::unexpected(std::move(r).error());
+            // Elements the list does not reach are value-initialized.
+            // For an element type whose value-initialization is
+            // observable this has to actually run, and only for the
+            // uncovered tail -- which is why the covered count comes
+            // from the fill rather than from args.size(), a number that
+            // stops being the element count once braces are elided.
+            if (covered < element_count && type_needs_nontrivial_default_init(target.type)) {
+                if (auto r = emit_array_element_loop(
+                        target.type, target.ptr, /*reverse=*/false, /*begin_index=*/covered,
+                        [&, this](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef) -> std::expected<void, CodegenError> {
+                            return initialize_storage_from_brace_args(
+                                LValue{element_ptr, element_type, element_alignment}, {});
+                        });
                     !r.has_value()) {
                     return std::unexpected(std::move(r).error());
                 }
             }
-            return {};
+            return report_leftover_initializers(target.type, args, index);
         }
         // `S s{1, 2};` -- aggregate initialization ([dcl.init.aggr]) of a
         // record. The spec adopts no separate rule for it, so under the
@@ -923,6 +929,125 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         return collect_call_candidates(type_name + "_new", /*param_offset=*/1, /*receiver_expr=*/nullptr).empty();
     }
 
+    [[nodiscard]] bool Codegen::type_is_elidable_aggregate(const Type& type)
+    {
+        if (type.kind == TypeKind::Array && type.element != nullptr) return true;
+        return type.kind == TypeKind::Named && find_struct_def(type.name) != nullptr &&
+               record_is_aggregate(type.name);
+    }
+
+    [[nodiscard]] bool Codegen::aggregate_has_elidable_member(const Type& type)
+    {
+        if (type.kind == TypeKind::Array && type.element != nullptr) {
+            return type_is_elidable_aggregate(*type.element);
+        }
+        const StructDef* def = (type.kind == TypeKind::Named) ? find_struct_def(type.name) : nullptr;
+        if (def == nullptr) return false;
+        for (const StructField& field : def->fields) {
+            if (type_is_elidable_aggregate(field.type)) return true;
+        }
+        return false;
+    }
+
+    // One sub-object's worth of a brace-enclosed initializer list, taken
+    // from `args` at `index`. Three cases, in [dcl.init.aggr] order:
+    //
+    //  - the initializer is itself a braced list: it initializes this
+    //    sub-object completely, whatever its shape;
+    //  - the sub-object is not an aggregate, or the initializer is an
+    //    expression of the sub-object's own type: it takes exactly one
+    //    initializer, the ordinary case;
+    //  - otherwise the sub-object is an aggregate given a bare run of
+    //    initializers, so its braces were elided ([dcl.init.aggr]/15)
+    //    and its own members consume from the same run.
+    //
+    // The cursor is what makes elision a property of the *model* rather
+    // than of a particular depth: `int a[2][3]{1, 2, 3, 4, 5, 6}` and
+    // `Out o{1, 2, 3}` are the same rule applied to different shapes,
+    // and neither needs a case of its own.
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::initialize_storage_from_brace_args_cursor(
+        const Codegen::LValue& target, const std::vector<ExprPtr>& args, std::size_t& index)
+    {
+        if (index >= args.size()) return {};
+        const Expr& next = *args[index];
+        if (next.kind == ExprKind::BracedInitList) {
+            ++index;
+            return initialize_storage_from_brace_args(target, next.args);
+        }
+        if (!type_is_elidable_aggregate(target.type)) {
+            ++index;
+            return initialize_storage_from_expr(target, next);
+        }
+        if (target.type.kind == TypeKind::Named) {
+            std::optional<Type> source_type = infer_type(next);
+            if (source_type.has_value() && types_equal(*source_type, target.type)) {
+                ++index;
+                return initialize_storage_from_expr(target, next);
+            }
+        }
+        std::int64_t covered = 0;
+        return fill_aggregate_from_cursor(target, args, index, covered);
+    }
+
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::report_leftover_initializers(
+        const Type& type, const std::vector<ExprPtr>& args, std::size_t index)
+    {
+        if (index >= args.size()) return {};
+        std::string message{};
+        message += "too many initializers for '";
+        message += (type.name.empty() ? std::string{"array"} : type.name);
+        message += "': every member is initialized and ";
+        message += std::to_string(args.size() - index);
+        message += (args.size() - index == 1 ? " initializer is" : " initializers are");
+        message += " left over";
+        return std::unexpected(CodegenError(message, current_loc_));
+    }
+
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::fill_aggregate_from_cursor(
+        const Codegen::LValue& target, const std::vector<ExprPtr>& args, std::size_t& index, std::int64_t& covered)
+    {
+        covered = 0;
+        if (target.type.kind == TypeKind::Array && target.type.element != nullptr) {
+            auto array_llvm_type_result = to_llvm_type(target.type);
+            if (!array_llvm_type_result.has_value()) return std::unexpected(std::move(array_llvm_type_result).error());
+            llvm::LLVMTypeRef array_llvm_type = std::move(array_llvm_type_result).value();
+            llvm::LLVMTypeRef i64 = llvm::LLVMInt64TypeInContext(context_);
+            const Type& element_type = *target.type.element;
+            std::optional<unsigned int> element_alignment = alignment_for_type(element_type);
+            while (covered < target.type.array_size && index < args.size()) {
+                llvm::LLVMValueRef element_index =
+                    llvm::LLVMConstInt(i64, static_cast<unsigned long long>(covered), /*SignExtend=*/0);
+                llvm::LLVMValueRef element_ptr = build_array_element_gep(array_llvm_type, target.ptr, element_index);
+                if (auto r = initialize_storage_from_brace_args_cursor(
+                        LValue{element_ptr, element_type, element_alignment}, args, index);
+                    !r.has_value()) {
+                    return std::unexpected(std::move(r).error());
+                }
+                ++covered;
+            }
+            return {};
+        }
+        const StructDef* def = find_struct_def(target.type.name);
+        if (def == nullptr) {
+            return std::unexpected(CodegenError("class '" + target.type.name + "' has no constructor matching this call", current_loc_));
+        }
+        auto record_llvm_type_result = to_llvm_type(target.type);
+        if (!record_llvm_type_result.has_value()) return std::unexpected(std::move(record_llvm_type_result).error());
+        llvm::LLVMTypeRef record_llvm_type = std::move(record_llvm_type_result).value();
+        while (static_cast<std::size_t>(covered) < def->fields.size() && index < args.size()) {
+            const StructField& field = def->fields[static_cast<std::size_t>(covered)];
+            llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(
+                builder_, record_llvm_type, target.ptr, static_cast<unsigned int>(covered), "agg.field");
+            if (auto r = initialize_storage_from_brace_args_cursor(
+                    LValue{field_ptr, field.type, alignment_for_type(field.type)}, args, index);
+                !r.has_value()) {
+                return std::unexpected(std::move(r).error());
+            }
+            ++covered;
+        }
+        return {};
+    }
+
     [[nodiscard]] std::expected<void, CodegenError> Codegen::aggregate_initialize_record_storage(
         const Codegen::LValue& target, const std::vector<ExprPtr>& args)
     {
@@ -935,7 +1060,10 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                                                 "' is not an aggregate ([dcl.init.aggr]) because it has a non-public data member, so a braced list cannot initialize its members directly",
                                                 current_loc_));
         }
-        if (args.size() > def->fields.size()) {
+        // See the array branch: the member count answers the question
+        // directly only when no member can absorb more than one
+        // initializer. Otherwise the leftover check below reports it.
+        if (!aggregate_has_elidable_member(target.type) && args.size() > def->fields.size()) {
             std::string message{};
             message += "too many initializers for '";
             message += target.type.name;
@@ -953,21 +1081,13 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         // member's own default member initializer, which [dcl.init.aggr]
         // prefers over value-initialization.
         if (auto r = initialize_storage_from_brace_args(target, {}); !r.has_value()) return std::unexpected(std::move(r).error());
-        auto record_llvm_type_result = to_llvm_type(target.type);
-        if (!record_llvm_type_result.has_value()) return std::unexpected(std::move(record_llvm_type_result).error());
-        llvm::LLVMTypeRef record_llvm_type = std::move(record_llvm_type_result).value();
-        for (std::size_t i = 0; i < args.size(); ++i) {
-            const StructField& field = def->fields[i];
-            llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, record_llvm_type, target.ptr,
-                                                                     static_cast<unsigned int>(i), "agg.field");
-            // Per member, through the same routine every other
-            // initialization boundary uses, so a member's value is
-            // checked against its declared type by the one check that
-            // already answers that question.
-            if (auto r = initialize_storage_from_expr(LValue{field_ptr, field.type, alignment_for_type(field.type)}, *args[i]);
-                !r.has_value()) {
-                return std::unexpected(std::move(r).error());
-            }
+        std::size_t index = 0;
+        std::int64_t covered = 0;
+        if (auto r = fill_aggregate_from_cursor(target, args, index, covered); !r.has_value()) {
+            return std::unexpected(std::move(r).error());
+        }
+        if (auto r = report_leftover_initializers(target.type, args, index); !r.has_value()) {
+            return std::unexpected(std::move(r).error());
         }
         return {};
     }
@@ -1580,6 +1700,17 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         // position, not whichever child was most recently visited.
         refresh_debug_location(expr.loc);
         switch (expr.kind) {
+            // A braced list is not an expression and has no value of its
+            // own; it is consumed by initialize_storage_from_expr at an
+            // initialization boundary that knows the target type.
+            // Reaching general expression codegen means it was written
+            // somewhere no such target exists.
+            case ExprKind::BracedInitList:
+                return std::unexpected(CodegenError(
+                    "a brace-enclosed initializer list can only appear as an initializer, where the type it "
+                    "initializes is known",
+                    expr.loc));
+
             case ExprKind::IntegerLiteral:
                 return llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), static_cast<std::uint64_t>(expr.int_value), /*SignExtend=*/1);
 

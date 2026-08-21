@@ -535,6 +535,10 @@ void print_expr(const scpp::Expr& expr, int depth) {
         case scpp::ExprKind::ValueInit:
             std::cout << "ValueInit " << type_to_string(expr.type) << "\n";
             break;
+        case scpp::ExprKind::BracedInitList:
+            std::cout << "BracedInitList\n";
+            for (const auto& arg : expr.args) print_expr(*arg, depth + 1);
+            break;
         case scpp::ExprKind::New:
             std::cout << "New " << type_to_string(expr.type) << "\n";
             if (expr.lhs) {
