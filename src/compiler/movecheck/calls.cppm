@@ -1382,24 +1382,30 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
                                    const Signatures& signatures, SourceLocation loc, const std::string& target_name,
                                    bool report_errors) {
     if (!report_errors || target_type.kind != TypeKind::Pointer) return {};
+    // A mismatch only means something once both pointees are real types.
+    // Inside a still-uninstantiated generic they are not: the class's own
+    // type parameters are placeholders, and the bare-witness pass
+    // substitutes them into declared member types while leaving the types
+    // inferred for expressions spelled as the parameter itself -- so
+    // `shared_ptr<T>`'s `this->ptr_` reads as `__generic_bare_witness*`
+    // against a `T*` source that means the very same type. Per Body's
+    // function_is_generic_template contract a rule that *rejects* must not
+    // be founded on those stand-in types, and nothing is lost by declining:
+    // every generic body is checked again at each instantiation, where the
+    // pointees are real.
+    //
+    // This previously asked instead whether each pointee named a type the
+    // program defines, which approximated "am I looking at a placeholder?"
+    // by a flat, unscoped name lookup -- so any program that declared its
+    // own global `T` (or `class T`, or `enum class T`) made the library's
+    // unrelated parameter `T` look resolved and unmasked the mismatch,
+    // failing to compile inside std_memory.scpp.
+    if (body.function_is_generic_template) return {};
     std::optional<Type> source_type = infer_expr_type(expr, body, signatures);
     if (!source_type || source_type->kind != TypeKind::Pointer) return {};
     if (raw_pointer_implicitly_convertible(*source_type, target_type)) return {};
     if (body.program != nullptr &&
         types_compatible_with_base_conversion(*source_type, target_type, *body.program, enclosing_class_name(body))) {
-        return {};
-    }
-    // A mismatch only means something once both pointees are real types
-    // -- see is_resolved_named_type. Inside an uninstantiated generic
-    // they may still be type-parameter names, and `U*` into `T*` is not
-    // a conversion error just because the two placeholders are spelled
-    // differently.
-    auto effective_pointee = [](const Type& pointer_type) -> const Type& {
-        const Type& pointee = *pointer_type.pointee;
-        return pointee.kind == TypeKind::Reference && pointee.pointee != nullptr ? *pointee.pointee : pointee;
-    };
-    if (!is_resolved_named_type(effective_pointee(*source_type), body.program) ||
-        !is_resolved_named_type(effective_pointee(target_type), body.program)) {
         return {};
     }
     return std::unexpected(DataflowError("cannot initialize or assign raw pointer '" + target_name +
