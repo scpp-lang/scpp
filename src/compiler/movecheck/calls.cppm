@@ -1734,6 +1734,10 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
 // a clear diagnostic rather than silently guessing an overload.
 [[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures) {
     switch (expr.kind) {
+        // A brace-enclosed initializer list has no type of its own; only
+        // the initialization boundary that consumes it knows what it
+        // means, so it is exactly the nullopt case described above.
+        case ExprKind::BracedInitList: return std::nullopt;
         case ExprKind::IntegerLiteral: return named_type("int");
         case ExprKind::FloatLiteral: return named_type("double");
         case ExprKind::BoolLiteral: return named_type("bool");

@@ -6247,13 +6247,35 @@ private:
         return parse_block();
     }
 
+    // One element of a brace-enclosed initializer list. An element that
+    // is itself a brace-enclosed list -- the inner `{1, 2}` of
+    // `int a[2][2]{{1, 2}, {3, 4}}` -- is parsed by recursing here
+    // rather than through parse_expr, which has no production for `{`
+    // and rejected every such list with "expected an expression but
+    // found '{'". The nested list becomes a BracedInitList expression,
+    // whose meaning is supplied by whatever initialization boundary
+    // consumes it, since a braced list has no type of its own.
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_brace_initializer_element() {
+        if (check(TokenKind::LBrace)) {
+            SourceLocation nested_loc = current_loc();
+            auto nested_result = parse_brace_initializer_args();
+            if (!nested_result.has_value()) return std::unexpected(std::move(nested_result).error());
+            auto nested = std::make_unique<Expr>();
+            nested->kind = ExprKind::BracedInitList;
+            nested->loc = nested_loc;
+            nested->args = std::move(nested_result).value();
+            return std::move(nested);
+        }
+        return parse_expr();
+    }
+
     [[nodiscard]] std::expected<std::vector<ExprPtr>, ParseError> parse_brace_initializer_args() {
         if (auto _r = expect(TokenKind::LBrace, "'{'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         std::vector<ExprPtr> args{};
 
         if (!check(TokenKind::RBrace)) {
             while (true) {
-                auto arg_result = parse_expr();
+                auto arg_result = parse_brace_initializer_element();
                 if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
                 ExprPtr __arg_result_value = std::move(arg_result).value();
                 args.push_back(std::move(__arg_result_value));

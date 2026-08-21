@@ -403,6 +403,13 @@ void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
             if (expr->lhs) collect_reference_uses(expr->lhs.get(), body, out);
             for (const auto& arg : expr->args) collect_reference_uses(arg.get(), body, out);
             return;
+        // A nested brace-enclosed initializer list is not a leaf: its
+        // elements are ordinary expressions and any of them may name a
+        // reference, so the walk has to descend into them exactly as it
+        // does into a call's arguments.
+        case ExprKind::BracedInitList:
+            for (const auto& arg : expr->args) collect_reference_uses(arg.get(), body, out);
+            return;
         case ExprKind::Delete:
         case ExprKind::Destroy:
         case ExprKind::PackExpansion:

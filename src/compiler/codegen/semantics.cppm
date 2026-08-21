@@ -123,6 +123,12 @@ namespace {
     std::optional<Type> Codegen::infer_type(const Expr& expr)
 {
         switch (expr.kind) {
+            // A brace-enclosed initializer list has no type of its own:
+            // only the initialization boundary consuming it knows what
+            // it means. Answering nullopt here is also what keeps a
+            // nested list out of constructor overload resolution, since
+            // no parameter can match an argument with no type.
+            case ExprKind::BracedInitList: return std::nullopt;
             case ExprKind::IntegerLiteral: return named_type("int");
             case ExprKind::FloatLiteral: return named_type("double");
             case ExprKind::BoolLiteral: return named_type("bool");
