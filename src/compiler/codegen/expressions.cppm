@@ -393,7 +393,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 // still running its destructor at scope end.
                 const Function* ctor_def = resolve_constructor_overload_exact(expr.name, expr.args);
                 if (ctor_def == nullptr && !expr.args.empty()) {
-                    return std::unexpected(CodegenError("class '" + expr.name + "' has no constructor matching this call", current_loc_));
+                    return std::unexpected(CodegenError(describe_constructor_resolution_failure(expr.name, expr.args), current_loc_));
                 }
                 auto value_result = codegen_constructed_class_value(expr.name, expr.args, ctor_def, &expr);
                 if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
@@ -729,7 +729,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 if (args.empty() && record_is_implicitly_default_initializable(target.type.name)) {
                     return emit_default_initializers_for_record_storage(target.ptr, target.type.name, /*initialize_virtual_interface_bases=*/true);
                 }
-                return std::unexpected(CodegenError("class '" + target.type.name + "' has no constructor matching this call", current_loc_));
+                return std::unexpected(CodegenError(describe_constructor_resolution_failure(target.type.name, args), current_loc_));
             }
             return initialize_record_storage_by_constructor(target, args);
         }
@@ -883,7 +883,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     {
         const Function* ctor_def = resolve_overload_by_type(target.type.name + "_new", args, /*param_offset=*/1);
         if (ctor_def == nullptr) {
-            return std::unexpected(CodegenError("class '" + target.type.name + "' has no constructor matching this call", current_loc_));
+            return std::unexpected(CodegenError(describe_constructor_resolution_failure(target.type.name, args), current_loc_));
         }
         if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
             auto value_result = codegen_constructed_class_value(target.type.name, args, ctor_def);
@@ -2462,7 +2462,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         }
                         return heap_ptr;
                     }
-                    return std::unexpected(CodegenError("class '" + expr.type.name + "' has no constructor matching this call",
+                    return std::unexpected(CodegenError(describe_constructor_resolution_failure(expr.type.name, expr.args),
                         current_loc_));
                 }
                 if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {

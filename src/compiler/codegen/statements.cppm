@@ -223,7 +223,8 @@ namespace scpp {
                                                 LValue{storage, stmt.type, declared_alignment}, stmt.ctor_args); !r.has_value())
                                             return std::unexpected(std::move(r).error());
                                     } else {
-                                        return std::unexpected(CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
+                                        return std::unexpected(CodegenError(
+                                            describe_constructor_resolution_failure(stmt.type.name, stmt.ctor_args),
                                             current_loc_));
                                     }
                                 } else if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
@@ -299,8 +300,8 @@ namespace scpp {
                                 if (auto r = emit_default_initializers_for_record_storage(
                                     storage, stmt.type.name, /*initialize_virtual_interface_bases=*/true); !r.has_value()) return std::unexpected(std::move(r).error());
                             } else if (class_def != nullptr) {
-                                return std::unexpected(CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
-                                    current_loc_));
+                                return std::unexpected(CodegenError(
+                                    describe_constructor_resolution_failure(stmt.type.name, no_args), current_loc_));
                             }
                         } else {
                             if (auto r = initialize_storage_from_brace_args(LValue{storage, stmt.type, declared_alignment}, {}); !r.has_value()) return std::unexpected(std::move(r).error());
@@ -519,8 +520,8 @@ namespace scpp {
                             // compiler-provided recursive memberwise copy
                             // directly, exactly like move construction's own
                             // analogous fallback above.
-                            return std::unexpected(CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
-                                current_loc_));
+                            return std::unexpected(CodegenError(
+                                describe_constructor_resolution_failure(stmt.type.name, stmt.ctor_args), current_loc_));
                         }
                         if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
                             auto value_result = codegen_constructed_class_value(stmt.type.name, stmt.ctor_args, ctor_def);

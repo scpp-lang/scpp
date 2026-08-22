@@ -4210,6 +4210,204 @@ void test_narrowing_the_placeholder_rule_keeps_the_conversions_that_are_real() {
     }
 }
 
+// [over.match.best], adopted for scpp by spec §10.4(4): a call is
+// ill-formed when no viable candidate is better than all the others.
+// The resolver had no ambiguity diagnostic at all -- it scored the
+// candidates, and where the scores tied it returned the first one it had
+// walked, so `f(A)`/`f(B)` given `f({1,2})` silently compiled to a call
+// to whichever overload was written above the other.
+void test_ambiguous_braced_list_between_two_aggregates_is_rejected_naming_both() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct A { int x; int y; };\n"
+        "struct B { int p; int q; };\n"
+        "int f(A a) { return 1; }\n"
+        "int f(B b) { return 2; }\n"
+        "int main() { return f({1,2}); }\n");
+    expect(!ir_result.has_value(),
+           "ambiguous_aggregates: `{1,2}` initializes A and B equally well, so the call has no best "
+           "viable candidate and must be rejected rather than silently bound to one of them");
+    if (ir_result.has_value()) return;
+    const std::string& message = ir_result.error().message;
+    expect(message.find("ambiguous call to") != std::string::npos,
+           "ambiguous_aggregates: expected an ambiguity diagnostic, got: " + message);
+    // An ambiguity error that does not say *which* overloads competed
+    // leaves the reader exactly where they started; naming them is the
+    // whole content of the message.
+    expect(message.find("candidate: f(A)") != std::string::npos &&
+               message.find("candidate: f(B)") != std::string::npos,
+           "ambiguous_aggregates: the message must name both competing candidates, got: " + message);
+}
+
+// The defect's actual shape: the program's meaning depended on the order
+// its overloads happened to be declared in. Swapping the two declarations
+// must not change the answer -- and before the fix it did, from "calls
+// f(A)" to "calls f(B)".
+void test_ambiguity_diagnosis_does_not_depend_on_declaration_order() {
+    cases_run++;
+    auto first_order = try_generate_ir(
+        "struct A { int x; int y; };\n"
+        "struct B { int p; int q; };\n"
+        "int f(A a) { return 1; }\n"
+        "int f(B b) { return 2; }\n"
+        "int main() { return f({1,2}); }\n");
+    auto swapped_order = try_generate_ir(
+        "struct A { int x; int y; };\n"
+        "struct B { int p; int q; };\n"
+        "int f(B b) { return 2; }\n"
+        "int f(A a) { return 1; }\n"
+        "int main() { return f({1,2}); }\n");
+    expect(!first_order.has_value() && !swapped_order.has_value(),
+           "ambiguity_order_independent: both declaration orders must be rejected");
+    if (first_order.has_value() || swapped_order.has_value()) return;
+    expect(first_order.error().message.find("ambiguous call to") != std::string::npos &&
+               swapped_order.error().message.find("ambiguous call to") != std::string::npos,
+           "ambiguity_order_independent: both orders must report ambiguity, got: " +
+               first_order.error().message + " / " + swapped_order.error().message);
+}
+
+// The same tie reached through a converting constructor rather than an
+// aggregate: `5` initializes K1 and K2 equally well.
+void test_ambiguous_converting_constructors_are_rejected() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "class K1 { public: int v; virtual ~K1() {} K1(int x) : v{x} {} };\n"
+        "class K2 { public: int v; virtual ~K2() {} K2(int x) : v{x} {} };\n"
+        "int f(K1 x) { return 1; }\n"
+        "int f(K2 x) { return 2; }\n"
+        "int main() { return f(5); }\n");
+    expect(!ir_result.has_value(),
+           "ambiguous_converting_ctors: `5` converts to K1 and to K2 equally well, so the call is "
+           "ill-formed");
+    if (ir_result.has_value()) return;
+    expect(ir_result.error().message.find("ambiguous call to") != std::string::npos,
+           "ambiguous_converting_ctors: expected an ambiguity diagnostic, got: " +
+               ir_result.error().message);
+}
+
+// The candidate list is the message, so it has to be complete rather than
+// a sample of the tied set.
+void test_three_way_ambiguity_names_every_candidate() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct A { int x; int y; };\n"
+        "struct B { int p; int q; };\n"
+        "struct C { int m; int n; };\n"
+        "int f(A a) { return 1; }\n"
+        "int f(B b) { return 2; }\n"
+        "int f(C c) { return 3; }\n"
+        "int main() { return f({1,2}); }\n");
+    expect(!ir_result.has_value(), "three_way_ambiguity: three equally good candidates is still ambiguous");
+    if (ir_result.has_value()) return;
+    const std::string& message = ir_result.error().message;
+    expect(message.find("candidate: f(A)") != std::string::npos &&
+               message.find("candidate: f(B)") != std::string::npos &&
+               message.find("candidate: f(C)") != std::string::npos,
+           "three_way_ambiguity: every tied candidate must be listed, got: " + message);
+}
+
+// Constructor calls reach codegen through their own resolver, which had
+// its own copy of "return the first match". Reporting a tie there as
+// "has no constructor matching this call" would send the reader looking
+// for a missing constructor when the problem is that two of them matched.
+void test_ambiguous_constructor_call_is_reported_as_ambiguous_not_as_no_match() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct A { int x; int y; };\n"
+        "struct B { int p; int q; };\n"
+        "class K {\n"
+        "  public:\n"
+        "    int v;\n"
+        "    virtual ~K() {}\n"
+        "    K(A a) : v{1} {}\n"
+        "    K(B b) : v{2} {}\n"
+        "};\n"
+        "int main() { K k{{1,2}}; return k.v; }\n");
+    expect(!ir_result.has_value(), "ambiguous_ctor: two constructors match `{1,2}` equally well");
+    if (ir_result.has_value()) return;
+    const std::string& message = ir_result.error().message;
+    expect(message.find("ambiguous") != std::string::npos,
+           "ambiguous_ctor: expected an ambiguity diagnostic, got: " + message);
+    expect(message.find("no constructor matching") == std::string::npos,
+           "ambiguous_ctor: a tie must not be reported as an absence, got: " + message);
+}
+
+// The constant evaluator resolves overloads independently of codegen. Had
+// it kept returning the first match, `constexpr` would have been a way to
+// bypass the ambiguity check entirely: the same call would be rejected at
+// runtime and silently accepted when folded.
+void test_ambiguous_constexpr_call_is_rejected_like_its_runtime_counterpart() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct A { int x; int y; };\n"
+        "struct B { int p; int q; };\n"
+        "constexpr int f(A a) { return 1; }\n"
+        "constexpr int f(B b) { return 2; }\n"
+        "int main() { constexpr int r = f({1,2}); return r; }\n");
+    expect(!ir_result.has_value(),
+           "ambiguous_constexpr: an ambiguous call must be ambiguous during constant evaluation too");
+    if (ir_result.has_value()) return;
+    const std::string& message = ir_result.error().message;
+    expect(message.find("ambiguous call to") != std::string::npos,
+           "ambiguous_constexpr: expected an ambiguity diagnostic, got: " + message);
+    expect(message.find("candidate: f(A)") != std::string::npos &&
+               message.find("candidate: f(B)") != std::string::npos,
+           "ambiguous_constexpr: the evaluator's message must name the candidates too, got: " + message);
+}
+
+// [over.match.best]/2.4: a non-template is better than a template
+// specialization, so this is *not* a tie. Both orders matter: with the
+// generic written first, codegen used to resolve to the uninstantiated
+// `f.T` and fail with "no generated code for resolved function".
+void test_non_generic_overload_beats_a_generic_one_in_either_declaration_order() {
+    cases_run++;
+    auto concrete_first = try_generate_ir(
+        "int f(int x) { return 1; }\n"
+        "template<typename T>\n"
+        "int f(T x) { return 2; }\n"
+        "int main() { return f(5) - 1; }\n");
+    expect(concrete_first.has_value(),
+           "non_generic_preferred: the non-generic overload is strictly better, got: " +
+               (concrete_first.has_value() ? std::string{} : concrete_first.error().message));
+    auto generic_first = try_generate_ir(
+        "template<typename T>\n"
+        "int f(T x) { return 2; }\n"
+        "int f(int x) { return 1; }\n"
+        "int main() { return f(5) - 1; }\n");
+    expect(generic_first.has_value(),
+           "non_generic_preferred: declaration order must not matter, got: " +
+               (generic_first.has_value() ? std::string{} : generic_first.error().message));
+}
+
+// The risk of diagnosing ambiguity is diagnosing it too eagerly. An
+// identity match outranks a user-defined conversion, so this stays a
+// unique best candidate rather than becoming a new rejection.
+void test_exact_scalar_match_still_beats_a_converting_constructor() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "class K { public: int v; virtual ~K() {} K(int x) : v{x} {} };\n"
+        "int f(K k) { return 1; }\n"
+        "int f(int x) { return 2; }\n"
+        "int main() { return f(5) - 2; }\n");
+    expect(ir_result.has_value(),
+           "exact_beats_conversion: `f(int)` is an identity match and must win outright, got: " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().message));
+}
+
+// An lvalue argument prefers a reference parameter -- a deliberate scpp
+// preference that the identity ranking must narrow *within*, not repeal.
+// Pinned because ranking identity matches first very nearly overruled it.
+void test_lvalue_argument_still_prefers_the_reference_parameter() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "int f(int x) { return 1; }\n"
+        "int f(const int& x) { return 2; }\n"
+        "int main() { int v = 7; return f(v) - 2; }\n");
+    expect(ir_result.has_value(),
+           "lvalue_prefers_reference: the value/reference preference must still choose a winner, got: " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().message));
+}
+
 void test_auto_reference_to_a_reference_returning_call_collapses() {
     cases_run++;
     auto ir_result = try_generate_ir(
@@ -4292,6 +4490,15 @@ int main() {
     test_multidimensional_array_row_spans_the_inner_bound();
     test_three_dimensional_array_bounds_are_not_reversed();
     test_multidimensional_array_addresses_each_cell_distinctly();
+    test_ambiguous_braced_list_between_two_aggregates_is_rejected_naming_both();
+    test_ambiguity_diagnosis_does_not_depend_on_declaration_order();
+    test_ambiguous_converting_constructors_are_rejected();
+    test_three_way_ambiguity_names_every_candidate();
+    test_ambiguous_constructor_call_is_reported_as_ambiguous_not_as_no_match();
+    test_ambiguous_constexpr_call_is_rejected_like_its_runtime_counterpart();
+    test_non_generic_overload_beats_a_generic_one_in_either_declaration_order();
+    test_exact_scalar_match_still_beats_a_converting_constructor();
+    test_lvalue_argument_still_prefers_the_reference_parameter();
     test_auto_reference_to_a_reference_returning_call_collapses();
     test_auto_reference_to_a_reference_returning_method_collapses();
     test_generate_returns_engaged_expected_on_success();
