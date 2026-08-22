@@ -1755,9 +1755,24 @@ private:
     // a call in a global initializer, in an array bound, in an `alignas`
     // argument, or one naming a sibling of an *enclosing* namespace was
     // left unqualified and then failed here.
+    [[nodiscard]] std::string describe_constexpr_candidate(const Function& fn, const std::string& display_name) {
+        std::string result{};
+        result += display_name;
+        result += "(";
+        for (std::size_t i = 0; i < fn.params.size(); ++i) {
+            if (i != 0) result += ", ";
+            result += describe_type_brief(fn.params[i].type);
+        }
+        result += ")";
+        if (fn.is_generic_template) result += " [generic]";
+        return result;
+    }
+
     [[nodiscard]] OptionalFunctionRef find_callable(const std::string& name, const std::vector<std::shared_ptr<Cell>>& args,
                                                 bool require_constexpr, bool explicit_global_qualification = false,
-                                                const std::vector<ExprPtr>* arg_exprs = nullptr) {
+                                                const std::vector<ExprPtr>* arg_exprs = nullptr,
+                                                std::vector<const Function*>* out_ambiguous = nullptr) {
+        if (out_ambiguous != nullptr) out_ambiguous->clear();
         if (!explicit_global_qualification) {
             for (std::size_t depth = lookup_namespace_path_.size(); depth > 0; --depth) {
                 std::string candidate{};
@@ -1767,18 +1782,28 @@ private:
                 }
                 candidate += "::";
                 candidate += name;
-                if (OptionalFunctionRef found = find_callable_exact(candidate, args, require_constexpr, arg_exprs);
+                if (OptionalFunctionRef found = find_callable_exact(candidate, args, require_constexpr, arg_exprs, out_ambiguous);
                     found.has_value()) {
                     return found;
                 }
+                // A tie found at this depth is the answer: an outer scope
+                // does not un-ambiguate an inner one.
+                if (out_ambiguous != nullptr && out_ambiguous->size() > 1) return {};
             }
         }
-        return find_callable_exact(name, args, require_constexpr, arg_exprs);
+        return find_callable_exact(name, args, require_constexpr, arg_exprs, out_ambiguous);
     }
 
     [[nodiscard]] OptionalFunctionRef find_callable_exact(const std::string& name, const std::vector<std::shared_ptr<Cell>>& args,
-                                                bool require_constexpr, const std::vector<ExprPtr>* arg_exprs = nullptr) {
+                                                bool require_constexpr, const std::vector<ExprPtr>* arg_exprs = nullptr,
+                                                std::vector<const Function*>* out_ambiguous = nullptr) {
         if (!functions_by_name_.contains(name)) return {};
+        // Collect every match rather than returning the first. Returning
+        // the first made a constexpr call's meaning depend on the order
+        // its overloads happened to be declared in -- the same defect
+        // codegen's resolve_overload_by_type had, and leaving it here
+        // would make `constexpr` a way to bypass the ambiguity check.
+        std::vector<const Function*> matches{};
         for (std::size_t fn_index : functions_by_name_.at(name)) {
             const Function& fn = program_.functions[fn_index];
             if (!fn.body) continue;
@@ -1799,8 +1824,18 @@ private:
                     break;
                 }
             }
-            if (params_match) return make_function_ref(fn);
+            if (params_match) matches.push_back(&fn);
         }
+        if (matches.empty()) return {};
+        if (matches.size() == 1) return make_function_ref(*matches[0]);
+        // [over.match.best]/2.4: a non-template is better than a template.
+        std::vector<const Function*> non_generic{};
+        for (const Function* fn : matches) {
+            if (!fn->is_generic_template) non_generic.push_back(fn);
+        }
+        if (!non_generic.empty()) matches = std::move(non_generic);
+        if (matches.size() == 1) return make_function_ref(*matches[0]);
+        if (out_ambiguous != nullptr) *out_ambiguous = std::move(matches);
         return {};
     }
 
@@ -3131,11 +3166,25 @@ private:
             if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
             arg_values.push_back(std::move(arg_result).value());
         }
+        std::vector<const Function*> tied_callees{};
         OptionalFunctionRef callee_ref =
             find_callable(expr.name, arg_values, /*require_constexpr=*/true, expr.explicit_global_qualification,
-                          &expr.args);
+                          &expr.args, &tied_callees);
         if (!callee_ref.has_value())
             return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+                if (tied_callees.size() > 1) {
+                    std::string message{};
+                    message += "ambiguous call to '";
+                    message += expr.name;
+                    message += "': ";
+                    message += std::to_string(tied_callees.size());
+                    message += " overloads match these argument types equally well and none is better than the others ([over.match.best])";
+                    for (const Function* fn : tied_callees) {
+                        message += "\n  candidate: ";
+                        message += describe_constexpr_candidate(*fn, expr.name);
+                    }
+                    return std::unexpected(ConstexprError(expr.loc, message));
+                }
                 if (has_runtime_only_match(expr.name, arg_values, &expr.args)) {
                     return std::unexpected(ConstexprError(expr.loc, "immediate evaluation may only call constexpr/consteval functions"));
                 }

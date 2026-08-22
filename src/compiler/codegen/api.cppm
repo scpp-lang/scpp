@@ -449,9 +449,15 @@ private:
     // free-function/constructor call, no receiver at all), and always
     // `true` for a constructor call (there's no *existing* object yet
     // for read-only-reachability to apply to).
+    // `out_ambiguous`, when non-null, is filled with the tied candidates
+    // if resolution fails because several matched equally well; it is
+    // left empty for every other kind of failure. Callers that only need
+    // "did this resolve?" pass nothing -- an ambiguous call does not
+    // resolve, so nullptr is the right answer for them either way.
     const Function* resolve_overload_by_type(const std::string& callee_name, const std::vector<ExprPtr>& args,
                                               std::size_t param_offset, bool receiver_is_mutable = true,
-                                              const Expr* receiver_expr = nullptr);
+                                              const Expr* receiver_expr = nullptr,
+                                              std::vector<const Function*>* out_ambiguous = nullptr);
 
     // The candidate set and the per-candidate viability test that
     // resolve_overload_by_type is built from, exposed so that
@@ -481,7 +487,20 @@ private:
 
     [[nodiscard]] bool parameter_type_is_generic_placeholder(const Function& fn, const Type& type) const;
 
-    const Function* resolve_constructor_overload_exact(const std::string& class_name, const std::vector<ExprPtr>& args);
+    const Function* resolve_constructor_overload_exact(const std::string& class_name, const std::vector<ExprPtr>& args,
+                                                       std::vector<const Function*>* out_ambiguous = nullptr);
+
+    // The constructor-call counterpart of describe_call_resolution_failure:
+    // returns the ambiguity message naming the tied constructors when
+    // several matched equally well, and the plain "no constructor
+    // matching this call" otherwise. Every site that reports a failed
+    // constructor call goes through this, so a tie is never reported as
+    // an absence.
+    std::string describe_constructor_resolution_failure(const std::string& class_name, const std::vector<ExprPtr>& args);
+
+    // Renders one candidate as it appears on a "candidate:" line of an
+    // ambiguity or no-match diagnostic.
+    std::string describe_candidate_signature(const Function& fn, const std::string& display_name, std::size_t param_offset);
 
     // Recursively verifies a type is trivial per the language spec (ch04):
     // scalars, raw pointers (any pointee), fixed-size arrays of trivial

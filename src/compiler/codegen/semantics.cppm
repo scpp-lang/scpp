@@ -1018,6 +1018,20 @@ namespace {
     // requiring a match would reject valid calls -- and explicitly defers
     // to "codegen's own type checking". That deferral is sound; codegen
     // does the checking. It was only ever the *report* that was wrong.
+    std::string Codegen::describe_candidate_signature(const Function& fn, const std::string& display_name,
+                                                      std::size_t param_offset)
+{
+        std::string result = display_name + "(";
+        for (std::size_t i = param_offset; i < fn.params.size(); i++) {
+            if (i != param_offset) result += ", ";
+            result += describe_type_brief(fn.params[i].type);
+        }
+        result += ")";
+        if (fn.is_generic_template) result += " [generic]";
+        return result;
+    }
+
+
     std::string Codegen::describe_call_resolution_failure(const std::string& callee_name,
                                                           const std::string& display_name,
                                                           const std::vector<ExprPtr>& args, std::size_t param_offset,
@@ -1029,14 +1043,7 @@ namespace {
         }
 
         auto describe_signature = [&](const Function& fn) {
-            std::string result = display_name + "(";
-            for (std::size_t i = param_offset; i < fn.params.size(); i++) {
-                if (i != param_offset) result += ", ";
-                result += describe_type_brief(fn.params[i].type);
-            }
-            result += ")";
-            if (fn.is_generic_template) result += " [generic]";
-            return result;
+            return describe_candidate_signature(fn, display_name, param_offset);
         };
         auto candidate_list = [&]() {
             std::string result;
@@ -1045,6 +1052,25 @@ namespace {
             }
             return result;
         };
+
+        // Ambiguity is reported before any per-candidate rejection,
+        // because there is no rejection to report: every tied candidate
+        // *matched*. Naming them is the whole content of the message --
+        // "ambiguous call to 'f'" without saying which two overloads
+        // competed leaves the reader exactly where they started, which
+        // is the defect shape #436 established for the ch06 cast
+        // diagnostic.
+        {
+            std::vector<const Function*> tied;
+            if (resolve_overload_by_type(callee_name, args, param_offset, receiver_is_mutable, receiver_expr, &tied) ==
+                    nullptr &&
+                tied.size() > 1) {
+                std::string result = "ambiguous call to '" + display_name + "': " + std::to_string(tied.size()) +
+                                     " overloads match these argument types equally well and none is better than the others ([over.match.best])";
+                for (const Function* fn : tied) result += "\n  candidate: " + describe_signature(*fn);
+                return result;
+            }
+        }
 
         // Report the most specific cause available: a candidate rejected
         // purely on an argument type says more than one rejected on
@@ -1113,8 +1139,26 @@ namespace {
 
     const Function* Codegen::resolve_overload_by_type(const std::string& callee_name, const std::vector<ExprPtr>& args,
                                               std::size_t param_offset, bool receiver_is_mutable ,
-                                              const Expr* receiver_expr)
+                                              const Expr* receiver_expr,
+                                              std::vector<const Function*>* out_ambiguous)
 {
+        // Reported rather than resolved. Every "pick the first one"
+        // below used to hide a real ambiguity: two candidates the
+        // scoring could not order, decided by whichever the user
+        // happened to write first. Spec §10.4(4) puts scpp's overload
+        // resolution under [over.match], whose [over.match.best] makes a
+        // call with no single best viable candidate ill-formed; the
+        // scoring here gives a preference order, not a total order, so
+        // when it runs out there is no answer --
+        // the same conclusion movecheck's Monomorphizer already reaches
+        // for generic overloads ("ambiguous call to overloaded generic
+        // function", monomorphize.cppm). Joining that answer rather than
+        // inventing a second one.
+        auto ambiguous = [&](std::vector<const Function*> tied) -> const Function* {
+            if (out_ambiguous != nullptr) *out_ambiguous = std::move(tied);
+            return nullptr;
+        };
+        if (out_ambiguous != nullptr) out_ambiguous->clear();
         auto scalar_exact_match_score = [&, this](const Function* fn) {
             int score = 0;
             std::size_t fixed_param_count = fn->params.size() - param_offset;
@@ -1146,59 +1190,119 @@ namespace {
         }
         if (matches.empty()) return nullptr;
         if (matches.size() == 1) return matches[0];
-        auto exact_non_reference_match = [&, this](const Function* fn) {
+        // [over.match.best]/2.4, adopted by spec §10.4(4): a non-template
+        // function is better than a template specialization. The
+        // template is the fallback, not a peer -- without this, `f(int)`
+        // and `template<typename T> f(T)` are two identity matches and
+        // the call looks ambiguous. (Whichever was written first used to
+        // win; when that was the template, codegen resolved to the
+        // uninstantiated `f.T` and failed with "no generated code for
+        // resolved function".)
+        {
+            std::vector<const Function*> non_generic;
+            for (const Function* fn : matches) {
+                if (!fn->is_generic_template) non_generic.push_back(fn);
+            }
+            if (!non_generic.empty()) matches = std::move(non_generic);
+            if (matches.size() == 1) return matches[0];
+        }
+        // An *identity* match: every argument already has the
+        // parameter's own type, looking through a top-level reference
+        // and top-level const. [over.ics.rank] ranks identity above any
+        // conversion, and spec §16.3(3) makes scalar matching exact in
+        // the first place; that ordering holds on *either* side of the
+        // value/reference axis -- called with a `const char*`, both
+        // `f(const char*)` and `f(const Str&)` are viable, but only the
+        // first is viable without converting anything.
+        //
+        // This used to compare the parameter type as written, so a
+        // reference parameter could never be an identity match and a
+        // value parameter always looked strictly better than an equally
+        // good reference one. That is why the exact-match path had to be
+        // abandoned whenever the candidates differed on the reference
+        // axis, which in turn handed `f(p)` (with `p` a `const char*`
+        // local) to a scoring rule that knows about lvalue-ness but not
+        // about types -- and it picked `f(const Str&)`, converting when
+        // an exact match was sitting right there.
+        auto strip_to_value = [](Type type) {
+            if (type.kind == TypeKind::Reference && type.pointee != nullptr) type = *type.pointee;
+            type.is_const_qualified = false;
+            return type;
+        };
+        auto identity_match = [&, this](const Function* fn) {
             std::size_t fixed_param_count = fn->params.size() - param_offset;
             for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
                 std::optional<Type> arg_type = infer_type(*args[i]);
                 if (!arg_type.has_value()) return false;
                 Type candidate_param_type = normalized_param_type(*fn, *args[i], fn->params[i + param_offset].type);
-                if (!types_equal(*arg_type, candidate_param_type)) return false;
+                if (!types_equal(strip_to_value(*arg_type), strip_to_value(candidate_param_type))) return false;
             }
             return true;
         };
         if (callee_name.ends_with("_new")) {
-            for (const Function* fn : matches) {
-                if (!fn->is_generic_template && exact_non_reference_match(fn) && fn->name.starts_with(callee_name + ".")) {
-                    return fn;
+            // A constructor call prefers a non-generic candidate, then a
+            // monomorphized clone, then an identity match among those.
+            // Each of those is a *preference*, so it narrows the field;
+            // it does not by itself choose. This used to return the first
+            // member of the narrowest non-empty tier, which for a class
+            // whose constructors are plain overloads (no clones, so the
+            // first two preferences select nothing) meant returning
+            // whichever constructor was written first -- `string_view(const
+            // char*)` beat `string_view(const string&)` for a `const
+            // char*` argument only by being declared above it.
+            auto narrow_to = [&](auto&& accepts) {
+                std::vector<const Function*> selected;
+                for (const Function* fn : matches) {
+                    if (accepts(fn)) selected.push_back(fn);
                 }
-            }
-            for (const Function* fn : matches) {
-                if (!fn->is_generic_template && fn->name.starts_with(callee_name + ".")) return fn;
-            }
-            for (const Function* fn : matches) {
-                if (!fn->is_generic_template) return fn;
-            }
+                if (!selected.empty()) matches = std::move(selected);
+            };
+            narrow_to([](const Function* fn) { return !fn->is_generic_template; });
+            narrow_to([&](const Function* fn) { return fn->name.starts_with(callee_name + "."); });
+            narrow_to([&](const Function* fn) { return identity_match(fn); });
+            if (matches.size() == 1) return matches[0];
         }
-        const Function* best_exact = nullptr;
-        int best_exact_score = -1;
-        bool unique_exact = true;
+        // Rank before tie-breaking. An identity match outranks every
+        // conversion, so the candidates that convert nothing are the
+        // only ones still in the running; the value/reference tiebreak
+        // below then chooses *among* them rather than overruling them.
+        std::vector<const Function*> identity_matches;
         for (const Function* fn : matches) {
-            int score = exact_non_reference_match(fn) ? 1000 + scalar_exact_match_score(fn) : scalar_exact_match_score(fn);
-            if (score > best_exact_score) {
-                best_exact = fn;
-                best_exact_score = score;
-                unique_exact = true;
-            } else if (score == best_exact_score) {
-                unique_exact = false;
-            }
+            if (identity_match(fn)) identity_matches.push_back(fn);
         }
-        if (best_exact != nullptr && unique_exact && best_exact_score > 0) {
-            bool exact_path_has_reference_axis_difference = false;
-            for (std::size_t i = 0; i < matches.size() && !exact_path_has_reference_axis_difference; i++) {
-                for (std::size_t j = i + 1; j < matches.size() && !exact_path_has_reference_axis_difference; j++) {
-                    std::size_t fixed_param_count =
-                        std::min(matches[i]->params.size(), matches[j]->params.size()) - param_offset;
-                    for (std::size_t k = 0; k < args.size() && k < fixed_param_count; k++) {
-                        bool lhs_ref = matches[i]->params[k + param_offset].type.kind == TypeKind::Reference;
-                        bool rhs_ref = matches[j]->params[k + param_offset].type.kind == TypeKind::Reference;
-                        if (lhs_ref != rhs_ref) {
-                            exact_path_has_reference_axis_difference = true;
-                            break;
-                        }
+        if (identity_matches.size() == 1) return identity_matches[0];
+        if (identity_matches.size() > 1) matches = identity_matches;
+        bool has_reference_axis_difference = false;
+        for (std::size_t i = 0; i < matches.size() && !has_reference_axis_difference; i++) {
+            for (std::size_t j = i + 1; j < matches.size() && !has_reference_axis_difference; j++) {
+                std::size_t fixed_param_count = std::min(matches[i]->params.size(), matches[j]->params.size()) - param_offset;
+                for (std::size_t k = 0; k < args.size() && k < fixed_param_count; k++) {
+                    bool lhs_ref = matches[i]->params[k + param_offset].type.kind == TypeKind::Reference;
+                    bool rhs_ref = matches[j]->params[k + param_offset].type.kind == TypeKind::Reference;
+                    if (lhs_ref != rhs_ref) {
+                        has_reference_axis_difference = true;
+                        break;
                     }
                 }
             }
-            if (!exact_path_has_reference_axis_difference) return best_exact;
+        }
+        int best_exact_score = -1;
+        for (const Function* fn : matches) best_exact_score = std::max(best_exact_score, scalar_exact_match_score(fn));
+        // `scalar_exact_match_score` skips reference parameters, so it
+        // scores `f(const int&)` zero against `f(int)`'s four even though
+        // both are identity matches for an `int` lvalue. Letting it
+        // narrow a field that spans the reference axis would silently
+        // repeal the value/reference preference below, which is a
+        // deliberate scpp rule (an lvalue prefers a reference parameter,
+        // a prvalue prefers a value parameter) and not this defect's
+        // business to change.
+        if (best_exact_score > 0 && !has_reference_axis_difference) {
+            std::vector<const Function*> best_scalar;
+            for (const Function* fn : matches) {
+                if (scalar_exact_match_score(fn) == best_exact_score) best_scalar.push_back(fn);
+            }
+            if (best_scalar.size() == 1) return best_scalar[0];
+            matches = best_scalar;
         }
         // Tie-break ("T& beats const T& for a mutable lvalue", ch05
         // §5.10): prefer whichever match has the most mutable-reference
@@ -1254,41 +1358,49 @@ namespace {
             }
             return score;
         };
-        bool has_reference_axis_difference = false;
-        for (std::size_t i = 0; i < matches.size() && !has_reference_axis_difference; i++) {
-            for (std::size_t j = i + 1; j < matches.size() && !has_reference_axis_difference; j++) {
-                std::size_t fixed_param_count = std::min(matches[i]->params.size(), matches[j]->params.size()) - param_offset;
-                for (std::size_t k = 0; k < args.size() && k < fixed_param_count; k++) {
-                    bool lhs_ref = matches[i]->params[k + param_offset].type.kind == TypeKind::Reference;
-                    bool rhs_ref = matches[j]->params[k + param_offset].type.kind == TypeKind::Reference;
-                    if (lhs_ref != rhs_ref) {
-                        has_reference_axis_difference = true;
-                        break;
-                    }
-                }
-            }
+        auto final_score = [&](const Function* fn) {
+            return (has_reference_axis_difference ? value_vs_reference_axis_score(fn) * 100 : 0) + mutable_ref_score(fn);
+        };
+        int best_score = final_score(matches[0]);
+        for (const Function* fn : matches) best_score = std::max(best_score, final_score(fn));
+        std::vector<const Function*> best_matches;
+        for (const Function* fn : matches) {
+            if (final_score(fn) == best_score) best_matches.push_back(fn);
         }
-        const Function* best = matches[0];
-        int best_score = (has_reference_axis_difference ? value_vs_reference_axis_score(best) * 100 : 0) +
-                         mutable_ref_score(best);
-        bool unique_best = true;
-        for (std::size_t i = 1; i < matches.size(); i++) {
-            int score = (has_reference_axis_difference ? value_vs_reference_axis_score(matches[i]) * 100 : 0) +
-                        mutable_ref_score(matches[i]);
-            if (score > best_score) {
-                best = matches[i];
-                best_score = score;
-                unique_best = true;
-            } else if (score == best_score) {
-                unique_best = false;
-            }
-        }
-        return unique_best ? best : matches[0];
+        if (best_matches.size() == 1) return best_matches[0];
+        return ambiguous(std::move(best_matches));
     }
 
 
-    const Function* Codegen::resolve_constructor_overload_exact(const std::string& class_name, const std::vector<ExprPtr>& args)
+    std::string Codegen::describe_constructor_resolution_failure(const std::string& class_name,
+                                                                 const std::vector<ExprPtr>& args)
 {
+        // Constructor calls reach codegen through two resolvers --
+        // resolve_overload_by_type on the "<Class>_new" name, and
+        // resolve_constructor_overload_exact -- and different call sites
+        // use different ones. Ask both, so a tie is named whichever
+        // resolver saw it.
+        std::vector<const Function*> tied;
+        resolve_overload_by_type(class_name + "_new", args, /*param_offset=*/1, /*receiver_is_mutable=*/false,
+                                 /*receiver_expr=*/nullptr, &tied);
+        if (tied.size() <= 1) resolve_constructor_overload_exact(class_name, args, &tied);
+        if (tied.size() > 1) {
+            std::string result = "ambiguous constructor call for class '" + class_name + "': " +
+                                 std::to_string(tied.size()) +
+                                 " constructors match these argument types equally well and none is better than the others ([over.match.best])";
+            for (const Function* fn : tied) {
+                result += "\n  candidate: " + describe_candidate_signature(*fn, class_name, /*param_offset=*/1);
+            }
+            return result;
+        }
+        return "class '" + class_name + "' has no constructor matching this call";
+    }
+
+
+    const Function* Codegen::resolve_constructor_overload_exact(const std::string& class_name, const std::vector<ExprPtr>& args,
+                                                                std::vector<const Function*>* out_ambiguous)
+{
+        if (out_ambiguous != nullptr) out_ambiguous->clear();
         auto is_constructor_clone = [&](const Function& fn) {
             return fn.name == class_name + "_new" ||
                    (!fn.member_owner_class.empty() && fn.member_owner_class == class_name &&
@@ -1305,16 +1417,32 @@ namespace {
             if (all_match) matches.push_back(&fn);
         }
         if (matches.empty()) return nullptr;
-        auto exact_type_match = [&, this](const Function* fn) {
+        // Same ranking as resolve_overload_by_type: identity first,
+        // looking through a top-level reference and top-level const, so
+        // that `std::string_view sv{p}` with `p` a `const char*` picks
+        // `string_view(const char*)` on the strength of the type rather
+        // than on it being written above `string_view(const string&)`.
+        auto identity_match = [&, this](const Function* fn) {
             for (std::size_t i = 0; i < args.size(); i++) {
                 std::optional<Type> inferred = infer_type(*args[i]);
                 if (!inferred.has_value()) return false;
-                if (!types_equal(*inferred, fn->params[i + 1].type)) return false;
+                Type param_type = fn->params[i + 1].type;
+                if (param_type.kind == TypeKind::Reference && param_type.pointee != nullptr) param_type = *param_type.pointee;
+                Type arg_type = *inferred;
+                if (arg_type.kind == TypeKind::Reference && arg_type.pointee != nullptr) arg_type = *arg_type.pointee;
+                param_type.is_const_qualified = false;
+                arg_type.is_const_qualified = false;
+                if (!types_equal(arg_type, param_type)) return false;
             }
             return true;
         };
-        for (const Function* fn : matches) {
-            if (exact_type_match(fn)) return fn;
+        {
+            std::vector<const Function*> identity_matches;
+            for (const Function* fn : matches) {
+                if (identity_match(fn)) identity_matches.push_back(fn);
+            }
+            if (identity_matches.size() == 1) return identity_matches[0];
+            if (identity_matches.size() > 1) matches = identity_matches;
         }
         if (matches.size() == 1) return matches[0];
         auto mutable_ref_score = [&, this](const Function* fn) {
@@ -1327,20 +1455,15 @@ namespace {
             }
             return score;
         };
-        const Function* best = matches[0];
-        int best_score = mutable_ref_score(best);
-        bool unique_best = true;
-        for (std::size_t i = 1; i < matches.size(); i++) {
-            int score = mutable_ref_score(matches[i]);
-            if (score > best_score) {
-                best = matches[i];
-                best_score = score;
-                unique_best = true;
-            } else if (score == best_score) {
-                unique_best = false;
-            }
+        int best_score = mutable_ref_score(matches[0]);
+        for (const Function* fn : matches) best_score = std::max(best_score, mutable_ref_score(fn));
+        std::vector<const Function*> best_matches;
+        for (const Function* fn : matches) {
+            if (mutable_ref_score(fn) == best_score) best_matches.push_back(fn);
         }
-        return unique_best ? best : matches[0];
+        if (best_matches.size() == 1) return best_matches[0];
+        if (out_ambiguous != nullptr) *out_ambiguous = std::move(best_matches);
+        return nullptr;
     }
 
 
