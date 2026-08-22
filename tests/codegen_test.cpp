@@ -4016,6 +4016,200 @@ void run_call_resolution_diagnostic_tests() {
 // always been accepted, so this is the deduced spelling catching up
 // with it, and it has to be tested here: monomorphize and check_moves
 // both accept the un-collapsed form and hand it on.
+// A by-value record parameter is not a generic placeholder, however it
+// happens to be spelled. codegen used to decide that question with
+// `std::isupper(name[0])`, and since every user-declared type in scpp
+// is spelled with a leading capital, `S` was taken for a `T` and
+// rewritten to the argument's own type. `f(S)` then tied with `f(int)`
+// at the top score, the tie fell through to the "first match" fallback,
+// and declaration order picked the winner -- emitting
+// `call i32 @f.S(i32 5)`, which is not valid IR.
+void test_a_scalar_argument_does_not_select_a_by_value_record_overload() {
+    cases_run++;
+    auto record_first = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "int f(S s) { return 2; }\n"
+        "int f(int x) { return 1; }\n"
+        "int main() { return f(5); }\n");
+    expect(record_first.has_value(),
+           "record_overload: expected `f(5)` to select `f(int)`, got " +
+               (record_first.has_value() ? std::string{} : record_first.error().kind + ": " + record_first.error().message));
+    if (record_first.has_value()) {
+        std::string main_ir = function_ir(record_first.value(), "main");
+        expect(main_ir.find("@f.int") != std::string::npos,
+               "record_overload: expected `main` to call `f.int`");
+        expect(main_ir.find("@f.S") == std::string::npos,
+               "record_overload: expected `main` not to call `f.S` with an `int` argument");
+    }
+
+    // The same program with the overloads swapped. Pre-fix this order
+    // already resolved correctly, which is precisely the evidence that
+    // selection was being decided by declaration order rather than by
+    // the argument -- so the two orders have to agree.
+    cases_run++;
+    auto scalar_first = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "int f(int x) { return 1; }\n"
+        "int f(S s) { return 2; }\n"
+        "int main() { return f(5); }\n");
+    expect(scalar_first.has_value(),
+           "record_overload: expected the reversed declaration order to compile, got " +
+               (scalar_first.has_value() ? std::string{} : scalar_first.error().kind + ": " + scalar_first.error().message));
+    if (scalar_first.has_value()) {
+        expect(function_ir(scalar_first.value(), "main").find("@f.int") != std::string::npos,
+               "record_overload: expected declaration order not to change the selected overload");
+    }
+}
+
+// Every scalar argument kind reached the same wrong answer, so each is
+// its own row: the placeholder rewrite made the record parameter an
+// exact match for whatever was passed.
+void test_no_scalar_argument_kind_selects_a_record_overload() {
+    struct Row {
+        const char* name;
+        const char* scalar_param;
+        const char* argument;
+    };
+    const Row rows[] = {
+        {"char", "char", "'a'"},
+        {"bool", "bool", "true"},
+        {"double", "double", "1.5"},
+        {"pointer", "int*", "nullptr"},
+    };
+    for (const Row& row : rows) {
+        cases_run++;
+        std::string source = std::string{"struct S { int a; int b; };\n"} + "int f(S s) { return 2; }\n" + "int f(" +
+                             row.scalar_param + " x) { return 1; }\n" + "int main() { return f(" + row.argument +
+                             "); }\n";
+        auto ir_result = try_generate_ir(source);
+        expect(ir_result.has_value(), std::string{"record_overload_"} + row.name +
+                                          ": expected the scalar overload to be selected, got " +
+                                          (ir_result.has_value() ? std::string{}
+                                                                 : ir_result.error().kind + ": " + ir_result.error().message));
+        if (ir_result.has_value()) {
+            expect(function_ir(ir_result.value(), "main").find("@f.S") == std::string::npos,
+                   std::string{"record_overload_"} + row.name + ": expected `f(S)` not to be selected");
+        }
+    }
+}
+
+// The sharper form of the same defect. `K` has a real converting
+// constructor from `int`, so codegen could emit a *valid* call to the
+// wrong function: this compiled clean and silently ran `f(K)`. ch05
+// §5.10's ranking is the rule being restored -- an exact match outranks
+// a user-defined conversion.
+void test_an_exact_scalar_match_outranks_a_converting_constructor() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "class K {\n"
+        "  public:\n"
+        "    int v;\n"
+        "    virtual ~K() { }\n"
+        "    K(int x) : v{x} { }\n"
+        "};\n"
+        "int f(K k) { return 2; }\n"
+        "int f(int x) { return 1; }\n"
+        "int main() { return f(5); }\n");
+    expect(ir_result.has_value(),
+           "converting_ctor_rank: expected `f(5)` to compile, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+    if (!ir_result.has_value()) return;
+    std::string main_ir = function_ir(ir_result.value(), "main");
+    expect(main_ir.find("@f.int") != std::string::npos,
+           "converting_ctor_rank: expected the exact `f(int)` match to outrank the `K(int)` conversion");
+    expect(main_ir.find("@f.K") == std::string::npos,
+           "converting_ctor_rank: expected `f(K)` not to be silently selected for an `int` argument");
+}
+
+// The same resolver serves method calls and constructor calls, so the
+// defect reached both. These two rows fail independently of the free
+// function above.
+void test_record_parameter_confusion_does_not_reach_methods_or_constructors() {
+    cases_run++;
+    auto method_result = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "class C {\n"
+        "  public:\n"
+        "    virtual ~C() { }\n"
+        "    int m(S s) { return 2; }\n"
+        "    int m(int x) { return 1; }\n"
+        "};\n"
+        "int main() { C c{}; return c.m(5); }\n");
+    expect(method_result.has_value(),
+           "method_overload: expected `c.m(5)` to select `m(int)`, got " +
+               (method_result.has_value() ? std::string{} : method_result.error().kind + ": " + method_result.error().message));
+    if (method_result.has_value()) {
+        expect(function_ir(method_result.value(), "main").find("@C_m.S") == std::string::npos,
+               "method_overload: expected the `S` method overload not to be selected for an `int` argument");
+    }
+
+    cases_run++;
+    auto ctor_result = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "class K {\n"
+        "  public:\n"
+        "    int v;\n"
+        "    virtual ~K() { }\n"
+        "    K(S s) : v{2} { }\n"
+        "    K(int x) : v{1} { }\n"
+        "};\n"
+        "int main() { K k{5}; return k.v; }\n");
+    expect(ctor_result.has_value(),
+           "ctor_overload: expected `K k{5}` to select `K(int)`, got " +
+               (ctor_result.has_value() ? std::string{} : ctor_result.error().kind + ": " + ctor_result.error().message));
+    if (ctor_result.has_value()) {
+        expect(function_ir(ctor_result.value(), "main").find("@K_new.S") == std::string::npos,
+               "ctor_overload: expected the `S` constructor not to be selected for an `int` argument");
+    }
+}
+
+// Guards for what the narrowed rule must *not* break: a genuine
+// placeholder still deduces from the argument, a genuine converting
+// constructor is still selected when it is the only candidate, and a
+// braced list still binds to the record overload it fits (#486).
+// None of these three fail before the fix -- they exist to bound it.
+void test_narrowing_the_placeholder_rule_keeps_the_conversions_that_are_real() {
+    cases_run++;
+    auto generic_result = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "int f(S s) { return 2; }\n"
+        "template<typename T>\n"
+        "int f(T x) { return 1; }\n"
+        "int main() { return f(5); }\n");
+    expect(generic_result.has_value(),
+           "placeholder_guard: expected a real `T` parameter still to deduce from the argument, got " +
+               (generic_result.has_value() ? std::string{} : generic_result.error().kind + ": " + generic_result.error().message));
+
+    cases_run++;
+    auto sole_ctor_result = try_generate_ir(
+        "class K {\n"
+        "  public:\n"
+        "    int v;\n"
+        "    virtual ~K() { }\n"
+        "    K(int x) : v{x} { }\n"
+        "};\n"
+        "int f(K k) { return k.v; }\n"
+        "int main() { return f(5); }\n");
+    expect(sole_ctor_result.has_value(),
+           "placeholder_guard: expected the sole converting-constructor candidate still to be viable, got " +
+               (sole_ctor_result.has_value() ? std::string{}
+                                             : sole_ctor_result.error().kind + ": " + sole_ctor_result.error().message));
+
+    cases_run++;
+    auto braced_result = try_generate_ir(
+        "struct S { int a; int b; };\n"
+        "int f(S s) { return s.a * 10 + s.b; }\n"
+        "int f(int x) { return 1; }\n"
+        "int main() { return f({3, 4}); }\n");
+    expect(braced_result.has_value(),
+           "placeholder_guard: expected a braced list still to select the record overload, got " +
+               (braced_result.has_value() ? std::string{} : braced_result.error().kind + ": " + braced_result.error().message));
+    if (braced_result.has_value()) {
+        expect(function_ir(braced_result.value(), "main").find("@f.S") != std::string::npos,
+               "placeholder_guard: expected `f({3, 4})` still to call `f.S`");
+    }
+}
+
 void test_auto_reference_to_a_reference_returning_call_collapses() {
     cases_run++;
     auto ir_result = try_generate_ir(
@@ -4083,6 +4277,11 @@ int main() {
     test_a_returned_braced_list_takes_its_type_from_the_return_type();
     test_a_braced_list_initializes_a_call_argument();
     test_a_braced_list_argument_selects_the_overload_it_fits();
+    test_a_scalar_argument_does_not_select_a_by_value_record_overload();
+    test_no_scalar_argument_kind_selects_a_record_overload();
+    test_an_exact_scalar_match_outranks_a_converting_constructor();
+    test_record_parameter_confusion_does_not_reach_methods_or_constructors();
+    test_narrowing_the_placeholder_rule_keeps_the_conversions_that_are_real();
     test_a_braced_list_in_a_new_position_still_checks_its_elements();
     test_a_braced_list_initializes_a_namespace_scope_variable();
     test_brace_elision_fills_an_aggregate_from_a_flat_run();

@@ -825,12 +825,51 @@ namespace {
     }
 
 
-    Type Codegen::normalized_param_type(const Expr& arg, Type type)
+    // ch05 §5.11: a parameter type is a *generic placeholder* -- the `T`
+    // of `template<typename T> void f(T)` -- exactly when the name is one
+    // of the template parameters in scope for the function that declares
+    // it. Only then is deducing it from the argument the right thing to
+    // do; any other name denotes a type in its own right and has to be
+    // matched, not overwritten.
+    //
+    // This used to be decided by `std::isupper(name[0])`, i.e. by how the
+    // type was spelled. Every user-declared type in scpp is spelled with
+    // a leading capital, so *every* by-value record parameter was taken
+    // for a placeholder and silently rewritten to whatever type the
+    // argument happened to have. That made `f(S)` an exact match for
+    // `f(5)`: it tied with `f(int)` at the top score, the tie dropped
+    // resolution through to the "first match" fallback below, and
+    // whichever overload was declared first won -- emitting
+    // `call i32 @f.S(i32 5)`, which is not valid IR. Renaming `S` to
+    // `sLower` made the same program resolve correctly, which is the
+    // proof that the spelling was doing the deciding.
+    //
+    // Asking the program which names are declared types instead would
+    // only move the proxy: `nullptr_t` names no ClassDef, StructDef or
+    // EnumDef, so `unique_ptr(nullptr_t)` would start absorbing `int*`
+    // arguments the `unique_ptr(T*)` overload should have taken.
+    bool Codegen::parameter_type_is_generic_placeholder(const Function& fn, const Type& type) const
 {
-        if (type.kind == TypeKind::Named && !type.name.empty() && type.template_args.empty() &&
-            std::isupper(static_cast<unsigned char>(type.name[0]))) {
-            if (std::optional<Type> inferred = infer_type(arg); inferred.has_value()) return *inferred;
+        if (type.kind != TypeKind::Named || type.name.empty() || !type.template_args.empty()) return false;
+        auto names_a_parameter = [&](const std::vector<GenericTypeParam>& params) {
+            return std::ranges::any_of(params, [&](const GenericTypeParam& param) { return param.name == type.name; });
+        };
+        if (names_a_parameter(fn.template_params)) return true;
+        if (fn.member_owner_class.empty()) return false;
+        if (const ClassDef* owner = find_class_def(fn.member_owner_class); owner != nullptr) {
+            return names_a_parameter(owner->template_params);
         }
+        if (const StructDef* owner = find_struct_def(fn.member_owner_class); owner != nullptr) {
+            return names_a_parameter(owner->template_params);
+        }
+        return false;
+    }
+
+
+    Type Codegen::normalized_param_type(const Function& fn, const Expr& arg, Type type)
+{
+        if (!parameter_type_is_generic_placeholder(fn, type)) return type;
+        if (std::optional<Type> inferred = infer_type(arg); inferred.has_value()) return *inferred;
         return type;
     }
 
@@ -933,7 +972,7 @@ namespace {
         }
         std::size_t fixed_param_count = fn.params.size() - param_offset;
         for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
-            Type candidate_param_type = normalized_param_type(*args[i], fn.params[i + param_offset].type);
+            Type candidate_param_type = normalized_param_type(fn, *args[i], fn.params[i + param_offset].type);
             if (rvalue_ref_collapses_to_value(fn, i + param_offset, *args[i], param_offset)) {
                 candidate_param_type = *candidate_param_type.pointee;
             }
@@ -1082,7 +1121,7 @@ namespace {
             for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
                 std::optional<Type> arg_type = infer_type(*args[i]);
                 if (!arg_type.has_value()) continue;
-                Type candidate_param_type = normalized_param_type(*args[i], fn->params[i + param_offset].type);
+                Type candidate_param_type = normalized_param_type(*fn, *args[i], fn->params[i + param_offset].type);
                 if (candidate_param_type.kind == TypeKind::Reference) continue;
                 if (types_equal(*arg_type, candidate_param_type)) score += 4;
                 else if (literal_matches_scalar_parameter(*args[i], candidate_param_type)) score += 1;
@@ -1112,7 +1151,7 @@ namespace {
             for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
                 std::optional<Type> arg_type = infer_type(*args[i]);
                 if (!arg_type.has_value()) return false;
-                Type candidate_param_type = normalized_param_type(*args[i], fn->params[i + param_offset].type);
+                Type candidate_param_type = normalized_param_type(*fn, *args[i], fn->params[i + param_offset].type);
                 if (!types_equal(*arg_type, candidate_param_type)) return false;
             }
             return true;

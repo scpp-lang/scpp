@@ -477,7 +477,9 @@ private:
     bool rvalue_ref_collapses_to_value(const Function& fn, std::size_t param_index, const Expr& arg,
                                        std::size_t param_offset);
 
-    Type normalized_param_type(const Expr& arg, Type type);
+    Type normalized_param_type(const Function& fn, const Expr& arg, Type type);
+
+    [[nodiscard]] bool parameter_type_is_generic_placeholder(const Function& fn, const Type& type) const;
 
     const Function* resolve_constructor_overload_exact(const std::string& class_name, const std::vector<ExprPtr>& args);
 
