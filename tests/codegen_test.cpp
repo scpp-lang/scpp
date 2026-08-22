@@ -4608,6 +4608,306 @@ void test_returning_a_string_literal_from_a_pointer_returning_function() {
                (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
 }
 
+// [dcl.init.string]/1: "An array of ordinary character type ... can be
+// initialized by an ordinary string-literal ...: successive characters of the
+// value of the string-literal initialize the elements of the array." scpp
+// implemented the rule nowhere at all, so every spelling of it landed on
+// [dcl.init.aggr]'s element walk instead and bound the whole literal to
+// element 0. All three spellings are pinned together because each reaches a
+// different entry point -- `{...}` reaches initialize_storage_from_brace_args,
+// `= "..."` reaches initialize_storage_from_expr, `= {...}` reaches the first
+// through the second -- and only a rule stated once for all of them keeps the
+// three answering alike. The memcpy assertion is what distinguishes the fix
+// from the defect: the array receives the literal's *bytes*, where before it
+// received (or, at namespace scope, silently stored) the decayed pointer.
+void test_a_char_array_is_initialized_by_a_string_literal() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "int main() {\n"
+        "    char exact[6]{\"hello\"};\n"
+        "    char copy_init[6] = \"hello\";\n"
+        "    char braced_copy[6] = {\"hello\"};\n"
+        "    char oversized[10]{\"hi\"};\n"
+        "    return static_cast<int>(exact[0]) + static_cast<int>(copy_init[4]) +\n"
+        "           static_cast<int>(braced_copy[5]) + static_cast<int>(oversized[9]);\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "char_array_from_string_literal: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+    if (!ir_result.has_value()) return;
+    expect(ir_result.value().find("@llvm.memcpy") != std::string::npos,
+           "char_array_from_string_literal: expected the literal's bytes to be copied into the array, "
+           "but no memcpy was emitted -- the array was given the decayed pointer instead");
+    expect(ir_result.value().find("[10 x i8]") != std::string::npos,
+           "char_array_from_string_literal: expected the oversized array to keep its declared bound");
+}
+
+// The constant evaluator is a second, independent implementation of the same
+// rule (#480, #484 and #485 were each a case of the two disagreeing), and it
+// is the only one consulted for a constexpr variable. It reported "constexpr
+// assignment requires exactly matching types", because a string-literal
+// *expression* evaluates to a `const char*` -- the decayed value -- and
+// copying that into an array cell is not the initialization the rule
+// describes. Folding four reads into one number pins both halves of /1: the
+// characters that are copied, and the elements past them that are
+// value-initialized.
+void test_the_constant_evaluator_initializes_a_char_array_from_a_string_literal() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "constexpr int folded() {\n"
+        "    char exact[6]{\"hello\"};\n"
+        "    char copy_init[6] = \"hello\";\n"
+        "    char oversized[10]{\"hi\"};\n"
+        "    return static_cast<int>(exact[0]) * 1000000 + static_cast<int>(copy_init[4]) * 1000 +\n"
+        "           static_cast<int>(exact[5]) * 100 + static_cast<int>(oversized[9]);\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int value = folded();\n"
+        "    return value;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "constexpr_char_array_from_string_literal: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+    if (!ir_result.has_value()) return;
+    expect(ir_result.value().find("104111000") != std::string::npos,
+           "constexpr_char_array_from_string_literal: expected 'hello'[0]=='h', 'hello'[4]=='o' and both "
+           "the terminator and the tail past \"hi\" to be zero, folding to 104111000");
+}
+
+// [dcl.init.string]/2: the array must have room for every character *and*
+// the terminating null. `char w[5]{"hello"}` is the boundary C accepts
+// (C99 6.7.8/14 drops the terminator) and C++ has never accepted; the spec
+// adopts no clause changing that, so the plain C++ rule applies.
+//
+// The diagnostic is the point of the test as much as the rejection is. Both
+// sizes were already rejected before the fix -- but by a generic store-type
+// backstop reporting "scpp has no implicit conversion between distinct scalar
+// types ... use an explicit 'static_cast<T>(...)'", which names neither the
+// array nor the literal, and prescribes a cast that cannot be written. An
+// author reading it cannot tell that `char w[6]` is the fix.
+void test_a_string_literal_too_long_for_its_array_is_rejected_by_both_implementations() {
+    struct Case {
+        const char* name;
+        const char* declaration;
+        const char* expected_bound;
+    };
+    const Case cases[] = {
+        {"too_small", "char w[3]{\"hello\"};", "'char[3]'"},
+        {"no_room_for_the_terminator", "char w[5]{\"hello\"};", "'char[5]'"},
+        {"copy_init_spelling", "char w[5] = \"hello\";", "'char[5]'"},
+    };
+    for (const Case& test_case : cases) {
+        cases_run++;
+        auto codegen_result = try_generate_ir(
+            "int main() {\n"
+            "    " + std::string(test_case.declaration) + "\n"
+            "    return static_cast<int>(w[0]);\n"
+            "}\n");
+        expect(!codegen_result.has_value(),
+               std::string("string_literal_too_long/") + test_case.name +
+                   ": expected an overlong literal to be rejected");
+        if (!codegen_result.has_value()) {
+            expect(codegen_result.error().kind == "CodegenError",
+                   std::string("string_literal_too_long/") + test_case.name + ": expected a CodegenError, got " +
+                       codegen_result.error().kind);
+            expect(codegen_result.error().message.find("terminating null character") != std::string::npos,
+                   std::string("string_literal_too_long/") + test_case.name +
+                       ": expected the diagnostic to say the count includes the terminating null character, got " +
+                       codegen_result.error().message);
+            expect(codegen_result.error().message.find(test_case.expected_bound) != std::string::npos,
+                   std::string("string_literal_too_long/") + test_case.name +
+                       ": expected the diagnostic to name the array, got " + codegen_result.error().message);
+            expect(codegen_result.error().message.find("needs 6") != std::string::npos,
+                   std::string("string_literal_too_long/") + test_case.name +
+                       ": expected the diagnostic to name the size that would work, got " +
+                       codegen_result.error().message);
+        }
+    }
+
+    cases_run++;
+    auto constexpr_result = try_generate_ir(
+        "constexpr int overlong() {\n"
+        "    char w[3]{\"hello\"};\n"
+        "    return static_cast<int>(w[0]);\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int value = overlong();\n"
+        "    return value;\n"
+        "}\n");
+    expect(!constexpr_result.has_value(),
+           "string_literal_too_long: expected the constant evaluator to reject an overlong literal too");
+    if (!constexpr_result.has_value()) {
+        expect(constexpr_result.error().kind == "ConstexprError",
+               "string_literal_too_long: expected a ConstexprError, got " + constexpr_result.error().kind);
+        expect(constexpr_result.error().message.find("terminating null character") != std::string::npos,
+               "string_literal_too_long: expected the constant evaluator to report the same rule in the same "
+               "words, got " + constexpr_result.error().message);
+    }
+}
+
+// [dcl.init]/17.5 sends an array destination to [dcl.init.aggr] and
+// [dcl.init.string] and nowhere else, so C++ has no copy-initialization of an
+// array from another array -- `char y[2] = x;` is ill-formed for any `x`, and
+// the spec adopts no clause introducing one. It was rejected, but by the same
+// generic store-type backstop, which called an array a scalar and suggested a
+// static_cast. Naming the rule matters here more than usual: the two
+// neighbouring spellings `char y[2]{x[0], x[1]}` and `char y[6] = "hello"`
+// *are* legal, and the old message pointed away from both.
+void test_an_array_is_not_copy_initialized_from_another_array() {
+    struct Case {
+        const char* name;
+        const char* source;
+        const char* expected_type;
+        const char* expected_tail;
+    };
+    const Case cases[] = {
+        {"char_array",
+         "int main() {\n"
+         "    char x[2]{'a', 'b'};\n"
+         "    char y[2] = x;\n"
+         "    return static_cast<int>(y[0]);\n"
+         "}\n",
+         "'char[2]'", "or by a string literal"},
+        {"int_array",
+         "int main() {\n"
+         "    int x[2]{1, 2};\n"
+         "    int y[2] = x;\n"
+         "    return y[0];\n"
+         "}\n",
+         "'int[2]'", "initializer list ('{...}'):"},
+    };
+    for (const Case& test_case : cases) {
+        cases_run++;
+        auto result = try_generate_ir(test_case.source);
+        expect(!result.has_value(),
+               std::string("array_copy_init/") + test_case.name + ": expected array copy-initialization to be rejected");
+        if (!result.has_value()) {
+            expect(result.error().kind == "CodegenError",
+                   std::string("array_copy_init/") + test_case.name + ": expected a CodegenError, got " +
+                       result.error().kind);
+            expect(result.error().message.find("no copy-initialization of an array") != std::string::npos,
+                   std::string("array_copy_init/") + test_case.name +
+                       ": expected the diagnostic to name the rule, got " + result.error().message);
+            expect(result.error().message.find(test_case.expected_type) != std::string::npos,
+                   std::string("array_copy_init/") + test_case.name + ": expected the diagnostic to name the array, got " +
+                       result.error().message);
+            expect(result.error().message.find(test_case.expected_tail) != std::string::npos,
+                   std::string("array_copy_init/") + test_case.name +
+                       ": expected the diagnostic to list what an array initializer may be, got " +
+                       result.error().message);
+        }
+    }
+}
+
+// The boundary of [dcl.init.string]: the rule applies to an array of ordinary
+// character type and to nothing else, so `int w[6]{"hello"}` stays ill-formed
+// -- [dcl.init.aggr] binds the literal to the `int` element `w[0]`, and no
+// conversion takes an array there. Both implementations must say so in the
+// same words; the evaluator answered "constexpr assignment requires exactly
+// matching types", a message about a store, naming neither operand.
+void test_a_string_literal_does_not_initialize_an_array_of_non_character_type() {
+    cases_run++;
+    auto codegen_result = try_generate_ir(
+        "int main() {\n"
+        "    int w[6]{\"hello\"};\n"
+        "    return w[0];\n"
+        "}\n");
+    expect(!codegen_result.has_value(),
+           "string_literal_non_char_array: expected an int array not to accept a string literal");
+    if (!codegen_result.has_value()) {
+        expect(codegen_result.error().kind == "CodegenError",
+               "string_literal_non_char_array: expected a CodegenError, got " + codegen_result.error().kind);
+        expect(codegen_result.error().message.find("cannot initialize 'int' with a string literal") != std::string::npos,
+               "string_literal_non_char_array: expected the diagnostic to name both operands, got " +
+                   codegen_result.error().message);
+        expect(codegen_result.error().message.find("[dcl.init.string]") != std::string::npos,
+               "string_literal_non_char_array: expected the diagnostic to name the rule that does not apply, got " +
+                   codegen_result.error().message);
+    }
+
+    cases_run++;
+    auto constexpr_result = try_generate_ir(
+        "constexpr int folded() {\n"
+        "    int w[6]{\"hello\"};\n"
+        "    return w[0];\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int value = folded();\n"
+        "    return value;\n"
+        "}\n");
+    expect(!constexpr_result.has_value(),
+           "string_literal_non_char_array: expected the constant evaluator to reject it too");
+    if (!constexpr_result.has_value()) {
+        expect(constexpr_result.error().kind == "ConstexprError",
+               "string_literal_non_char_array: expected a ConstexprError, got " + constexpr_result.error().kind);
+        expect(constexpr_result.error().message.find("cannot initialize 'int' with a string literal") != std::string::npos,
+               "string_literal_non_char_array: expected the constant evaluator to report the same defect in the "
+               "same words, got " + constexpr_result.error().message);
+    }
+}
+
+// [expr.ass]/1 wants a modifiable lvalue, which an array never is. The
+// outcome was already right and the message was not: assignment landed on the
+// same scalar-conversion backstop, so `w = "hello";` was reported as a failed
+// conversion with the advice to add a static_cast. That is the diagnostic
+// failure mode #433/#436/#478 were: it denies the rule that *does* apply one
+// line up -- `char w[6] = "hello";` at the declaration -- and prescribes a
+// cast that does not exist.
+void test_an_array_is_not_assignable() {
+    cases_run++;
+    auto result = try_generate_ir(
+        "int main() {\n"
+        "    char w[6]{'h', 'e', 'l', 'l', 'o', '\\0'};\n"
+        "    w = \"world\";\n"
+        "    return static_cast<int>(w[0]);\n"
+        "}\n");
+    expect(!result.has_value(), "array_not_assignable: expected assignment to an array to be rejected");
+    if (!result.has_value()) {
+        expect(result.error().kind == "CodegenError",
+               "array_not_assignable: expected a CodegenError, got " + result.error().kind);
+        expect(result.error().message.find("is not assignable") != std::string::npos,
+               "array_not_assignable: expected the diagnostic to say the array is not assignable, got " +
+                   result.error().message);
+        expect(result.error().message.find("[expr.ass]") != std::string::npos,
+               "array_not_assignable: expected the diagnostic to name the rule, got " + result.error().message);
+    }
+}
+
+// The second dominant defect pattern: a rule taught to the position it was
+// reported in and to no other. [dcl.init.string] reaches a default member
+// initializer, an aggregate's array member, a `static` local, a `constexpr`
+// local, an array of arrays and a concatenated literal (#489) as much as it
+// reaches a plain local, and each of those is a distinct initialization entry
+// point in codegen. Verified by construction rather than by arguing that one
+// path reaches the others.
+void test_a_char_array_is_initialized_from_a_string_literal_in_every_position() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct Holder {\n"
+        "    char braced[6]{\"hello\"};\n"
+        "    char assigned[6] = \"world\";\n"
+        "};\n"
+        "struct Pair {\n"
+        "    char text[4];\n"
+        "    int count;\n"
+        "};\n"
+        "int main() {\n"
+        "    Holder holder{};\n"
+        "    Pair pair{\"abc\", 7};\n"
+        "    static char kept[6]{\"hello\"};\n"
+        "    char joined[5]{\"ab\" \"cd\"};\n"
+        "    constexpr char folded[6]{\"hello\"};\n"
+        "    char rows[2][6]{\"hello\", \"world\"};\n"
+        "    return static_cast<int>(holder.braced[0]) + static_cast<int>(holder.assigned[0]) +\n"
+        "           static_cast<int>(pair.text[0]) + pair.count + static_cast<int>(kept[1]) +\n"
+        "           static_cast<int>(joined[3]) + static_cast<int>(folded[1]) +\n"
+        "           static_cast<int>(rows[1][0]);\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "char_array_positions: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+}
+
 int main() {
     run_test_case_files();
     test_sizeof_a_string_literal_counts_its_bytes_plus_the_terminator();
@@ -4617,6 +4917,13 @@ int main() {
     test_conditional_arms_of_different_literal_lengths_agree_after_decay();
     test_a_literal_argument_decays_at_exact_match_rank();
     test_returning_a_string_literal_from_a_pointer_returning_function();
+    test_a_char_array_is_initialized_by_a_string_literal();
+    test_the_constant_evaluator_initializes_a_char_array_from_a_string_literal();
+    test_a_string_literal_too_long_for_its_array_is_rejected_by_both_implementations();
+    test_an_array_is_not_copy_initialized_from_another_array();
+    test_a_string_literal_does_not_initialize_an_array_of_non_character_type();
+    test_an_array_is_not_assignable();
+    test_a_char_array_is_initialized_from_a_string_literal_in_every_position();
 
     test_long_binary_chain_generates_without_re_walking_its_prefix();
     test_member_type_is_usable_through_its_qualified_name();

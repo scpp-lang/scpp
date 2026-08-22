@@ -790,9 +790,43 @@ namespace scpp {
                 }
                 continue;
             }
+            // An array, for the same reason: `char g[6] = "hello";` is a
+            // [dcl.init.string] initialization of the global's storage,
+            // not a value produced and then stored. Routed to the very
+            // function the local declaration path uses, so the two
+            // positions of one declaration cannot disagree -- before
+            // this, a global array fell through to the store below,
+            // which (unlike every other binding boundary) ran no
+            // check_store_type at all, so the literal's decayed 8-byte
+            // `const char*` was written straight into the 6-byte array,
+            // overrunning it and leaving `g[0]` reading a pointer byte.
+            if (global.decl->type.kind == TypeKind::Array) {
+                LValue target{it->second.global, global.decl->type,
+                              global.decl->resolved_alignment != 0
+                                  ? std::optional<unsigned>(global.decl->resolved_alignment)
+                                  : alignment_for_type(global.decl->type)};
+                if (auto r = initialize_storage_from_expr(target, *global.decl->init); !r.has_value()) {
+                    return std::unexpected(std::move(r).error());
+                }
+                continue;
+            }
             auto init_value_result = codegen_value_for_target(*global.decl->init, global.decl->type);
             if (!init_value_result.has_value()) return std::unexpected(std::move(init_value_result).error());
-            create_store(std::move(init_value_result).value(), it->second.global,
+            llvm::LLVMValueRef init_value = std::move(init_value_result).value();
+            // The same check every other initialization boundary runs.
+            // This one ran none, so a global whose initializer lowered to
+            // a differently-shaped value was stored verbatim and only
+            // LLVM's module verifier -- which by then can no longer name
+            // the declaration -- had any chance of noticing.
+            auto global_llvm_type_result = to_llvm_type(global.decl->type);
+            if (!global_llvm_type_result.has_value()) return std::unexpected(std::move(global_llvm_type_result).error());
+            current_loc_ = global.decl->loc;
+            if (auto r = check_store_type(init_value, std::move(global_llvm_type_result).value(),
+                                          "global '" + global.decl->var_name + "'");
+                !r.has_value()) {
+                return std::unexpected(std::move(r).error());
+            }
+            create_store(init_value, it->second.global,
                          global.decl->resolved_alignment != 0 ? std::optional<unsigned>(global.decl->resolved_alignment)
                                                               : alignment_for_type(global.decl->type));
         }

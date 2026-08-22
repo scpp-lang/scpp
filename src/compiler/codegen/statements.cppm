@@ -271,6 +271,23 @@ namespace scpp {
                                 LValue target{storage, stmt.type, declared_alignment};
                                 if (auto r = initialize_storage_from_brace_args(target, stmt.init->args); !r.has_value())
                                     return std::unexpected(std::move(r).error());
+                            } else if (stmt.type.kind == TypeKind::Array) {
+                                // Same reason as the braced list above:
+                                // an array has no single loadable value,
+                                // so `char w[6] = "hello";` initializes
+                                // the storage in place ([dcl.init.string])
+                                // rather than producing a value to store.
+                                // Routed to the one function that knows
+                                // what an array initializer may be, which
+                                // is also what gives `char y[2] = x;` a
+                                // diagnostic naming the actual rule --
+                                // codegen_value_for_target below knows
+                                // nothing about arrays and produced a
+                                // *pointer*, which check_store_type then
+                                // reported as a scalar-conversion error.
+                                LValue target{storage, stmt.type, declared_alignment};
+                                if (auto r = initialize_storage_from_expr(target, *stmt.init); !r.has_value())
+                                    return std::unexpected(std::move(r).error());
                             } else {
                                 auto init_value_result = codegen_value_for_target(*stmt.init, stmt.type);
                                 if (!init_value_result.has_value()) return std::unexpected(std::move(init_value_result).error());
@@ -588,18 +605,29 @@ namespace scpp {
                             if (!scope_stack_.empty()) scope_stack_.back().push_back(declared_local_of(stmt));
                             return {};
                         }
-                        auto init_value_result = codegen_value_for_target(*stmt.init, stmt.type);
-                        if (!init_value_result.has_value()) return std::unexpected(std::move(init_value_result).error());
-                        llvm::LLVMValueRef init_value = std::move(init_value_result).value();
-                        // Refresh to `stmt`'s own position: codegen_expr just
-                        // recursed through `stmt.init` (possibly a compound
-                        // expression like `a + b`), leaving current_loc_ at
-                        // whichever sub-expression it last visited rather
-                        // than the statement check_store_type is actually
-                        // about.
-                        refresh_debug_location(stmt.loc);
-                        if (auto r = check_store_type(init_value, llvm_type, "variable '" + stmt.var_name + "'"); !r.has_value()) return std::unexpected(std::move(r).error());
-                        create_store(init_value, slot, declared_alignment);
+                        if (stmt.type.kind == TypeKind::Array) {
+                            // `char w[6] = "hello";` -- like the braced
+                            // list above, an array is initialized in
+                            // place; it has no single loadable value for
+                            // codegen_value_for_target to produce. See the
+                            // static-storage path's note.
+                            LValue target{slot, stmt.type, declared_alignment};
+                            if (auto r = initialize_storage_from_expr(target, *stmt.init); !r.has_value())
+                                return std::unexpected(std::move(r).error());
+                        } else {
+                            auto init_value_result = codegen_value_for_target(*stmt.init, stmt.type);
+                            if (!init_value_result.has_value()) return std::unexpected(std::move(init_value_result).error());
+                            llvm::LLVMValueRef init_value = std::move(init_value_result).value();
+                            // Refresh to `stmt`'s own position: codegen_expr just
+                            // recursed through `stmt.init` (possibly a compound
+                            // expression like `a + b`), leaving current_loc_ at
+                            // whichever sub-expression it last visited rather
+                            // than the statement check_store_type is actually
+                            // about.
+                            refresh_debug_location(stmt.loc);
+                            if (auto r = check_store_type(init_value, llvm_type, "variable '" + stmt.var_name + "'"); !r.has_value()) return std::unexpected(std::move(r).error());
+                            create_store(init_value, slot, declared_alignment);
+                        }
                     } else {
                         // scpp has no concept of an uninitialized variable: a
                         // local declared without an initializer is always
