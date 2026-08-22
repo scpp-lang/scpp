@@ -43,7 +43,11 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     return type.kind == TypeKind::Named && (type.name == "std::string" || type.name == "string");
 }
 
-[[nodiscard]] bool is_const_char_pointer_type(const Type& type) {
+[[nodiscard]] bool is_const_char_pointer_type(const Type& raw_type) {
+    // A string literal's type is an array of `const char` ([lex.string]),
+    // and decays to `const char*` -- the two are indistinguishable at
+    // every use this predicate guards, so ask about the decayed type.
+    Type type = decay_array_to_pointer(raw_type);
     return type.kind == TypeKind::Pointer && type.pointee != nullptr && type.pointee->kind == TypeKind::Named &&
            type.pointee->name == "char" && !type.is_mutable_pointee;
 }
@@ -1921,13 +1925,14 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
             case ExprKind::StringLiteral:
                 // A read-only global byte array (null-terminated, like a
-                // real C string literal), decaying directly to a pointer
-                // to its first byte -- there is no backing local
-                // variable/place for a literal, so (unlike an array-typed
-                // identifier's load_value decay) this needs no separate
-                // lvalue-then-decay step; CreateGlobalString itself
-                // returns the pointer. Reuses the exact mechanism already
-                // used for print_bool's "true"/"false" constants.
+                // real C string literal). The literal's type is that array
+                // ([lex.string]/1), and this is its *decayed* value: because
+                // the array object is a global, its address and the address
+                // of its first byte are the same pointer, so
+                // CreateGlobalString serves as both -- codegen_lvalue's own
+                // StringLiteral case returns the identical pointer typed as
+                // the array. Reuses the exact mechanism already used for
+                // print_bool's "true"/"false" constants.
                 return llvm::LLVMBuildGlobalString(builder_, expr.name.c_str(), "str");
 
             case ExprKind::Conditional:
@@ -3372,6 +3377,18 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     }
                     return LValue{pointee_ptr, *operand_underlying.pointee, alignment_for_type(*operand_underlying.pointee)};
                 }();
+
+            case ExprKind::StringLiteral: {
+                // [lex.string]/1: a string literal *is* an lvalue, designating
+                // an array object with static storage duration -- so it has a
+                // place after all, and LLVMBuildGlobalString returns exactly
+                // that object's address. Without this case `"abcd"[1]` and a
+                // range-for over a literal have an array-typed operand with
+                // nowhere to subscript.
+                Type literal_type = string_literal_type(expr.name.size());
+                llvm::LLVMValueRef global = llvm::LLVMBuildGlobalString(builder_, expr.name.c_str(), "str");
+                return LValue{global, literal_type, alignment_for_type(literal_type)};
+            }
 
             default:
                 return std::unexpected(CodegenError("expression is not assignable",

@@ -379,8 +379,15 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
 //
 // Everything else still has to match exactly: scpp has no implicit
 // scalar conversions (ch06).
-[[nodiscard]] bool conditional_arm_types_agree(const Expr& then_arm, const Type& then_type, const Expr& else_arm,
-                                               const Type& else_type) {
+[[nodiscard]] bool conditional_arm_types_agree(const Expr& then_arm, const Type& raw_then_type, const Expr& else_arm,
+                                               const Type& raw_else_type) {
+    // [expr.cond]/4: the lvalue-to-rvalue, array-to-pointer and
+    // function-to-pointer conversions are applied to the second and third
+    // operands before their types are compared, so `c ? "const " : ""`
+    // compares `const char*` with `const char*` rather than two arrays of
+    // different length.
+    Type then_type = decay_array_to_pointer(raw_then_type);
+    Type else_type = decay_array_to_pointer(raw_else_type);
     if (types_equal(then_type, else_type)) return true;
     const Type& then_value = binary_operand_type(then_type);
     const Type& else_value = binary_operand_type(else_type);

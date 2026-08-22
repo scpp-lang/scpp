@@ -358,6 +358,53 @@ class AlignmentSpecifier {
     return type;
 }
 
+// [lex.string]/1: a string literal has type "array of n `const char`",
+// where n counts the encoded bytes plus the terminating null. The spec
+// adopts the C++ standard's lexical rules unchanged -- §16.2
+// [lex.literal.scpp] re-specifies the typing of *scalar* literals only
+// (integer, floating-point, `true`/`false`, character) and says nothing
+// about string literals, so [lex.string] applies as written.
+//
+// A string literal decays to `const char*` in almost every context, and
+// that decayed type is what nearly all of the compiler sees -- but the
+// decay is a *conversion applied to* an array, not the literal's type.
+// Reporting the decayed type from type inference makes `sizeof` measure
+// a pointer (8) instead of the array (n), and makes a literal invisible
+// to every "is this an array?" test, such as range-for's.
+//
+// Constness is carried on the array itself rather than on `element`
+// because a pointer records its pointee's constness in
+// `is_mutable_pointee` and leaves `pointee` unqualified (see the
+// parser's pointer construction); an array whose `element` were
+// const-qualified could therefore never compare equal to the pointee of
+// the `const char*` it decays to.
+[[nodiscard]] inline Type string_literal_type(std::size_t byte_count) {
+    Type type{};
+    type.kind = TypeKind::Array;
+    type.element = std::make_shared<Type>(named_type("char"));
+    type.array_size = static_cast<std::int64_t>(byte_count) + 1;
+    type.is_const_qualified = true;
+    return type;
+}
+
+// [conv.array]: an array lvalue converts to a pointer to its first
+// element. The array is read-only if either it or its element carries
+// the qualifier -- `const char w[3]` records it on the element, while a
+// string literal records it on the array (see string_literal_type).
+//
+// [over.ics.scs] classifies this as an *lvalue transformation* and gives
+// the resulting conversion sequence Exact Match rank, so reaching a
+// parameter by decay is not a "conversion" that a competing candidate
+// requiring a real user-defined conversion may outrank.
+[[nodiscard]] inline Type decay_array_to_pointer(Type type) {
+    if (type.kind != TypeKind::Array || type.element == nullptr) return type;
+    Type decayed{};
+    decayed.kind = TypeKind::Pointer;
+    decayed.pointee = type.element;
+    decayed.is_mutable_pointee = !(type.is_const_qualified || type.element->is_const_qualified);
+    return decayed;
+}
+
 // ch06 §6: the canonical internal spelling of `nullptr`'s type. Source
 // may write it either bare (`nullptr_t`) or `std::`-qualified
 // (`std::nullptr_t`, the spelling real C++ exposes) -- the parser

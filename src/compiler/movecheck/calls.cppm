@@ -720,6 +720,17 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     const Type& class_type, const Expr& arg, const Body& body, const Signatures& signatures);
 
 [[nodiscard]] bool argument_type_matches_parameter(const Type& arg_type, const Type& param_type, const Body& body) {
+    // An array argument decays to a pointer to its first element. An
+    // array is read-only if either it or its element carries the
+    // qualifier: `const char w[3]` records it on the element, a string
+    // literal on the array itself (see string_literal_type) -- either
+    // way it may not bind to a pointer whose pointee is mutable.
+    if (param_type.kind == TypeKind::Pointer && arg_type.kind == TypeKind::Array &&
+        param_type.pointee != nullptr && arg_type.element != nullptr) {
+        return (!param_type.is_mutable_pointee ||
+                !(arg_type.is_const_qualified || arg_type.element->is_const_qualified)) &&
+               types_equal(*arg_type.element, *param_type.pointee);
+    }
     if (is_reference(param_type)) {
         if (arg_type.kind == TypeKind::Reference) {
             if (arg_type.pointee == nullptr || param_type.pointee == nullptr) return false;
@@ -1521,6 +1532,19 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
     // failing to compile inside std_memory.scpp.
     if (body.function_is_generic_template) return {};
     std::optional<Type> source_type = infer_expr_type(expr, body, signatures);
+    // An array source decays to a pointer to its first element
+    // ([conv.array]), so the same compatibility question applies to the
+    // decayed type. Without this the early return below would skip every
+    // array source, and since a string literal's type is now an array of
+    // `const char` ([lex.string]/1) rather than a `const char*`,
+    // `char* p = "abcd";` would have silently started compiling.
+    //
+    // This sees only constness that is recorded *on the type*. A `const`
+    // local or global array records it on the declaration instead, and the
+    // guard that catches that for `&x` is scoped to the syntactic `&expr`
+    // shape -- so `char* p = w;` for a const array remains accepted. That
+    // is a separate, pre-existing defect with a different root cause.
+    if (source_type && source_type->kind == TypeKind::Array) source_type = decay_array_to_pointer(*source_type);
     if (!source_type || source_type->kind != TypeKind::Pointer) return {};
     if (raw_pointer_implicitly_convertible(*source_type, target_type)) return {};
     if (body.program != nullptr &&
@@ -1886,13 +1910,7 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             return named_type("size_t");
         case ExprKind::ValueInit:
             return expr.type;
-        case ExprKind::StringLiteral: {
-            Type result;
-            result.kind = TypeKind::Pointer;
-            result.pointee = std::make_shared<Type>(named_type("char"));
-            result.is_mutable_pointee = false;
-            return result;
-        }
+        case ExprKind::StringLiteral: return string_literal_type(expr.name.size());
 
         case ExprKind::Identifier: {
             if (const Type* local_type = body.type_if_local(expr); local_type != nullptr) return *local_type;
@@ -2029,6 +2047,10 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
                 case UnaryOp::Deref: {
                     std::optional<Type> operand = infer_expr_type(*expr.lhs, body, signatures);
                     if (!operand) return std::nullopt;
+                    // [expr.unary.op]/1 requires a pointer operand, which an
+                    // array reaches through [conv.array]'s array-to-pointer
+                    // conversion -- `*"abcd"` has type `const char`.
+                    if (operand->kind == TypeKind::Array) operand = decay_array_to_pointer(*operand);
                     if (is_explicit_star_this(expr) && operand->kind == TypeKind::Reference && operand->pointee) {
                         return *operand->pointee;
                     }
@@ -2131,6 +2153,10 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             std::optional<Type> then_type = infer_expr_type(*expr.rhs, body, signatures);
             std::optional<Type> else_type = infer_expr_type(*expr.third, body, signatures);
             if (!then_type.has_value() || !else_type.has_value()) return std::nullopt;
+            // [expr.cond]/4 applies the array-to-pointer conversion to both
+            // operands before the composite type is determined.
+            then_type = decay_array_to_pointer(*then_type);
+            else_type = decay_array_to_pointer(*else_type);
             return types_equal(*then_type, *else_type) ? then_type : std::nullopt;
         }
 
