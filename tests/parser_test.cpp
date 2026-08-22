@@ -2595,6 +2595,114 @@ void test_string_literal_expression() {
     expect(assign.rhs->name == "hello", "string_literal_expression: decoded content should be 'hello'");
 }
 
+// [lex.string]/1: adjacent string-literal tokens are concatenated. The
+// spec adopts C++'s lexical rules unchanged (front matter §2, §4(1)), and
+// nothing in it modifies [lex.string], so `"ab" "cd"` is one literal
+// spelling `abcd`. The parser used to accept the first literal as a
+// complete expression and then fail on the second token.
+void test_adjacent_string_literals_are_concatenated() {
+    scpp::Program program = expect_parse_ok("int f(char* p) { p = \"ab\" \"cd\"; return 0; }");
+    const scpp::Expr& assign = *program.functions[0].body->statements[0]->expr;
+    expect(assign.rhs->kind == scpp::ExprKind::StringLiteral,
+           "adjacent_string_literals: rhs should be a single StringLiteral");
+    expect(assign.rhs->name == "abcd",
+           "adjacent_string_literals: expected 'abcd', got '" + assign.rhs->name + "'");
+}
+
+// Concatenation is a repeated join, not a special case for two.
+void test_more_than_two_adjacent_string_literals_are_concatenated() {
+    scpp::Program program = expect_parse_ok("int f(char* p) { p = \"a\" \"b\" \"c\" \"d\"; return 0; }");
+    const scpp::Expr& assign = *program.functions[0].body->statements[0]->expr;
+    expect(assign.rhs->name == "abcd",
+           "more_than_two_adjacent: expected 'abcd', got '" + assign.rhs->name + "'");
+}
+
+// The join is between *tokens*, so whitespace, newlines and comments
+// between them are irrelevant -- this is the shape anyone writing a long
+// diagnostic message actually reaches for.
+void test_adjacent_string_literals_join_across_lines_and_comments() {
+    scpp::Program program = expect_parse_ok(
+        "int f(char* p) {\n"
+        "    p = \"ab\"  /* joined */\n"
+        "        \"cd\"  // and again\n"
+        "        \"ef\";\n"
+        "    return 0;\n"
+        "}\n");
+    const scpp::Expr& assign = *program.functions[0].body->statements[0]->expr;
+    expect(assign.rhs->name == "abcdef",
+           "join_across_lines_and_comments: expected 'abcdef', got '" + assign.rhs->name + "'");
+}
+
+// Each literal's escapes are decoded *within that literal* before the
+// pieces are joined. Splicing raw source text instead would be wrong in
+// general -- `"\x41" "B"` would become the single escape `\x41B` -- so
+// this pins the decode-then-join order rather than just the result.
+void test_escapes_are_decoded_within_each_literal_before_joining() {
+    scpp::Program program = expect_parse_ok("int f(char* p) { p = \"a\\n\" \"b\"; return 0; }");
+    const scpp::Expr& assign = *program.functions[0].body->statements[0]->expr;
+    expect(assign.rhs->name == std::string("a\nb"),
+           "escapes_decoded_before_joining: expected 'a<LF>b' (3 bytes), got " +
+               std::to_string(assign.rhs->name.size()) + " bytes");
+    // A trailing backslash-escape in the first literal must not consume
+    // the join: `"a\\"` is a backslash, then `"b"`.
+    scpp::Program backslash = expect_parse_ok("int f(char* p) { p = \"a\\\\\" \"b\"; return 0; }");
+    const scpp::Expr& backslash_assign = *backslash.functions[0].body->statements[0]->expr;
+    expect(backslash_assign.rhs->name == std::string("a\\b"),
+           "escapes_decoded_before_joining: expected 'a\\b', got '" + backslash_assign.rhs->name + "'");
+}
+
+// An empty literal is a literal: it contributes nothing but does not stop
+// the join, and joining two empties is still one empty literal.
+void test_empty_string_literals_participate_in_concatenation() {
+    scpp::Program leading = expect_parse_ok("int f(char* p) { p = \"\" \"x\"; return 0; }");
+    expect(leading.functions[0].body->statements[0]->expr->rhs->name == "x",
+           "empty_literals_concatenate: '\"\" \"x\"' should be 'x'");
+    scpp::Program trailing = expect_parse_ok("int f(char* p) { p = \"x\" \"\"; return 0; }");
+    expect(trailing.functions[0].body->statements[0]->expr->rhs->name == "x",
+           "empty_literals_concatenate: '\"x\" \"\"' should be 'x'");
+    scpp::Program both = expect_parse_ok("int f(char* p) { p = \"\" \"\"; return 0; }");
+    expect(both.functions[0].body->statements[0]->expr->rhs->name.empty(),
+           "empty_literals_concatenate: '\"\" \"\"' should be empty");
+}
+
+// The widening risk: two literals that were always meant to stay separate
+// must not start joining. A comma still ends a literal.
+void test_comma_separated_string_arguments_are_not_concatenated() {
+    scpp::Program program =
+        expect_parse_ok("int g(char* a, char* b) { return 0; }\n"
+                        "int f() { return g(\"ab\", \"cd\"); }\n");
+    const scpp::Expr& call = *program.functions[1].body->statements[0]->expr;
+    expect(call.args.size() == 2,
+           "comma_separated_not_concatenated: expected 2 arguments, got " + std::to_string(call.args.size()));
+    if (call.args.size() != 2) return;
+    expect(call.args[0]->name == "ab" && call.args[1]->name == "cd",
+           "comma_separated_not_concatenated: arguments should stay 'ab' and 'cd'");
+}
+
+// A string-literal *operand* is a string-literal everywhere, not only in
+// an expression: `[[nodiscard("...")]]`'s reason takes the same join.
+void test_nodiscard_reason_concatenates_adjacent_literals() {
+    scpp::Program program =
+        expect_parse_ok("[[nodiscard(\"keep \" \"this\")]] int f() { return 3; }\n");
+    expect(program.functions[0].nodiscard_reason == "keep this",
+           "nodiscard_reason_concatenates: expected 'keep this', got '" +
+               program.functions[0].nodiscard_reason + "'");
+}
+
+// The linkage of a linkage-specification is a string-literal too, so the
+// join happens before the value is checked: `extern "C" "C"` is `extern
+// "CC"`, an unsupported linkage -- not a syntax error at the second
+// literal, which is what it used to report ("expected a type name").
+void test_extern_linkage_concatenates_before_it_is_checked() {
+    auto result = try_parse_with_std_imports("extern \"C\" \"C\" { int puts(char* s); }\n");
+    expect(!result.has_value(), "extern_linkage_concatenates: `extern \"C\" \"C\"` is not extern \"C\"");
+    if (result.has_value()) return;
+    std::string message = result.error().what();
+    expect(message.find("unsupported linkage") != std::string::npos &&
+               message.find("CC") != std::string::npos,
+           "extern_linkage_concatenates: the joined linkage should be reported, got: " + message);
+}
+
 void test_string_literal_escape_sequences_decode_correctly() {
     struct Case { const char* source; const char* expected; };
     const Case cases[] = {
@@ -6668,6 +6776,14 @@ int main() {
     test_const_auto_value_declaration_is_const();
     test_auto_rvalue_reference_declaration_reports_the_parameter_only_rule();
     test_auto_pointer_declaration_points_at_plain_auto();
+    test_adjacent_string_literals_are_concatenated();
+    test_more_than_two_adjacent_string_literals_are_concatenated();
+    test_adjacent_string_literals_join_across_lines_and_comments();
+    test_escapes_are_decoded_within_each_literal_before_joining();
+    test_empty_string_literals_participate_in_concatenation();
+    test_comma_separated_string_arguments_are_not_concatenated();
+    test_nodiscard_reason_concatenates_adjacent_literals();
+    test_extern_linkage_concatenates_before_it_is_checked();
     test_range_for_and_variable_declaration_agree_on_auto_reference();
 
     if (failures > 0) {

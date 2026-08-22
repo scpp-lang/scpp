@@ -1075,7 +1075,7 @@ private:
                             result.has_nodiscard = true;
                             auto string_tok_result = expect(TokenKind::StringLiteral, "a string literal");
                             if (!string_tok_result.has_value()) return std::unexpected(std::move(string_tok_result).error());
-                            auto reason_result = decode_string_literal(string_tok_result.value());
+                            auto reason_result = decode_adjacent_string_literals(string_tok_result.value());
                             if (!reason_result.has_value()) return std::unexpected(std::move(reason_result).error());
                             result.nodiscard_reason = std::move(reason_result).value();
                             auto rparen_result = expect(TokenKind::RParen, "')'");
@@ -5434,13 +5434,19 @@ private:
         auto tok_result = expect(TokenKind::StringLiteral, "a linkage string (e.g. \"C\")");
         if (!tok_result.has_value()) return std::unexpected(std::move(tok_result).error());
         const Token& tok = std::move(tok_result).value();
-        // `tok.text` includes the surrounding quotes (see StringLiteral's
-        // definition in lexer.cppm).
-        if (tok.text != "\"C\"") {
+        // The linkage is a *string-literal*, so adjacent literals are
+        // concatenated first ([lex.string]/1) and the result is then
+        // checked -- `extern "C" "C"` is `extern "CC"`, an unsupported
+        // linkage, rather than a confusing "expected a type name" at the
+        // second literal.
+        auto linkage_result = decode_adjacent_string_literals(tok);
+        if (!linkage_result.has_value()) return std::unexpected(std::move(linkage_result).error());
+        std::string linkage = std::move(linkage_result).value();
+        if (linkage != "C") {
             {
-                std::string _msg_4593{"unsupported linkage "};
-                _msg_4593 += std::string(tok.text.data(), tok.text.size());
-                _msg_4593 += ": only extern \"C\" is supported in this version";
+                std::string _msg_4593{"unsupported linkage \""};
+                _msg_4593 += linkage;
+                _msg_4593 += "\": only extern \"C\" is supported in this version";
                 return std::unexpected(ParseError(tok.line, tok.column,
                               _msg_4593));
             }
@@ -5502,6 +5508,34 @@ private:
             }
         }
         return std::move(result);
+    }
+
+    // [lex.string]/1: adjacent string-literal tokens are concatenated.
+    // The spec adopts the C++ standard's lexical rules unchanged (front
+    // matter §2, and §4(1)'s "the C++ standard as modified by this
+    // document"); nothing in it modifies [lex.string], so `"a" "b"` is
+    // one string literal spelling `ab`, exactly as in C++.
+    //
+    // The standard calls this translation phase 6, i.e. lexical, but the
+    // lexer here deliberately does not decode literals -- it records only
+    // a token's extent, and `Token::text` is a view into the source
+    // (lexer.cppm's StringLiteral). Splicing raw *source* text would be
+    // wrong in general: an escape sequence must be decoded within its own
+    // literal before the pieces are joined, or `"\x41" "B"` would decode
+    // as the single escape `\x41B`. So the join happens where token text
+    // becomes byte content, which is here; the result is what phase 6
+    // specifies.
+    [[nodiscard]] std::expected<std::string, ParseError> decode_adjacent_string_literals(const Token& first) {
+        auto first_result = decode_string_literal(first);
+        if (!first_result.has_value()) return std::unexpected(std::move(first_result).error());
+        std::string result = std::move(first_result).value();
+        while (check(TokenKind::StringLiteral)) {
+            const Token& next = advance();
+            auto next_result = decode_string_literal(next);
+            if (!next_result.has_value()) return std::unexpected(std::move(next_result).error());
+            result += std::move(next_result).value();
+        }
+        return result;
     }
 
     // Decodes a CharLiteral token's text (e.g. 'a', '\n', '\\', '\'', '\0')
@@ -10757,7 +10791,7 @@ private:
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::StringLiteral;
             node->loc = loc;
-            auto name_result = decode_string_literal(tok);
+            auto name_result = decode_adjacent_string_literals(tok);
             if (!name_result.has_value()) return std::unexpected(std::move(name_result).error());
             node->name = std::move(name_result).value();
             return std::move(node);
