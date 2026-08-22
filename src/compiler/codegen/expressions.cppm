@@ -99,7 +99,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         if (dest_type.kind == TypeKind::Pointer && dest_type.pointee &&
             dest_type.pointee->kind == TypeKind::Named && dest_type.pointee->name == "char" && !dest_type.is_mutable_pointee &&
             value.kind == ConstexprValueKind::StringLiteralPointer) {
-            create_store(llvm::LLVMBuildGlobalString(builder_, value.string_value.c_str(), "cexprstr"), dest_ptr, std::nullopt);
+            create_store(string_literal_global(value.string_value), dest_ptr, std::nullopt);
             return {};
         }
         if (dest_type.kind == TypeKind::Array && dest_type.element && value.kind == ConstexprValueKind::Array) {
@@ -667,6 +667,27 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         if (expr.kind == ExprKind::BracedInitList) {
             return initialize_storage_from_brace_args(target, expr.args);
         }
+        // [dcl.init.string], and then the only other thing an array
+        // initializer may be. An array destination reaches [dcl.init.aggr]
+        // or [dcl.init.string] and nothing else ([dcl.init]/17.5): there
+        // is no array copy-initialization in C++, so once the braced-list
+        // case above and the string-literal case here are excluded, no
+        // rule applies and the program is ill-formed.
+        //
+        // Reporting it *here* rather than letting it fall through is what
+        // the two shapes below need. `char w[6] = "hello";` used to reach
+        // codegen_value_for_target, which knows nothing about arrays, and
+        // `char y[2] = x;` used to reach it too -- both then produced a
+        // *pointer* that check_store_type rejected with a message about
+        // scalar conversions, and on the global path (which never called
+        // check_store_type at all) the 8-byte pointer was simply stored
+        // into the array, overrunning it.
+        if (target.type.kind == TypeKind::Array && target.type.element != nullptr) {
+            auto string_init_result = try_initialize_array_from_string_literal(target, expr);
+            if (!string_init_result.has_value()) return std::unexpected(std::move(string_init_result).error());
+            if (std::move(string_init_result).value()) return {};
+            return std::unexpected(CodegenError(describe_invalid_array_initializer(target.type), expr.loc));
+        }
         if (target.type.kind == TypeKind::Reference) {
             return initialize_reference_storage(target, expr);
         }
@@ -696,6 +717,27 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             }
             return {};
         }
+        // An array-typed initializer bound to a destination that is not
+        // an array. `int w[6]{"hello"}` and `char y[2]{x}` both land
+        // here, on the *element* -- [dcl.init.aggr] bound the whole
+        // initializer-clause to `w[0]`/`y[0]`. Diagnosed against the two
+        // scpp types before the value is lowered, because past this point
+        // the only check left is check_store_type, which sees LLVM types
+        // only and can say nothing truthful about either operand.
+        //
+        // Restricted to a Named (scalar) destination on purpose: a
+        // pointer, span or function-pointer destination is exactly where
+        // [conv.array] decay is legitimate, and records were handled
+        // above.
+        if (target.type.kind == TypeKind::Named) {
+            std::optional<Type> source_type = infer_type(expr);
+            if (source_type.has_value() && source_type->kind == TypeKind::Array) {
+                return std::unexpected(CodegenError(
+                    describe_cannot_initialize_from_array(target.type, *source_type,
+                                                          expr.kind == ExprKind::StringLiteral),
+                    expr.loc));
+            }
+        }
         auto init_value_result = codegen_value_for_target(expr, target.type);
         if (!init_value_result.has_value()) return std::unexpected(std::move(init_value_result).error());
         llvm::LLVMValueRef init_value = std::move(init_value_result).value();
@@ -705,6 +747,86 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             return std::unexpected(std::move(r).error());
         create_store(init_value, target.ptr, target.alignment);
         return {};
+    }
+
+
+    // [lex.string]/1: a string literal designates an array object of
+    // `n + 1` bytes -- the literal's own characters and the terminating
+    // null. Built here rather than with LLVMBuildGlobalString, which
+    // takes a NUL-terminated `const char*` and therefore *truncates* the
+    // object at the literal's first embedded null: `"a\0b"` has type
+    // `const char[4]` (Expr::name holds the decoded bytes, so its size is
+    // 3) but was given two bytes of storage, so every reader of the array
+    // -- `"a\0b"[2]`, a range-for over it, and the [dcl.init.string] copy
+    // below -- addressed memory past the object.
+    //
+    // One definition for all three lowering sites (the decayed value, the
+    // lvalue, and a constant-evaluated `const char*`) so an object's size
+    // cannot depend on which one asked for it.
+    [[nodiscard]] llvm::LLVMValueRef Codegen::string_literal_global(const std::string& bytes)
+    {
+        llvm::LLVMValueRef initializer =
+            llvm::LLVMConstStringInContext2(context_, bytes.data(), bytes.size(), /*DontNullTerminate=*/0);
+        llvm::LLVMTypeRef array_type = llvm::LLVMArrayType2(llvm::LLVMInt8TypeInContext(context_), bytes.size() + 1);
+        llvm::LLVMValueRef global = llvm::LLVMAddGlobal(module_, array_type, "str");
+        llvm::LLVMSetLinkage(global, llvm::LLVMPrivateLinkage);
+        llvm::LLVMSetUnnamedAddress(global, llvm::LLVMGlobalUnnamedAddr);
+        llvm::LLVMSetGlobalConstant(global, /*IsConstant=*/1);
+        llvm::LLVMSetInitializer(global, initializer);
+        return global;
+    }
+
+
+    // [dcl.init.string]/1: "An array of ordinary character type ... can be
+    // initialized by an ordinary string-literal ...: successive characters
+    // of the value of the string-literal initialize the elements of the
+    // array", and any element the literal does not reach is
+    // value-initialized (/1's "the remaining elements are
+    // value-initialized"). The terminating null is one of those successive
+    // characters, which is why /2's bound check counts it.
+    //
+    // The one implementation of that rule in codegen. Both spellings of
+    // the initializer -- `char w[6]{"hello"}` and `char w[6] = "hello"` --
+    // and every position an array can be initialized in reach it through
+    // exactly two callers (initialize_storage_from_expr for a lone
+    // initializer, initialize_storage_from_brace_args for a braced one),
+    // rather than each position deciding for itself.
+    //
+    // Lowered as a memcpy from the literal's own static array object, not
+    // as N stores: that object already exists (a string literal *is* an
+    // lvalue designating an array with static storage duration --
+    // [lex.string]/1, and codegen_lvalue returns exactly it), so the
+    // initialization is a copy of it, and a memcpy is what real C++
+    // implementations emit for the same rule.
+    [[nodiscard]] std::expected<bool, CodegenError> Codegen::try_initialize_array_from_string_literal(
+        const Codegen::LValue& target, const Expr& expr)
+    {
+        if (!string_literal_initializes_char_array(target.type, expr)) return false;
+        if (!string_literal_fits_array(target.type.array_size, expr.name.size())) {
+            return std::unexpected(
+                CodegenError(describe_string_literal_too_long_for_array(target.type, expr.name.size()), expr.loc));
+        }
+        // Value-initialize first so the elements past the terminating
+        // null get the zeroes [dcl.init.string]/1 requires, then copy the
+        // literal's bytes over the prefix. Same shape as the array branch
+        // of initialize_storage_from_brace_args, and for the same reason:
+        // "the elements the initializer does not reach" stays literally
+        // the value-initialization path instead of a second copy of it.
+        if (auto r = zero_initialize_storage(target.ptr, target.type, target.alignment); !r.has_value()) {
+            return std::unexpected(std::move(r).error());
+        }
+        auto literal_result = codegen_lvalue(expr);
+        if (!literal_result.has_value()) return std::unexpected(std::move(literal_result).error());
+        LValue literal = std::move(literal_result).value();
+        std::uint64_t byte_count = static_cast<std::uint64_t>(expr.name.size()) + 1;
+        llvm::LLVMValueRef length =
+            llvm::LLVMConstInt(llvm::LLVMInt64TypeInContext(context_), byte_count, /*SignExtend=*/0);
+        unsigned int destination_alignment = 1;
+        if (target.alignment.has_value()) destination_alignment = *target.alignment;
+        unsigned int source_alignment = 1;
+        if (literal.alignment.has_value()) source_alignment = *literal.alignment;
+        llvm::LLVMBuildMemCpy(builder_, target.ptr, destination_alignment, literal.ptr, source_alignment, length);
+        return true;
     }
 
 
@@ -787,6 +909,18 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         // per element and is therefore skipped for covered elements by
         // the loop bound below).
         if (target.type.kind == TypeKind::Array && target.type.element != nullptr) {
+            // [dcl.init.aggr]/4.2 hands a braced list's array element off
+            // to [dcl.init.string] before element-wise initialization is
+            // even considered, so `char w[6] = {"hello"}` is the *same*
+            // string initialization `char w[6] = "hello"` is -- not an
+            // array of six elements whose first initializer happens to be
+            // a string. Asked before the element loop for exactly that
+            // reason.
+            if (args.size() == 1 && args[0] != nullptr) {
+                auto string_init_result = try_initialize_array_from_string_literal(target, *args[0]);
+                if (!string_init_result.has_value()) return std::unexpected(std::move(string_init_result).error());
+                if (std::move(string_init_result).value()) return {};
+            }
             std::int64_t element_count = target.type.array_size;
             // When no element can absorb more than one initializer, one
             // initializer means one element and the count answers the
@@ -954,10 +1088,14 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     }
 
     // One sub-object's worth of a brace-enclosed initializer list, taken
-    // from `args` at `index`. Three cases, in [dcl.init.aggr] order:
+    // from `args` at `index`. Four cases, in [dcl.init.aggr] order:
     //
     //  - the initializer is itself a braced list: it initializes this
     //    sub-object completely, whatever its shape;
+    //  - the sub-object is an array of `char` and the initializer is a
+    //    string literal ([dcl.init.aggr]/4.2 -> [dcl.init.string]): the
+    //    literal initializes the whole sub-object and braces are *not*
+    //    elided into it;
     //  - the sub-object is not an aggregate, or the initializer is an
     //    expression of the sub-object's own type: it takes exactly one
     //    initializer, the ordinary case;
@@ -977,6 +1115,12 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         if (next.kind == ExprKind::BracedInitList) {
             ++index;
             return initialize_storage_from_brace_args(target, next.args);
+        }
+        if (string_literal_initializes_char_array(target.type, next)) {
+            ++index;
+            auto string_init_result = try_initialize_array_from_string_literal(target, next);
+            if (!string_init_result.has_value()) return std::unexpected(std::move(string_init_result).error());
+            return {};
         }
         if (!type_is_elidable_aggregate(target.type)) {
             ++index;
@@ -1006,6 +1150,15 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         if (index >= args.size()) return;
         const Expr& next = *args[index];
         if (next.kind == ExprKind::BracedInitList) {
+            ++index;
+            return;
+        }
+        // [dcl.init.string] consumes exactly one initializer for the whole
+        // array, which is what the emitting cursor does; a counting twin
+        // that instead elided braces into the array would make
+        // `f(Wrapper{"hi"})` look like a list of two initializers for a
+        // one-member aggregate and reject the call before it was lowered.
+        if (string_literal_initializes_char_array(type, next)) {
             ++index;
             return;
         }
@@ -1051,6 +1204,14 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             if (type.pointee == nullptr) return false;
             if (type.is_mutable_ref && !type.is_rvalue_ref) return false;
             return braced_init_list_can_initialize(*type.pointee, args);
+        }
+        // `char w[6] = {"hello"}` -- [dcl.init.aggr]/4.2 makes the whole
+        // list one [dcl.init.string] initialization, so the fill walk
+        // below (which would consume the literal as an initializer for
+        // element 0 and then report five elements left uninitialized)
+        // never applies to it.
+        if (args.size() == 1 && args[0] != nullptr && string_literal_initializes_char_array(type, *args[0])) {
+            return true;
         }
         if (type_is_elidable_aggregate(type)) {
             std::size_t index = 0;
@@ -1928,12 +2089,10 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 // real C string literal). The literal's type is that array
                 // ([lex.string]/1), and this is its *decayed* value: because
                 // the array object is a global, its address and the address
-                // of its first byte are the same pointer, so
-                // CreateGlobalString serves as both -- codegen_lvalue's own
-                // StringLiteral case returns the identical pointer typed as
-                // the array. Reuses the exact mechanism already used for
-                // print_bool's "true"/"false" constants.
-                return llvm::LLVMBuildGlobalString(builder_, expr.name.c_str(), "str");
+                // of its first byte are the same pointer, so the one global
+                // serves as both -- codegen_lvalue's own StringLiteral case
+                // returns the identical pointer typed as the array.
+                return string_literal_global(expr.name);
 
             case ExprKind::Conditional:
                 return [&, this]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
@@ -3381,12 +3540,12 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             case ExprKind::StringLiteral: {
                 // [lex.string]/1: a string literal *is* an lvalue, designating
                 // an array object with static storage duration -- so it has a
-                // place after all, and LLVMBuildGlobalString returns exactly
+                // place after all, and string_literal_global returns exactly
                 // that object's address. Without this case `"abcd"[1]` and a
                 // range-for over a literal have an array-typed operand with
                 // nowhere to subscript.
                 Type literal_type = string_literal_type(expr.name.size());
-                llvm::LLVMValueRef global = llvm::LLVMBuildGlobalString(builder_, expr.name.c_str(), "str");
+                llvm::LLVMValueRef global = string_literal_global(expr.name);
                 return LValue{global, literal_type, alignment_for_type(literal_type)};
             }
 
@@ -3491,6 +3650,15 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         }
                     }
                     return lv.ptr;
+                }
+                // [expr.ass]/1: an array is not a modifiable lvalue, so
+                // no assignment applies to one. Caught here, against the
+                // scpp type, because the only check downstream is
+                // check_store_type: it compares LLVM types and reported
+                // `w = "hello";` as a failed *scalar conversion* with the
+                // advice to add a static_cast, which cannot be written.
+                if (lv.type.kind == TypeKind::Array) {
+                    return std::unexpected(CodegenError(describe_array_not_assignable(lv.type), expr.loc));
                 }
                 auto value_result = codegen_value_for_target(*expr.rhs, lv.type);
                 if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());

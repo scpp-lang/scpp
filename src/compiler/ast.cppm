@@ -387,6 +387,39 @@ class AlignmentSpecifier {
     return type;
 }
 
+// [dcl.init.string]/1: "An array of ordinary character type ... can be
+// initialized by an ordinary string-literal ...". `char` is the only
+// ordinary character type SCPP26 has -- ch06 §16.1(4) removes
+// `signed char`, `unsigned char` and every wide character type, and the
+// spec adopts no clause modifying [dcl.init.string] itself -- so the
+// rule's element-type precondition is exactly "the element type is
+// `char`", however the array or its element spells constness.
+//
+// One definition, because three phases have to agree on it: codegen
+// lowers the initialization, the constant evaluator performs it, and
+// overload resolution's braced-list *counting* twin has to consume the
+// same one initializer for the same sub-object. Two of them answering
+// differently is the shape that made `char w[6]{"hello"}` an array of
+// six independently-initialized elements in one place and a single
+// string initialization in another.
+[[nodiscard]] inline bool is_ordinary_character_array_type(const Type& type) {
+    return type.kind == TypeKind::Array && type.element != nullptr &&
+           type.element->kind == TypeKind::Named && type.element->name == "char";
+}
+
+// [dcl.init.string]/2: "There shall not be more initializers than there
+// are array elements" -- the terminating null is one of those
+// initializers, so a literal of n bytes needs a bound of at least n + 1.
+// A larger bound is fine: [dcl.init.string]/1 value-initializes the
+// remaining elements.
+//
+// This is the C++ rule, not C's: C99 6.7.8/14 lets `char w[5] = "hello"`
+// drop the terminator, and C++ has never allowed it. The spec adopts no
+// clause modifying [dcl.init.string], so the plain C++ rule applies.
+[[nodiscard]] inline bool string_literal_fits_array(std::int64_t array_size, std::size_t literal_byte_count) {
+    return array_size >= static_cast<std::int64_t>(literal_byte_count) + 1;
+}
+
 // [conv.array]: an array lvalue converts to a pointer to its first
 // element. The array is read-only if either it or its element carries
 // the qualifier -- `const char w[3]` records it on the element, while a
@@ -3583,6 +3616,132 @@ public:
         case TypeKind::FunctionPointer: return describe_type_brief_function(type);
     }
     return "<type>";
+}
+
+// [dcl.init.aggr]/4.2 -> [dcl.init.string]: this initializer-clause is a
+// string literal and this destination is an array of `char`, so the
+// literal initializes the whole array rather than one of its elements.
+//
+// Deliberately independent of whether the literal *fits*: an overlong
+// literal is still a [dcl.init.string] initialization, just an ill-formed
+// one, and answering "no" for it would silently reinterpret
+// `char w[3] = "hello"` as five separate element initializers and report
+// something else entirely. The bound check belongs to the rule, not to
+// the recognition of it.
+[[nodiscard]] inline bool string_literal_initializes_char_array(const Type& target_type, const Expr& initializer) {
+    return initializer.kind == ExprKind::StringLiteral && is_ordinary_character_array_type(target_type);
+}
+
+// [dcl.init.string]/2 violated: the literal, counting its terminating
+// null character, has more initializers than the array has elements.
+// Named here rather than spelled at each reporting site so codegen and
+// the constant evaluator report the same defect in the same words -- and
+// so the message states the one fact the author needs, that the count
+// includes the null terminator the literal brings with it. Without that,
+// an author reading "array size is 5 but the string has 5 characters"
+// concludes the compiler is wrong.
+[[nodiscard]] inline std::string describe_string_literal_too_long_for_array(const Type& array_type,
+                                                                           std::size_t literal_byte_count) {
+    std::int64_t needed = static_cast<std::int64_t>(literal_byte_count) + 1;
+    std::string element_spelling{"char"};
+    if (array_type.element != nullptr) element_spelling = describe_type_brief(*array_type.element);
+    std::string result{};
+    result += "string literal is too long for '";
+    result += describe_type_brief(array_type);
+    result += "': the array has ";
+    result += std::to_string(array_type.array_size);
+    result += " elements but the initializer needs ";
+    result += std::to_string(needed);
+    result += " -- ";
+    result += std::to_string(literal_byte_count);
+    result += " character(s) plus the terminating null character, which is part of the initializer";
+    result += " ([dcl.init.string]). Declare it as '";
+    result += element_spelling;
+    result += "[";
+    result += std::to_string(needed);
+    result += "]' or longer";
+    return result;
+}
+
+// An array given an initializer that is neither a brace-enclosed
+// initializer list nor -- for an array of `char` -- a string literal.
+// [dcl.init]/17.5 reaches [dcl.init.aggr] and [dcl.init.string] and
+// nothing else for an array destination, so C++ has no array
+// copy-initialization at all: `char y[2] = x;` for another `char[2]` is
+// ill-formed, and the spec adopts no clause introducing one.
+//
+// Stated once, and stated as *what an array initializer may be*, because
+// the message this replaced was produced far downstream by a generic
+// store-type backstop and named the wrong rule entirely ("scpp has no
+// implicit conversion between distinct scalar types ... use an explicit
+// static_cast") -- advice that cannot be followed, since no cast makes
+// one array initialize another.
+[[nodiscard]] inline std::string describe_invalid_array_initializer(const Type& array_type) {
+    std::string result{};
+    result += "'";
+    result += describe_type_brief(array_type);
+    result += "' can only be initialized by a brace-enclosed initializer list";
+    if (is_ordinary_character_array_type(array_type)) {
+        result += " ('{...}') or by a string literal";
+    } else {
+        result += " ('{...}')";
+    }
+    result += ": C++ has no copy-initialization of an array from another expression ([dcl.init.aggr], [dcl.init.string])";
+    return result;
+}
+
+// The mirror image of the rule above: an array-typed *initializer* bound
+// to a destination that is not an array and cannot hold a pointer either
+// -- `int w[6]{"hello"}` binds `const char[6]` to the `int` element
+// `w[0]`, and `char y[2]{x}` binds `char[2]` to the `char` element `y[0]`.
+//
+// Both used to reach the generic store-type backstop, which compares only
+// LLVM types and therefore reported "scpp has no implicit conversion
+// between distinct scalar types ... use an explicit 'static_cast<T>(...)'":
+// it names neither operand, calls an array a scalar, and prescribes a cast
+// that does not exist. Naming the real operands is the whole point --
+// `int w[6]{"hello"}` is not a conversion mistake, it is a destination
+// that [dcl.init.string] does not apply to.
+[[nodiscard]] inline std::string describe_cannot_initialize_from_array(const Type& target_type,
+                                                                      const Type& source_type,
+                                                                      bool source_is_string_literal) {
+    std::string result{};
+    result += "cannot initialize '";
+    result += describe_type_brief(target_type);
+    result += "' with ";
+    if (source_is_string_literal) {
+        result += "a string literal of type '";
+    } else {
+        result += "an lvalue of type '";
+    }
+    result += describe_type_brief(source_type);
+    result += "'";
+    if (source_is_string_literal) {
+        result += ": a string literal initializes an array of 'char' as a whole, never a single object";
+        result += " ([dcl.init.string]/1)";
+    } else {
+        result += ": an array is not convertible to '";
+        result += describe_type_brief(target_type);
+        result += "'";
+    }
+    return result;
+}
+
+// [expr.ass]/1: assignment requires a modifiable lvalue, and an array is
+// never one -- `w = "hello";` for a `char[6]` is ill-formed however well
+// the sizes line up. Distinct from describe_invalid_array_initializer
+// above because the two rules are distinct: initialization of an array
+// from a string literal is legal ([dcl.init.string]) and assignment of
+// one to an array is not, so the diagnostic must not send the author
+// looking for a bigger array or a cast.
+[[nodiscard]] inline std::string describe_array_not_assignable(const Type& array_type) {
+    std::string result{};
+    result += "'";
+    result += describe_type_brief(array_type);
+    result += "' is not assignable: an array is not a modifiable lvalue ([expr.ass]/1), so nothing --";
+    result += " not a string literal, not another array -- can be assigned to it. Assign the elements,";
+    result += " or initialize the array at its declaration instead";
+    return result;
 }
 
 } // namespace scpp

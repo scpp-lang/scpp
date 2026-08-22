@@ -155,6 +155,15 @@ export constexpr llvm::LLVMLinkage LLVMAppendingLinkage = llvm::LLVMLinkage::LLV
 export constexpr llvm::LLVMLinkage LLVMInternalLinkage = llvm::LLVMLinkage::LLVMInternalLinkage;
 export constexpr llvm::LLVMLinkage LLVMPrivateLinkage = llvm::LLVMLinkage::LLVMPrivateLinkage;
 
+export enum class LLVMUnnamedAddr {
+    LLVMNoUnnamedAddr = 0,
+    LLVMLocalUnnamedAddr = 1,
+    LLVMGlobalUnnamedAddr = 2,
+};
+export constexpr llvm::LLVMUnnamedAddr LLVMNoUnnamedAddr = llvm::LLVMUnnamedAddr::LLVMNoUnnamedAddr;
+export constexpr llvm::LLVMUnnamedAddr LLVMLocalUnnamedAddr = llvm::LLVMUnnamedAddr::LLVMLocalUnnamedAddr;
+export constexpr llvm::LLVMUnnamedAddr LLVMGlobalUnnamedAddr = llvm::LLVMUnnamedAddr::LLVMGlobalUnnamedAddr;
+
 export enum class LLVMIntPredicate {
     LLVMIntEQ = 32,
     LLVMIntNE = 33,
@@ -276,11 +285,14 @@ LLVMValueRef LLVMConstPointerNull(LLVMTypeRef Ty);
 LLVMValueRef LLVMGetUndef(LLVMTypeRef Ty);
 LLVMValueRef LLVMConstBitCast(LLVMValueRef ConstantVal, LLVMTypeRef ToType);
 LLVMValueRef LLVMConstArray2(LLVMTypeRef ElementTy, LLVMValueRef* ConstantVals, unsigned long Length);
+LLVMValueRef LLVMConstStringInContext2(LLVMContextRef C, const char* Str, unsigned long Length,
+                                       LLVMBool DontNullTerminate);
 LLVMValueRef LLVMConstStructInContext(LLVMContextRef C, LLVMValueRef* ConstantVals, unsigned int Count,
                                       LLVMBool Packed);
 void LLVMSetInitializer(LLVMValueRef GlobalVar, LLVMValueRef ConstantVal);
 void LLVMSetGlobalConstant(LLVMValueRef GlobalVar, LLVMBool IsConstant);
 void LLVMSetLinkage(LLVMValueRef Global, LLVMLinkage Linkage);
+void LLVMSetUnnamedAddress(LLVMValueRef Global, LLVMUnnamedAddr UnnamedAddr);
 unsigned int LLVMGetAlignment(LLVMValueRef V);
 void LLVMSetAlignment(LLVMValueRef V, unsigned int Bytes);
 LLVMTypeRef LLVMGlobalGetValueType(LLVMValueRef Global);
@@ -361,6 +373,8 @@ LLVMValueRef LLVMBuildInsertValue(LLVMBuilderRef B, LLVMValueRef AggVal, LLVMVal
                                   const char* Name);
 LLVMValueRef LLVMBuildGlobalString(LLVMBuilderRef B, const char* Str, const char* Name);
 LLVMValueRef LLVMBuildMemSet(LLVMBuilderRef B, LLVMValueRef Ptr, LLVMValueRef Val, LLVMValueRef Len, unsigned int Align);
+LLVMValueRef LLVMBuildMemCpy(LLVMBuilderRef B, LLVMValueRef Dst, unsigned int DstAlign, LLVMValueRef Src,
+                             unsigned int SrcAlign, LLVMValueRef Size);
 
 // Metadata
 LLVMMetadataRef LLVMValueAsMetadata(LLVMValueRef Val);

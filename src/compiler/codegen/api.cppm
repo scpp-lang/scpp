@@ -926,6 +926,12 @@ private:
 
     [[nodiscard]] std::expected<void, CodegenError> initialize_storage_from_expr(const LValue& target, const Expr& expr);
 
+    // [dcl.init.string]: `char w[6]{"hello"}` / `char w[6] = "hello"`.
+    // Returns false when this initializer is not a string literal
+    // initializing an array of `char`, so the caller falls through to
+    // whatever rule does apply.
+    [[nodiscard]] std::expected<bool, CodegenError> try_initialize_array_from_string_literal(const LValue& target, const Expr& expr);
+
     [[nodiscard]] std::expected<void, CodegenError> initialize_storage_from_brace_args(const LValue& target, const std::vector<ExprPtr>& args);
 
     [[nodiscard]] std::expected<void, CodegenError> initialize_storage(const LValue& target, const Initializer& init);
@@ -1719,6 +1725,11 @@ private:
     // backing storage to take a pointer to; that is deferred to whenever
     // by-value struct temporaries need addressable storage.
     [[nodiscard]] std::expected<LValue, CodegenError> codegen_lvalue(const Expr& expr);
+
+    // [lex.string]/1's array object for one string literal: `n + 1` bytes
+    // of read-only static storage holding exactly the literal's decoded
+    // content plus the terminating null.
+    [[nodiscard]] llvm::LLVMValueRef string_literal_global(const std::string& bytes);
 
     // `print_int`/`print_bool`/`print_char` are temporary builtins that
     // shell out to libc's `printf` so programs can produce visible output

@@ -1550,6 +1550,93 @@ private:
         return {};
     }
 
+    // [dcl.init.string]/1 during constant evaluation, the evaluator's
+    // counterpart of Codegen::try_initialize_array_from_string_literal.
+    // ch06 §6.1(4.1)/(4.2) require the implementation to support both
+    // string-literal objects and fixed-size arrays here, and a
+    // `constexpr` program is the same program as its runtime twin: if
+    // only one of the two implementations knows this rule they disagree
+    // about what the program means.
+    //
+    // The literal's bytes are written into the array's own element cells
+    // rather than the cell being replaced wholesale, because a
+    // string-literal *expression* evaluates to a `const char*` pointing
+    // at separate storage (make_string_literal_pointer) -- which is the
+    // decayed value, not the initialization. Copying that pointer in is
+    // exactly what the old path did, and it is why the evaluator reported
+    // "constexpr assignment requires exactly matching types".
+    [[nodiscard]] std::expected<bool, ConstexprError> try_initialize_array_cell_from_string_literal(
+        const std::shared_ptr<Cell>& cell, const Type& type, const Expr& expr, const SourceLocation& loc) {
+        if (!string_literal_initializes_char_array(type, expr)) return false;
+        if (!string_literal_fits_array(type.array_size, expr.name.size())) {
+            return std::unexpected(ConstexprError(loc, describe_string_literal_too_long_for_array(type, expr.name.size())));
+        }
+        if (!cell->data.is_array()) {
+            return std::unexpected(ConstexprError(loc, "internal error: expected array storage for an array initializer"));
+        }
+        std::vector<std::shared_ptr<Cell>>& elements = cell->data.array.elements;
+        for (std::size_t i = 0; i < elements.size(); ++i) {
+            // Elements past the literal (and its terminating null) are
+            // value-initialized -- [dcl.init.string]/1's "the remaining
+            // elements are value-initialized" -- which for `char` is 0,
+            // the same value the byte loop below writes for them.
+            //
+            // The cast through std::int8_t matches
+            // make_string_literal_pointer: `char` is signed (ch06 §16.1),
+            // so a 0xC8 byte is -56, the only reading that fits the
+            // bounds integer_bounds_for_type reports for `char`.
+            std::int64_t byte = 0;
+            if (i < expr.name.size()) byte = static_cast<std::int64_t>(static_cast<std::int8_t>(expr.name.at(i)));
+            if (auto result = checked_assign_integer(elements[i], byte, loc); !result.has_value()) {
+                return std::unexpected(std::move(result).error());
+            }
+        }
+        return true;
+    }
+
+    // The evaluator's single "bind this expression to a place of this
+    // declared type", the counterpart of codegen's
+    // initialize_storage_from_expr. Five sites previously spelled out
+    // `evaluate_expr_in_context` followed by `copy_into` by hand, so an
+    // array destination -- which has neither of the two rules that reach
+    // it ([dcl.init.aggr], [dcl.init.string]) expressible as "evaluate,
+    // then copy a matching value" -- had no correct answer at any of
+    // them.
+    [[nodiscard]] std::expected<void, ConstexprError> initialize_cell_from_expr(const std::shared_ptr<Cell>& cell,
+                                                                               const Type& type, const Expr& expr,
+                                                                               const SourceLocation& loc) {
+        auto string_result = try_initialize_array_cell_from_string_literal(cell, type, expr, loc);
+        if (!string_result.has_value()) return std::unexpected(std::move(string_result).error());
+        if (std::move(string_result).value()) return {};
+        // [dcl.init]/17.5: an array destination reaches [dcl.init.aggr]
+        // or [dcl.init.string] and nothing else, so anything that is
+        // neither a braced list nor a string literal initializing an
+        // array of `char` is ill-formed -- there is no array
+        // copy-initialization to fall back on.
+        if (type.kind == TypeKind::Array && type.element != nullptr && expr.kind != ExprKind::BracedInitList) {
+            return std::unexpected(ConstexprError(loc, describe_invalid_array_initializer(type)));
+        }
+        // Codegen's mirror of this rule lives in
+        // initialize_storage_from_expr; both are needed because the
+        // evaluator never reaches codegen. `int w[6]{"hello"}` inside a
+        // constexpr function bound `const char[6]` to the `int` element
+        // `w[0]` and reported "constexpr assignment requires exactly
+        // matching types" -- a message about the *store*, naming neither
+        // operand, for what is really a destination [dcl.init.string]
+        // does not apply to.
+        if (type.kind == TypeKind::Named && is_scalar_type_name(type.name) && expr.kind != ExprKind::BracedInitList) {
+            std::optional<Type> source_type = infer_unevaluated_expr_type(expr);
+            if (source_type.has_value() && source_type->kind == TypeKind::Array) {
+                return std::unexpected(ConstexprError(
+                    loc, describe_cannot_initialize_from_array(type, *source_type,
+                                                               expr.kind == ExprKind::StringLiteral)));
+            }
+        }
+        auto value_result = evaluate_expr_in_context(expr, &type);
+        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+        return copy_into(cell, std::move(value_result).value(), loc);
+    }
+
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> bind_read_only_span(const Type& span_type, const Expr& init_expr,
                                                             const SourceLocation& loc) {
         if (span_type.kind != TypeKind::Span || !span_type.pointee) {
@@ -2111,19 +2198,25 @@ private:
             ++index;
             return initialize_cell_from_brace_args(cell, type, next.args, loc);
         }
+        // [dcl.init.aggr]/4.2 -> [dcl.init.string]: a string literal
+        // initializing a sub-object of array-of-`char` type initializes
+        // the whole sub-object and braces are not elided into it. Codegen's
+        // cursor asks this in the same position and for the same reason.
+        if (string_literal_initializes_char_array(type, next)) {
+            ++index;
+            auto string_result = try_initialize_array_cell_from_string_literal(cell, type, next, loc);
+            if (!string_result.has_value()) return std::unexpected(std::move(string_result).error());
+            return {};
+        }
         if (!type_is_elidable_aggregate(type)) {
             ++index;
-            auto value_result = evaluate_expr_in_context(next, &type);
-            if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
-            return copy_into(cell, std::move(value_result).value(), loc);
+            return initialize_cell_from_expr(cell, type, next, loc);
         }
         if (type.kind == TypeKind::Named) {
             std::optional<Type> source_type = infer_unevaluated_expr_type(next);
             if (source_type.has_value() && types_equal(*source_type, type)) {
                 ++index;
-                auto value_result = evaluate_expr_in_context(next, &type);
-                if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
-                return copy_into(cell, std::move(value_result).value(), loc);
+                return initialize_cell_from_expr(cell, type, next, loc);
             }
             // Reached only when the braces were elided, so this record
             // never passed through initialize_cell_from_brace_args and
@@ -2201,6 +2294,15 @@ private:
         if (!array_type.element) return std::unexpected(ConstexprError(loc, "malformed array type in constexpr evaluator"));
         if (!cell->data.is_array()) {
             return std::unexpected(ConstexprError(loc, "internal error: expected array storage for an array initializer"));
+        }
+        // [dcl.init.aggr]/4.2: `char w[6] = {"hello"}` is the same
+        // [dcl.init.string] initialization `char w[6] = "hello"` is, not
+        // a six-element list whose first initializer is a string. Asked
+        // before the element walk, exactly as codegen's array branch does.
+        if (args.size() == 1 && args[0] != nullptr) {
+            auto string_result = try_initialize_array_cell_from_string_literal(cell, array_type, *args[0], loc);
+            if (!string_result.has_value()) return std::unexpected(std::move(string_result).error());
+            if (std::move(string_result).value()) return {};
         }
         std::vector<std::shared_ptr<Cell>>& elements = cell->data.array.elements;
         // The element count answers "too many initializers?" directly
@@ -2421,14 +2523,10 @@ private:
             if (init.brace_args.size() != 1) {
                 return std::unexpected(ConstexprError(loc, "brace-initialization of this member requires exactly one expression"));
             }
-            auto value_result = evaluate_expr_in_context(*init.brace_args[0], &field_cell->type);
-            if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
-            return copy_into(field_cell, std::move(value_result).value(), loc);
+            return initialize_cell_from_expr(field_cell, field_type, *init.brace_args[0], loc);
         }
         if (init.expr) {
-            auto value_result = evaluate_expr_in_context(*init.expr, &field_cell->type);
-            if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
-            return copy_into(field_cell, std::move(value_result).value(), loc);
+            return initialize_cell_from_expr(field_cell, field_type, *init.expr, loc);
         }
         return {};
     }
@@ -3879,9 +3977,8 @@ private:
                         auto call_result = call_function(ctor, std::move(ctor_bindings), stmt.loc);
                         if (!call_result.has_value()) return std::unexpected(std::move(call_result).error());
                     } else if (stmt.init) {
-                        auto value_result = evaluate_expr_in_context(*stmt.init, &cell->type);
-                        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
-                        if (auto result = copy_into(cell, std::move(value_result).value(), stmt.loc); !result.has_value()) {
+                        if (auto result = initialize_cell_from_expr(cell, stmt.type, *stmt.init, stmt.loc);
+                            !result.has_value()) {
                             return std::unexpected(std::move(result).error());
                         }
                     }

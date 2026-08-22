@@ -10681,6 +10681,89 @@ void run_user_destructor_member_teardown_runtime_tests() {
     }
 }
 
+// [dcl.init.string] at namespace scope, checked by *running* the program
+// rather than by compiling it: this is the one position where the defect was
+// silent. define_global_initializers ran no store-type check at all, so
+// `char greeting[6] = "hello";` compiled cleanly and lowered to an 8-byte
+// pointer store into 6 bytes of global storage -- wrong contents and a
+// two-byte overrun past the object, straight into whatever the linker placed
+// next. A compile-time test cannot see that; only the value can.
+void run_namespace_scope_char_array_initialization_tests() {
+    {
+        std::string case_name = "namespace_scope_char_array_holds_the_literal_bytes";
+        cases_run++;
+        RunResult result = compile_and_run("char greeting[6] = \"hello\";\n"
+                                           "char padded[10] = \"hi\";\n"
+                                           "int main() {\n"
+                                           "    return static_cast<int>(greeting[1]) + static_cast<int>(padded[1]) +\n"
+                                           "           static_cast<int>(greeting[5]) + static_cast<int>(padded[9]);\n"
+                                           "}\n",
+                                           case_name);
+        expect(result.exit_code == 206,
+               case_name + ": expected 'e' (101) + 'i' (105) + two value-initialized bytes == 206, got exit " +
+                   std::to_string(result.exit_code) +
+                   " -- a global char array must hold the literal's characters, not its decayed address");
+    }
+
+    {
+        // The same position, with the literal too long: the overrun this
+        // wrote past the object was five bytes. It has to be a diagnostic,
+        // and it has to be the same diagnostic a local gets.
+        std::string case_name = "namespace_scope_char_array_too_small_is_a_diagnostic_not_an_overrun";
+        cases_run++;
+        auto result = try_compile_and_run("char greeting[3] = \"hello\";\n"
+                                          "int main() { return static_cast<int>(greeting[0]); }\n",
+                                          case_name);
+        expect(!result.has_value(),
+               case_name + ": expected a global array too small for its literal to be rejected, but it compiled "
+                           "and ran to exit " +
+                   (result.has_value() ? std::to_string(result.value().exit_code) : std::string{"?"}));
+        if (!result.has_value()) {
+            expect(std::string(result.error().what()).find("terminating null character") != std::string::npos,
+                   case_name + ": expected the diagnostic to say the count includes the terminating null "
+                               "character, got " +
+                       std::string(result.error().what()));
+        }
+    }
+
+    {
+        // A string literal's type is 'const char[N+1]' where N counts every
+        // byte of its value ([lex.string]/1), embedded null characters
+        // included. The object the literal denotes has to be that long too:
+        // lowering it through a NUL-terminated C string truncates it at the
+        // first '\0' and every later subscript then reads past the object.
+        std::string case_name = "a_string_literal_keeps_its_bytes_after_an_embedded_null";
+        cases_run++;
+        RunResult result = compile_and_run("int main() {\n"
+                                           "    char w[6] = \"a\\0b\";\n"
+                                           "    return static_cast<int>(w[0]) + static_cast<int>(w[2]) +\n"
+                                           "           static_cast<int>(w[5]);\n"
+                                           "}\n",
+                                           case_name);
+        expect(result.exit_code == 195,
+               case_name + ": expected 'a' (97) + 'b' (98) + a value-initialized byte == 195, got exit " +
+                   std::to_string(result.exit_code) +
+                   " -- an embedded null must not truncate the literal's storage");
+    }
+
+    {
+        // sizeof already reported 4 here before this change; the storage
+        // behind the literal was the part that stopped at the embedded
+        // null, so subscripting past it read whatever followed in .rodata.
+        std::string case_name = "a_string_literal_is_subscriptable_past_an_embedded_null";
+        cases_run++;
+        RunResult result = compile_and_run("int main() {\n"
+                                           "    return static_cast<int>(sizeof(\"a\\0b\")) * 100 +\n"
+                                           "           static_cast<int>(\"a\\0b\"[2]);\n"
+                                           "}\n",
+                                           case_name);
+        expect(result.exit_code == ((4 * 100 + 98) & 0xff),
+               case_name + ": expected sizeof(\"a\\0b\") == 4 and \"a\\0b\"[2] == 'b' (498, exit " +
+                   std::to_string((4 * 100 + 98) & 0xff) + "), got exit " + std::to_string(result.exit_code) +
+                   " -- the object behind the literal must be as long as the literal's type says it is");
+    }
+}
+
 int main() {
     run_test_case_files();
     run_driver_single_test_case_files();
@@ -10741,6 +10824,7 @@ int main() {
     run_equality_operator_tests();
     test_compile_to_executable_returns_engaged_expected_on_success();
     test_compile_to_executable_returns_disengaged_expected_on_failure_without_throwing();
+    run_namespace_scope_char_array_initialization_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
