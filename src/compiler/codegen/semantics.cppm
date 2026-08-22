@@ -140,13 +140,7 @@ namespace {
                 return expr.type;
             case ExprKind::TypeTrait: return named_type("bool");
             case ExprKind::CharLiteral: return named_type("char");
-            case ExprKind::StringLiteral: {
-                Type result;
-                result.kind = TypeKind::Pointer;
-                result.pointee = std::make_shared<Type>(named_type("char"));
-                result.is_mutable_pointee = false;
-                return result;
-            }
+            case ExprKind::StringLiteral: return string_literal_type(expr.name.size());
 
             case ExprKind::Identifier: {
                 if (const LocalSlot* local = find_local(expr)) return local->type;
@@ -272,6 +266,10 @@ namespace {
                     case UnaryOp::Deref: {
                         std::optional<Type> operand = infer_type(*expr.lhs);
                         if (!operand) return std::nullopt;
+                        // [expr.unary.op]/1 requires a pointer operand, which
+                        // an array reaches through [conv.array]'s array-to-
+                        // pointer conversion -- `*"abcd"` has type `const char`.
+                        if (operand->kind == TypeKind::Array) operand = decay_array_to_pointer(*operand);
                         if (expr.lhs->kind == ExprKind::Identifier && expr.lhs->name == "this" &&
                             operand->kind == TypeKind::Reference && operand->pointee) {
                             return *operand->pointee;
@@ -353,6 +351,10 @@ namespace {
                 std::optional<Type> then_type = infer_type(*expr.rhs);
                 std::optional<Type> else_type = infer_type(*expr.third);
                 if (!then_type.has_value() || !else_type.has_value()) return std::nullopt;
+                // [expr.cond]/4 applies the array-to-pointer conversion to
+                // both operands before the composite type is determined.
+                then_type = decay_array_to_pointer(*then_type);
+                else_type = decay_array_to_pointer(*else_type);
                 return types_equal(*then_type, *else_type) ? then_type : std::nullopt;
             }
 
@@ -610,7 +612,13 @@ namespace {
 {
         if (candidate_param_type.kind == TypeKind::Pointer && arg_type.kind == TypeKind::Array &&
             candidate_param_type.pointee != nullptr && arg_type.element != nullptr) {
-            return (!candidate_param_type.is_mutable_pointee || !arg_type.element->is_const_qualified) &&
+            // An array is read-only if either it or its element says so:
+            // `const char w[3]` records the qualifier on the element,
+            // while a string literal records it on the array (see
+            // string_literal_type). Either way the pointer it decays to
+            // may not be a mutable one.
+            return (!candidate_param_type.is_mutable_pointee ||
+                    !(arg_type.is_const_qualified || arg_type.element->is_const_qualified)) &&
                    types_equal(*arg_type.element, *candidate_param_type.pointee);
         }
         if (candidate_param_type.kind == TypeKind::Span && arg_type.kind == TypeKind::Array &&
@@ -1235,7 +1243,15 @@ namespace {
                 std::optional<Type> arg_type = infer_type(*args[i]);
                 if (!arg_type.has_value()) return false;
                 Type candidate_param_type = normalized_param_type(*fn, *args[i], fn->params[i + param_offset].type);
-                if (!types_equal(strip_to_value(*arg_type), strip_to_value(candidate_param_type))) return false;
+                // An array argument reaches a pointer parameter by an
+                // lvalue transformation, which [over.ics.scs] ranks as
+                // Exact Match -- so `f("abc")` is an identity match for
+                // `f(const char*)` and must outrank a candidate that
+                // needs a converting constructor.
+                if (!types_equal(strip_to_value(decay_array_to_pointer(*arg_type)),
+                                 strip_to_value(candidate_param_type))) {
+                    return false;
+                }
             }
             return true;
         };
@@ -1428,7 +1444,11 @@ namespace {
                 if (!inferred.has_value()) return false;
                 Type param_type = fn->params[i + 1].type;
                 if (param_type.kind == TypeKind::Reference && param_type.pointee != nullptr) param_type = *param_type.pointee;
-                Type arg_type = *inferred;
+                // Decay before the qualifier is stripped: an array's own
+                // const is what decides the decayed pointee's mutability
+                // ([conv.array]), and the transformation keeps Exact
+                // Match rank ([over.ics.scs]).
+                Type arg_type = decay_array_to_pointer(*inferred);
                 if (arg_type.kind == TypeKind::Reference && arg_type.pointee != nullptr) arg_type = *arg_type.pointee;
                 param_type.is_const_qualified = false;
                 arg_type.is_const_qualified = false;

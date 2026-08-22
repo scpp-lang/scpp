@@ -3230,7 +3230,7 @@ private:
                     return expr.type;
             }();
             case ExprKind::Destroy: return named_type("void");
-            case ExprKind::StringLiteral: return make_const_char_pointer_type();
+            case ExprKind::StringLiteral: return string_literal_type(expr.name.size());
             case ExprKind::Identifier:
                 return [&, this]() -> std::optional<Type> {
                     // Speculative: prefer a real binding; an identifier that
@@ -3275,7 +3275,12 @@ private:
                     if (!expr.rhs || !expr.third) return std::nullopt;
                     std::optional<Type> lhs_type = infer_unevaluated_expr_type(*expr.rhs);
                     std::optional<Type> rhs_type = infer_unevaluated_expr_type(*expr.third);
-                    if (!lhs_type.has_value() || !rhs_type.has_value() || !types_equal(*lhs_type, *rhs_type)) return std::nullopt;
+                    if (!lhs_type.has_value() || !rhs_type.has_value()) return std::nullopt;
+                    // [expr.cond]/4 applies the array-to-pointer conversion to
+                    // both operands before the composite type is determined.
+                    lhs_type = decay_array_to_pointer(*lhs_type);
+                    rhs_type = decay_array_to_pointer(*rhs_type);
+                    if (!types_equal(*lhs_type, *rhs_type)) return std::nullopt;
                     return lhs_type;
                 }();
             case ExprKind::Member:
@@ -3333,6 +3338,10 @@ private:
                         case UnaryOp::Deref: {
                             std::optional<Type> operand = infer_unevaluated_expr_type(*expr.lhs);
                             if (!operand.has_value()) return std::nullopt;
+                            // [expr.unary.op]/1 requires a pointer operand,
+                            // which an array reaches through [conv.array]'s
+                            // array-to-pointer conversion.
+                            if (operand->kind == TypeKind::Array) operand = decay_array_to_pointer(*operand);
                             if ((operand->kind == TypeKind::Pointer || operand->kind == TypeKind::Reference) && operand->pointee) {
                                 return *operand->pointee;
                             }

@@ -132,7 +132,11 @@ namespace scpp {
     return type.kind == TypeKind::Named && (type.name == "std::string" || type.name == "string");
 }
 
-[[nodiscard]] bool is_const_char_pointer_type(const Type& type) {
+[[nodiscard]] bool is_const_char_pointer_type(const Type& raw_type) {
+    // A string literal's type is an array of `const char` ([lex.string]),
+    // and decays to `const char*` -- the two are indistinguishable at
+    // every use this predicate guards, so ask about the decayed type.
+    Type type = decay_array_to_pointer(raw_type);
     return type.kind == TypeKind::Pointer && type.pointee != nullptr && type.pointee->kind == TypeKind::Named &&
            type.pointee->name == "char" && !type.is_mutable_pointee;
 }
@@ -3293,6 +3297,12 @@ struct ConvertingConstructorBinding {
                                /*report_errors=*/true);
                 }
                 std::optional<Type> returned_type = infer_expr_type(*term.return_value, body, signatures);
+                // [stmt.return]/2 implicitly converts the operand to the
+                // return type, and the array-to-pointer conversion
+                // ([conv.array]) is part of that: `return "text/html";` from
+                // a `const char*` function returns the decayed pointer, not
+                // the string-literal array object itself.
+                if (returned_type.has_value()) returned_type = decay_array_to_pointer(*returned_type);
                 // ch05 §5.14: check_generic_type_methods_once
                 // (movecheck/monomorphize.cppm) builds one synthetic,
                 // witness-substituted "check" class *per method* of a

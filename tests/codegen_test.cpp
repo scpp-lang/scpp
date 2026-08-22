@@ -4445,8 +4445,179 @@ void test_auto_reference_to_a_reference_returning_method_collapses() {
                (ir_result.has_value() ? std::string{} : ir_result.error().message));
 }
 
+
+// [lex.string]/1 gives a string literal the type `const char[N+1]` -- an
+// array object, not a pointer to one. scpp typed it `const char*` at
+// inference in all three implementations that ask (codegen's infer_type,
+// movecheck's infer_expr_type and the constant evaluator's
+// infer_unevaluated_expr_type), so `sizeof` never saw the array and answered
+// the pointer's width instead. The tell is that the answer did not depend on
+// the literal at all: "abcd", "x" and "" all reported 8. Folding four
+// different lengths into one number pins that the size now tracks the
+// content, which a fix that merely returned 5 for every literal would fail.
+void test_sizeof_a_string_literal_counts_its_bytes_plus_the_terminator() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "constexpr int sizes() {\n"
+        "    return static_cast<int>(sizeof(\"abcd\")) * 1000 +\n"
+        "           static_cast<int>(sizeof(\"x\")) * 100 +\n"
+        "           static_cast<int>(sizeof(\"\")) * 10 +\n"
+        "           static_cast<int>(sizeof(\"ab\" \"cd\"));\n"
+        "}\n"
+        "int main() {\n"
+        "    constexpr int folded = sizes();\n"
+        "    return folded;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "string_literal_sizeof: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+    if (!ir_result.has_value()) return;
+    expect(ir_result.value().find("5215") != std::string::npos,
+           "string_literal_sizeof: expected sizeof(\"abcd\")==5, sizeof(\"x\")==2, sizeof(\"\")==1 and "
+           "sizeof(\"ab\" \"cd\")==5 to fold to 5215, so a literal's size tracks its own length rather "
+           "than reporting a pointer's width");
+}
+
+// The constant evaluator is a separate implementation of type inference from
+// codegen's, so it can hold the old answer on its own -- an array bound is
+// the position where only it is consulted. `char w[sizeof("abcd")]` must be
+// a five-element array; while the literal was a pointer it was an eight.
+void test_constant_evaluator_sizes_a_string_literal_as_an_array_too() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "int main() {\n"
+        "    char w[sizeof(\"abcd\")];\n"
+        "    return static_cast<int>(sizeof(w));\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "string_literal_sizeof_bound: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+    if (!ir_result.has_value()) return;
+    expect(ir_result.value().find("[5 x i8]") != std::string::npos,
+           "string_literal_sizeof_bound: expected an array bound of sizeof(\"abcd\") to lower to "
+           "[5 x i8], got " + ir_result.value().substr(0, 0) + "the wrong bound");
+}
+
+// [lex.string]/1 also makes the literal an *lvalue* designating that array
+// object, so it can be subscripted like any other array -- and, being an
+// array rather than a raw pointer, without the `[[scpp::unsafe]]` block ch05
+// requires for pointer arithmetic. Both spellings are pinned here because
+// they exercise different paths: the subscript needs codegen_lvalue to have a
+// StringLiteral case at all, and the range-for needs the array to survive
+// `auto&&` range binding rather than decaying at deduction.
+void test_a_string_literal_is_an_lvalue_array_that_can_be_subscripted() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "int main() {\n"
+        "    int seen = 0;\n"
+        "    for (char ch : \"abcd\") { seen += 1; }\n"
+        "    return static_cast<int>(\"abcd\"[1]) * 1000 + seen;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "string_literal_lvalue: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+}
+
+// The other half of the rule: an array decays to a pointer wherever a
+// pointer is wanted ([conv.array]), so making the literal an array must not
+// stop it initializing a `const char*`, being deduced through `auto` or a
+// generic parameter, or reaching `*` and `?:`. Each of these is a separate
+// implementation of the same conversion -- [dcl.type.auto.deduct]/4 and
+// [temp.deduct.call]/2 for the two deductions, [expr.unary.op]/1 for the
+// dereference and [expr.cond]/4 for the conditional -- and each answered
+// "array" until it was taught to decay. `auto` deducing eight bytes is the
+// point: it deduces the pointer, not the array.
+void test_a_string_literal_still_decays_where_a_pointer_is_wanted() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "template<typename T>\n"
+        "int width(T p) { return static_cast<int>(sizeof(p)); }\n"
+        "int main() {\n"
+        "    const char* p = \"abcd\";\n"
+        "    auto s = \"abcd\";\n"
+        "    const char* picked = true ? \"const \" : \"\";\n"
+        "    return static_cast<int>(sizeof(s)) * 1000 + width(\"abcd\") * 100 +\n"
+        "           static_cast<int>(sizeof(*\"abcd\")) * 10 + (p == picked ? 1 : 2);\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "string_literal_decay: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+}
+
+// A conditional whose arms are two literals of *different* length is the
+// case [expr.cond]/4 exists for: without applying array-to-pointer to both
+// operands first, `const char[7]` and `const char[1]` are simply not the
+// same type and the whole expression is rejected. This shape is written in
+// src/compiler/parser.cppm itself, so it is not hypothetical.
+void test_conditional_arms_of_different_literal_lengths_agree_after_decay() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "int main() {\n"
+        "    bool flag = true;\n"
+        "    const char* prefix = flag ? \"const \" : \"\";\n"
+        "    return prefix == nullptr ? 1 : 0;\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "conditional_literal_arms: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+}
+
+// [over.ics.scs] ranks array-to-pointer as an *lvalue transformation* with
+// Exact Match rank, so a literal reaching `const char*` by decay must still
+// beat a user-defined conversion. #488 taught the resolver to diagnose
+// genuine ambiguity, and its identity test compared the argument's type as
+// written -- once the literal became an array, `S{"abcd"}` stopped being an
+// identity match for `S(const char*)` and tied with `S(const S&)`, which is
+// reported as ambiguous. The two constructors are the shape std::string has.
+void test_a_literal_argument_decays_at_exact_match_rank() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "class S {\n"
+        "public:\n"
+        "    virtual ~S() {}\n"
+        "    S(const char* text) { n_ = 1; }\n"
+        "    S(const S& other) { n_ = other.n_; }\n"
+        "    int n() const { return n_; }\n"
+        "private:\n"
+        "    int n_{};\n"
+        "};\n"
+        "int main() {\n"
+        "    S s{\"abcd\"};\n"
+        "    return s.n();\n"
+        "}\n");
+    expect(ir_result.has_value(),
+           "literal_exact_match_rank: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+}
+
+// [stmt.return]/2 converts the operand to the return type, and [conv.array]
+// is part of that conversion. The lifetime check on a returned pointer
+// compared the returned expression's type against the declared return type
+// directly, so an array-typed literal did not match `const char*` and every
+// `return "text/html";` in a `const char*` function was rejected.
+void test_returning_a_string_literal_from_a_pointer_returning_function() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "const char* kind(int n) {\n"
+        "    if (n == 0) return \"text/html\";\n"
+        "    return \"application/octet-stream\";\n"
+        "}\n"
+        "int main() { return kind(0) == nullptr ? 1 : 0; }\n");
+    expect(ir_result.has_value(),
+           "return_literal_decay: expected IR, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+}
+
 int main() {
     run_test_case_files();
+    test_sizeof_a_string_literal_counts_its_bytes_plus_the_terminator();
+    test_constant_evaluator_sizes_a_string_literal_as_an_array_too();
+    test_a_string_literal_is_an_lvalue_array_that_can_be_subscripted();
+    test_a_string_literal_still_decays_where_a_pointer_is_wanted();
+    test_conditional_arms_of_different_literal_lengths_agree_after_decay();
+    test_a_literal_argument_decays_at_exact_match_rank();
+    test_returning_a_string_literal_from_a_pointer_returning_function();
+
     test_long_binary_chain_generates_without_re_walking_its_prefix();
     test_member_type_is_usable_through_its_qualified_name();
     test_member_type_shadows_a_namespace_scope_type_inside_its_own_body();

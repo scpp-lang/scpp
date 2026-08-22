@@ -2363,7 +2363,28 @@ void test_auto_reference_cannot_outlive_or_escape_its_lender() {
                moved_message.value_or(""));
 }
 
+// [lex.string]/1 makes a string literal an array of `const char`. Giving it
+// that type must not open a const hole: `char* p` must still be unable to
+// point at a literal's bytes. The check that refuses this
+// (check_raw_pointer_assignment) only ever examined *pointer* sources, so
+// once the literal became an array it would have skipped that check
+// entirely and `char* p = "abcd";` would have started compiling. This
+// therefore guards behaviour that must *not* change: it passes before the
+// fix as well as after, and its value is that deleting the array-to-pointer
+// decay from check_raw_pointer_assignment makes it fail.
+void test_a_mutable_raw_pointer_cannot_point_at_a_string_literal() {
+    cases_run++;
+    std::optional<std::string> message = move_error_message(
+        "int main() {\n"
+        "    char* p = \"abcd\";\n"
+        "    return p == nullptr ? 1 : 0;\n"
+        "}\n");
+    expect(message.has_value(),
+           "mutable_pointer_to_literal: expected a rejection, got acceptance");
+}
+
 int main() {
+    test_a_mutable_raw_pointer_cannot_point_at_a_string_literal();
     run_test_case_files();
     test_literal_adoption_covers_every_scalar_type();
     test_scalar_model_lists_exactly_the_twenty_names();
