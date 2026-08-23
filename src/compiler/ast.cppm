@@ -420,6 +420,45 @@ class AlignmentSpecifier {
     return array_size >= static_cast<std::int64_t>(literal_byte_count) + 1;
 }
 
+// [dcl.ptr]/1 with [conv.qual]: "pointer to const T" has exactly one
+// internal spelling here -- Pointer{pointee = an *unqualified* T,
+// is_mutable_pointee = false}, the shape parse_type builds for a written
+// `const T*`. The qualifier is never left on the pointee instead.
+// types_equal compares both fields, so the two spellings of that one
+// type would not compare equal, and `const int* p = &c;` would be
+// rejected against its own type. Normalizing here, in the one function
+// every constructed pointer type goes through, is what keeps the
+// question from having to be re-answered at each construction site.
+[[nodiscard]] inline Type pointer_to(Type pointee) {
+    Type result{};
+    result.kind = TypeKind::Pointer;
+    result.is_mutable_pointee = !pointee.is_const_qualified;
+    pointee.is_const_qualified = false;
+    result.pointee = std::make_shared<Type>(std::move(pointee));
+    return result;
+}
+
+// [expr.ref]/4 and [expr.sub]/1: a subobject reached through a const
+// object is itself const. Both movecheck's and codegen's type inference
+// call this rather than each spelling the propagation out, because a
+// disagreement between the two about whether `s.a` of a `const S s` is
+// const is exactly a disagreement about whether `char* p = s.a;` is
+// accepted.
+//
+// A reference member is not a subobject that inherits the qualifier: it
+// denotes some other object entirely, and its own mutability is what
+// governs -- so the qualifier is taken from the reference, not the base.
+[[nodiscard]] inline Type member_access_type(const Type& declared, bool base_is_const) {
+    if (declared.kind == TypeKind::Reference && declared.pointee != nullptr) {
+        Type referent{*declared.pointee};
+        if (!declared.is_mutable_ref) referent.is_const_qualified = true;
+        return referent;
+    }
+    Type result{declared};
+    if (base_is_const) result.is_const_qualified = true;
+    return result;
+}
+
 // [conv.array]: an array lvalue converts to a pointer to its first
 // element. The array is read-only if either it or its element carries
 // the qualifier -- `const char w[3]` records it on the element, while a
@@ -431,11 +470,9 @@ class AlignmentSpecifier {
 // requiring a real user-defined conversion may outrank.
 [[nodiscard]] inline Type decay_array_to_pointer(Type type) {
     if (type.kind != TypeKind::Array || type.element == nullptr) return type;
-    Type decayed{};
-    decayed.kind = TypeKind::Pointer;
-    decayed.pointee = type.element;
-    decayed.is_mutable_pointee = !(type.is_const_qualified || type.element->is_const_qualified);
-    return decayed;
+    Type element{*type.element};
+    if (type.is_const_qualified) element.is_const_qualified = true;
+    return pointer_to(std::move(element));
 }
 
 // ch06 §6: the canonical internal spelling of `nullptr`'s type. Source
@@ -988,6 +1025,22 @@ class Expr {
         if (!types_equal(a.function_params[i], b.function_params[i])) return false;
     }
     return true;
+}
+
+// [conv.lval]/1 with [dcl.init]: initialization and assignment copy a
+// *value* into an object. Top-level cv-qualification belongs to the
+// object, not to the value, so it never takes part in the "do these two
+// types match?" question those positions ask -- `constexpr int x = 5;`
+// initializes an `int` object from an `int` prvalue, and `int v = c;`
+// for a `const int c` reads a plain `int`.
+//
+// Only the *top* level is dropped: a `const int*` and an `int*` are
+// genuinely different types ([conv.qual]), and that difference is the
+// whole point of the const-escape checks.
+[[nodiscard]] inline bool types_equal_ignoring_top_level_const(Type a, Type b) {
+    a.is_const_qualified = false;
+    b.is_const_qualified = false;
+    return types_equal(a, b);
 }
 
 enum class StmtKind {
@@ -3561,6 +3614,7 @@ public:
 [[nodiscard]] inline std::string describe_type_brief_pointer(const Type& type) {
     if (type.pointee == nullptr) return "*?";
     std::string result{""};
+    if (!type.is_mutable_pointee) result += "const ";
     result += describe_type_brief(*type.pointee);
     result += "*";
     return result;
@@ -3569,6 +3623,7 @@ public:
 [[nodiscard]] inline std::string describe_type_brief_array(const Type& type) {
     if (type.element == nullptr) return "?[]";
     std::string result{""};
+    if (type.is_const_qualified && !type.element->is_const_qualified) result += "const ";
     result += describe_type_brief(*type.element);
     result += "[";
     result += std::to_string(type.array_size);

@@ -103,6 +103,13 @@ struct LocalDecl {
     // reject reassignment after the single initializing Assign/Declare a
     // const local's own VarDecl lowers to.
     bool is_const = false;
+    // Declared with the `constexpr` specifier specifically. Implied by
+    // `is_const` ([dcl.constexpr]/1 makes such an object const), kept
+    // apart from it only so a diagnostic names the keyword the source
+    // actually spells: "'w' is declared const at line 2" pointed at a
+    // line reading `constexpr char w[6]{...}` sends the reader looking
+    // for a `const` that is not there.
+    bool is_constexpr = false;
     // ch05 §5.12: initialized with a lambda that has at least one
     // by-reference capture. Such a closure keeps those borrows alive
     // until its own last use / ScopeExit, so reference-liveness treats
@@ -718,6 +725,7 @@ private:
                 decl.decl_loc = stmt.loc;
                 decl.is_static_lifetime = stmt.is_static_local;
                 decl.is_const = stmt.is_const || stmt.is_constexpr;
+                decl.is_constexpr = stmt.is_constexpr;
                 if (stmt.init != nullptr && stmt.init->kind == ExprKind::Lambda) {
                     for (const LambdaCapture& capture : stmt.init->lambda_captures) {
                         if (capture.by_reference) {

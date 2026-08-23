@@ -3826,6 +3826,20 @@ private:
                 [[scpp::unsafe]] {
                         *out_bare_const = true;
                 }
+                // ...and on the *type* as well, not only on the
+                // declaration. Stmt::is_const answers "may this variable
+                // be reassigned?", which is a different question from
+                // "what is this variable's type?" -- and only the first
+                // one used to be recorded. Every consumer that asks the
+                // type instead (infer_expr_type, Codegen::infer_type,
+                // decay_array_to_pointer, describe_type_brief) therefore
+                // saw a plain, mutable `T`, which is why `char* p = w;`
+                // for a `const char w[6]` handed out a mutable handle to
+                // a const object and `int* p = &g;` did the same for a
+                // `const` global. [dcl.type.cv]/1 puts `const` on the
+                // type; the spec adopts no clause modifying that, so the
+                // plain C++ rule applies and the type is where it goes.
+                type.is_const_qualified = true;
                 return type;
             }
             if (allow_const_qualified_value_type) {
@@ -9373,6 +9387,13 @@ private:
                              _msg_7653));
             }
         }
+        // [dcl.constexpr]/1: "applied to the definition of a variable
+        // [constexpr] implies const". Recorded on the type, like the
+        // written `const` -- otherwise `constexpr char w[6]{"hello"};
+        // char* p = w;` decayed to a *mutable* `char*` and wrote through
+        // a constexpr object, while the identically-meaning `const char
+        // w[6]` did not.
+        if (stmt->is_constexpr) stmt->type.is_const_qualified = true;
         if (((stmt->is_const && !stmt->is_static_local) || stmt->is_constexpr) && stmt->init == nullptr && !stmt->has_ctor_args) {
             {
                 std::string _msg_7660{"a constant variable must be initialized ('"};

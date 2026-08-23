@@ -47,6 +47,7 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
                                            std::string_view context,
                                            const Type* destination_type = nullptr);
 [[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
+[[nodiscard]] bool place_is_read_only(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
                          const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> validate_subscript_expr(const Expr& expr, const DataflowState& state, const Body& body,
@@ -1027,67 +1028,21 @@ std::expected<void, DataflowError> reject_lifetime_group_state_embedding(const E
 // Determines whether `expr` (a borrow-source place -- the same shape
 // resolve_borrow_source_root accepts) is only reachable *read-only*,
 // i.e. whether obtaining a *mutable* `T&`/`T*` from it must be rejected.
-// This is the "projection chain's const-reachability" resolve_borrow_
-// source_root's own callers need but that function alone doesn't answer
-// (it only resolves *which root* to check for borrow conflicts, not
-// whether the path to it crossed a read-only step) -- used to reject
-// binding a `T&` (apply_reference_binding) or passing a `T&` call
-// argument (apply_reference_argument) through a `const T&`/`std::span
-// <const T>`/`const T*` anywhere along the chain, and to decide whether
-// `&expr` (ch05 §5.7) may produce a mutable `T*` or only a `const T*`.
-// Once a chain crosses a read-only step, everything beyond it stays
-// read-only: a struct field/array element can never itself be a
-// reference or span (ch04.1), so there's no way for a later `.field`/
-// `[index]` step to "regain" mutability -- only a chain that never
-// crosses one at all is mutable.
+// The "projection chain's const-reachability" resolve_borrow_source_root's
+// own callers need but that function alone doesn't answer (it only
+// resolves *which root* to check for borrow conflicts, not whether the
+// path to it crossed a read-only step) -- used to reject binding a `T&`
+// (apply_reference_binding) or passing a `T&` call argument
+// (apply_reference_argument) through a `const T&`/`std::span<const T>`/
+// `const T*` anywhere along the chain, and to decide whether `&expr`
+// (ch05 §5.7) may produce a mutable `T*` or only a `const T*`.
+//
+// This was a second, independent answer to exactly the question
+// assignment_target_is_read_only was already answering, and the two had
+// drifted apart in five places -- see place_is_read_only (calls.cppm),
+// which is now the single definition both names denote.
 [[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures) {
-    switch (expr.kind) {
-        case ExprKind::Identifier: {
-            std::optional<LocalId> local = body.local_of(expr);
-            if (!local.has_value()) return false; // unknown name: left to codegen's own check
-            if (body.decl(*local).is_const) return true;
-            const Type& type = body.type_of(*local);
-            if (is_reference(type) || is_span(type)) {
-                return !type.is_mutable_ref;
-            }
-            return false; // an owned local (or a by-value parameter) is fully mutable to its owner
-        }
-
-        case ExprKind::Member:
-        case ExprKind::Subscript:
-            return is_read_only_reachable(*expr.lhs, body, signatures);
-
-        case ExprKind::Unary: {
-            if (is_explicit_star_this(expr)) return is_read_only_reachable(*expr.lhs, body, signatures);
-            if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
-                return is_read_only_reachable(*expr.lhs, body, signatures);
-            }
-            if (expr.unary_op != UnaryOp::Deref) return false;
-            std::optional<Type> operand_type = infer_expr_type(*expr.lhs, body, signatures);
-            if (!operand_type.has_value()) return false;
-            if (operand_type->kind == TypeKind::Pointer) return !operand_type->is_mutable_pointee;
-            return false;
-        }
-
-        case ExprKind::Call: {
-            // The call's *own* declared return type is authoritative --
-            // it doesn't matter whether the elided argument behind it was
-            // itself mutable or read-only-reachable: a signature that
-            // promises `const T&` back hands back a read-only view
-            // regardless (exactly like a plain `const T&`-typed
-            // Identifier above), and a signature promising `T&` could
-            // only have been called successfully with a mutable-
-            // reachable argument in the first place (apply_reference_
-            // argument already enforces that at the call site).
-            CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
-            const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
-            if (sig == nullptr) return false;
-            return !sig->return_type.is_mutable_ref;
-        }
-
-        default:
-            return false;
-    }
+    return place_is_read_only(expr, body, signatures);
 }
 
 // Handles `&expr` (UnaryOp::AddressOf, ch05 §5.7) used as a plain value.

@@ -376,6 +376,11 @@ private:
 
     std::optional<Type> infer_type(const Expr& expr);
 
+    // The lvalue half of infer_type -- see the [conv.lval] note on
+    // movecheck's infer_expr_type/infer_expr_lvalue_type pair, which this
+    // deliberately mirrors so the two copies keep answering alike.
+    std::optional<Type> infer_lvalue_type(const Expr& expr);
+
     // Whether `arg` produces a genuine rvalue of exactly `expected_type`
     // -- mirrors movecheck's own produces_rvalue_of_type (ch03/ch05
     // §5.11), used only for the `T&&`/`Concept auto&&` branch of
