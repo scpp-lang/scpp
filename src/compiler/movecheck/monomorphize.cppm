@@ -5648,6 +5648,16 @@ private:
                     if (is_synthesized_for_range_storage(stmt.var_name) && stmt.is_const) {
                         resolved.is_mutable_ref = false;
                     }
+                    // [dcl.type.auto.deduct]/4 deduces the type; the
+                    // declaration's own `const` then qualifies it
+                    // ([dcl.type.cv]/1). Without this, `const auto c =
+                    // 5;` produced a plain `int` type and the qualifier
+                    // survived only on Stmt::is_const -- the very split
+                    // representation #492 removed for a written type, so
+                    // every type-level consumer saw a mutable `int`.
+                    if (stmt.is_const && resolved.kind != TypeKind::Reference && !is_span(resolved)) {
+                        resolved.is_const_qualified = true;
+                    }
                     stmt.type = resolved;
                     refine_declared_type(stmt, body, resolved);
                 } else if (stmt.type.kind == TypeKind::Reference && stmt.type.pointee != nullptr &&

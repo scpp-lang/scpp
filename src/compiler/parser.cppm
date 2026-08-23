@@ -3452,17 +3452,46 @@ private:
         return {};
     }
 
+    // [dcl.ptr]/1 + [dcl.type.cv]/1: applies a written `const` to the base
+    // type and then consumes the declarator's `*` levels, each of which
+    // may itself be followed by its own `const` (`int* const p` -- a const
+    // *pointer* to a mutable int, as distinct from `const int* p`).
+    //
+    // `leading_const` is the west-const spelling parse_type() already
+    // consumed before this type; a trailing `const` accepted right here is
+    // the east-const spelling of the very same thing (`int const` ==
+    // `const int`, [dcl.type.cv]/1 -- the two orders are one type, not
+    // two). Both land on the *base* type's own `is_const_qualified`, so
+    // there is one representation for one qualifier rather than a `bool`
+    // travelling beside the type.
+    //
+    // Every pointer level is built by ast.cppm's `pointer_to`, which owns
+    // the single canonical spelling of `const T*` (qualifier on the
+    // pointer's `is_mutable_pointee`, never left on the pointee) -- this
+    // used to be open-coded twice in this function with a
+    // `first_star && const_qualifies_first_pointer` guard, which is the
+    // same reading, arrived at separately. `const int**` still means
+    // "pointer to (pointer to const int)": the qualifier is consumed into
+    // the innermost level and the outer `pointer_to` sees an already-
+    // unqualified pointee.
+    [[nodiscard]] std::expected<Type, ParseError> parse_pointer_suffixes(Type type, bool leading_const) {
+        if (leading_const) type.is_const_qualified = true;
+        if (match(TokenKind::KwConst)) type.is_const_qualified = true;
+        while (match(TokenKind::Star)) {
+            type = pointer_to(std::move(type));
+            if (match(TokenKind::KwConst)) type.is_const_qualified = true;
+        }
+        return type;
+    }
+
     // Parses a base type name (`int`, `bool`, `std::unique_ptr<T>`, or a
     // known struct name) followed by zero or more `*` for pointer levels.
     // Array suffixes (`[N]`) are handled separately by parse_array_suffix,
     // since in C-style declarators the array size follows the *declared
     // name*, not the type. `const_qualifies_first_pointer` is set by
     // parse_type() when it saw a leading `const` immediately before this
-    // call: it makes only the *innermost* (first-parsed) `*` level's
-    // pointee const (`const T*`, or `const T**`'s inner pointer -- matching
-    // real C++'s own reading of `const` as binding to the base type, not
-    // an outer pointer level), never a later/outer one, mirroring how
-    // real C++ reads `const int**` as "pointer to (pointer to const int)".
+    // call; see parse_pointer_suffixes for how it (and the east-const
+    // spelling) are applied.
     [[nodiscard]] std::expected<Type, ParseError> parse_unqualified_type(bool const_qualifies_first_pointer = false) {
         if (std::optional<std::string> std_builtin_scalar = peek_std_qualified_builtin_scalar_type_name();
             std_builtin_scalar.has_value()) {
@@ -3717,17 +3746,7 @@ private:
             return std::unexpected(ParseError(tok.line, tok.column, "expected a type name"));
         }
 
-        bool first_star = true;
-        while (match(TokenKind::Star)) {
-            auto pointee = std::make_shared<Type>(type);
-            Type pointer_type{};
-            pointer_type.kind = TypeKind::Pointer;
-            pointer_type.pointee = std::move(pointee);
-            pointer_type.is_mutable_pointee = !(first_star && const_qualifies_first_pointer);
-            type = pointer_type;
-            first_star = false;
-        }
-        return type;
+        return parse_pointer_suffixes(std::move(type), const_qualifies_first_pointer);
     }
 
     // Parses a full type, including the borrow-checking sugar from ch03:
@@ -3749,41 +3768,59 @@ private:
     // and, like a reference's `is_mutable_ref`, properly tracked: `const
     // T*` and `T*` are genuinely distinct types (ch05 §5.7, ch08 Q9),
     // not unified the way an earlier draft of that section assumed.
-    // A bare `const T` (no `&`/`&&`/`*` at all) is rejected *unless* the
-    // caller opts in: either via `out_bare_const` (non-null), which
-    // parse_var_decl uses for a `const`-qualified local variable (spec
-    // ch05/ch06 -- an immutable local, distinct from a type-level
-    // qualifier), or via `allow_const_qualified_value_type`, which
-    // parse_template_type_argument uses so `const T` can appear as a
-    // generic/template type argument. Every other caller (a parameter,
-    // struct/class field, or return type) keeps the original rejection.
-    [[nodiscard]] std::expected<Type, ParseError> parse_type(bool allow_rvalue_ref = false, bool* out_bare_const = nullptr,
-                    bool allow_const_qualified_value_type = false) {
+    // A bare `const T` (no `&`/`&&`/`*` at all) is a `const`-qualified
+    // value type, accepted in every position a type may be written:
+    // [dcl.type.cv]/1 puts the qualifier on the type, and the spec adopts
+    // no clause narrowing where it may appear, so a parameter, data
+    // member, return type or template argument may all carry it exactly
+    // as in ISO C++. `out_bare_const` (non-null) additionally *reports*
+    // the qualifier to parse_var_decl, which still records it on
+    // Stmt::is_const for the deduced-`auto` case, where the type this
+    // function returns is only the `auto` placeholder.
+    //
+    // This used to be three mutually exclusive answers to one question:
+    // `out_bare_const` non-null returned an *unqualified* type and set
+    // the flag, `allow_const_qualified_value_type` set the qualifier, and
+    // every other caller got a parse error. #492 fixed the first arm by
+    // also setting the qualifier; the third arm is why `int f(const int
+    // v)`, `const int f()` and `struct S { const int x; }` -- all plain,
+    // unremarkable C++ -- were parse errors, and why a half-represented
+    // qualifier could disagree with itself depending on which position it
+    // was written in.
+    [[nodiscard]] std::expected<Type, ParseError> parse_type(bool allow_rvalue_ref = false, bool* out_bare_const = nullptr) {
         // Types are checked on the finished type rather than by counting
         // recursion, because the parser builds pointer and array types
         // with loops -- `int` followed by two thousand stars costs the
         // parser no depth at all and still produces a two-thousand-link
         // chain for every later pass to recurse over.
-        auto type_result = parse_type_inner(allow_rvalue_ref, out_bare_const, allow_const_qualified_value_type);
+        auto type_result = parse_type_inner(allow_rvalue_ref, out_bare_const);
         if (type_result.has_value() && type_nesting_exceeds(type_result.value(), kMaxNestingDepth)) {
             return std::unexpected(nesting_too_deep_error("type"));
         }
         return type_result;
     }
 
-    [[nodiscard]] std::expected<Type, ParseError> parse_type_inner(bool allow_rvalue_ref, bool* out_bare_const,
-                    bool allow_const_qualified_value_type) {
+    [[nodiscard]] std::expected<Type, ParseError> parse_type_inner(bool allow_rvalue_ref, bool* out_bare_const) {
         bool has_const_prefix = match(TokenKind::KwConst);
         auto type_result = parse_unqualified_type(/*const_qualifies_first_pointer=*/has_const_prefix);
         if (!type_result.has_value()) return std::unexpected(std::move(type_result).error());
         Type type = std::move(type_result).value();
 
         if (match(TokenKind::Amp)) {
+            // A reference records its referent's constness in
+            // `is_mutable_ref`, never as a qualifier on the pointee --
+            // the same single-spelling invariant `pointer_to` keeps for
+            // pointers, and for the same reason (types_equal compares
+            // both, so two spellings of `const T&` would not compare
+            // equal). Applies to the east spelling too: `int const& r`
+            // arrives here with the qualifier already on `type`.
+            bool referent_is_const = has_const_prefix || type.is_const_qualified;
+            type.is_const_qualified = false;
             auto pointee = std::make_shared<Type>(std::move(type));
             Type reference_type{};
             reference_type.kind = TypeKind::Reference;
             reference_type.pointee = std::move(pointee);
-            reference_type.is_mutable_ref = !has_const_prefix;
+            reference_type.is_mutable_ref = !referent_is_const;
             return reference_type;
         }
 
@@ -3798,7 +3835,7 @@ private:
                                   _msg_3250));
                 }
             }
-            if (has_const_prefix) {
+            if (has_const_prefix || type.is_const_qualified) {
                 const Token& tok = peek();
                 {
                     std::string _msg_3257{"'const' cannot qualify an rvalue reference ('const T&&') -- an "};
@@ -3817,41 +3854,30 @@ private:
             return reference_type;
         }
 
-        if (has_const_prefix && type.kind != TypeKind::Pointer) {
-            if (out_bare_const != nullptr) {
-                // out_bare_const is a raw bool* known non-null here (the
-                // `!= nullptr` check just above); self-hosting still
-                // requires an explicit `[[scpp::unsafe]] { }` to
-                // dereference any raw pointer (ch01 §1.3/ch02).
-                [[scpp::unsafe]] {
-                        *out_bare_const = true;
-                }
-                // ...and on the *type* as well, not only on the
-                // declaration. Stmt::is_const answers "may this variable
-                // be reassigned?", which is a different question from
-                // "what is this variable's type?" -- and only the first
-                // one used to be recorded. Every consumer that asks the
-                // type instead (infer_expr_type, Codegen::infer_type,
-                // decay_array_to_pointer, describe_type_brief) therefore
-                // saw a plain, mutable `T`, which is why `char* p = w;`
-                // for a `const char w[6]` handed out a mutable handle to
-                // a const object and `int* p = &g;` did the same for a
-                // `const` global. [dcl.type.cv]/1 puts `const` on the
-                // type; the spec adopts no clause modifying that, so the
-                // plain C++ rule applies and the type is where it goes.
-                type.is_const_qualified = true;
-                return type;
-            }
-            if (allow_const_qualified_value_type) {
-                type.is_const_qualified = true;
-                return type;
-            }
-            const Token& tok = peek();
-            {
-                std::string _msg_3281{"'const' is only supported directly before a reference type ('const T&') "};
-                _msg_3281 += "or a pointer type ('const T*') in this version";
-                return std::unexpected(ParseError(tok.line, tok.column,
-                              _msg_3281));
+        // [dcl.type.cv]/1: the qualifier belongs on the type, in every
+        // position a type may be written. `parse_pointer_suffixes` has
+        // already applied it (from either the west `const T` spelling
+        // whose token `has_const_prefix` records, or the east `T const`
+        // one) -- so all that is left here is to *report* it through
+        // `out_bare_const` for parse_var_decl, whose deduced-`auto`
+        // path has no concrete type to carry it on yet.
+        //
+        // Nothing is rejected: the previous three-way split (report and
+        // return unqualified / qualify / parse error) was one question
+        // answered three ways depending on which caller asked, which is
+        // how `int f(const int v)` came to be a parse error while `const
+        // int v = ...;` was not. The `allow_const_qualified_value_type`
+        // opt-in that arm needed is gone with it, and so is the
+        // `type.kind != TypeKind::Pointer` guard: `const T*` already carries
+        // its qualifier as `is_mutable_pointee`, so `is_const_qualified`
+        // is unset on it and there is nothing left to report.
+        if (out_bare_const != nullptr && type.is_const_qualified) {
+            // out_bare_const is a raw bool* known non-null here (the
+            // `!= nullptr` check just above); self-hosting still
+            // requires an explicit `[[scpp::unsafe]] { }` to
+            // dereference any raw pointer (ch01 §1.3/ch02).
+            [[scpp::unsafe]] {
+                    *out_bare_const = true;
             }
         }
         return type;
@@ -3883,6 +3909,27 @@ private:
     // with zero new logic; only monomorphization (consulting
     // out_generic_concept, recorded on Param) needs to know this
     // parameter was ever generic at all.
+    // [dcl.fct]/5: "any top-level cv-qualifiers modifying a parameter type
+    // are deleted when forming the function type". The single place a
+    // parameter's declared type is committed, so that the qualifier is
+    // guaranteed gone from `Param::type` -- i.e. from the function's
+    // *type* -- everywhere it is consumed (overload resolution,
+    // redeclaration matching, mangling, `.scppm` payloads), rather than
+    // each of those consumers having to remember to ignore it.
+    //
+    // The parameter object itself is still `const` inside the body; that
+    // is what `Param::is_const` records, and build_mir puts it on the
+    // parameter's LocalDecl exactly as a `const` local's is recorded.
+    // Only the *top* level is deleted -- `const int*` (pointer to const)
+    // and `const int&` keep their qualifier, which is not a top-level one.
+    void set_param_declared_type(Param& param, Type type) {
+        if (type.kind != TypeKind::Reference && type.is_const_qualified) {
+            param.is_const = true;
+            type.is_const_qualified = false;
+        }
+        param.type = std::move(type);
+    }
+
     [[nodiscard]] std::expected<Type, ParseError> parse_param_type(std::string& out_generic_concept) {
         out_generic_concept.clear();
         std::size_t const_offset = static_cast<std::size_t>(check(TokenKind::KwConst) ? 1 : 0);
@@ -3922,6 +3969,10 @@ private:
         bool has_const = match(TokenKind::KwConst);
         if (next_is_identifier_then_auto) advance(); // the concept name itself
         if (auto _r = expect(TokenKind::KwAuto, "'auto'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        // East spelling: `auto const v` / `Concept auto const& v` means
+        // exactly what the west one does ([dcl.type.cv] places no
+        // ordering requirement on a decl-specifier-seq).
+        if (match(TokenKind::KwConst)) has_const = true;
         out_generic_concept = concept_name;
 
         Type type{};
@@ -3958,17 +4009,14 @@ private:
             reference_type.is_mutable_ref = !has_const;
             return reference_type;
         }
-        if (has_const) {
-            const Token& tok = peek();
-            {
-                std::string _msg_3378{"'const' is only supported directly before a reference type ('const "};
-                _msg_3378 += display_name;
-                _msg_3378 += " auto&') in this version";
-                return std::unexpected(ParseError(tok.line, tok.column,
-                              _msg_3378));
-            }
-        }
-        return type; // bare "ConceptName auto"/"auto" -- by value
+        // `const ConceptName auto v` / `const auto v` -- by value, and
+        // `const` at the top level of a parameter, which [dcl.fct]/5
+        // deletes from the function type. set_param_declared_type moves
+        // it onto Param::is_const; leaving it here is what makes that
+        // happen, and what makes an assignment to `v` in the body an
+        // error rather than a silent write.
+        type.is_const_qualified = has_const;
+        return type; // "ConceptName auto"/"auto" -- by value
     }
 
     // Wraps `base` in Array types for each trailing `[N]` found after a
@@ -4094,8 +4142,7 @@ private:
     }
 
     [[nodiscard]] std::expected<Type, ParseError> parse_template_type_argument() {
-        auto type_result = parse_type(/*allow_rvalue_ref=*/false, /*out_bare_const=*/nullptr,
-                               /*allow_const_qualified_value_type=*/true);
+        auto type_result = parse_type(/*allow_rvalue_ref=*/false, /*out_bare_const=*/nullptr);
         if (!type_result.has_value()) return std::unexpected(std::move(type_result).error());
         Type type = std::move(type_result).value();
         const Token& attr_start_tok = peek();
@@ -6089,6 +6136,7 @@ private:
         if (!check(TokenKind::RParen)) {
             while (true) {
                 Param param{};
+                param.loc = SourceLocation{peek().line, peek().column};
 
                 Type base_type{};
 
@@ -6123,7 +6171,7 @@ private:
                     return std::unexpected(ParseError(tok.line, tok.column,
                                       "a parameter pack must be the last parameter in the list (ch05 §5.11)"));
                 }
-                param.type = std::move(param_type);
+                set_param_declared_type(param, std::move(param_type));
                 // ch05 §5.15: `T&& f [[scpp::thread_movable]]` -- a
                 // trailing attribute-specifier-seq right after a
                 // parameter's own declarator (real C++ grammar already
@@ -8844,6 +8892,7 @@ private:
                     break;
                 }
                 Param param{};
+                param.loc = SourceLocation{peek().line, peek().column};
 
                 Type base_type{};
 
@@ -8871,7 +8920,7 @@ private:
                     return std::unexpected(ParseError(tok.line, tok.column,
                                       "a parameter pack must be the last parameter in the list (ch05 §5.11)"));
                 }
-                param.type = std::move(param_type);
+                set_param_declared_type(param, std::move(param_type));
                 // ch05 §5.15: see parse_param_list's identical trailing-
                 // attribute handling -- this is the separate parameter-
                 // parsing loop parse_function itself uses (top-level
@@ -9232,6 +9281,15 @@ private:
     [[nodiscard]] std::expected<Type, ParseError> parse_auto_declared_type(bool& out_is_const) {
         bool has_const = match(TokenKind::KwConst);
         if (auto _r = expect(TokenKind::KwAuto, "'auto'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        // East spelling: `auto const c` / `auto const& r`, the same
+        // decl-specifier-seq written in the other order ([dcl.type.cv]
+        // imposes no ordering). Without this the caller went on to
+        // demand a variable name and reported `expected variable name
+        // but found 'const'`.
+        if (check(TokenKind::KwConst) && peek_at(1).kind != TokenKind::KwAuto) {
+            advance();
+            has_const = true;
+        }
         Type declared = named_type("auto");
         if (check(TokenKind::AmpAmp)) {
             const Token& tok = peek();

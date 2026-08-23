@@ -74,6 +74,9 @@ using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature
                                                                        const Signatures& signatures);
 [[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] bool place_is_read_only(const Expr& expr, const Body& body, const Signatures& signatures);
+[[nodiscard]] bool expr_is_assignable_place(const Expr& expr, const Body& body);
+[[nodiscard]] DataflowError read_only_write_error(const Expr& place, const Body& body, const Signatures& signatures,
+                                                  const std::string& operator_spelling, SourceLocation loc);
 [[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
 
 

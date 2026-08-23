@@ -98,10 +98,11 @@ struct LocalDecl {
     // program-long rather than stack-scoped.
     bool is_static_lifetime = false;
     // Declared `const`/`constexpr` (Stmt::is_const, ch05/ch06) -- an
-    // immutable local, not a parameter: those don't support `const` yet
-    // (see parse_param_type). Consulted by movecheck's Assign case to
-    // reject reassignment after the single initializing Assign/Declare a
-    // const local's own VarDecl lowers to.
+    // immutable declaration. Also carries a `const` *parameter*'s
+    // qualifier: [dcl.fct]/5 deletes that from the function's type, so
+    // `Param::type` cannot hold it and this is the only place it
+    // survives (see Param::is_const). Consulted by place_is_read_only,
+    // which is what every write, borrow and address-of check asks.
     bool is_const = false;
     // Declared with the `constexpr` specifier specifically. Implied by
     // `is_const` ([dcl.constexpr]/1 makes such an object const), kept
@@ -580,6 +581,14 @@ public:
             LocalDecl decl;
             decl.type = param.type;
             decl.source_name = param.name;
+            // [dcl.fct]/5: the top-level `const` of `f(const int v)` is
+            // not part of the function's type (so it is not on
+            // `param.type`), but the parameter *object* is const inside
+            // the body -- recorded here on exactly the field a `const`
+            // local's declaration uses, so every read-only check sees a
+            // const parameter and a const local identically.
+            decl.is_const = param.is_const;
+            decl.decl_loc = param.loc;
             param.resolved_local = declare(param.name, std::move(decl)) + 1;
         }
         if (member_initializers != nullptr) {
@@ -695,6 +704,14 @@ private:
             LocalDecl decl;
             decl.type = param.type;
             decl.source_name = param.name;
+            // [dcl.fct]/5: the top-level `const` of `f(const int v)` is
+            // not part of the function's type (so it is not on
+            // `param.type`), but the parameter *object* is const inside
+            // the body -- recorded here on exactly the field a `const`
+            // local's declaration uses, so every read-only check sees a
+            // const parameter and a const local identically.
+            decl.is_const = param.is_const;
+            decl.decl_loc = param.loc;
             param.resolved_local = declare(param.name, std::move(decl)) + 1;
         }
         resolve_stmt(*expr.lambda_body);

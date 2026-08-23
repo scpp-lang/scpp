@@ -1176,8 +1176,7 @@ void test_lambda_by_reference_capture_still_rejects_mutation_through_const_refer
         "    return writer();\n"
         "}\n");
     expect(error.has_value() &&
-              error->find("cannot assign to this place: it is reached through a read-only (const) reference") !=
-                  std::string::npos,
+              error->find("cannot modify 'this.value' through '=': it is read-only") != std::string::npos,
            "lambda_by_reference_capture_still_rejects_mutation_through_const_reference: expected const-reference "
            "mutation diagnostic, got '" +
               (error.has_value() ? *error : std::string("<no error>")) + "'");

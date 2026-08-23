@@ -1393,15 +1393,56 @@ private:
         message += "expression is not a constant expression: identifier '";
         message += name;
         message += "' is not available";
+        // Naming *why* rather than only "not available", because the two
+        // reasons need different fixes and the old message named
+        // neither: a runtime variable has to be made `const`/`constexpr`,
+        // while a variable that already is one but whose initializer is
+        // not itself a constant expression has to have that initializer
+        // fixed instead.
+        std::optional<std::size_t> index =
+            find_visible_global_index(program_, lookup_namespace_path_, name, explicit_global_qualification);
+        if (index.has_value()) {
+            const GlobalVar& global = program_.globals[*index];
+            if (global.decl != nullptr) {
+                message += " (the global '";
+                message += name;
+                message += "' declared at line ";
+                message += std::to_string(static_cast<std::int64_t>(global.decl->loc.line));
+                if (!global.decl->is_const && !global.decl->is_constexpr && !global.decl->type.is_const_qualified) {
+                    message += " is neither 'const' nor 'constexpr', so its value is not known until runtime)";
+                } else if (!global.decl->init) {
+                    message += " has no initializer to evaluate)";
+                } else {
+                    message += " has an initializer that is not itself a constant expression)";
+                }
+            }
+        }
         return std::unexpected(ConstexprError(loc, message));
     }
 
     // ch05 §9.4(8): a required constant expression may name a global
     // `constexpr` variable (e.g. `constexpr int kBufferSize = 64; char
     // buf[kBufferSize];`, straight from the spec's own accepted-examples
-    // list) -- returns nullptr for any name that isn't such a global (a
-    // plain runtime global, or no global at all), so lookup_binding's
-    // existing "identifier is not available" diagnostic still fires for
+    // list) -- and, by §7.1(1)'s adoption of [expr.const] unchanged, a
+    // `const` one with an initializer too ([expr.const]/3's
+    // "usable in constant expressions"). §9.4(5)'s own Note says as much
+    // from the other side: "a *non-`const`*, non-`constexpr` local
+    // variable ... is not usable in a constant expression ... and
+    // therefore cannot be read by an array bound".
+    //
+    // The `const` arm is *best-effort*, exactly as
+    // bind_local_constant_for_array_bounds and
+    // validate_constexpr_stmt_tree's VarDecl case already make it for a
+    // local: a `const` global whose initializer is not a constant
+    // expression simply does not become one, which is not an error at the
+    // declaration -- only at a use site that required a constant. Making
+    // the global rule anything other than the local rule is what made
+    // `const int n = 3; int a[n];` compile inside a function and fail at
+    // namespace scope.
+    //
+    // Returns nullptr for any name that isn't such a global (a plain
+    // runtime global, or no global at all), so lookup_binding's
+    // existing "not usable" diagnostic still fires for
     // those. Evaluates the global's own initializer, at most once
     // (memoized in resolved_global_constants_), in a completely isolated
     // frame stack: a global initializer must only ever see other
@@ -1430,12 +1471,15 @@ private:
             find_visible_global_index(program_, namespace_path, name, explicit_global_qualification);
         if (!index.has_value()) return nullptr;
         const GlobalVar& global = program_.globals[*index];
-        if (global.decl == nullptr || !global.decl->is_constexpr || !global.decl->init) return nullptr;
+        if (global.decl == nullptr || !global.decl->init) return nullptr;
+        bool is_required = global.decl->is_constexpr;
+        bool is_const_global = global.decl->is_const || global.decl->type.is_const_qualified;
+        if (!is_required && !is_const_global) return nullptr;
         std::string key = global.decl->var_name;
         if (resolved_global_constants_.contains(key)) return resolved_global_constants_.at(key);
         if (globals_resolving_.contains(key)) {
             std::string message{};
-            message += "constant expression circularly depends on global constexpr variable '";
+            message += "constant expression circularly depends on global constant variable '";
             message += key;
             message += "'";
             return std::unexpected(ConstexprError(loc, message));
@@ -1451,7 +1495,12 @@ private:
         leave_namespace(saved_namespace_path);
         frames_ = std::move(saved_frames);
         globals_resolving_.erase(key);
-        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+        if (!value_result.has_value()) {
+            // Best-effort for `const`, required-strict for `constexpr` --
+            // the local rule, applied to the global.
+            if (!is_required) return nullptr;
+            return std::unexpected(std::move(value_result).error());
+        }
         std::shared_ptr<Cell> value = std::move(value_result).value();
         resolved_global_constants_.emplace(key, value);
         return value;

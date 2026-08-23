@@ -837,7 +837,7 @@ void write_generic_type_param(std::ostream& out, const GenericTypeParam& param) 
 // Structurally bound; see `write_expr`.
 void write_param(std::ostream& out, const Param& param) {
     const auto& [type, name, resolved_local, lifetime, default_expr, generic_concept, require_thread_movable,
-                 require_thread_shareable, is_parameter_pack] = param;
+                 require_thread_shareable, is_parameter_pack, is_const, loc] = param;
     write_type(out, type);
     write_string(out, name);
     write_u64_le(out, static_cast<std::uint64_t>(resolved_local));
@@ -848,6 +848,8 @@ void write_param(std::ostream& out, const Param& param) {
     write_u8(out, require_thread_movable ? 1u : 0u);
     write_u8(out, require_thread_shareable ? 1u : 0u);
     write_u8(out, is_parameter_pack ? 1u : 0u);
+    write_u8(out, is_const ? 1u : 0u);
+    write_source_location(out, loc);
 }
 
 [[nodiscard]] std::expected<Param, DriverError> read_param(std::istream& in, const std::string& context) {
@@ -883,6 +885,12 @@ void write_param(std::ostream& out, const Param& param) {
     auto pack_r = read_u8(in, context + " parameter pack");
     if (!pack_r.has_value()) return std::unexpected(std::move(pack_r).error());
     param.is_parameter_pack = pack_r.value() != 0u;
+    auto is_const_r = read_u8(in, context + " is_const");
+    if (!is_const_r.has_value()) return std::unexpected(std::move(is_const_r).error());
+    param.is_const = is_const_r.value() != 0u;
+    auto loc_r = read_source_location(in, context + " loc");
+    if (!loc_r.has_value()) return std::unexpected(std::move(loc_r).error());
+    param.loc = loc_r.value();
     return param;
 }
 
