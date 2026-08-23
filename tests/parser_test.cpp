@@ -5585,10 +5585,11 @@ void test_explicit_template_arg_field_count_is_guarded() {
 void test_param_field_count_is_guarded() {
     const scpp::Param probe{};
     const auto& [type, name, resolved_local, lifetime, default_expr, generic_concept,
-                 require_thread_movable, require_thread_shareable, is_parameter_pack] = probe;
+                 require_thread_movable, require_thread_shareable, is_parameter_pack, is_const, loc] = probe;
     expect(type.kind == scpp::TypeKind::Named && name.empty() && resolved_local == 0 &&
                !lifetime.present() && default_expr == nullptr && generic_concept.empty() &&
-               !require_thread_movable && !require_thread_shareable && !is_parameter_pack,
+               !require_thread_movable && !require_thread_shareable && !is_parameter_pack && !is_const &&
+               loc.line == 0 && loc.column == 0,
            "a default-constructed Param value-initializes every field");
 }
 
@@ -5659,6 +5660,8 @@ scpp::Expr make_fully_populated_expr() {
     param.require_thread_movable = true;
     param.require_thread_shareable = true;
     param.is_parameter_pack = true;
+    param.is_const = true;
+    param.loc = scpp::SourceLocation{61, 62};
     auto param_default = std::make_unique<scpp::Expr>();
     param_default->kind = scpp::ExprKind::Identifier;
     param_default->name = "param_default";
@@ -5789,7 +5792,9 @@ void expect_expr_round_trip(const scpp::Expr& clone, std::string_view label) {
                lambda_params[0].lifetime.name == "a" && lambda_params[0].type.name == "param_type" &&
                lambda_params[0].generic_concept == "Concept" &&
                lambda_params[0].require_thread_movable && lambda_params[0].require_thread_shareable &&
-               lambda_params[0].is_parameter_pack && lambda_params[0].default_expr != nullptr &&
+               lambda_params[0].is_parameter_pack && lambda_params[0].is_const &&
+               lambda_params[0].loc.line == 61 && lambda_params[0].loc.column == 62 &&
+               lambda_params[0].default_expr != nullptr &&
                lambda_params[0].default_expr->name == "param_default" &&
                lambda_params[0].default_expr->resolved_local == 59,
            std::string{label} + ": lambda_params survive with their resolution");

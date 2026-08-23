@@ -552,6 +552,24 @@ class Param {
     // (`Concept auto&... args`). Supported only on a free function's own
     // parameter list, never on a method/lambda in this version.
     bool is_parameter_pack = false;
+    // [dcl.fct]/5: "any top-level cv-qualifiers modifying a parameter
+    // type are deleted when forming the function type". `type` is
+    // therefore the *function type's* parameter type, always free of
+    // top-level `const`, so overload resolution, redeclaration matching
+    // and mangling cannot see a qualifier the language says isn't part
+    // of the signature -- `void f(int)` and `void f(const int)` declare
+    // the same function.
+    //
+    // The parameter *object* inside the body is still const, and this is
+    // where that survives: build_mir copies it onto the parameter's own
+    // LocalDecl::is_const, which is the same field a `const` local
+    // carries and the same one place_is_read_only already consults.
+    bool is_const = false;
+    // Where the parameter was declared, so a diagnostic about it can name
+    // a line ("'v' is declared const at line 7") exactly as one about a
+    // `const` local does -- build_mir puts it on the parameter's
+    // LocalDecl::decl_loc.
+    SourceLocation loc;
 };
 
 // ch05 §5.12: one entry in a lambda expression's own capture-list --
@@ -1043,6 +1061,31 @@ class Expr {
     return types_equal(a, b);
 }
 
+// A type with its own read-only-ness erased -- the "is this even the same
+// type?" half of a reference binding, kept apart from the "may I widen
+// read-only to mutable?" half, which is a const-reachability question
+// with its own diagnostic. `int&` and `const int&` answer this
+// identically; whether the binding is *allowed* is then decided by the
+// const guard alone, rather than by whichever of the two checks happened
+// to run first -- which is what used to answer a const question with
+// "cannot bind reference 'r' from an incompatible source type".
+//
+// Only the outermost level and a reference's immediate referent are
+// touched, exactly the levels a reference binding's own qualification
+// conversion may add to ([conv.qual]); a `const int*` stays distinct from
+// an `int*`.
+[[nodiscard]] inline Type type_ignoring_top_level_const(const Type& type) {
+    Type result{type};
+    result.is_const_qualified = false;
+    if (result.kind == TypeKind::Reference && result.pointee != nullptr) {
+        Type referent{*result.pointee};
+        referent.is_const_qualified = false;
+        result.pointee = std::make_shared<Type>(std::move(referent));
+        result.is_mutable_ref = true;
+    }
+    return result;
+}
+
 enum class StmtKind {
     VarDecl,
     Return,
@@ -1229,7 +1272,9 @@ inline Param::Param(const Param& other)
       generic_concept{other.generic_concept},
       require_thread_movable{other.require_thread_movable},
       require_thread_shareable{other.require_thread_shareable},
-      is_parameter_pack{other.is_parameter_pack} {
+      is_parameter_pack{other.is_parameter_pack},
+      is_const{other.is_const},
+      loc{other.loc} {
     if (other.default_expr != nullptr) {
         ExprPtr cloned_default_expr = deep_clone_expr(*other.default_expr);
         default_expr = std::shared_ptr<Expr>{cloned_default_expr.release()};

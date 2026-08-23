@@ -126,11 +126,6 @@ namespace scpp {
     return global->decl->type;
 }
 
-[[nodiscard]] bool is_visible_global_const(const std::string& name, bool explicit_global_qualification, const Body& body) {
-    const GlobalVar* global = find_visible_global_for_name(name, explicit_global_qualification, body);
-    return global != nullptr && global->decl != nullptr && (global->decl->is_const || global->decl->is_constexpr);
-}
-
 [[nodiscard]] bool is_string_named_type(const Type& type) {
     return type.kind == TypeKind::Named && (type.name == "std::string" || type.name == "string");
 }
@@ -224,21 +219,20 @@ namespace scpp {
                                 "' must be a builtin numeric lvalue",
                             expr.loc));
     }
-    auto write_roots_result = resolve_borrow_source_root(*expr.lhs, state, body, signatures, /*report_errors=*/false);
-    if (!write_roots_result.has_value()) return std::unexpected(std::move(write_roots_result).error());
-    RootSet write_roots = std::move(write_roots_result).value();
-    if (write_roots.empty()) {
+    if (!expr_is_assignable_place(*expr.lhs, body)) {
         return std::unexpected(DataflowError("operand of '" +
                                 std::string(expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PostInc ? "++" : "--") +
                                 "' must be an assignable place",
                             expr.loc));
     }
     if (assignment_target_is_read_only(*expr.lhs, body, signatures)) {
-        return std::unexpected(DataflowError("cannot apply '" +
-                                std::string(expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PostInc ? "++" : "--") +
-                                "' to this place: it is reached through a read-only (const) reference",
-                            expr.loc));
+        return std::unexpected(read_only_write_error(
+            *expr.lhs, body, signatures,
+            std::string(expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PostInc ? "++" : "--"), expr.loc));
     }
+    auto write_roots_result = resolve_borrow_source_root(*expr.lhs, state, body, signatures, /*report_errors=*/false);
+    if (!write_roots_result.has_value()) return std::unexpected(std::move(write_roots_result).error());
+    RootSet write_roots = std::move(write_roots_result).value();
     if (std::optional<LocalId> lender = resolve_reborrow_lender(*expr.lhs, body, signatures); lender.has_value()) {
         if (auto _r = validate_reborrow_lender_write(*lender, state, body, report_errors); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
@@ -351,9 +345,15 @@ namespace scpp {
             return std::unexpected(std::move(_r).error());
         }
     }
+    if (!expr_is_assignable_place(*expr.lhs, body)) {
+        return std::unexpected(DataflowError("left operand of '" + std::string(compound_operator_spelling(expr.binary_op)) +
+                                "' must be an assignable place",
+                            expr.loc));
+    }
     if (assignment_target_is_read_only(*expr.lhs, body, signatures)) {
-        return std::unexpected(DataflowError("cannot assign to this place: it is reached through a read-only (const) reference",
-                            state.current_loc));
+        return std::unexpected(read_only_write_error(*expr.lhs, body, signatures,
+                                                     std::string(compound_operator_spelling(expr.binary_op)),
+                                                     state.current_loc));
     }
     if (std::optional<LocalId> lender = resolve_reborrow_lender(*expr.lhs, body, signatures); lender.has_value()) {
         if (auto _r = validate_reborrow_lender_write(*lender, state, body, report_errors); !_r.has_value()) {
@@ -368,11 +368,6 @@ namespace scpp {
         auto write_roots_result = resolve_borrow_source_root(*expr.lhs, state, body, signatures, /*report_errors=*/false);
         if (!write_roots_result.has_value()) return std::unexpected(std::move(write_roots_result).error());
         write_roots = std::move(write_roots_result).value();
-    }
-    if (write_roots.empty()) {
-        return std::unexpected(DataflowError("left operand of '" + std::string(compound_operator_spelling(expr.binary_op)) +
-                                "' must be an assignable place",
-                            expr.loc));
     }
     if (!write_through_mutable_reborrow) {
         for (LocalId root : write_roots) {
@@ -2349,9 +2344,8 @@ struct ConvertingConstructorBinding {
                     }
                     if (report_errors) {
                         if (assignment_target_is_read_only(*expr.lhs, body, signatures)) {
-                            return std::unexpected(DataflowError("cannot assign to this place: it is reached through a "
-                                                 "read-only (const) reference",
-                                state.current_loc));
+                            return std::unexpected(
+                                read_only_write_error(*expr.lhs, body, signatures, "=", state.current_loc));
                         }
                         if (std::optional<LocalId> lender = resolve_reborrow_lender(*expr.lhs, body, signatures);
                             lender.has_value()) {
@@ -2618,13 +2612,26 @@ struct ConvertingConstructorBinding {
         std::optional<Type> source_type = infer_expr_type(*stmt.expr, body, signatures);
         bool reference_binding_compatible = false;
         if (source_type.has_value()) {
+            // Compared ignoring the *referent's* own const-qualification,
+            // because that is not the question this check asks. `int& r =
+            // p;` for a `const int& p` differs from `int&` only in the
+            // qualifier, and answering it here produced "cannot bind
+            // reference 'r' from an incompatible source type" -- a
+            // message that names the wrong problem and offers no fix,
+            // when the const-reachability guard immediately below already
+            // has the right one. Anything genuinely of a different type
+            // still lands here.
+            Type source_unqualified = type_ignoring_top_level_const(*source_type);
+            Type target_unqualified = type_ignoring_top_level_const(stmt.type);
             reference_binding_compatible =
-                types_equal(*source_type, stmt.type) ||
-                types_compatible_with_base_conversion(*source_type, stmt.type, *body.program, state.current_class);
-            if (!reference_binding_compatible && stmt.type.pointee != nullptr) {
+                types_equal(source_unqualified, target_unqualified) ||
+                types_compatible_with_base_conversion(source_unqualified, target_unqualified, *body.program,
+                                                      state.current_class);
+            if (!reference_binding_compatible && target_unqualified.pointee != nullptr) {
+                Type target_referent = type_ignoring_top_level_const(*target_unqualified.pointee);
                 reference_binding_compatible =
-                    types_equal(*source_type, *stmt.type.pointee) ||
-                    types_compatible_with_base_conversion(*source_type, *stmt.type.pointee, *body.program,
+                    types_equal(source_unqualified, target_referent) ||
+                    types_compatible_with_base_conversion(source_unqualified, target_referent, *body.program,
                                                           state.current_class);
             }
         }
@@ -2915,23 +2922,32 @@ struct ConvertingConstructorBinding {
             const Type* local_type = stmt.has_local ? &body.type_of(stmt.local) : nullptr;
             std::string target_name = stmt.has_local ? body.name_of(stmt.local)
                                                      : (stmt.target != nullptr ? stmt.target->name : std::string{});
-            // ch05/ch06: a `const`-qualified local (LocalDecl::is_const)
-            // is initialized exactly once, by the
-            // very same Assign statement its own VarDecl lowers to (see
-            // mir.cppm's VarDecl case) -- distinguished from a genuine
-            // later reassignment attempt by whether `stmt.local` already
-            // has a prior entry in `state.locals` at all, the identical
-            // "first write vs. reassignment" test the class-typed-local
-            // case below uses for its own, differently-motivated
-            // restriction. Checked *before* every type-specific case
-            // below (reference/span/class/unique_ptr/plain scalar) so it
-            // uniformly covers all of them with one rule, rather than
-            // needing to be threaded through each one separately.
-            if (report_errors &&
-                ((stmt.has_local && body.decl(stmt.local).is_const && state.locals.contains(stmt.local)) ||
-                 (!stmt.has_local && is_visible_global_const(target_name, /*explicit_global_qualification=*/false, body)))) {
-                return std::unexpected(DataflowError("cannot reassign 'const' variable '" + target_name + "' after initialization",
-                    state.current_loc));
+            // ch05/ch06: a read-only place is written exactly once, by
+            // the very same Assign statement its own VarDecl lowers to
+            // (see mir.cppm's VarDecl case) -- distinguished from a
+            // genuine later reassignment attempt by whether `stmt.local`
+            // already has a prior entry in `state.locals` at all, the
+            // identical "first write vs. reassignment" test the
+            // class-typed-local case below uses for its own,
+            // differently-motivated restriction. A target that is not a
+            // local at all (a global) has no such initializing Assign in
+            // this body, so it needs no exemption. Checked *before* every
+            // type-specific case below (reference/span/class/unique_ptr/
+            // plain scalar) so it uniformly covers all of them with one
+            // rule, rather than needing to be threaded through each one
+            // separately.
+            //
+            // Asked of `place_is_read_only`, the one predicate that
+            // answers this. It used to be `LocalDecl::is_const` for a
+            // local and a private `is_visible_global_const` for a global
+            // -- neither of which looks at the *type*, so a `const`
+            // parameter (whose qualifier lives nowhere else) was freely
+            // assignable: `int f(const int v) { v = 6; return v; }`
+            // compiled and returned 6.
+            bool target_is_reassignment = (stmt.has_local && state.locals.contains(stmt.local)) || !stmt.has_local;
+            if (report_errors && stmt.target != nullptr && target_is_reassignment &&
+                place_is_read_only(*stmt.target, body, signatures)) {
+                return std::unexpected(read_only_write_error(*stmt.target, body, signatures, "=", state.current_loc));
             }
             if (local_type == nullptr) {
                 std::optional<Type> global_type =

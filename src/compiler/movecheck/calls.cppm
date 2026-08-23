@@ -1510,6 +1510,30 @@ std::expected<void, DataflowError> check_scalar_conversion(const Type& target_ty
         loc));
 }
 
+// Where the field a Member expression names was declared, so a
+// read-only diagnostic about `s.x` can point at the `const` on `x`
+// rather than only asserting that it exists.
+[[nodiscard]] std::optional<SourceLocation> find_field_decl_loc(const Expr& member, const Body& body,
+                                                                const Signatures& signatures) {
+    if (body.program == nullptr || member.lhs == nullptr) return std::nullopt;
+    std::optional<Type> base = infer_expr_type(*member.lhs, body, signatures);
+    if (!base.has_value()) return std::nullopt;
+    const Type* named = &*base;
+    if (named->kind == TypeKind::Reference && named->pointee != nullptr) named = named->pointee.get();
+    if (named->kind != TypeKind::Named) return std::nullopt;
+    if (const ClassDef* def = find_class_def(*body.program, named->name)) {
+        for (const ClassField& field : def->fields) {
+            if (field.name == member.name) return field.loc;
+        }
+    }
+    if (const StructDef* def = find_struct_def(*body.program, named->name)) {
+        for (const StructField& field : def->fields) {
+            if (field.name == member.name) return field.loc;
+        }
+    }
+    return std::nullopt;
+}
+
 // Names the object whose constness a rejected binding would have
 // dropped, and where it was made const -- because "cannot convert
 // 'const int*' to 'int*'" leaves the reader looking for a `const` that
@@ -1533,9 +1557,15 @@ std::expected<void, DataflowError> check_scalar_conversion(const Type& target_ty
             // `c.ref_field` is blamed on the field, not on `c`.
             if (place_is_read_only(*place, body, signatures) &&
                 !place_is_read_only(*place->lhs, body, signatures)) {
-                std::string result{"'"};
-                result += place->kind == ExprKind::Member ? place->name : std::string("[...]");
+                if (place->kind != ExprKind::Member) return "the element is read-only";
+                std::string result{"the field '"};
+                result += place->name;
                 result += "' is read-only";
+                if (std::optional<SourceLocation> field_loc = find_field_decl_loc(*place, body, signatures);
+                    field_loc.has_value() && field_loc->line != 0) {
+                    result += ", declared at line ";
+                    result += std::to_string(static_cast<std::int64_t>(field_loc->line));
+                }
                 return result;
             }
             place = place->lhs.get();
@@ -1546,13 +1576,32 @@ std::expected<void, DataflowError> check_scalar_conversion(const Type& target_ty
     if (place == nullptr || place->kind != ExprKind::Identifier) return "";
     if (std::optional<LocalId> local = body.local_of(*place); local.has_value()) {
         const LocalDecl& decl = body.decl(*local);
-        if (!decl.is_const && !body.type_of(*local).is_const_qualified) return "";
+        const Type& type = body.type_of(*local);
+        if (!decl.is_const && !type.is_const_qualified) {
+            // A shared borrow is read-only without any of its *own*
+            // declaration being `const`-qualified -- the qualifier is on
+            // the referent, spelled `const T&`. Naming it matters most
+            // for a `const T&` parameter, where the reader otherwise
+            // gets no location at all.
+            if (!(is_reference(type) || is_span(type)) || type.is_mutable_ref) return "";
+            std::string result{"'"};
+            result += decl.source_name;
+            result += "' is a read-only ('const') ";
+            result += is_span(type) ? "view" : "reference";
+            if (decl.decl_loc.line != 0) {
+                result += ", declared at line ";
+                result += std::to_string(static_cast<std::int64_t>(decl.decl_loc.line));
+            }
+            return result;
+        }
         std::string result{"'"};
         result += decl.source_name;
         result += "' is declared ";
         result += decl.is_constexpr ? "constexpr" : "const";
-        result += " at line ";
-        result += std::to_string(decl.decl_loc.line);
+        if (decl.decl_loc.line != 0) {
+            result += " at line ";
+            result += std::to_string(static_cast<std::int64_t>(decl.decl_loc.line));
+        }
         return result;
     }
     if (const GlobalVar* global = find_visible_global_for_expr(*place, body);
@@ -1563,10 +1612,73 @@ std::expected<void, DataflowError> check_scalar_conversion(const Type& target_ty
         result += "' is declared ";
         result += global->decl->is_constexpr ? "constexpr" : "const";
         result += " at line ";
-        result += std::to_string(global->decl->loc.line);
+        result += std::to_string(static_cast<std::int64_t>(global->decl->loc.line));
         return result;
     }
     return "";
+}
+
+// Renders a place expression back into something close to its source
+// spelling, so a diagnostic about `s.arr[i] = 1` can say which place it
+// means instead of "this place". Falls back to an empty string for
+// anything that is not a plain place chain; the caller then says "this
+// place".
+[[nodiscard]] std::string describe_place_expr(const Expr& expr) {
+    if (expr.kind == ExprKind::Identifier) return expr.name;
+    if (expr.kind == ExprKind::Member && expr.lhs != nullptr) {
+        std::string base = describe_place_expr(*expr.lhs);
+        if (base.empty()) return "";
+        base += expr.implicit_arrow_chain_safe ? "->" : ".";
+        base += expr.name;
+        return base;
+    }
+    if (expr.kind == ExprKind::Subscript && expr.lhs != nullptr) {
+        std::string base = describe_place_expr(*expr.lhs);
+        if (base.empty()) return "";
+        base += "[...]";
+        return base;
+    }
+    if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Deref && expr.lhs != nullptr) {
+        std::string base = describe_place_expr(*expr.lhs);
+        if (base.empty()) return "";
+        return "*" + base;
+    }
+    return "";
+}
+
+// The single wording of "you may not write here, because the place is
+// read-only". Every modifying operation asks the same question -- plain
+// `=`, a compound `+=`, `++`/`--` -- and before this they answered it
+// with three different sentences ("cannot reassign 'c' after
+// initialization", "cannot assign to this place: it is reached through a
+// read-only (const) reference", "cannot apply '++' to this place: ...").
+// The last two also asserted a *reference* that a `const` local, global
+// or by-value parameter does not have.
+//
+// `operator_spelling` is the operator the user actually wrote, so the
+// message stays specific without becoming a separate sentence per
+// operator.
+[[nodiscard]] DataflowError read_only_write_error(const Expr& place, const Body& body, const Signatures& signatures,
+                                                  const std::string& operator_spelling, SourceLocation loc) {
+    std::string message{"cannot modify "};
+    std::string spelling = describe_place_expr(place);
+    if (spelling.empty()) {
+        message += "this place";
+    } else {
+        message += "'";
+        message += spelling;
+        message += "'";
+    }
+    message += " through '";
+    message += operator_spelling;
+    message += "': it is read-only";
+    std::string const_source = describe_const_source(place, body, signatures);
+    if (!const_source.empty()) {
+        message += " (";
+        message += const_source;
+        message += ")";
+    }
+    return DataflowError(message, loc);
 }
 
 std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& target_type, const Expr& expr, const Body& body,
@@ -1776,6 +1888,39 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
 // The same question under the name the assignment path asks it by.
 [[nodiscard]] bool assignment_target_is_read_only(const Expr& expr, const Body& body, const Signatures& signatures) {
     return place_is_read_only(expr, body, signatures);
+}
+
+// [basic.lval]/1 + [expr.ass]/1: does this expression designate an
+// object at all, i.e. is it a candidate for being written to? This is a
+// separate question from `place_is_read_only`, which asks whether the
+// object it designates may be *modified*.
+//
+// `++`/`--`/`+=` used to answer it with `resolve_borrow_source_root(...)
+// .empty()`, which actually means "no *local* owns this place" -- true
+// of every namespace-scope variable, so `int g = 5; g++;` was rejected
+// as "operand of '++' must be an assignable place" while the plain
+// `g = 7;` beside it compiled. Two code paths, one question, and the
+// borrow-tracking answer standing in for the language one; that also put
+// the wrong message on `const int g = 5; ++g;`, which is a const error,
+// not a not-a-place error.
+[[nodiscard]] bool expr_is_assignable_place(const Expr& expr, const Body& body) {
+    switch (expr.kind) {
+        case ExprKind::Identifier:
+            if (body.local_of(expr).has_value()) return true;
+            return find_visible_global_for_expr(expr, body) != nullptr;
+        case ExprKind::Member:
+        case ExprKind::Subscript:
+            return expr.lhs != nullptr && expr_is_assignable_place(*expr.lhs, body);
+        case ExprKind::Unary:
+            if (is_explicit_star_this(expr)) return true;
+            return expr.unary_op == UnaryOp::Deref;
+        case ExprKind::Call:
+            // `operator_deref` is how an overloaded `*p` arrives here;
+            // any other call yields a prvalue, which is not a place.
+            return expr.name == "operator_deref";
+        default:
+            return false;
+    }
 }
 
 // A call through a function-pointer-typed field -- `receiver.field_

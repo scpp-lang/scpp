@@ -3189,7 +3189,7 @@ void run_consteval_tests() {
             (std::filesystem::current_path() / (case_name + "_exe")).string(), std_link_inputs(),
             prebuilt_module_import_paths());
         bool threw = !compile_result_47k.has_value() &&
-                     std::string(compile_result_47k.error().what()).find("circularly depends on global constexpr variable") !=
+                     std::string(compile_result_47k.error().what()).find("circularly depends on global constant variable") !=
                          std::string::npos;
         expect(threw, case_name + ": expected a cycle between two constexpr globals to be diagnosed without anything else naming them");
     }
@@ -3529,12 +3529,42 @@ void run_consteval_tests() {
         std::filesystem::remove(exe_path_47n);
     }
 
+    // [expr.const], adopted unchanged by ch06 §7.1(1): a `const` global with
+    // a constant initializer *is* usable in a constant expression, in a
+    // namespace exactly as at global scope. This used to be rejected --
+    // and asserted to be rejected right here, on the reasoning that "a
+    // `const` global is not a constant in scpp", which no clause of the
+    // spec says; ch05 §9.4(5)'s own Note says the opposite by naming only
+    // a *non-*`const`, non-`constexpr` variable as unusable.
+    {
+        std::string case_name = "constexpr_lookup_resolves_a_namespaced_const_global";
+        cases_run++;
+        std::filesystem::path exe_path_const_ns = std::filesystem::current_path() / (case_name + "_exe");
+        auto compile_result_const_ns = scpp::compile_to_executable("namespace a {\n"
+                                                                   "const int kTarget = 8;\n"
+                                                                   "int read() {\n"
+                                                                   "    constexpr int local = kTarget;\n"
+                                                                   "    return local;\n"
+                                                                   "}\n"
+                                                                   "}\n"
+                                                                   "int main() {\n"
+                                                                   "    return a::read();\n"
+                                                                   "}\n",
+                                                                   exe_path_const_ns.string(), std_link_inputs(),
+                                                                   prebuilt_module_import_paths());
+        if (!compile_result_const_ns.has_value()) throw std::move(compile_result_const_ns).error();
+        RunResult run_result_const_ns = run_command_capture(exe_path_const_ns.string() + " 2>&1");
+        expect(run_result_const_ns.exit_code == 8,
+               case_name + ": expected a namespaced const global to be usable in a constant expression, got " +
+                   std::to_string(run_result_const_ns.exit_code));
+        std::filesystem::remove(exe_path_const_ns);
+    }
+
     // The other half of the widening. An unqualified name must not reach
     // into an unrelated namespace, and giving the evaluator a namespace
-    // model must not make a `const` or plain global -- neither of which is
-    // a constant in scpp, at the global namespace either -- start
-    // resolving. All three are rejected before the fix as well; they are
-    // the guard that the walk widened only along the axis it was meant to.
+    // model must not make a *mutable* global start resolving. Both are
+    // rejected before the fix as well; they are the guard that the walk
+    // widened only along the axis it was meant to.
     struct ConstexprNamespaceLookupRejectionCase {
         const char* name;
         const char* source;
@@ -3546,18 +3576,6 @@ void run_consteval_tests() {
          "constexpr int kTarget = 8;\n"
          "}\n"
          "namespace a {\n"
-         "int read() {\n"
-         "    constexpr int local = kTarget;\n"
-         "    return local;\n"
-         "}\n"
-         "}\n"
-         "int main() {\n"
-         "    return a::read();\n"
-         "}\n",
-         "identifier 'kTarget' is not available"},
-        {"constexpr_lookup_does_not_promote_a_namespaced_const_global",
-         "namespace a {\n"
-         "const int kTarget = 8;\n"
          "int read() {\n"
          "    constexpr int local = kTarget;\n"
          "    return local;\n"
@@ -9824,6 +9842,31 @@ void run_scppm_payload_round_trip_tests() {
                    std::to_string(warm_code) + ")");
     }
     {
+        // [dcl.fct]/5 keeps the qualifier off `Param::type`, so a `const`
+        // parameter's constness travels in `Param::is_const` alone -- a
+        // field the payload has to carry or the warm build silently gets a
+        // *mutable* parameter and accepts a write the cold build rejects
+        // (the #435 failure mode). The `loc` beside it is what makes the
+        // resulting diagnostic name a line.
+        std::string case_name = "scppm_payload_preserves_const_parameters_in_exported_templates";
+        cases_run++;
+        auto [cold_code, warm_code] = cold_and_warm_exit_codes(case_name,
+                                                               "export module probe_mod;\n"
+                                                               "namespace probe_mod {\n"
+                                                               "export template <typename T>\n"
+                                                               "T triple(const T value) {\n"
+                                                               "    return value * 3;\n"
+                                                               "}\n"
+                                                               "}\n",
+                                                               "import probe_mod;\n"
+                                                               "int main() { return probe_mod::triple<int>(7); }\n");
+        expect(cold_code == 21, case_name + ": expected 21 from source, got " + std::to_string(cold_code));
+        expect(warm_code == 21, case_name + ": expected 21 from .scppm, got " + std::to_string(warm_code));
+        expect(cold_code == warm_code,
+               case_name + ": cold and warm builds diverged (cold " + std::to_string(cold_code) + ", warm " +
+                   std::to_string(warm_code) + ")");
+    }
+    {
         // Lambda captures and parameters carry `resolved_local` too, and a
         // template body containing a lambda exercises both.
         std::string case_name = "scppm_payload_preserves_lambda_captures_in_exported_templates";
@@ -10999,6 +11042,469 @@ void run_const_escape_constant_evaluator_tests() {
     }
 }
 
+// [dcl.fct]/5 and [dcl.type.cv]: a bare `const` declaration.
+//
+// `parse_type_inner` used to have three mutually exclusive answers for
+// `const T`: put it on the referent for `const T&`, put it on the pointee for
+// `const T*`, and *reject* it anywhere else. The third arm is why every case
+// in the accept table below was a parse error -- including `int f(const int
+// v)`, which is the single most ordinary way to write a C++ parameter. The
+// east spelling (`int const c`) was rejected by a fourth path, the declarator,
+// with a different message again.
+//
+// The pre-fix outcome for each accept case is a *rejection*, so each one
+// asserts the run-time value the program is supposed to produce rather than
+// merely that it compiles: a case that compiled but computed the wrong thing
+// would pass a "no error" assertion.
+void run_bare_const_declaration_tests() {
+    struct AcceptCase {
+        const char* name;
+        const char* source;
+        int expected_exit;
+    };
+    const AcceptCase accept_cases[] = {
+        // [dcl.fct]/5. Pre-fix: "'const' is only supported directly before a
+        // reference type ('const T&') or a pointer type ('const T*') in this
+        // version".
+        {"a_const_by_value_parameter_is_a_declaration_like_any_other",
+         "int f(const int v) { return v * 2; }\n"
+         "int main() { return f(3); }\n",
+         6},
+        {"a_const_by_value_parameter_may_be_read_through_every_form",
+         "int g(int v) { return v; }\n"
+         "int f(const int v) { const int& r = v; return g(v) + r; }\n"
+         "int main() { return f(3); }\n",
+         6},
+        {"a_const_class_typed_parameter_may_be_read",
+         "struct S { int x; };\n"
+         "int f(const S s) { return s.x; }\n"
+         "int main() { S s{7}; return f(s); }\n",
+         7},
+        {"a_const_parameter_may_carry_a_default_argument",
+         "int f(const int v = 7) { return v; }\n"
+         "int main() { return f(); }\n",
+         7},
+        {"a_const_parameter_is_accepted_on_a_method",
+         "struct S { int x; int add(const int d) { return x + d; } };\n"
+         "int main() { S s{5}; return s.add(2); }\n",
+         7},
+        {"a_const_parameter_is_accepted_on_a_lambda",
+         "int main() { auto f = [](const int v) { return v + 1; }; return f(6); }\n",
+         7},
+        {"a_const_parameter_is_accepted_in_the_abbreviated_generic_form",
+         "int f(const auto v) { return v + 1; }\n"
+         "int main() { return f(6); }\n",
+         7},
+        // [dcl.fct] return types and [class.mem] members: the same third arm.
+        {"a_const_return_type_is_accepted",
+         "const int f() { return 7; }\n"
+         "int main() { return f(); }\n",
+         7},
+        {"a_const_data_member_is_accepted",
+         "struct S { const int x; int y; };\n"
+         "int main() { S s{7, 1}; return s.x; }\n",
+         7},
+        // [dcl.type.cv]/1 imposes no order on a decl-specifier-seq, so the
+        // east spelling declares the same thing. Pre-fix each of these was a
+        // *different* parse error from the declarator: "expected variable
+        // name", "expected function name", "expected parameter name",
+        // "expected field or method name".
+        {"east_const_declares_the_same_local_as_west_const",
+         "int main() { int const c = 5; return c; }\n",
+         5},
+        {"east_const_declares_the_same_global_as_west_const",
+         "int const g = 5;\n"
+         "int main() { return g; }\n",
+         5},
+        {"east_const_declares_the_same_parameter_as_west_const",
+         "int f(int const v) { return v; }\n"
+         "int main() { return f(5); }\n",
+         5},
+        {"east_const_declares_the_same_member_as_west_const",
+         "struct S { int const x; };\n"
+         "int main() { S s{7}; return s.x; }\n",
+         7},
+        {"east_const_after_a_star_declares_a_const_pointer",
+         "int main() {\n"
+         "    int x = 5;\n"
+         "    int* const p = &x;\n"
+         "    [[scpp::unsafe]] { return *p; }\n"
+         "}\n",
+         5},
+        {"east_const_before_and_after_a_star_declares_a_const_pointer_to_const",
+         "int main() {\n"
+         "    int x = 5;\n"
+         "    int const* const p = &x;\n"
+         "    [[scpp::unsafe]] { return *p; }\n"
+         "}\n",
+         5},
+        {"east_const_is_accepted_on_an_auto_declaration",
+         "int main() { auto const c = 7; return c; }\n",
+         7},
+        {"east_const_is_accepted_on_an_auto_reference",
+         "int main() { int x = 4; auto const& r = x; return r; }\n",
+         4},
+        // [expr.const] via ch06 §7.1(1), and the §9.4(5) Note's own wording
+        // ("a *non-const*, non-constexpr local variable ... is not usable in
+        // a constant expression"). Pre-fix: "expression is not a constant
+        // expression: identifier 'n' is not available" -- but only for a
+        // *global*; the identical local already worked, which is what made
+        // this two code paths answering one question.
+        {"a_const_global_is_usable_as_an_array_bound",
+         "const int n = 3;\n"
+         "int main() { int a[n]{1,2,7}; return a[2]; }\n",
+         7},
+        {"a_const_global_is_usable_in_an_arithmetic_constant_expression",
+         "const int n = 3;\n"
+         "int main() { int a[n * 2 + 1]{1,2,3,4,5,6,7}; return a[6]; }\n",
+         7},
+        {"a_const_global_may_seed_another_const_global_and_a_constexpr",
+         "const int a = 2;\n"
+         "const int b = a + 2;\n"
+         "constexpr int c = b + 3;\n"
+         "int main() { return c; }\n",
+         7},
+        {"a_const_global_is_usable_as_a_global_array_bound",
+         "const int n = 3;\n"
+         "int ga[n] = {1,2,7};\n"
+         "int main() { return ga[2]; }\n",
+         7},
+        // Pre-fix: "operand of '++' must be an assignable place". The guard
+        // was `resolve_borrow_source_root(...).empty()`, which means "no
+        // *local* owns this place" -- true of every namespace-scope variable,
+        // const or not. Plain `=` never asked it, so `g = 7;` compiled while
+        // `g++;` did not.
+        {"a_mutable_global_can_be_incremented",
+         "int g = 5;\n"
+         "int main() { g++; ++g; return g; }\n",
+         7},
+        {"a_mutable_global_can_be_compound_assigned",
+         "int g = 5;\n"
+         "int main() { g += 3; g -= 1; return g; }\n",
+         7},
+        {"a_mutable_global_array_element_can_be_incremented",
+         "int ga[3] = {1,2,5};\n"
+         "int main() { ga[2]++; ga[2] += 1; return ga[2]; }\n",
+         7},
+        {"a_mutable_global_struct_field_can_be_incremented",
+         "struct S { int x; };\n"
+         "S gs = {5};\n"
+         "int main() { gs.x++; gs.x += 1; return gs.x; }\n",
+         7},
+    };
+    for (const AcceptCase& accept_case : accept_cases) {
+        std::string case_name = accept_case.name;
+        cases_run++;
+        RunResult result = compile_and_run(accept_case.source, case_name);
+        expect(result.exit_code == accept_case.expected_exit,
+               case_name + ": expected exit " + std::to_string(accept_case.expected_exit) + ", got " +
+                   std::to_string(result.exit_code));
+    }
+
+    struct RejectCase {
+        const char* name;
+        const char* source;
+        const char* must_say;
+        const char* must_also_say;
+    };
+    const RejectCase reject_cases[] = {
+        // The hole the loosening opens if `const` is only ever consulted on
+        // `Stmt::is_const`: a parameter is built from `Param`, not `Stmt`, so
+        // nothing carried its qualifier. With the qualifier deleted from the
+        // function type per [dcl.fct]/5 it has to live on the parameter's own
+        // LocalDecl, and every write check has to ask the one predicate that
+        // reads it.
+        {"a_const_by_value_parameter_cannot_be_assigned",
+         "int f(const int v) { v = 6; return v; }\n"
+         "int main() { return f(3); }\n",
+         "cannot modify 'v' through '='", "'v' is declared const at line 1"},
+        {"a_const_by_value_parameter_cannot_be_incremented",
+         "int f(const int v) { v++; return v; }\n"
+         "int main() { return f(3); }\n",
+         "cannot modify 'v' through '++'", "'v' is declared const at line 1"},
+        {"a_const_by_value_parameter_cannot_yield_a_mutable_reference",
+         "int f(const int v) { int& r = v; r = 6; return v; }\n"
+         "int main() { return f(3); }\n",
+         "read-only", "'v' is declared const at line 1"},
+        {"a_const_generic_parameter_cannot_be_assigned",
+         "int f(const auto v) { v = 3; return v; }\n"
+         "int main() { return f(7); }\n",
+         "cannot modify 'v' through '='", "'v' is declared const at line 1"},
+        {"an_east_const_parameter_cannot_be_assigned",
+         "int f(int const v) { v = 6; return v; }\n"
+         "int main() { return f(3); }\n",
+         "cannot modify 'v' through '='", "'v' is declared const at line 1"},
+        {"an_east_const_pointer_cannot_be_repointed",
+         "int main() {\n"
+         "    int x = 5;\n"
+         "    int y = 6;\n"
+         "    int* const p = &x;\n"
+         "    p = &y;\n"
+         "    [[scpp::unsafe]] { return *p; }\n"
+         "}\n",
+         "cannot modify 'p' through '='", "'p' is declared const at line 4"},
+        // [dcl.fct]/5 again, from the other side: with the top-level
+        // qualifier deleted, these two declare the *same* function.
+        {"a_const_parameter_does_not_create_a_second_overload",
+         "int f(int v) { return v; }\n"
+         "int f(const int v) { return v + 1; }\n"
+         "int main() { return f(3); }\n",
+         "redefinition of 'f'", "identical parameter list"},
+        // A `const` *parameter* is not initialized by a constant expression,
+        // so it is not usable in one ([expr.const]). The loosening must not
+        // reach this far.
+        {"a_const_parameter_is_not_usable_in_a_constant_expression",
+         "int f(const int n) { int a[n]{1,2,3}; return a[0]; }\n"
+         "int main() { return f(3); }\n",
+         "not a constant expression", "identifier 'n' is not available"},
+        // ...nor is a global whose initializer is not itself constant. The
+        // diagnostic has to say *which* of those it is, or the reader cannot
+        // tell an unsupported form from an unusable one.
+        {"a_const_global_with_a_runtime_initializer_is_not_a_constant_expression",
+         "int r() { return 3; }\n"
+         "const int n = r();\n"
+         "int main() { int a[n]{1,2,7}; return a[2]; }\n",
+         "identifier 'n' is not available",
+         "has an initializer that is not itself a constant expression"},
+        {"a_mutable_global_is_not_usable_in_a_constant_expression",
+         "int n = 3;\n"
+         "int main() { int a[n]{1,2,7}; return a[2]; }\n",
+         "identifier 'n' is not available",
+         "is neither 'const' nor 'constexpr'"},
+    };
+    for (const RejectCase& reject_case : reject_cases) {
+        std::string case_name = reject_case.name;
+        cases_run++;
+        auto result = try_compile_and_run(reject_case.source, case_name);
+        expect(!result.has_value(),
+               case_name + ": expected a rejection, but it compiled and ran to exit " +
+                   (result.has_value() ? std::to_string(result.value().exit_code) : std::string{"?"}));
+        if (!result.has_value()) {
+            std::string message = result.error().what();
+            expect(message.find(reject_case.must_say) != std::string::npos,
+                   case_name + ": expected the diagnostic to say '" + std::string(reject_case.must_say) + "', got " +
+                       message);
+            expect(message.find(reject_case.must_also_say) != std::string::npos,
+                   case_name + ": expected the diagnostic to say '" + std::string(reject_case.must_also_say) +
+                       "', got " + message);
+        }
+    }
+}
+
+// "May I write here?" had four different answers depending on which syntactic
+// form asked: "cannot reassign 'c' after initialization" (plain `=`), "cannot
+// assign to this place: it is reached through a read-only (const) reference"
+// (`+=` and every projection), "cannot apply '++' to this place: ..." (`++`),
+// and "operand of '++' must be an assignable place" (anything at namespace
+// scope, const or not). Two of those also asserted a *reference* that a const
+// local, global or by-value parameter simply does not have.
+//
+// One question, one sentence. The operator the user wrote is a parameter of
+// that sentence, not a separate sentence.
+void run_read_only_write_diagnostic_unification_tests() {
+    struct MessageCase {
+        const char* name;
+        const char* source;
+        const char* expected_fragment;
+        const char* expected_source_fragment;
+    };
+    const MessageCase message_cases[] = {
+        {"const_local_assignment_names_the_declaration",
+         "int main() {\n"
+         "    const int c = 5;\n"
+         "    c = 6;\n"
+         "    return c;\n"
+         "}\n",
+         "cannot modify 'c' through '=': it is read-only", "'c' is declared const at line 2"},
+        {"const_global_assignment_names_the_declaration",
+         "const int g = 5;\n"
+         "int main() { g = 6; return g; }\n",
+         "cannot modify 'g' through '=': it is read-only", "the global 'g' is declared const at line 1"},
+        {"const_local_increment_names_the_declaration",
+         "int main() {\n"
+         "    const int c = 5;\n"
+         "    c++;\n"
+         "    return c;\n"
+         "}\n",
+         "cannot modify 'c' through '++': it is read-only", "'c' is declared const at line 2"},
+        {"const_global_increment_names_the_declaration",
+         "const int g = 5;\n"
+         "int main() { ++g; return g; }\n",
+         "cannot modify 'g' through '++': it is read-only", "the global 'g' is declared const at line 1"},
+        {"const_local_compound_assignment_names_the_declaration",
+         "int main() {\n"
+         "    const int c = 5;\n"
+         "    c += 1;\n"
+         "    return c;\n"
+         "}\n",
+         "cannot modify 'c' through '+=': it is read-only", "'c' is declared const at line 2"},
+        {"const_global_compound_assignment_names_the_declaration",
+         "const int g = 5;\n"
+         "int main() { g += 1; return g; }\n",
+         "cannot modify 'g' through '+=': it is read-only", "the global 'g' is declared const at line 1"},
+        {"a_constexpr_declaration_is_named_by_the_keyword_the_source_spells",
+         "int main() {\n"
+         "    constexpr int c = 5;\n"
+         "    c = 6;\n"
+         "    return c;\n"
+         "}\n",
+         "cannot modify 'c' through '=': it is read-only", "'c' is declared constexpr at line 2"},
+        {"writing_a_const_field_names_the_field_and_its_line",
+         "struct S { const int x; int y; };\n"
+         "int main() { S s{5, 1}; s.x = 6; return s.x; }\n",
+         "cannot modify 's.x' through '=': it is read-only", "the field 'x' is read-only, declared at line 1"},
+        {"writing_an_element_of_a_const_array_names_the_array",
+         "int main() {\n"
+         "    const int a[3]{1,2,3};\n"
+         "    a[0] = 9;\n"
+         "    return a[0];\n"
+         "}\n",
+         "cannot modify 'a[...]' through '=': it is read-only", "'a' is declared const at line 2"},
+        {"writing_through_a_const_reference_parameter_names_the_parameter",
+         "int f(const int& p) { p = 6; return p; }\n"
+         "int main() { int x = 5; return f(x); }\n",
+         "cannot modify 'p' through '=': it is read-only",
+         "'p' is a read-only ('const') reference, declared at line 1"},
+        {"writing_a_field_of_a_const_parameter_names_the_parameter",
+         "struct S { int x; };\n"
+         "int f(const S s) { s.x = 9; return s.x; }\n"
+         "int main() { S s{7}; return f(s); }\n",
+         "cannot modify 's.x' through '=': it is read-only", "'s' is declared const at line 2"},
+    };
+    for (const MessageCase& message_case : message_cases) {
+        std::string case_name = message_case.name;
+        cases_run++;
+        auto result = try_compile_and_run(message_case.source, case_name);
+        expect(!result.has_value(), case_name + ": expected a rejection, but it compiled");
+        if (!result.has_value()) {
+            std::string message = result.error().what();
+            expect(message.find(message_case.expected_fragment) != std::string::npos,
+                   case_name + ": expected '" + std::string(message_case.expected_fragment) + "', got " + message);
+            expect(message.find(message_case.expected_source_fragment) != std::string::npos,
+                   case_name + ": expected '" + std::string(message_case.expected_source_fragment) + "', got " +
+                       message);
+        }
+    }
+
+    // The same question asked of a binding rather than a write. Pre-fix this
+    // one answered with a *type* message -- "cannot bind reference 'r' from
+    // an incompatible source type" -- because the compatibility check ran
+    // before the const guard and saw `int&` and `const int&` as unrelated
+    // types. `type_ignoring_top_level_const` is what lets the const guard own it.
+    {
+        std::string case_name = "binding_a_mutable_reference_to_a_const_reference_parameter_is_a_const_error";
+        cases_run++;
+        auto result = try_compile_and_run("int f(const int& p) { int& r = p; r = 6; return p; }\n"
+                                          "int main() { int x = 5; return f(x); }\n",
+                                          case_name);
+        expect(!result.has_value(), case_name + ": expected a rejection, but it compiled");
+        if (!result.has_value()) {
+            std::string message = result.error().what();
+            expect(message.find("cannot bind a mutable reference 'r'") != std::string::npos,
+                   case_name + ": expected the const-binding diagnostic, got " + message);
+            expect(message.find("'p' is a read-only ('const') reference") != std::string::npos,
+                   case_name + ": expected the diagnostic to name the const source, got " + message);
+            expect(message.find("incompatible source type") == std::string::npos,
+                   case_name + ": expected the const question not to be answered with a type message, got " + message);
+        }
+    }
+    {
+        std::string case_name = "binding_auto_ref_to_a_const_reference_parameter_is_the_same_error";
+        cases_run++;
+        auto result = try_compile_and_run("int f(const int& p) { auto& r = p; r = 6; return p; }\n"
+                                          "int main() { int x = 5; return f(x); }\n",
+                                          case_name);
+        expect(!result.has_value(), case_name + ": expected a rejection, but it compiled");
+        if (!result.has_value()) {
+            std::string message = result.error().what();
+            expect(message.find("cannot bind a mutable reference 'r'") != std::string::npos,
+                   case_name + ": expected the const-binding diagnostic, got " + message);
+            expect(message.find("incompatible source type") == std::string::npos,
+                   case_name + ": expected the const question not to be answered with a type message, got " + message);
+        }
+    }
+}
+
+// The constant evaluator is a second implementation of every rule, so it gets
+// its own cell rather than being assumed to inherit one. `resolve_global_constant`
+// required `is_constexpr`, while the *local* path already accepted a `const`
+// initializer best-effort -- so the evaluator and codegen had two different
+// answers to "what is `g`?", and the evaluator's was "I don't know".
+void run_const_constant_expression_evaluator_tests() {
+    {
+        std::string case_name = "the_evaluator_and_codegen_agree_about_a_const_global_used_as_a_bound";
+        cases_run++;
+        RunResult result = compile_and_run("const int g = 5;\n"
+                                           "int main() {\n"
+                                           "    int a[g]{1,2,3,4,5};\n"
+                                           "    int runtime = g;\n"
+                                           "    if (runtime != static_cast<int>(sizeof(a)) / 4) { return 88; }\n"
+                                           "    if (a[g - 1] != 5) { return 89; }\n"
+                                           "    return runtime * 10 + a[0];\n"
+                                           "}\n",
+                                           case_name);
+        expect(result.exit_code == 51,
+               case_name + ": expected the folded bound and the run-time read of 'g' to agree (51), got exit " +
+                   std::to_string(result.exit_code) +
+                   " -- 88 means sizeof disagreed with the run-time value, 89 means the element did");
+    }
+    {
+        std::string case_name = "a_const_global_folds_through_a_chain_the_same_way_codegen_reads_it";
+        cases_run++;
+        RunResult result = compile_and_run("const int a = 2;\n"
+                                           "const int b = a * 3;\n"
+                                           "int main() {\n"
+                                           "    int arr[b]{1,2,3,4,5,6};\n"
+                                           "    int runtime = b;\n"
+                                           "    if (runtime != static_cast<int>(sizeof(arr)) / 4) { return 88; }\n"
+                                           "    return runtime;\n"
+                                           "}\n",
+                                           case_name);
+        expect(result.exit_code == 6,
+               case_name + ": expected the evaluator's chain and codegen's run-time read to agree (6), got exit " +
+                   std::to_string(result.exit_code));
+    }
+    {
+        // A `const` parameter reaches the evaluator too: a constexpr function
+        // with one has to fold to the same value the run-time call computes.
+        std::string case_name = "a_constexpr_function_with_a_const_parameter_folds_to_the_runtime_value";
+        cases_run++;
+        RunResult result = compile_and_run("int f(const int v) { return v * 3; }\n"
+                                           "constexpr int cf(const int v) { return v * 3; }\n"
+                                           "int main() {\n"
+                                           "    constexpr int folded = cf(4);\n"
+                                           "    int runtime = f(4);\n"
+                                           "    if (folded != runtime) { return 88; }\n"
+                                           "    return folded;\n"
+                                           "}\n",
+                                           case_name);
+        expect(result.exit_code == 12,
+               case_name + ": expected the folded and run-time results to agree (12), got exit " +
+                   std::to_string(result.exit_code));
+    }
+    {
+        // A local `const` already worked; a global did not. Same source, one
+        // keyword apart -- they must not disagree.
+        std::string case_name = "a_const_local_and_a_const_global_bound_behave_identically";
+        cases_run++;
+        RunResult local_result = compile_and_run("int main() {\n"
+                                                 "    const int n = 3;\n"
+                                                 "    int a[n]{1,2,7};\n"
+                                                 "    return a[n - 1];\n"
+                                                 "}\n",
+                                                 case_name + "_local");
+        RunResult global_result = compile_and_run("const int n = 3;\n"
+                                                  "int main() {\n"
+                                                  "    int a[n]{1,2,7};\n"
+                                                  "    return a[n - 1];\n"
+                                                  "}\n",
+                                                  case_name + "_global");
+        expect(local_result.exit_code == 7 && global_result.exit_code == 7,
+               case_name + ": expected both to return 7, got local " + std::to_string(local_result.exit_code) +
+                   " and global " + std::to_string(global_result.exit_code));
+    }
+}
+
 // The other half, and the one that stops this from being a fix that simply
 // rejects more: every reading form stays legal, and the lvalue-to-rvalue
 // conversion ([conv.lval]/1, which drops the cv-qualification) has to keep
@@ -11177,6 +11683,9 @@ int main() {
     run_const_escape_rejection_tests();
     run_const_escape_constant_evaluator_tests();
     run_const_escape_still_accepted_tests();
+    run_bare_const_declaration_tests();
+    run_read_only_write_diagnostic_unification_tests();
+    run_const_constant_expression_evaluator_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
