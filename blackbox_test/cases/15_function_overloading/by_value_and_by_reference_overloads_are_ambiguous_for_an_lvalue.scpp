@@ -1,0 +1,29 @@
+// [over.ics.rank]/3.2.3 with [over.match.best]/2: binding a reference is
+// an *identity* conversion, exactly like copying into a by-value
+// parameter, so for a bare lvalue argument neither `f(int)` nor
+// `f(int&)` has a better conversion sequence than the other and the call
+// is ambiguous. clang++-22 -std=c++26 rejects this program for the same
+// reason.
+//
+// This case previously asserted the opposite -- that "by-value vs.
+// by-reference is a separate, orthogonal axis" on which an lvalue picks
+// `f(int&)` and a prvalue picks `f(int)` -- and attributed it to
+// "ch05 §5.10". No such clause exists: chapter 05 of docs/spec is
+// `05-unions-and-packed-layout.md`, whose only sections are §9.1-§9.4 on
+// union types. Nothing in the spec modifies [over.ics.rank], so the
+// ordinary C++ rule applies unchanged and the old behaviour was an
+// unauthorised deviation that silently called a different function than
+// C++ specifies.
+int f(int x) {
+    return x * 2;
+}
+
+int f(int& x) {
+    x = x + 1;
+    return x * 3;
+}
+
+int main() {
+    int y = 10;
+    return f(y);
+}

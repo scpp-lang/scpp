@@ -4394,18 +4394,108 @@ void test_exact_scalar_match_still_beats_a_converting_constructor() {
                (ir_result.has_value() ? std::string{} : ir_result.error().message));
 }
 
-// An lvalue argument prefers a reference parameter -- a deliberate scpp
-// preference that the identity ranking must narrow *within*, not repeal.
-// Pinned because ranking identity matches first very nearly overruled it.
-void test_lvalue_argument_still_prefers_the_reference_parameter() {
+// This test used to assert the opposite: that "an lvalue argument prefers
+// a reference parameter" -- a *deliberate scpp preference* -- must
+// choose a winner here. It does not exist. Nothing in docs/spec/ modifies
+// [over.ics.rank], so ordinary C++ applies unchanged (the citation the
+// implementation carried, "ch05 §5.10", is not a clause the spec has),
+// and [over.ics.rank] makes binding a reference an *identity*
+// conversion -- which is exactly why `f(T)` and `f(const T&)` are
+// indistinguishable for an lvalue and the call is ambiguous. clang++-22
+// -std=c++26 rejects the same program with "call to 'f' is ambiguous".
+//
+// A test whose name asserts a limitation is nearly invisible; this one
+// pinned the wrong answer in place while the resolver silently called
+// `f(const int&)`.
+void test_value_and_const_reference_overloads_are_ambiguous_for_an_lvalue() {
     cases_run++;
     auto ir_result = try_generate_ir(
         "int f(int x) { return 1; }\n"
         "int f(const int& x) { return 2; }\n"
         "int main() { int v = 7; return f(v) - 2; }\n");
+    expect(!ir_result.has_value(),
+           "value_vs_constref_ambiguous: `f(int)` and `f(const int&)` are indistinguishable for an "
+           "lvalue argument ([over.ics.rank]), so the call has no best viable candidate");
+    if (ir_result.has_value()) return;
+    const std::string& message = ir_result.error().message;
+    expect(message.find("ambiguous call to 'f'") != std::string::npos,
+           "value_vs_constref_ambiguous: expected an ambiguity diagnostic, got: " + message);
+    // The candidate list has to name the types the user wrote. A
+    // `const int&` parameter used to be printed as `f(int&)` -- the very
+    // overload it is being distinguished from.
+    expect(message.find("candidate: f(int)") != std::string::npos &&
+               message.find("candidate: f(const int&)") != std::string::npos,
+           "value_vs_constref_ambiguous: the message must name both candidates with their written "
+           "types, got: " + message);
+}
+
+// [over.match.best]/2 is a *partial* order across all arguments: a
+// candidate wins only if no argument is worse and at least one is better.
+// Here candidate 1 is better on argument 1 and worse on argument 2, so
+// neither wins and the call is ambiguous -- clang++-22 -std=c++26 agrees.
+// A scalar score cannot represent this at all: summing per-argument
+// points always produces a maximum, so one of the two was always picked.
+void test_multi_argument_partial_order_is_ambiguous_rather_than_summed() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "int f(int a, const int& b) { return 1; }\n"
+        "int f(const int& a, int b) { return 2; }\n"
+        "int main() { int x = 1; int y = 2; return f(x, y); }\n");
+    expect(!ir_result.has_value(),
+           "multiarg_partial_order: neither candidate is better on every argument, so the call has no "
+           "best viable candidate");
+    if (ir_result.has_value()) return;
+    expect(ir_result.error().message.find("ambiguous call to 'f'") != std::string::npos,
+           "multiarg_partial_order: expected an ambiguity diagnostic, got: " + ir_result.error().message);
+}
+
+// The other half of the partial order: one argument strictly better and
+// the rest equal *does* decide, so this must stay a unique winner. Pinned
+// because the guard above could just as easily have made every
+// multi-argument call ambiguous.
+void test_multi_argument_one_better_one_equal_still_selects() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "int f(int* a, int b) { return 1; }\n"
+        "int f(const int* a, int b) { return 2; }\n"
+        "int main() { int v = 0; int* p = &v; int y = 2; return f(p, y) - 1; }\n");
     expect(ir_result.has_value(),
-           "lvalue_prefers_reference: the value/reference preference must still choose a winner, got: " +
+           "multiarg_one_better: `f(int*, int)` is better on argument 1 and equal on argument 2, so it "
+           "wins outright, got: " +
                (ir_result.has_value() ? std::string{} : ir_result.error().message));
+}
+
+// [over.ics.ref]: a read-only argument forms no conversion sequence to a
+// `T&` parameter, so this is not an ambiguity to report but a candidate
+// to remove -- and the message must say so rather than blaming the
+// argument's *type*, which matches perfectly.
+void test_read_only_argument_against_a_mutable_reference_parameter_says_why() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "int f(int& x) { x = 99; return 1; }\n"
+        "int main() { const int c = 3; return f(c); }\n");
+    expect(!ir_result.has_value(),
+           "read_only_argument: a `const` local cannot bind a `T&` parameter");
+    if (ir_result.has_value()) return;
+    const std::string& message = ir_result.error().message;
+    expect(message.find("read-only") != std::string::npos && message.find("[over.ics.ref]") != std::string::npos,
+           "read_only_argument: the message must name const-ness as the reason, got: " + message);
+}
+
+// A `const T&` parameter printed as `T&` names a different C++ type than
+// the one declared -- and in an ambiguity between `f(int)` and
+// `f(const int&)`, it names the overload it is being distinguished from.
+void test_candidate_signatures_print_reference_parameters_in_cpp_spelling() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "int f(int x) { return 1; }\n"
+        "int f(const int& x) { return 2; }\n"
+        "int main() { int v = 7; return f(v); }\n");
+    expect(!ir_result.has_value(), "reference_spelling: the call is ambiguous");
+    if (ir_result.has_value()) return;
+    const std::string& message = ir_result.error().message;
+    expect(message.find("f(const int&)") != std::string::npos && message.find("&mut") == std::string::npos,
+           "reference_spelling: a `const int&` parameter must print as `const int&`, got: " + message);
 }
 
 void test_auto_reference_to_a_reference_returning_call_collapses() {
@@ -4976,7 +5066,11 @@ int main() {
     test_ambiguous_constexpr_call_is_rejected_like_its_runtime_counterpart();
     test_non_generic_overload_beats_a_generic_one_in_either_declaration_order();
     test_exact_scalar_match_still_beats_a_converting_constructor();
-    test_lvalue_argument_still_prefers_the_reference_parameter();
+    test_value_and_const_reference_overloads_are_ambiguous_for_an_lvalue();
+    test_multi_argument_partial_order_is_ambiguous_rather_than_summed();
+    test_multi_argument_one_better_one_equal_still_selects();
+    test_read_only_argument_against_a_mutable_reference_parameter_says_why();
+    test_candidate_signatures_print_reference_parameters_in_cpp_spelling();
     test_auto_reference_to_a_reference_returning_call_collapses();
     test_auto_reference_to_a_reference_returning_method_collapses();
     test_generate_returns_engaged_expected_on_success();

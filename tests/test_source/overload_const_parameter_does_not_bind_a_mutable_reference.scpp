@@ -1,0 +1,15 @@
+import std;
+
+// [dcl.fct]/5 deletes a parameter's top-level `const` from the function
+// *type*, so it lives on Param::is_const. codegen never copied it onto
+// the parameter's LocalSlot, so the parameter object read back as
+// writable and `f(v)` selected `f(int&)`: this returned 99.
+int f(int x) { return 0; }
+int f(int& x) { x = 99; return 0; }
+
+int probe(const int v) {
+    int ignored = f(v);
+    return v;
+}
+
+int main() { return probe(3); }

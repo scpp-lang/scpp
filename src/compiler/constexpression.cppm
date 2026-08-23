@@ -1988,8 +1988,72 @@ private:
         }
         if (!non_generic.empty()) matches = std::move(non_generic);
         if (matches.size() == 1) return make_function_ref(*matches[0]);
-        if (out_ambiguous != nullptr) *out_ambiguous = std::move(matches);
+        // [over.match.best] over [over.ics.rank], through the same shared
+        // algebra codegen and movecheck use.
+        //
+        // Without it the evaluator stopped at the non-template
+        // preference and called *every* remaining tie ambiguous, so a
+        // `constexpr` call and a runtime call to the very same
+        // expression selected differently: `f(a)` with `f(int&)` and
+        // `f(const int&)` declared runs `f(int&)` at run time and was
+        // rejected as ambiguous when folded.
+        std::vector<std::vector<ArgumentConversion>> conversions{};
+        for (const Function* fn : matches) conversions.push_back(argument_conversions_for(*fn, args, arg_exprs));
+        std::vector<std::size_t> best = best_viable_candidates(conversions);
+        if (best.size() == 1) return make_function_ref(*matches[best[0]]);
+        std::vector<const Function*> tied{};
+        for (std::size_t index : best) tied.push_back(matches[index]);
+        if (out_ambiguous != nullptr) *out_ambiguous = std::move(tied);
         return {};
+    }
+
+    // The evaluator's half of the shared [over.ics.rank] vocabulary.
+    // Argument types come from the already-evaluated Cells, which is all
+    // the evaluator has: a Cell records what an expression *is*, not the
+    // value category the expression had, so /3.2.3's rvalue-reference
+    // preference cannot fire here. Every other rule can, and those are
+    // the ones that decide between two viable reference bindings.
+    [[nodiscard]] std::vector<ArgumentConversion> argument_conversions_for(const Function& fn,
+                                                                          const std::vector<std::shared_ptr<Cell>>& args,
+                                                                          const std::vector<ExprPtr>* arg_exprs) {
+        auto strip_to_value = [](Type type) {
+            if (type.kind == TypeKind::Reference && type.pointee != nullptr) type = *type.pointee;
+            type.is_const_qualified = false;
+            return type;
+        };
+        std::vector<ArgumentConversion> result{};
+        for (std::size_t i = 0; i < args.size(); ++i) {
+            ArgumentConversion conversion{};
+            conversion.rank = ConversionRank::Identity;
+            const Expr* arg_expr = arg_exprs != nullptr && i < arg_exprs->size() ? (*arg_exprs)[i].get() : nullptr;
+            if (i >= fn.params.size() || args[i] == nullptr ||
+                (arg_expr != nullptr && arg_expr->kind == ExprKind::BracedInitList)) {
+                // A braced list has no type of its own, so there is
+                // nothing to rank; an unknown sequence compares equal to
+                // every other one.
+                conversion.unknown = true;
+                result.push_back(conversion);
+                continue;
+            }
+            const Type& param_type = fn.params[i].type;
+            Type target = param_type;
+            if (param_type.kind == TypeKind::Reference) {
+                conversion.binds_reference = true;
+                conversion.reference_is_mutable = param_type.is_mutable_ref && !param_type.is_rvalue_ref;
+                conversion.reference_is_rvalue = param_type.is_rvalue_ref;
+                if (param_type.pointee != nullptr) target = *param_type.pointee;
+            }
+            Type from = decay_array_to_pointer(args[i]->type);
+            if (types_equal(strip_to_value(from), strip_to_value(target))) {
+                conversion.rank = ConversionRank::Identity;
+            } else if (is_qualification_conversion(from, target)) {
+                conversion.rank = ConversionRank::Qualification;
+            } else {
+                conversion.rank = ConversionRank::Conversion;
+            }
+            result.push_back(conversion);
+        }
+        return result;
     }
 
     [[nodiscard]] OptionalFunctionRef find_single_argument_converting_constructor(const std::string& class_name,

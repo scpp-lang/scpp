@@ -1,0 +1,15 @@
+import std;
+
+// [over.ics.ref]: a read-only argument forms no conversion sequence to a
+// `T&` parameter, so `f(int&)` is not viable here and `f(int)` is the
+// unique best candidate. Before this was checked, resolution scored a
+// reference bind above a by-value copy and selected `f(int&)`, whose
+// `x = 99` wrote through a constant: this program returned 99.
+int f(int x) { return 0; }
+int f(int& x) { x = 99; return 0; }
+
+int main() {
+    const int c = 3;
+    int ignored = f(c);
+    return c;
+}

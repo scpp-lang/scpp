@@ -1,0 +1,23 @@
+import std;
+
+// [expr.unary.op]/3: `&E` has type "pointer to T" where T is E's type
+// *including its cv-qualifiers*, so `&c` for a read-only `c` is
+// `const int*` and only `f(const int*)` is an exact match.
+//
+// Codegen's copy of that inference dropped the place-reachability half
+// on the claim that "movecheck rejects those before codegen runs".
+// With both overloads declared movecheck has nothing to reject -- it
+// selects `f(const int*)` quite correctly -- so codegen was free to
+// score `int*` an exact match and emit a call to the *other* function.
+// Two passes, two different answers to "which function", no diagnostic.
+int f(int* p) { return 1; }
+int f(const int* p) { return 2; }
+
+const int g = 7;
+
+int main() {
+    const int c = 7;
+    int local = f(&c);
+    int global = f(&g);
+    return local * 10 + global;
+}

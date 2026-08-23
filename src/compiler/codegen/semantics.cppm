@@ -274,15 +274,24 @@ namespace {
                         // [expr.unary.op]/3: "pointer to T" for T the
                         // operand's type, cv-qualifiers included. Kept
                         // deliberately identical to movecheck's own copy
-                        // in calls.cppm's infer_expr_type, minus the
-                        // place-reachability half that needs a Body --
-                        // movecheck rejects those before codegen runs.
+                        // in calls.cppm's infer_expr_type, place-
+                        // reachability half included: the claim that
+                        // "movecheck rejects those before codegen runs"
+                        // held only while a read-only operand had just
+                        // one candidate to bind to. With `f(int*)` and
+                        // `f(const int*)` both declared, movecheck
+                        // selects `f(const int*)` and has nothing to
+                        // reject, while a codegen that dropped the const
+                        // scored `int*` an exact match and emitted a call
+                        // to the *other* function.
                         if (operand->kind == TypeKind::Reference && operand->pointee) {
                             Type referent = *operand->pointee;
                             if (!operand->is_mutable_ref) referent.is_const_qualified = true;
                             return pointer_to(std::move(referent));
                         }
-                        return pointer_to(std::move(*operand));
+                        Type referent = std::move(*operand);
+                        if (is_read_only_place(*expr.lhs)) referent.is_const_qualified = true;
+                        return pointer_to(std::move(referent));
                     }
                     case UnaryOp::Deref: {
                         std::optional<Type> operand = infer_type(*expr.lhs);
@@ -722,6 +731,20 @@ namespace {
             if (const_reference_binds_materialized_temporary(arg, param_type)) {
                 return true;
             }
+            // [over.ics.ref]/1: a `T&` binds only to an lvalue. A
+            // prvalue -- spec §6.6(1)'s "fresh value": a call's returned
+            // value, a `new`, a constructed temporary -- has no place to
+            // borrow from, so no conversion sequence exists and the
+            // candidate is not viable. The Move/literal list just below
+            // was a hand-enumerated subset of the same rule that left
+            // `Call` out, which is why `f(g())` with `f(int)` and
+            // `f(int&)` declared did not simply pick `f(int)`: `f(int&)`
+            // stayed viable, tied, and the call was rejected for trying
+            // to borrow `g()`'s result.
+            if (param_type.is_mutable_ref && param_type.pointee != nullptr &&
+                produces_rvalue_of_type(arg, *param_type.pointee)) {
+                return false;
+            }
             if (arg.kind == ExprKind::Move || arg.kind == ExprKind::New ||
                 arg.kind == ExprKind::IntegerLiteral || arg.kind == ExprKind::FloatLiteral ||
                 arg.kind == ExprKind::BoolLiteral ||
@@ -795,26 +818,87 @@ namespace {
     }
 
 
+    // "May a mutable `T&`/`T*` be obtained from this place?", answered
+    // the same way movecheck's place_is_read_only answers it. The two
+    // are a single question asked by two passes, and they had drifted:
+    // this one saw only *local* constness, so a `const` global, a
+    // `const` data member reached through a mutable object, a
+    // `span<const T>`/`const T*` element and a `const`-qualified
+    // by-value parameter all read back as writable. Overload resolution
+    // now asks it as a viability question ([over.ics.ref]), so a
+    // divergence here is a `f(int&)` selected for a constant and a
+    // `x = 99` written through it -- which is exactly what
+    // `const int g = 3; f(g);` used to do.
     bool Codegen::is_read_only_place(const Expr& expr)
 {
+        auto type_is_read_only_view = [](const Type& type) {
+            return type.is_const_qualified ||
+                   ((type.kind == TypeKind::Reference || type.kind == TypeKind::Span) && !type.is_mutable_ref);
+        };
         switch (expr.kind) {
             case ExprKind::Identifier: {
-                const LocalSlot* local = find_local(expr);
-                if (local == nullptr) return false;
-                return local->is_const || (local->type.kind == TypeKind::Reference && !local->type.is_mutable_ref);
+                if (const LocalSlot* local = find_local(expr); local != nullptr) {
+                    return local->is_const || type_is_read_only_view(local->type);
+                }
+                if (const GlobalSlot* global = find_visible_global_slot(expr.name, expr.explicit_global_qualification);
+                    global != nullptr) {
+                    return global->is_const || type_is_read_only_view(global->type);
+                }
+                return false;
             }
-            case ExprKind::Member:
-            case ExprKind::Subscript:
+            case ExprKind::Member: {
+                // A projection's own declared type decides first: a
+                // `const` field, or a field that is itself a shared
+                // borrow, is read-only however mutable the object
+                // holding it is.
+                if (std::optional<Type> base = infer_type(*expr.lhs); base.has_value()) {
+                    const Type* base_type = &*base;
+                    if (base_type->kind == TypeKind::Reference && base_type->pointee != nullptr) {
+                        base_type = base_type->pointee.get();
+                    }
+                    if (base_type->kind == TypeKind::Named) {
+                        if (base_type->is_const_qualified) return true;
+                        if (const ClassDef* def = find_class_def(base_type->name); def != nullptr) {
+                            for (const ClassField& field : def->fields) {
+                                if (field.name == expr.name) return type_is_read_only_view(field.type);
+                            }
+                        }
+                        if (const StructDef* def = find_struct_def(base_type->name); def != nullptr) {
+                            for (const StructField& field : def->fields) {
+                                if (field.name == expr.name) return type_is_read_only_view(field.type);
+                            }
+                        }
+                    }
+                }
                 return is_read_only_place(*expr.lhs);
-            case ExprKind::Unary:
+            }
+            case ExprKind::Subscript: {
+                if (std::optional<Type> base = infer_type(*expr.lhs); base.has_value()) {
+                    const Type* base_type = &*base;
+                    if (base_type->kind == TypeKind::Reference && base_type->pointee != nullptr) {
+                        base_type = base_type->pointee.get();
+                    }
+                    if (base_type->kind == TypeKind::Span && !base_type->is_mutable_ref) return true;
+                    if (base_type->kind == TypeKind::Pointer && !base_type->is_mutable_pointee) return true;
+                    if (base_type->is_const_qualified) return true;
+                    if (base_type->kind == TypeKind::Array && base_type->element != nullptr &&
+                        base_type->element->is_const_qualified) {
+                        return true;
+                    }
+                }
+                return is_read_only_place(*expr.lhs);
+            }
+            case ExprKind::Unary: {
                 if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
                     return is_read_only_place(*expr.lhs);
                 }
-                if (expr.unary_op != UnaryOp::Deref || expr.lhs->kind != ExprKind::Identifier) return false;
-                {
-                    const LocalSlot* local = find_local(*expr.lhs);
-                    return local != nullptr && local->type.kind == TypeKind::Pointer && !local->type.is_mutable_pointee;
-                }
+                if (expr.unary_op != UnaryOp::Deref) return false;
+                std::optional<Type> operand = infer_type(*expr.lhs);
+                if (!operand.has_value()) return false;
+                if (operand->kind == TypeKind::Pointer) return !operand->is_mutable_pointee;
+                if (operand->kind == TypeKind::Reference) return !operand->is_mutable_ref;
+                return false;
+            }
             case ExprKind::Call: {
                 std::optional<Type> t = infer_type(expr);
                 return t.has_value() && t->kind == TypeKind::Reference && !t->is_mutable_ref;
@@ -1009,6 +1093,23 @@ namespace {
                 !literal_matches_scalar_parameter(*args[i], candidate_param_type)) {
                 return CallCandidateRejection{CallRejectionReason::ArgumentType, i, candidate_param_type};
             }
+            // A read-only argument cannot bind a `T&` parameter -- the
+            // callee would be free to write through it. Viability, not
+            // ranking: [over.ics.ref] forms no implicit conversion
+            // sequence at all here, so the candidate is not in the
+            // running and cannot be what an ambiguity is between.
+            //
+            // Nothing asked this before. `argument_matches_parameter`
+            // compares against `infer_type`, which reports an
+            // expression's *value* type with the top-level const
+            // stripped, so const-ness of the argument was invisible to
+            // every check on this path: `const int c = 3; f(c)` picked
+            // `f(int&)` over `f(int)` and the callee's `x = 99` wrote
+            // through it into a constant.
+            if (candidate_param_type.kind == TypeKind::Reference && candidate_param_type.is_mutable_ref &&
+                !candidate_param_type.is_rvalue_ref && is_read_only_place(*args[i])) {
+                return CallCandidateRejection{CallRejectionReason::ArgumentIsReadOnly, i, candidate_param_type};
+            }
         }
         return CallCandidateRejection{CallRejectionReason::None, 0, Type{}};
     }
@@ -1106,6 +1207,8 @@ namespace {
         // arity, which in turn says more than a receiver-shape mismatch.
         const Function* type_mismatch_fn = nullptr;
         CallCandidateRejection type_mismatch{CallRejectionReason::None, 0, Type{}};
+        const Function* read_only_arg_fn = nullptr;
+        CallCandidateRejection read_only_arg{CallRejectionReason::None, 0, Type{}};
         bool any_read_only_receiver = false;
         bool any_ref_qualifier = false;
         for (const Function* fn : candidates) {
@@ -1116,6 +1219,12 @@ namespace {
                     if (type_mismatch_fn == nullptr) {
                         type_mismatch_fn = fn;
                         type_mismatch = rejection;
+                    }
+                    break;
+                case CallRejectionReason::ArgumentIsReadOnly:
+                    if (read_only_arg_fn == nullptr) {
+                        read_only_arg_fn = fn;
+                        read_only_arg = rejection;
                     }
                     break;
                 case CallRejectionReason::ReceiverIsReadOnly: any_read_only_receiver = true; break;
@@ -1147,8 +1256,17 @@ namespace {
                    std::to_string(type_mismatch.argument_index + 1) + " is " + actual_text + ", but '" +
                    describe_signature(*type_mismatch_fn) + "' expects '" +
                    describe_type_brief(type_mismatch.expected_param_type) +
-                   "' (spec ch05.10 -- overload resolution is exact type match only; an explicit "
-                   "static_cast<T> may be required)" +
+                   "' (spec §16.3(3) -- an argument of scalar type matches a parameter of scalar type only if "
+                   "the two types are the same; an explicit static_cast<T> may be required)" +
+                   (candidates.size() > 1 ? candidate_list() : std::string());
+        }
+        if (read_only_arg_fn != nullptr) {
+            return "no overload of '" + display_name + "' accepts these arguments: argument " +
+                   std::to_string(read_only_arg.argument_index + 1) +
+                   " is read-only (const), so it cannot bind parameter '" +
+                   describe_type_brief(read_only_arg.expected_param_type) +
+                   "' of '" + describe_signature(*read_only_arg_fn) +
+                   "', which the callee may write through ([over.ics.ref])" +
                    (candidates.size() > 1 ? candidate_list() : std::string());
         }
         if (any_read_only_receiver) {
@@ -1188,19 +1306,6 @@ namespace {
             return nullptr;
         };
         if (out_ambiguous != nullptr) out_ambiguous->clear();
-        auto scalar_exact_match_score = [&, this](const Function* fn) {
-            int score = 0;
-            std::size_t fixed_param_count = fn->params.size() - param_offset;
-            for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
-                std::optional<Type> arg_type = infer_type(*args[i]);
-                if (!arg_type.has_value()) continue;
-                Type candidate_param_type = normalized_param_type(*fn, *args[i], fn->params[i + param_offset].type);
-                if (candidate_param_type.kind == TypeKind::Reference) continue;
-                if (types_equal(*arg_type, candidate_param_type)) score += 4;
-                else if (literal_matches_scalar_parameter(*args[i], candidate_param_type)) score += 1;
-            }
-            return score;
-        };
         std::vector<const Function*> candidates = collect_call_candidates(callee_name, param_offset, receiver_expr);
         if (candidates.empty()) return nullptr;
         if (candidates.size() == 1 && !candidates[0]->is_generic_template) {
@@ -1227,185 +1332,171 @@ namespace {
         // win; when that was the template, codegen resolved to the
         // uninstantiated `f.T` and failed with "no generated code for
         // resolved function".)
-        {
-            std::vector<const Function*> non_generic;
+        auto narrow_to = [&](auto&& accepts) {
+            std::vector<const Function*> selected;
             for (const Function* fn : matches) {
-                if (!fn->is_generic_template) non_generic.push_back(fn);
+                if (accepts(fn)) selected.push_back(fn);
             }
-            if (!non_generic.empty()) matches = std::move(non_generic);
+            if (!selected.empty()) matches = std::move(selected);
+        };
+        narrow_to([](const Function* fn) { return !fn->is_generic_template; });
+        if (matches.size() == 1) return matches[0];
+        // The implicit object parameter's ref-qualifier, when the class
+        // declares both a qualified and an unqualified overload of the
+        // same name -- C++ makes that pair ill-formed to declare, so
+        // there is no [over.ics.rank] rule for it and it stays a
+        // narrowing preference rather than part of the ranking below.
+        if (param_offset == 1 && receiver_expr != nullptr) {
+            narrow_to([&, this](const Function* fn) {
+                if (fn->params.empty() || fn->params[0].type.pointee == nullptr) return false;
+                if (fn->receiver_ref_qualifier == ReceiverRefQualifier::None) return false;
+                Type receiver_expected = *fn->params[0].type.pointee;
+                receiver_expected.is_const_qualified = false;
+                bool receiver_is_rvalue = produces_rvalue_of_type(*receiver_expr, receiver_expected);
+                return receiver_is_rvalue ? fn->receiver_ref_qualifier == ReceiverRefQualifier::RValue
+                                          : fn->receiver_ref_qualifier == ReceiverRefQualifier::LValue;
+            });
             if (matches.size() == 1) return matches[0];
         }
-        // An *identity* match: every argument already has the
-        // parameter's own type, looking through a top-level reference
-        // and top-level const. [over.ics.rank] ranks identity above any
-        // conversion, and spec §16.3(3) makes scalar matching exact in
-        // the first place; that ordering holds on *either* side of the
-        // value/reference axis -- called with a `const char*`, both
-        // `f(const char*)` and `f(const Str&)` are viable, but only the
-        // first is viable without converting anything.
+        if (callee_name.ends_with("_new")) {
+            // A monomorphized clone of a constructor template is not a
+            // peer of the template it came from; it is the thing the
+            // template resolved to. Purely a naming artefact of
+            // monomorphization, so it narrows before ranking.
+            narrow_to([&](const Function* fn) { return fn->name.starts_with(callee_name + "."); });
+            if (matches.size() == 1) return matches[0];
+        }
+        // [over.match.best] over [over.ics.rank], via the one ranking
+        // algebra in ast.cppm that codegen, movecheck and the constant
+        // evaluator all share.
         //
-        // This used to compare the parameter type as written, so a
-        // reference parameter could never be an identity match and a
-        // value parameter always looked strictly better than an equally
-        // good reference one. That is why the exact-match path had to be
-        // abandoned whenever the candidates differed on the reference
-        // axis, which in turn handed `f(p)` (with `p` a `const char*`
-        // local) to a scoring rule that knows about lvalue-ness but not
-        // about types -- and it picked `f(const Str&)`, converting when
-        // an exact match was sitting right there.
+        // This used to be four scalar scores -- an exact-scalar score, a
+        // reference-axis score, a mutable-reference score and an
+        // identity-match tier -- combined into `value_vs_reference_axis
+        // * 100 + mutable_ref`, with the tied set reported as ambiguous.
+        // Two defects lived in that:
+        //
+        //  * A *scalar* score is a total order, and a total order always
+        //    has a maximum. [over.ics.rank] is a partial order in which
+        //    a by-value parameter and a reference parameter are
+        //    *indistinguishable* for an lvalue argument -- which is
+        //    exactly why `f(int)` versus `f(const int&)` is ambiguous in
+        //    C++ rather than a win for one of them. The score could not
+        //    represent "neither is better", so it picked one, silently,
+        //    and the program called a different function than C++
+        //    specifies.
+        //  * The value/reference axis itself was invented: an lvalue
+        //    argument scored +4 for a reference parameter and -4 for a
+        //    value parameter. Its cited authority, "ch05 §5.10", is not
+        //    a clause that exists -- the spec's chapter 5 file is the
+        //    union chapter -- and nothing in docs/spec/ modifies
+        //    [over.ics.rank], so ordinary C++ applies unchanged. The
+        //    axis also classified only Identifier/Member/Subscript as
+        //    lvalues, so a *call* used as an argument fell through both
+        //    arms and scored zero; those cells were the only ones that
+        //    happened to reach the ambiguity report, i.e. the only
+        //    correct ones.
+        std::vector<std::vector<ArgumentConversion>> conversions;
+        for (const Function* fn : matches) conversions.push_back(argument_conversions_for(*fn, args, param_offset, receiver_expr));
+        std::vector<std::size_t> best = best_viable_candidates(conversions);
+        if (best.size() == 1) return matches[best[0]];
+        std::vector<const Function*> tied;
+        for (std::size_t index : best) tied.push_back(matches[index]);
+        return ambiguous(std::move(tied));
+    }
+
+
+    // One argument's implicit conversion sequence, in the shared
+    // vocabulary [over.ics.rank] compares. The implicit object parameter
+    // is argument zero when there is one, so a method's `this` binding
+    // is ranked by the same rule as everything else rather than by a
+    // hand-rolled score beside it.
+    std::vector<ArgumentConversion> Codegen::argument_conversions_for(const Function& fn,
+                                                                     const std::vector<ExprPtr>& args,
+                                                                     std::size_t param_offset,
+                                                                     const Expr* receiver_expr)
+{
         auto strip_to_value = [](Type type) {
             if (type.kind == TypeKind::Reference && type.pointee != nullptr) type = *type.pointee;
             type.is_const_qualified = false;
             return type;
         };
-        auto identity_match = [&, this](const Function* fn) {
-            std::size_t fixed_param_count = fn->params.size() - param_offset;
-            for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
-                std::optional<Type> arg_type = infer_type(*args[i]);
-                if (!arg_type.has_value()) return false;
-                Type candidate_param_type = normalized_param_type(*fn, *args[i], fn->params[i + param_offset].type);
+        auto reference_facts = [](const Type& type, ArgumentConversion& conversion) {
+            if (type.kind != TypeKind::Reference) return;
+            conversion.binds_reference = true;
+            conversion.reference_is_mutable = type.is_mutable_ref && !type.is_rvalue_ref;
+            conversion.reference_is_rvalue = type.is_rvalue_ref;
+        };
+        std::vector<ArgumentConversion> result;
+        if (param_offset == 1 && receiver_expr != nullptr && !fn.params.empty()) {
+            ArgumentConversion receiver_conversion{};
+            receiver_conversion.rank = ConversionRank::Identity;
+            reference_facts(fn.params[0].type, receiver_conversion);
+            if (fn.params[0].type.pointee != nullptr) {
+                Type receiver_expected = *fn.params[0].type.pointee;
+                receiver_expected.is_const_qualified = false;
+                receiver_conversion.argument_is_rvalue = produces_rvalue_of_type(*receiver_expr, receiver_expected);
+                // A read-only receiver cannot prefer `T&` over `const T&`
+                // -- classify_call_candidate has already made the `T&`
+                // overload non-viable for it, and saying otherwise here
+                // would be a second answer to the same question.
+                if (!fn.params[0].type.is_mutable_ref && is_read_only_place(*receiver_expr)) {
+                    receiver_conversion.unknown = true;
+                }
+            }
+            result.push_back(receiver_conversion);
+        }
+        std::size_t fixed_param_count = fn.params.size() - param_offset;
+        for (std::size_t i = 0; i < args.size(); i++) {
+            ArgumentConversion conversion{};
+            conversion.rank = ConversionRank::Identity;
+            // A pack expansion or a defaulted tail has no parameter to
+            // measure against; an unknown sequence compares equal to
+            // every other, so it cannot invent a preference.
+            if (i >= fixed_param_count) {
+                conversion.unknown = true;
+                result.push_back(conversion);
+                continue;
+            }
+            Type param_type = normalized_param_type(fn, *args[i], fn.params[i + param_offset].type);
+            if (rvalue_ref_collapses_to_value(fn, i + param_offset, *args[i], param_offset) &&
+                param_type.pointee != nullptr) {
+                param_type = *param_type.pointee;
+            }
+            reference_facts(param_type, conversion);
+            Type target = param_type;
+            if (param_type.kind == TypeKind::Reference && param_type.pointee != nullptr) target = *param_type.pointee;
+            Type target_value = target;
+            target_value.is_const_qualified = false;
+            conversion.argument_is_rvalue = produces_rvalue_of_type(*args[i], target_value);
+            std::optional<Type> arg_type = infer_type(*args[i]);
+            if (!arg_type.has_value()) {
+                conversion.unknown = true;
+            } else {
                 // An array argument reaches a pointer parameter by an
                 // lvalue transformation, which [over.ics.scs] ranks as
                 // Exact Match -- so `f("abc")` is an identity match for
                 // `f(const char*)` and must outrank a candidate that
                 // needs a converting constructor.
-                if (!types_equal(strip_to_value(decay_array_to_pointer(*arg_type)),
-                                 strip_to_value(candidate_param_type))) {
-                    return false;
+                Type from = decay_array_to_pointer(*arg_type);
+                if (types_equal(strip_to_value(from), strip_to_value(target))) {
+                    conversion.rank = ConversionRank::Identity;
+                } else if (is_qualification_conversion(from, target)) {
+                    conversion.rank = ConversionRank::Qualification;
+                } else if (literal_matches_scalar_parameter(*args[i], param_type)) {
+                    // Spec §16.2(2): an integer literal takes its type
+                    // from context, so it *fits* a parameter of any
+                    // integral type -- but its own type (§16.2(3)) is
+                    // still the better match, exactly as [over.ics.scs]
+                    // ranks Exact Match above an integral conversion.
+                    conversion.rank = ConversionRank::Promotion;
+                } else {
+                    conversion.rank = ConversionRank::Conversion;
                 }
             }
-            return true;
-        };
-        if (callee_name.ends_with("_new")) {
-            // A constructor call prefers a non-generic candidate, then a
-            // monomorphized clone, then an identity match among those.
-            // Each of those is a *preference*, so it narrows the field;
-            // it does not by itself choose. This used to return the first
-            // member of the narrowest non-empty tier, which for a class
-            // whose constructors are plain overloads (no clones, so the
-            // first two preferences select nothing) meant returning
-            // whichever constructor was written first -- `string_view(const
-            // char*)` beat `string_view(const string&)` for a `const
-            // char*` argument only by being declared above it.
-            auto narrow_to = [&](auto&& accepts) {
-                std::vector<const Function*> selected;
-                for (const Function* fn : matches) {
-                    if (accepts(fn)) selected.push_back(fn);
-                }
-                if (!selected.empty()) matches = std::move(selected);
-            };
-            narrow_to([](const Function* fn) { return !fn->is_generic_template; });
-            narrow_to([&](const Function* fn) { return fn->name.starts_with(callee_name + "."); });
-            narrow_to([&](const Function* fn) { return identity_match(fn); });
-            if (matches.size() == 1) return matches[0];
+            result.push_back(conversion);
         }
-        // Rank before tie-breaking. An identity match outranks every
-        // conversion, so the candidates that convert nothing are the
-        // only ones still in the running; the value/reference tiebreak
-        // below then chooses *among* them rather than overruling them.
-        std::vector<const Function*> identity_matches;
-        for (const Function* fn : matches) {
-            if (identity_match(fn)) identity_matches.push_back(fn);
-        }
-        if (identity_matches.size() == 1) return identity_matches[0];
-        if (identity_matches.size() > 1) matches = identity_matches;
-        bool has_reference_axis_difference = false;
-        for (std::size_t i = 0; i < matches.size() && !has_reference_axis_difference; i++) {
-            for (std::size_t j = i + 1; j < matches.size() && !has_reference_axis_difference; j++) {
-                std::size_t fixed_param_count = std::min(matches[i]->params.size(), matches[j]->params.size()) - param_offset;
-                for (std::size_t k = 0; k < args.size() && k < fixed_param_count; k++) {
-                    bool lhs_ref = matches[i]->params[k + param_offset].type.kind == TypeKind::Reference;
-                    bool rhs_ref = matches[j]->params[k + param_offset].type.kind == TypeKind::Reference;
-                    if (lhs_ref != rhs_ref) {
-                        has_reference_axis_difference = true;
-                        break;
-                    }
-                }
-            }
-        }
-        int best_exact_score = -1;
-        for (const Function* fn : matches) best_exact_score = std::max(best_exact_score, scalar_exact_match_score(fn));
-        // `scalar_exact_match_score` skips reference parameters, so it
-        // scores `f(const int&)` zero against `f(int)`'s four even though
-        // both are identity matches for an `int` lvalue. Letting it
-        // narrow a field that spans the reference axis would silently
-        // repeal the value/reference preference below, which is a
-        // deliberate scpp rule (an lvalue prefers a reference parameter,
-        // a prvalue prefers a value parameter) and not this defect's
-        // business to change.
-        if (best_exact_score > 0 && !has_reference_axis_difference) {
-            std::vector<const Function*> best_scalar;
-            for (const Function* fn : matches) {
-                if (scalar_exact_match_score(fn) == best_exact_score) best_scalar.push_back(fn);
-            }
-            if (best_scalar.size() == 1) return best_scalar[0];
-            matches = best_scalar;
-        }
-        // Tie-break ("T& beats const T& for a mutable lvalue", ch05
-        // §5.10): prefer whichever match has the most mutable-reference
-        // parameters (including `this`) among positions where the
-        // argument/receiver is itself a mutable place. Falls back to the
-        // first match if that still doesn't produce a unique winner.
-        auto mutable_ref_score = [&, this](const Function* fn) {
-            int score = 0;
-            if (param_offset == 1 && fn->params[0].type.is_mutable_ref && receiver_is_mutable) score++;
-            if (param_offset == 1 && receiver_expr != nullptr && fn->params[0].type.pointee != nullptr) {
-                Type receiver_expected = *fn->params[0].type.pointee;
-                receiver_expected.is_const_qualified = false;
-                bool receiver_is_rvalue = produces_rvalue_of_type(*receiver_expr, receiver_expected);
-                if ((receiver_is_rvalue && fn->receiver_ref_qualifier == ReceiverRefQualifier::RValue) ||
-                    (!receiver_is_rvalue && fn->receiver_ref_qualifier == ReceiverRefQualifier::LValue)) {
-                    score += 2;
-                }
-            }
-            std::size_t fixed_param_count = fn->params.size() - param_offset;
-            for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
-                const Type& param_type = fn->params[i + param_offset].type;
-                if (param_type.kind == TypeKind::Reference && param_type.is_mutable_ref && !is_read_only_place(*args[i])) {
-                    score++;
-                }
-            }
-            return score;
-        };
-        auto value_vs_reference_axis_score = [&, this](const Function* fn) {
-            int score = 0;
-            std::size_t fixed_param_count = fn->params.size() - param_offset;
-            for (std::size_t i = 0; i < args.size() && i < fixed_param_count; i++) {
-                const Type& param_type = fn->params[i + param_offset].type;
-                const LocalSlot* arg_local = find_local(*args[i]);
-                bool arg_is_bare_name = args[i]->kind == ExprKind::Identifier &&
-                                        !args[i]->explicit_global_qualification && arg_local == nullptr;
-                bool arg_is_local_rvalue_ref =
-                    arg_local != nullptr && arg_local->type.kind == TypeKind::Reference && arg_local->type.is_rvalue_ref;
-                bool arg_is_lvalue_like = args[i]->kind == ExprKind::Identifier || args[i]->kind == ExprKind::Member ||
-                                          args[i]->kind == ExprKind::Subscript;
-                bool arg_is_prvalue_like = args[i]->kind == ExprKind::Move || args[i]->kind == ExprKind::New ||
-                                           args[i]->kind == ExprKind::IntegerLiteral || args[i]->kind == ExprKind::FloatLiteral ||
-                                           args[i]->kind == ExprKind::BoolLiteral || args[i]->kind == ExprKind::CharLiteral ||
-                                           args[i]->kind == ExprKind::StringLiteral;
-                if (arg_is_bare_name) continue;
-                if (arg_is_local_rvalue_ref) continue;
-                if (arg_is_lvalue_like) {
-                    if (param_type.kind == TypeKind::Reference) score += 4;
-                    else score -= 4;
-                } else if (arg_is_prvalue_like) {
-                    if (param_type.kind != TypeKind::Reference) score += 4;
-                    else score -= 4;
-                }
-            }
-            return score;
-        };
-        auto final_score = [&](const Function* fn) {
-            return (has_reference_axis_difference ? value_vs_reference_axis_score(fn) * 100 : 0) + mutable_ref_score(fn);
-        };
-        int best_score = final_score(matches[0]);
-        for (const Function* fn : matches) best_score = std::max(best_score, final_score(fn));
-        std::vector<const Function*> best_matches;
-        for (const Function* fn : matches) {
-            if (final_score(fn) == best_score) best_matches.push_back(fn);
-        }
-        if (best_matches.size() == 1) return best_matches[0];
-        return ambiguous(std::move(best_matches));
+        return result;
     }
 
 
@@ -1450,59 +1541,33 @@ namespace {
             bool all_match = true;
             for (std::size_t i = 0; all_match && i < args.size(); i++) {
                 all_match = argument_matches_parameter(*args[i], fn.params[i + 1].type);
+                // Same viability rule as classify_call_candidate: a
+                // read-only argument forms no conversion sequence to a
+                // `T&` parameter ([over.ics.ref]).
+                if (all_match && fn.params[i + 1].type.kind == TypeKind::Reference &&
+                    fn.params[i + 1].type.is_mutable_ref && !fn.params[i + 1].type.is_rvalue_ref &&
+                    is_read_only_place(*args[i])) {
+                    all_match = false;
+                }
             }
             if (all_match) matches.push_back(&fn);
         }
         if (matches.empty()) return nullptr;
-        // Same ranking as resolve_overload_by_type: identity first,
-        // looking through a top-level reference and top-level const, so
-        // that `std::string_view sv{p}` with `p` a `const char*` picks
-        // `string_view(const char*)` on the strength of the type rather
-        // than on it being written above `string_view(const string&)`.
-        auto identity_match = [&, this](const Function* fn) {
-            for (std::size_t i = 0; i < args.size(); i++) {
-                std::optional<Type> inferred = infer_type(*args[i]);
-                if (!inferred.has_value()) return false;
-                Type param_type = fn->params[i + 1].type;
-                if (param_type.kind == TypeKind::Reference && param_type.pointee != nullptr) param_type = *param_type.pointee;
-                // Decay before the qualifier is stripped: an array's own
-                // const is what decides the decayed pointee's mutability
-                // ([conv.array]), and the transformation keeps Exact
-                // Match rank ([over.ics.scs]).
-                Type arg_type = decay_array_to_pointer(*inferred);
-                if (arg_type.kind == TypeKind::Reference && arg_type.pointee != nullptr) arg_type = *arg_type.pointee;
-                param_type.is_const_qualified = false;
-                arg_type.is_const_qualified = false;
-                if (!types_equal(arg_type, param_type)) return false;
-            }
-            return true;
-        };
-        {
-            std::vector<const Function*> identity_matches;
-            for (const Function* fn : matches) {
-                if (identity_match(fn)) identity_matches.push_back(fn);
-            }
-            if (identity_matches.size() == 1) return identity_matches[0];
-            if (identity_matches.size() > 1) matches = identity_matches;
-        }
-        if (matches.size() == 1) return matches[0];
-        auto mutable_ref_score = [&, this](const Function* fn) {
-            int score = 0;
-            for (std::size_t i = 0; i < args.size(); i++) {
-                const Type& param_type = fn->params[i + 1].type;
-                if (param_type.kind == TypeKind::Reference && param_type.is_mutable_ref && !is_read_only_place(*args[i])) {
-                    score++;
-                }
-            }
-            return score;
-        };
-        int best_score = mutable_ref_score(matches[0]);
-        for (const Function* fn : matches) best_score = std::max(best_score, mutable_ref_score(fn));
-        std::vector<const Function*> best_matches;
+        // The same [over.ics.rank] algebra resolve_overload_by_type uses,
+        // rather than a second copy of it. This used to be its own
+        // identity-match tier plus its own mutable-reference score, which
+        // is how a constructor call and a plain call could disagree about
+        // which of two equally good candidates wins -- and, with no
+        // reference-axis rule at all here, how `S{x}` could quietly pick
+        // a different constructor than `f(x)` picks an overload.
+        std::vector<std::vector<ArgumentConversion>> conversions;
         for (const Function* fn : matches) {
-            if (mutable_ref_score(fn) == best_score) best_matches.push_back(fn);
+            conversions.push_back(argument_conversions_for(*fn, args, /*param_offset=*/1, /*receiver_expr=*/nullptr));
         }
-        if (best_matches.size() == 1) return best_matches[0];
+        std::vector<std::size_t> best = best_viable_candidates(conversions);
+        if (best.size() == 1) return matches[best[0]];
+        std::vector<const Function*> best_matches;
+        for (std::size_t index : best) best_matches.push_back(matches[index]);
         if (out_ambiguous != nullptr) *out_ambiguous = std::move(best_matches);
         return nullptr;
     }

@@ -131,7 +131,15 @@ namespace scpp {
                 return std::unexpected(CodegenError(
                     "internal error: parameter '" + param.name + "' was never resolved to a local", fn.loc));
             }
-            locals_[param_local(param)] = LocalSlot{slot, param.type};
+            // [dcl.fct]/5 deletes a parameter's top-level `const` from
+            // the *function type*, so it lives on Param::is_const rather
+            // than on Param::type -- and dropping it here made the
+            // parameter object read back as writable everywhere codegen
+            // asks (is_read_only_place, and through it overload
+            // resolution's [over.ics.ref] viability rule): `f(v)` with a
+            // `const int v` parameter selected `f(int&)` and wrote 99
+            // into it.
+            locals_[param_local(param)] = LocalSlot{slot, param.type, param.is_const};
             if (auto r = maybe_emit_parameter_debug_decl(param, slot, static_cast<unsigned>(index)); !r.has_value())
                 return std::unexpected(std::move(r).error());
             if (param.type.kind == TypeKind::Named && find_class_def(param.type.name) != nullptr) {
@@ -233,7 +241,15 @@ namespace scpp {
                 return std::unexpected(CodegenError(
                     "internal error: parameter '" + param.name + "' was never resolved to a local", fn.loc));
             }
-            locals_[param_local(param)] = LocalSlot{slot, param.type};
+            // [dcl.fct]/5 deletes a parameter's top-level `const` from
+            // the *function type*, so it lives on Param::is_const rather
+            // than on Param::type -- and dropping it here made the
+            // parameter object read back as writable everywhere codegen
+            // asks (is_read_only_place, and through it overload
+            // resolution's [over.ics.ref] viability rule): `f(v)` with a
+            // `const int v` parameter selected `f(int&)` and wrote 99
+            // into it.
+            locals_[param_local(param)] = LocalSlot{slot, param.type, param.is_const};
             if (auto r = maybe_emit_parameter_debug_decl(param, slot, static_cast<unsigned>(index)); !r.has_value())
                 return std::unexpected(std::move(r).error());
             if (param.type.kind == TypeKind::Named && find_class_def(param.type.name) != nullptr) {

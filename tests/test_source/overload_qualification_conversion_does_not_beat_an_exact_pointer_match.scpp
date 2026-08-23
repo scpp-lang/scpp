@@ -1,0 +1,13 @@
+import std;
+
+// [over.ics.rank]/3.2.1: `int*` -> `const int*` is a qualification
+// conversion, a longer sequence than the identity match, so `f(int*)`
+// wins rather than the two becoming ambiguous. Pinned because making the
+// value/reference axis honest could easily have made this a new tie.
+int f(int* p) { return 1; }
+int f(const int* p) { return 2; }
+
+int main() {
+    int v = 0;
+    return f(&v);
+}
