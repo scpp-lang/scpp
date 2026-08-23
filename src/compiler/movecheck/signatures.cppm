@@ -73,6 +73,7 @@ using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature
                                                                        const Body& body,
                                                                        const Signatures& signatures);
 [[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
+[[nodiscard]] bool place_is_read_only(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
 
 

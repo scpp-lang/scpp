@@ -35,6 +35,9 @@ namespace scpp {
                                                                                 const SourceLocation& loc,
                                                                                 const std::string& target_name,
                                                                                 bool report_errors);
+[[nodiscard]] std::expected<void, DataflowError> check_aggregate_element_conversions(
+    const Type& aggregate_type, const std::vector<ExprPtr>& elements, const Body& body, const Signatures& signatures,
+    const SourceLocation& loc, const std::string& target_name, bool report_errors);
 [[nodiscard]] std::expected<void, DataflowError> check_assignment_target_conversions(const Expr& place, const Expr& value,
                                                                                      const Body& body,
                                                                                      const DataflowState& state,
@@ -574,6 +577,14 @@ namespace scpp {
                                                                                 const SourceLocation& loc,
                                                                                 const std::string& target_name,
                                                                                 bool report_errors) {
+    // Before all of them, because a braced list has no type of its own
+    // for them to ask about ([dcl.init.list]): its *elements* are what
+    // bind, each to the field or element it initializes, and each of
+    // them comes straight back here.
+    if (value.kind == ExprKind::BracedInitList) {
+        return check_aggregate_element_conversions(target_type, value.args, body, signatures, loc, target_name,
+                                                   report_errors);
+    }
     // First, because it is not a conversion question: the other five ask
     // what `value` converts to, and a `void` expression has nothing to
     // convert. See check_expression_yields_a_value.
@@ -601,6 +612,63 @@ namespace scpp {
     }
     if (report_errors) {
         if (auto _r = check_enum_conversion_compatibility(target_type, value, body, signatures, loc); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    }
+    return {};
+}
+
+// [dcl.init.aggr]/4: "the explicitly initialized elements of the
+// aggregate are the elements ... copy-initialized from the corresponding
+// initializer-clause". Each element therefore gets exactly the checks
+// its field would get from any other binding position -- this recurses
+// straight back into check_value_binding_conversions rather than
+// re-deciding what a legal binding is, so a nested aggregate's elements
+// are checked to the same standard as a top-level declaration's.
+//
+// Nothing checked those elements before, in either of the two spellings.
+// `struct H { int* p; }; bool b = true; H h{&b};` bound a `bool*` into
+// an `int*` field, `H h = {&b};` likewise, and `H h{&c};` for a `const
+// int c` handed out a mutable pointer into a const object -- which is
+// how the const escape survived the checks aimed at declarations,
+// assignments and call arguments: this position was not one of them.
+//
+// Fewer elements than fields is fine ([dcl.init.aggr]/5 value-initializes
+// the rest); more is another rule's error, not this one's.
+[[nodiscard]] std::expected<void, DataflowError> check_aggregate_element_conversions(
+    const Type& aggregate_type, const std::vector<ExprPtr>& elements, const Body& body, const Signatures& signatures,
+    const SourceLocation& loc, const std::string& target_name, bool report_errors) {
+    if (!report_errors || elements.empty() || body.program == nullptr) return {};
+    if (aggregate_type.kind == TypeKind::Array && aggregate_type.element != nullptr) {
+        for (const ExprPtr& element : elements) {
+            if (element == nullptr || element->kind == ExprKind::BracedInitList) continue;
+            if (auto _r = check_value_binding_conversions(*aggregate_type.element, *element, body, signatures, loc,
+                                                          target_name + "'s elements", report_errors);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        return {};
+    }
+    if (aggregate_type.kind != TypeKind::Named) return {};
+    const StructDef* def = find_struct_def(*body.program, aggregate_type.name);
+    if (def == nullptr) return {};
+    for (std::size_t index = 0; index < elements.size() && index < def->fields.size(); ++index) {
+        if (elements[index] == nullptr) continue;
+        const Expr& element = *elements[index];
+        if (element.kind == ExprKind::BracedInitList) {
+            if (auto _r = check_aggregate_element_conversions(def->fields[index].type, element.args, body, signatures,
+                                                              loc, aggregate_type.name + "::" + def->fields[index].name,
+                                                              report_errors);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            continue;
+        }
+        if (auto _r = check_value_binding_conversions(def->fields[index].type, element, body, signatures, loc,
+                                                      aggregate_type.name + "::" + def->fields[index].name,
+                                                      report_errors);
+            !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
     }
@@ -985,9 +1053,24 @@ namespace scpp {
         // reference out of a read-only one (spec ch05 §5.7's "projection
         // chain's const-reachability").
         if (is_mutable && is_read_only_reachable(arg, body, signatures)) {
-            return std::unexpected(DataflowError("cannot pass " + format_roots(body, roots) + " by mutable reference: it is only reachable "
-                                                          "through a read-only (const) reference",
-                state.current_loc));
+            // format_roots answers "which *local* does this borrow
+            // reach?", and a const global reaches none -- so this used to
+            // print "cannot pass <unknown> by mutable reference", naming
+            // nothing the reader could act on. The argument expression is
+            // right here; describe it, and say where its constness comes
+            // from.
+            std::string subject = roots.empty() ? describe_assignment_place(arg) : format_roots(body, roots);
+            if (roots.empty()) subject = subject.empty() ? std::string("this argument") : "'" + subject + "'";
+            std::string message{"cannot pass "};
+            message += subject;
+            message += " by mutable reference: it is only reachable through a read-only (const) reference";
+            std::string const_source = describe_const_source(arg, body, signatures);
+            if (!const_source.empty()) {
+                message += " (";
+                message += const_source;
+                message += ")";
+            }
+            return std::unexpected(DataflowError(message, state.current_loc));
         }
         for (LocalId root : roots) {
             auto persistent_it = state.borrows.find(root);
@@ -1308,6 +1391,29 @@ struct ConvertingConstructorBinding {
                 return std::unexpected(std::move(_r).error());
             }
         } else {
+            // [dcl.init]/17.9 copy-initializes a by-value parameter from
+            // its argument, so it is a binding position like any other
+            // and gets the same raw-pointer conversion check a
+            // declaration or an assignment gets. Overload resolution's
+            // own argument_matches_parameter is a *selection* rule and is
+            // deliberately lenient about pointee qualification; it is not
+            // the place that answers whether the selected binding is
+            // sound. Without this, `take_ptr(&c)` for a `const int c` was
+            // reachable only through a guard scoped to the syntactic
+            // `&expr` shape -- which said nothing about `take_ptr(w)` for
+            // a const array, or about any pointer that reached the
+            // argument through some other expression.
+            if (report_errors && have_effective_param_type) {
+                std::string argument_name{"parameter "};
+                argument_name += std::to_string(param_index + 1);
+                argument_name += " of ";
+                argument_name += callee_display;
+                if (auto _r = check_raw_pointer_assignment(effective_param_type, arg, body, signatures,
+                                                           state.current_loc, argument_name, report_errors);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
             if (report_errors && sig != nullptr && param_index < sig->param_types.size() &&
                 sig->param_types[param_index].kind == TypeKind::Pointer) {
                 std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
@@ -1421,31 +1527,6 @@ struct ConvertingConstructorBinding {
             if (auto _r = apply_expr(arg, /*is_move_target_context=*/!(copyable_lvalue_source || freely_copyable_value_source), state,
                        body, signatures, report_errors); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
-            }
-
-            // `&expr` (ch05 §5.7) passed directly as a call argument --
-            // the primary motivating use case (an `extern "C"` out
-            // parameter, e.g. `getsockopt(..., &value, &len)`). If the
-            // declared parameter wants a *mutable* `T*` but `expr`'s
-            // place is only reachable read-only, reject: same
-            // const-widens-only-one-way rule as everywhere else in this
-            // version (`const T*` never converts to `T*`, so there is no
-            // way to legitimately satisfy a mutable-pointee parameter
-            // here). Scoped to exactly this direct syntactic shape (not a
-            // general type-checker): a raw pointer value that has already
-            // passed through some other variable/call has no
-            // "reachability" left to check -- only its own already-
-            // enforced declared constness matters by then (see
-            // assignment_target_is_read_only's Unary case).
-            bool param_wants_mutable_pointer =
-                sig != nullptr && param_index < sig->param_types.size() &&
-                sig->param_types[param_index].kind == TypeKind::Pointer &&
-                sig->param_types[param_index].is_mutable_pointee;
-            if (report_errors && param_wants_mutable_pointer && arg.kind == ExprKind::Unary &&
-                arg.unary_op == UnaryOp::AddressOf && is_read_only_reachable(*arg.lhs, body, signatures)) {
-                return std::unexpected(DataflowError("cannot pass '&' of a read-only-reachable place as a mutable 'T*' "
-                                    "argument (would need 'const T*', which this parameter doesn't accept)",
-                    state.current_loc));
             }
         }
         if (report_errors && sig != nullptr) {
@@ -1610,6 +1691,17 @@ struct ConvertingConstructorBinding {
                                     "' has no default constructor; no constructor of '" + class_name +
                                     "' matches 0 arguments",
                                 state.current_loc));
+        }
+    }
+    // [dcl.init.aggr]/4: with no constructor resolved and arguments
+    // present, this is aggregate initialization -- the same rule, and the
+    // same function, that the `T x = {...}` spelling goes through in
+    // check_value_binding_conversions.
+    if (sig == nullptr && !ctor_args.empty()) {
+        if (auto _r = check_aggregate_element_conversions(constructed_type, ctor_args, body, signatures,
+                                                          state.current_loc, constructed_type.name, report_errors);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
         }
     }
     if (report_errors && sig != nullptr && sig->access == AccessSpecifier::Private &&
@@ -2543,6 +2635,49 @@ struct ConvertingConstructorBinding {
         }
     }
 
+    // Reject manufacturing a mutable `T&`/`std::span<T>` out of a place
+    // that's only reachable read-only (e.g. `int& r = p.x;`/
+    // `std::span<int> s = p.arr;` where `p` is `const Foo&`) -- spec
+    // ch05 §5.7's "projection chain's const-reachability" check, shared
+    // with apply_reference_argument's identical guard for a call
+    // argument. A `const T&`/`std::span<const T>` binding is always fine
+    // regardless (read-only never needs to widen).
+    //
+    // Asked *before* the borrow roots are resolved, because whether the
+    // source is writable has nothing to do with which local owns it --
+    // and a `const` global owns no local root at all, so resolving first
+    // made `roots.empty()` return success and skip this entirely. That is
+    // how `const int g = 5; int& r = g; r = 9;` compiled and wrote 9.
+    if (report_errors && stmt.type.is_mutable_ref && place_is_read_only(*stmt.expr, body, signatures)) {
+        const char* kind_name = is_span(stmt.type) ? "span" : "reference";
+        // A range-`for` lowers to a synthesized range storage bound with
+        // the loop variable's own mutability, so this is where
+        // `for (int& v : c)` over a const range lands. Naming the
+        // synthesized local would print `$for_range_0`, which is not in
+        // the user's source at all -- and the fix is not spelled on it
+        // either, it is spelled on the loop variable.
+        bool is_range = is_synthesized_for_range_storage(body.name_of(stmt.local));
+        std::string message{"cannot bind a mutable "};
+        if (is_range) {
+            message += kind_name;
+            message += " to the range of this 'for' loop";
+        } else {
+            message += kind_name;
+            message += " '";
+            message += body.name_of(stmt.local);
+            message += "'";
+        }
+        message += ": its source is only reachable through a read-only (const) reference";
+        std::string const_source = describe_const_source(*stmt.expr, body, signatures);
+        if (!const_source.empty()) {
+            message += " (";
+            message += const_source;
+            message += ")";
+        }
+        if (is_range) message += " -- declare the loop variable a 'const' reference to read through it";
+        return std::unexpected(DataflowError(message, state.current_loc));
+    }
+
     auto roots_result = resolve_borrow_source_root(*stmt.expr, state, body, signatures, report_errors);
     if (!roots_result.has_value()) return std::unexpected(std::move(roots_result).error());
     RootSet roots = std::move(roots_result).value();
@@ -2565,20 +2700,6 @@ struct ConvertingConstructorBinding {
         if (auto _r = validate_reborrow_lender(*lender, is_mutable, state, body, report_errors); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
-    }
-
-    // Reject manufacturing a mutable `T&`/`std::span<T>` out of a place
-    // that's only reachable read-only (e.g. `int& r = p.x;`/
-    // `std::span<int> s = p.arr;` where `p` is `const Foo&`) -- spec
-    // ch05 §5.7's "projection chain's const-reachability" check, shared
-    // with apply_reference_argument's identical guard for a call
-    // argument. A `const T&`/`std::span<const T>` binding is always fine
-    // regardless (read-only never needs to widen).
-    if (report_errors && is_mutable && is_read_only_reachable(*stmt.expr, body, signatures)) {
-        const char* kind_name = is_span(stmt.type) ? "span" : "reference";
-        return std::unexpected(DataflowError(std::string("cannot bind a mutable ") + kind_name + " '" + body.name_of(stmt.local) +
-                             "': its source is only reachable through a read-only (const) reference",
-            state.current_loc));
     }
 
     if (!uses_lender_suspension) {
@@ -3120,24 +3241,6 @@ struct ConvertingConstructorBinding {
                 }
             }
 
-            // `T* p = &expr;` (ch05 §5.7): if `p`'s declared type wants a
-            // *mutable* T* but `expr`'s place is only reachable
-            // read-only, reject -- the same const-widens-only-one-way
-            // rule as check_call_arguments's identical guard for a call
-            // argument (`const T*` never converts to `T*` in this
-            // version, so there is no way to legitimately satisfy a
-            // mutable-pointee declaration here). Scoped to exactly this
-            // direct syntactic shape, not a general type-checker -- see
-            // check_call_arguments's identical comment for why.
-            if (report_errors && (*local_type).kind == TypeKind::Pointer &&
-                (*local_type).is_mutable_pointee && stmt.expr->kind == ExprKind::Unary &&
-                stmt.expr->unary_op == UnaryOp::AddressOf && is_read_only_reachable(*stmt.expr->lhs, body, signatures)) {
-                return std::unexpected(DataflowError("cannot assign '&' of a read-only-reachable place to '" + target_name +
-                                    "' (a mutable 'T*'): would need 'const T*', which '" + target_name +
-                                    "' isn't declared as",
-                    state.current_loc));
-            }
-
             if (report_errors) {
                 auto borrow_it = state.borrows.find(stmt.local);
                 if (borrow_it != state.borrows.end() &&
@@ -3269,22 +3372,38 @@ struct ConvertingConstructorBinding {
                 !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
-            // The fifth of check_value_binding_conversions' five
-            // questions, which the return position alone had no answer
-            // to: `A f(B b) { return b; }` between two distinct enum
-            // classes was accepted outright.
+            // [stmt.return]/2 copy-initializes the returned object from
+            // the operand, so `return` is a binding position like any
+            // other and takes the questions check_value_binding_conversions
+            // asks. Two of the five it had no answer to at all: `A f(B b)
+            // { return b; }` between two distinct enum classes was
+            // accepted outright, and `int* leak() { return &g; }` for a
+            // `const int g` returned a mutable handle to a const object.
             //
-            // Only this one is borrowed from that bundle rather than the
-            // whole of it. A function pointer cannot be spelled as a
-            // return type in this version at all, so that question
-            // cannot arise here; and the raw-pointer and `nullptr`
-            // questions are already answered below by the return-
-            // specific lifetime machinery, which knows what is being
-            // returned and says so ("returns a lifetime-tracked value
-            // from an incompatible source type") where the generic
-            // assignment-shaped message would not.
+            // The raw-pointer question used to be left to the return-
+            // specific lifetime machinery below on the grounds that it
+            // "knows what is being returned and says so". It does not: it
+            // answers a different question (which roots the returned
+            // pointer may outlive), and for a const-dropping return it
+            // reported "returns a lifetime-tracked value from an
+            // incompatible source type" -- a message that names neither
+            // the const nor a fix. Asked here, before it, the answer
+            // comes from the same function every other position uses.
+            //
+            // The remaining two are not borrowed: a function pointer
+            // cannot be spelled as a return type in this version, and
+            // `return nullptr;` against a non-pointer return type is
+            // already rejected by the return-specific type-mismatch
+            // check. The scalar question is asked just above, in the
+            // return position's own words.
             if (auto _r = check_enum_conversion_compatibility(fn.return_type, *term.return_value, body, signatures,
                                                               term.loc);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            if (auto _r = check_raw_pointer_assignment(fn.return_type, *term.return_value, body, signatures, term.loc,
+                                                       "the value returned from " + fn.name,
+                                                       /*report_errors=*/true);
                 !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }

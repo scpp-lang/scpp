@@ -209,6 +209,8 @@ struct NodiscardInfo {
                                   bool report_errors);
 [[nodiscard]] bool assignment_target_is_read_only(const Expr& expr, const Body& body,
                                                   const Signatures& signatures);
+[[nodiscard]] bool place_is_read_only(const Expr& expr, const Body& body, const Signatures& signatures);
+[[nodiscard]] std::string describe_const_source(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> validate_sizeof_operand(const Expr& expr, const Body& body, const Signatures& signatures,
                                     const SourceLocation& loc);
 [[nodiscard]] std::expected<void, DataflowError> validate_alignof_operand(const Expr& expr, const Body& body, const SourceLocation& loc);
@@ -1508,6 +1510,65 @@ std::expected<void, DataflowError> check_scalar_conversion(const Type& target_ty
         loc));
 }
 
+// Names the object whose constness a rejected binding would have
+// dropped, and where it was made const -- because "cannot convert
+// 'const int*' to 'int*'" leaves the reader looking for a `const` that
+// is nowhere near the line being rejected. `&s.arr[i]` for a `const S s`
+// is reported against `s`, so the walk here is to the *root* of the
+// place chain: that is the declaration the user would have to change.
+//
+// Empty when the root isn't a declaration this can point at (a call
+// result, a `const T&` parameter's referent, a string literal) -- the
+// caller then prints the types alone rather than an invented location.
+[[nodiscard]] std::string describe_const_source(const Expr& expr, const Body& body, const Signatures& signatures) {
+    const Expr* place = &expr;
+    while (place != nullptr) {
+        if (place->kind == ExprKind::Unary &&
+            (place->unary_op == UnaryOp::AddressOf || place->unary_op == UnaryOp::Deref) && place->lhs != nullptr) {
+            place = place->lhs.get();
+            continue;
+        }
+        if ((place->kind == ExprKind::Member || place->kind == ExprKind::Subscript) && place->lhs != nullptr) {
+            // Stop at a projection that is itself the read-only step, so
+            // `c.ref_field` is blamed on the field, not on `c`.
+            if (place_is_read_only(*place, body, signatures) &&
+                !place_is_read_only(*place->lhs, body, signatures)) {
+                std::string result{"'"};
+                result += place->kind == ExprKind::Member ? place->name : std::string("[...]");
+                result += "' is read-only";
+                return result;
+            }
+            place = place->lhs.get();
+            continue;
+        }
+        break;
+    }
+    if (place == nullptr || place->kind != ExprKind::Identifier) return "";
+    if (std::optional<LocalId> local = body.local_of(*place); local.has_value()) {
+        const LocalDecl& decl = body.decl(*local);
+        if (!decl.is_const && !body.type_of(*local).is_const_qualified) return "";
+        std::string result{"'"};
+        result += decl.source_name;
+        result += "' is declared ";
+        result += decl.is_constexpr ? "constexpr" : "const";
+        result += " at line ";
+        result += std::to_string(decl.decl_loc.line);
+        return result;
+    }
+    if (const GlobalVar* global = find_visible_global_for_expr(*place, body);
+        global != nullptr && global->decl != nullptr) {
+        if (!global->decl->is_const && !global->decl->is_constexpr && !global->decl->type.is_const_qualified) return "";
+        std::string result{"the global '"};
+        result += global->decl->var_name;
+        result += "' is declared ";
+        result += global->decl->is_constexpr ? "constexpr" : "const";
+        result += " at line ";
+        result += std::to_string(global->decl->loc.line);
+        return result;
+    }
+    return "";
+}
+
 std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& target_type, const Expr& expr, const Body& body,
                                    const Signatures& signatures, SourceLocation loc, const std::string& target_name,
                                    bool report_errors) {
@@ -1539,11 +1600,6 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
     // `const char` ([lex.string]/1) rather than a `const char*`,
     // `char* p = "abcd";` would have silently started compiling.
     //
-    // This sees only constness that is recorded *on the type*. A `const`
-    // local or global array records it on the declaration instead, and the
-    // guard that catches that for `&x` is scoped to the syntactic `&expr`
-    // shape -- so `char* p = w;` for a const array remains accepted. That
-    // is a separate, pre-existing defect with a different root cause.
     if (source_type && source_type->kind == TypeKind::Array) source_type = decay_array_to_pointer(*source_type);
     if (!source_type || source_type->kind != TypeKind::Pointer) return {};
     if (raw_pointer_implicitly_convertible(*source_type, target_type)) return {};
@@ -1551,26 +1607,87 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
         types_compatible_with_base_conversion(*source_type, target_type, *body.program, enclosing_class_name(body))) {
         return {};
     }
-    return std::unexpected(DataflowError("cannot initialize or assign raw pointer '" + target_name +
-                            "' from an incompatible pointer type without an explicit cast",
-                        loc));
+    // [conv.qual]/3 permits a qualification conversion only in the
+    // direction that *adds* const, so dropping it is its own failure and
+    // gets its own message. Told apart from an unrelated-pointee mismatch
+    // because the two have completely different fixes: this one is
+    // always spelled by qualifying the destination, and saying "without
+    // an explicit cast" here would be naming a fix the next diagnostic
+    // forbids -- ch05 §5.1(5.2) rejects a raw-pointer cast outside
+    // `[[scpp::unsafe]] { }`, and reaching for `unsafe` to defeat a
+    // const check is not a fix at all.
+    std::string source_brief = describe_type_brief(*source_type);
+    std::string target_brief = describe_type_brief(target_type);
+    if (!source_type->is_mutable_pointee && target_type.is_mutable_pointee && source_type->pointee != nullptr &&
+        target_type.pointee != nullptr && types_equal(*source_type->pointee, *target_type.pointee)) {
+        std::string const_source = describe_const_source(expr, body, signatures);
+        std::string message{"cannot initialize or assign raw pointer '"};
+        message += target_name;
+        message += "' (of type '";
+        message += target_brief;
+        message += "') from '";
+        message += source_brief;
+        message += "': that would drop 'const' and hand out a mutable handle to a read-only object";
+        if (!const_source.empty()) {
+            message += " (";
+            message += const_source;
+            message += ")";
+        }
+        message += " -- to read through it, declare it '";
+        message += source_brief;
+        message += "'";
+        return std::unexpected(DataflowError(message, loc));
+    }
+    std::string message{"cannot initialize or assign raw pointer '"};
+    message += target_name;
+    message += "' (of type '";
+    message += target_brief;
+    message += "') from an incompatible pointer type '";
+    message += source_brief;
+    message += "' without an explicit cast";
+    return std::unexpected(DataflowError(message, loc));
 }
 
-// Structurally validates and resolves spec ch05.3's elision rule for a
-[[nodiscard]] bool assignment_target_is_read_only(const Expr& expr, const Body& body, const Signatures& signatures) {
+// spec §6.2(10): "A shared reborrow does not make the program more
+// permissive than the binding from which it is formed: it may not be
+// used to mutate an object or range that is reachable only through a
+// shared or `const` binding." This is that predicate -- "is the place
+// this expression denotes reachable only read-only?" -- and there is
+// exactly one of it.
+//
+// There were two, and they disagreed in five places. `assignment_target_
+// is_read_only` answered it for "may I write here?" and `is_read_only_
+// reachable` (borrows.cppm) for "may I derive a mutable handle here?",
+// which are the same question about the same place. Only the first knew
+// about globals, so `const int g = 5;` rejected `g = 9;` and accepted
+// `int* p = &g;`, `int& r = g;`, `auto& r = g;`, `take_ref(g)`,
+// `take_ptr(&g)` and `std::span<int> s = ga;` -- every one of which then
+// wrote through the const object at runtime. Only the first knew that a
+// lambda's captured `const T&` field and a `std::span<const T>` base
+// stay read-only through a projection; only the first treated `*r` for a
+// `const T&` r as read-only. Only the second gave a span return type its
+// read-only answer.
+//
+// So this is the union of the two, and both names now denote it.
+// Once a chain crosses a read-only step, everything beyond it stays
+// read-only: a struct field/array element can never itself be a
+// reference or span (ch04.1), so there is no way for a later `.field`/
+// `[index]` step to "regain" mutability -- only a chain that never
+// crosses one at all is mutable.
+[[nodiscard]] bool place_is_read_only(const Expr& expr, const Body& body, const Signatures& signatures) {
     switch (expr.kind) {
         case ExprKind::Identifier: {
             if (std::optional<LocalId> local = body.local_of(expr); local.has_value()) {
                 const Type& type = body.type_of(*local);
-                return body.decl(*local).is_const ||
+                return body.decl(*local).is_const || type.is_const_qualified ||
                        ((is_reference(type) || is_span(type)) && !type.is_mutable_ref);
             }
             if (const GlobalVar* global = find_visible_global_for_expr(expr, body); global != nullptr && global->decl != nullptr) {
                 const Type& type = global->decl->type;
-                return global->decl->is_const || global->decl->is_constexpr ||
+                return global->decl->is_const || global->decl->is_constexpr || type.is_const_qualified ||
                        ((is_reference(type) || is_span(type)) && !type.is_mutable_ref);
             }
-            return false;
+            return false; // unknown name: left to codegen's own check
         }
         case ExprKind::Member:
         case ExprKind::Subscript: {
@@ -1591,10 +1708,12 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
                     base_named = base_named->pointee.get();
                 }
                 if (base_named != nullptr && base_named->kind == TypeKind::Named) {
+                    if (base_named->is_const_qualified) return true;
                     if (const ClassDef* def = find_class_def(*body.program, base_named->name)) {
                         for (const ClassField& field : def->fields) {
                             if (field.name == expr.name) {
                                 if ((is_reference(field.type) || is_span(field.type)) && !field.type.is_mutable_ref) return true;
+                                if (field.type.is_const_qualified) return true;
                                 break;
                             }
                         }
@@ -1603,6 +1722,7 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
                         for (const StructField& field : def->fields) {
                             if (field.name == expr.name) {
                                 if ((is_reference(field.type) || is_span(field.type)) && !field.type.is_mutable_ref) return true;
+                                if (field.type.is_const_qualified) return true;
                                 break;
                             }
                         }
@@ -1615,32 +1735,49 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
                     effective = effective->pointee.get();
                 }
                 if (effective != nullptr && effective->kind == TypeKind::Span && !effective->is_mutable_ref) return true;
+                if (effective != nullptr && effective->kind == TypeKind::Pointer && !effective->is_mutable_pointee) return true;
+                if (effective != nullptr && effective->is_const_qualified) return true;
             }
-            return assignment_target_is_read_only(*expr.lhs, body, signatures);
+            return place_is_read_only(*expr.lhs, body, signatures);
         }
         case ExprKind::Unary: {
+            if (is_explicit_star_this(expr)) return place_is_read_only(*expr.lhs, body, signatures);
             if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
-                return assignment_target_is_read_only(*expr.lhs, body, signatures);
+                return place_is_read_only(*expr.lhs, body, signatures);
             }
             if (expr.unary_op != UnaryOp::Deref) return false;
-            if (is_explicit_star_this(expr)) return is_read_only_reachable(*expr.lhs, body, signatures);
             std::optional<Type> operand_type = infer_expr_type(*expr.lhs, body, signatures);
             if (!operand_type.has_value()) return false;
-            if (operand_type->kind == TypeKind::Pointer) {
-                return !operand_type->is_mutable_pointee;
-            }
+            if (operand_type->kind == TypeKind::Pointer) return !operand_type->is_mutable_pointee;
             if (operand_type->kind == TypeKind::Reference) return !operand_type->is_mutable_ref;
             return false;
         }
         case ExprKind::Call: {
+            // The call's *own* declared return type is authoritative --
+            // it doesn't matter whether the elided argument behind it was
+            // itself mutable or read-only-reachable: a signature that
+            // promises `const T&` back hands back a read-only view
+            // regardless (exactly like a plain `const T&`-typed
+            // Identifier above), and a signature promising `T&` could
+            // only have been called successfully with a mutable-
+            // reachable argument in the first place (apply_reference_
+            // argument already enforces that at the call site).
             CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
-            return sig != nullptr && is_reference(sig->return_type) && !sig->return_type.is_mutable_ref;
+            if (sig == nullptr) return false;
+            if (is_reference(sig->return_type) || is_span(sig->return_type)) return !sig->return_type.is_mutable_ref;
+            return sig->return_type.is_const_qualified;
         }
         default:
             return false;
     }
 }
+
+// The same question under the name the assignment path asks it by.
+[[nodiscard]] bool assignment_target_is_read_only(const Expr& expr, const Body& body, const Signatures& signatures) {
+    return place_is_read_only(expr, body, signatures);
+}
+
 // A call through a function-pointer-typed field -- `receiver.field_
 // (args)`/`this->field_(args)`, parsed identically to an ordinary named-
 // method call (parse_member_or_method_call fuses the member access and
@@ -1889,7 +2026,31 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
 // overload's corresponding parameter fail to match (see
 // argument_matches_parameter) -- conservatively rejecting the call with
 // a clear diagnostic rather than silently guessing an overload.
+//
+// [conv.lval]/1: reading an lvalue yields a prvalue whose type is the
+// *cv-unqualified* version of the object's type -- which is why
+// `const int c = 5; int v = c;`, `f(c)` for `f(int)`, and `auto v = c;`
+// all work in C++ and why the qualifier only survives where no such
+// conversion happens: `&c` ([expr.unary.op]/3 keeps it), array-to-pointer
+// decay ([conv.array] -- `const char w[6]` yields `const char*`), and
+// reference binding (which never reads the object at all).
+//
+// So this wrapper is the lvalue-to-rvalue conversion, and the split it
+// draws is the whole reason the const representation could move onto the
+// type at all: infer_expr_type answers "what is this expression's
+// *value* type", place_is_read_only answers "is the object this
+// expression names writable". Arrays are exempt because they have no
+// lvalue-to-rvalue conversion -- they decay instead, and decay carries
+// the qualifier into the pointee.
+[[nodiscard]] std::optional<Type> infer_expr_lvalue_type(const Expr& expr, const Body& body, const Signatures& signatures);
+
 [[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures) {
+    std::optional<Type> type = infer_expr_lvalue_type(expr, body, signatures);
+    if (type.has_value() && type->kind != TypeKind::Array) type->is_const_qualified = false;
+    return type;
+}
+
+[[nodiscard]] std::optional<Type> infer_expr_lvalue_type(const Expr& expr, const Body& body, const Signatures& signatures) {
     switch (expr.kind) {
         // A brace-enclosed initializer list has no type of its own; only
         // the initialization boundary that consumes it knows what it
@@ -2028,21 +2189,29 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
                     }
                     std::optional<Type> operand = infer_expr_type(*expr.lhs, body, signatures);
                     if (!operand) return std::nullopt;
-                    Type result;
-                    result.kind = TypeKind::Pointer;
                     if (operand->kind == TypeKind::Reference && operand->pointee != nullptr) {
-                        result.pointee = std::make_shared<Type>(*operand->pointee);
-                        result.is_mutable_pointee = operand->is_mutable_ref;
-                    } else {
-                        result.pointee = std::make_shared<Type>(std::move(*operand));
-                        // `&expr` of a non-reference place yields a mutable
-                        // T* (ch05 §5.7) -- whether the place itself is
-                        // read-only-reachable is a separate check
-                        // (is_read_only_reachable), not part of `&expr`'s own
-                        // static type.
-                        result.is_mutable_pointee = true;
+                        Type referent = *operand->pointee;
+                        if (!operand->is_mutable_ref) referent.is_const_qualified = true;
+                        return pointer_to(std::move(referent));
                     }
-                    return result;
+                    // [expr.unary.op]/3: `&E` has type "pointer to T"
+                    // where T is E's type *including its cv-qualifiers*.
+                    // This used to hand back a mutable `T*` for every
+                    // non-reference operand and leave the constness
+                    // question to a separate guard scoped to the
+                    // syntactic `&expr` initializer/argument shapes --
+                    // so `H h{&c};`, `int* p = cond ? &c : &v;` and
+                    // `return &c;` were never asked at all. A place
+                    // reached read-only through a projection
+                    // (`&s.field` of a const `s`) has no const on its
+                    // own inferred type -- movecheck's Member/Subscript
+                    // inference yields no type for those at all -- so
+                    // the place predicate answers for those, in the same
+                    // expression, rather than in a second guard
+                    // somewhere else.
+                    Type referent = std::move(*operand);
+                    if (place_is_read_only(*expr.lhs, body, signatures)) referent.is_const_qualified = true;
+                    return pointer_to(std::move(referent));
                 }
                 case UnaryOp::Deref: {
                     std::optional<Type> operand = infer_expr_type(*expr.lhs, body, signatures);
@@ -2316,8 +2485,17 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             return std::nullopt;
 
         case ExprKind::Member: {
-            std::optional<Type> base = infer_expr_type(*expr.lhs, body, signatures);
+            // [expr.ref]/4: the member access's type is the field's type
+            // "combined with the cv-qualification of the object
+            // expression" -- so a field of a `const S` is itself const,
+            // which is what made `const S s{"hello"}; char* p = s.a;`
+            // hand out a mutable pointer into a const object. The base is
+            // asked for its *lvalue* type here, not its prvalue type: the
+            // qualifier this rule propagates is precisely the one
+            // [conv.lval] would have stripped.
+            std::optional<Type> base = infer_expr_lvalue_type(*expr.lhs, body, signatures);
             if (!base) return std::nullopt;
+            const bool base_is_const = base->kind == TypeKind::Reference ? !base->is_mutable_ref : base->is_const_qualified;
             const Type& base_named =
                 base->kind == TypeKind::Reference && base->pointee != nullptr ? *base->pointee : *base;
             if (base_named.kind != TypeKind::Named || body.program == nullptr) return std::nullopt;
@@ -2339,19 +2517,13 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             }
             if (const ClassDef* def = find_class_def(*body.program, base_named.name)) {
                 for (const ClassField& field : def->fields) {
-                    if (field.name == expr.name) {
-                        return field.type.kind == TypeKind::Reference ? std::optional<Type>(*field.type.pointee)
-                                                                      : std::optional<Type>(field.type);
-                    }
+                    if (field.name == expr.name) return member_access_type(field.type, base_is_const);
                 }
                 return {};
             }
             if (const StructDef* def = find_struct_def(*body.program, base_named.name)) {
                 for (const StructField& field : def->fields) {
-                    if (field.name == expr.name) {
-                        return field.type.kind == TypeKind::Reference ? std::optional<Type>(*field.type.pointee)
-                                                                      : std::optional<Type>(field.type);
-                    }
+                    if (field.name == expr.name) return member_access_type(field.type, base_is_const);
                 }
                 return {};
             }
@@ -2359,12 +2531,17 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
         }
 
         case ExprKind::Subscript: {
-            std::optional<Type> base = infer_expr_type(*expr.lhs, body, signatures);
+            // [expr.sub]/1 defines `E1[E2]` as `*(E1 + E2)`, so the
+            // element of a `const T[N]` is a `const T` -- the same
+            // qualification-propagation rule as [expr.ref]/4 above, and
+            // the reason the base is asked for its lvalue type.
+            std::optional<Type> base = infer_expr_lvalue_type(*expr.lhs, body, signatures);
             if (!base) return std::nullopt;
+            const bool base_is_const = base->kind == TypeKind::Reference ? !base->is_mutable_ref : base->is_const_qualified;
             const Type& effective = base->kind == TypeKind::Reference && base->pointee ? *base->pointee : *base;
-            if (effective.kind == TypeKind::Array) return *effective.element;
-            if (effective.kind == TypeKind::Span) return *effective.pointee;
-            if (effective.kind == TypeKind::Pointer) return *effective.pointee;
+            if (effective.kind == TypeKind::Array) return member_access_type(*effective.element, base_is_const || effective.is_const_qualified);
+            if (effective.kind == TypeKind::Span) return member_access_type(*effective.pointee, !effective.is_mutable_ref);
+            if (effective.kind == TypeKind::Pointer) return member_access_type(*effective.pointee, !effective.is_mutable_pointee);
             if (std::optional<Type> element = infer_vector_element_type(effective, body); element.has_value()) {
                 return *element;
             }

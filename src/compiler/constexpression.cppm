@@ -1279,6 +1279,17 @@ private:
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> make_default_cell(const Type& type, const SourceLocation& loc) {
         auto cell = std::make_shared<Cell>();
         cell->type = type;
+        // A Cell is storage, and this evaluator tracks whether storage may
+        // be written through LValue::read_only/Binding::read_only -- its
+        // own, complete model of constness, which is what rejects `c = 1;`
+        // and `f(c)` for a mutable-reference parameter here. The declared
+        // type's top-level `const` is the same fact spelled a second way,
+        // and carrying it on the cell too would make every `constexpr int
+        // x = 5;` a type mismatch against the plain `int` value being
+        // stored ([conv.lval]: the value has no qualifier). Cv-qualifiers
+        // *below* the top level -- `const int*`'s pointee -- are part of
+        // the type proper and stay.
+        cell->type.is_const_qualified = false;
         switch (type.kind) {
             case TypeKind::Named: {
                 if (is_integral_named_type(type.name) && type.name != "bool") {
@@ -1542,7 +1553,13 @@ private:
     }
 
     [[nodiscard]] std::expected<void, ConstexprError> copy_into(const std::shared_ptr<Cell>& target, const std::shared_ptr<Cell>& source, const SourceLocation& loc) {
-        if (!types_equal(target->type, source->type)) {
+        // Top-level const is the *object's*, not the value's
+        // ([conv.lval]/[dcl.init]) -- see
+        // types_equal_ignoring_top_level_const. A `constexpr`/`const`
+        // declaration's cell carries the qualifier its declared type now
+        // records, and requiring the incoming value to carry it too would
+        // reject every `constexpr int x = 5;` in the language.
+        if (!types_equal_ignoring_top_level_const(target->type, source->type)) {
             return std::unexpected(ConstexprError(loc, "constexpr assignment requires exactly matching types"));
         }
         std::shared_ptr<Cell> cloned = clone_cell(source);

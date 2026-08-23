@@ -10764,6 +10764,355 @@ void run_namespace_scope_char_array_initialization_tests() {
     }
 }
 
+// spec ch02 §6.2(10): "A shared reborrow does not make the program more
+// permissive than the binding from which it is formed: it may not be used to
+// mutate an object or range that is reachable only through a shared or
+// `const` binding." The plain C++ rules say the same thing from the other
+// end -- [conv.qual]/3 permits a qualification conversion only in the
+// direction that *adds* cv-qualification -- and the spec adopts no clause
+// modifying either, so both apply unchanged.
+//
+// Every case below was ACCEPTED before this change and then wrote through a
+// const object at run time, so each one asserts a rejection whose pre-fix
+// failure is not "it compiled" but "it compiled and printed the wrong
+// answer": the expected_wrong_exit field records what it actually returned.
+// The rejection is only half the assertion -- the diagnostic has to name the
+// const object and where it acquired its constness, because "cannot convert
+// 'int*' to 'int*'" (which is what an unreadable type printer produced here)
+// tells the reader nothing.
+void run_const_escape_rejection_tests() {
+    struct EscapeCase {
+        const char* name;
+        const char* source;
+        int wrong_exit;         // what `main` returned before the fix
+        const char* rule;       // the rule the diagnostic must name
+        const char* names_source; // the const object the diagnostic must name
+    };
+    const EscapeCase escape_cases[] = {
+        // Array-to-pointer decay: the escape route the const guard, being
+        // scoped to a syntactic `&expr`, could not see at all.
+        {"const_local_array_does_not_decay_to_a_mutable_pointer",
+         "int main() {\n"
+         "    const char w[6]{\"hello\"};\n"
+         "    char* p = w;\n"
+         "    [[scpp::unsafe]] { p[0] = 'X'; }\n"
+         "    return static_cast<int>(w[0]);\n"
+         "}\n",
+         88, "drop 'const'", "'w' is declared const"},
+        {"const_local_array_does_not_decay_when_passed_by_value",
+         "int poke(char* p) { [[scpp::unsafe]] { p[0] = 'X'; } return 0; }\n"
+         "int main() {\n"
+         "    const char w[6]{\"hello\"};\n"
+         "    poke(w);\n"
+         "    return static_cast<int>(w[0]);\n"
+         "}\n",
+         88, "drop 'const'", "'w' is declared const"},
+        {"const_global_array_does_not_decay_to_a_mutable_pointer",
+         "const char gw[6] = \"hello\";\n"
+         "int main() {\n"
+         "    char* p = gw;\n"
+         "    [[scpp::unsafe]] { p[0] = 'X'; }\n"
+         "    return static_cast<int>(gw[0]);\n"
+         "}\n",
+         88, "drop 'const'", "the global 'gw' is declared const"},
+        {"constexpr_local_array_does_not_decay_to_a_mutable_pointer",
+         "int main() {\n"
+         "    constexpr char w[6]{\"hello\"};\n"
+         "    char* p = w;\n"
+         "    [[scpp::unsafe]] { p[0] = 'X'; }\n"
+         "    return static_cast<int>(w[0]);\n"
+         "}\n",
+         88, "drop 'const'", "'w' is declared constexpr"},
+        // The global row: the two predicates that answered "is this place
+        // read-only?" disagreed about globals, and only the one asked by
+        // assignment knew the answer. Every route below therefore worked on
+        // a global while its local twin was correctly rejected.
+        {"a_mutable_pointer_cannot_be_taken_to_a_const_global",
+         "const int gsrc = 5;\n"
+         "int main() {\n"
+         "    int* p = &gsrc;\n"
+         "    [[scpp::unsafe]] { *p = 9; }\n"
+         "    return gsrc;\n"
+         "}\n",
+         9, "drop 'const'", "the global 'gsrc' is declared const"},
+        {"a_mutable_reference_cannot_bind_to_a_const_global",
+         "const int gsrc = 5;\n"
+         "int main() {\n"
+         "    int& r = gsrc;\n"
+         "    r = 9;\n"
+         "    return gsrc;\n"
+         "}\n",
+         9, "read-only", "the global 'gsrc' is declared const"},
+        {"a_const_global_cannot_be_passed_by_mutable_reference",
+         "int poke(int& r) { r = 9; return 0; }\n"
+         "const int gsrc = 5;\n"
+         "int main() {\n"
+         "    poke(gsrc);\n"
+         "    return gsrc;\n"
+         "}\n",
+         9, "cannot pass 'gsrc' by mutable reference", "the global 'gsrc' is declared const"},
+        {"a_mutable_span_cannot_view_a_const_global_array",
+         "const int ga[3] = {1,2,3};\n"
+         "int main() {\n"
+         "    std::span<int> s = ga;\n"
+         "    s[0] = 9;\n"
+         "    return ga[0];\n"
+         "}\n",
+         9, "read-only", "the global 'ga' is declared const"},
+        {"a_range_for_over_a_const_global_array_cannot_yield_mutable_elements",
+         "const int ga[3] = {1,2,3};\n"
+         "int main() {\n"
+         "    for (int& v : ga) { v = 7; }\n"
+         "    return ga[0];\n"
+         "}\n",
+         7, "declare the loop variable a 'const' reference", "the global 'ga' is declared const"},
+        // Positions no type-level rule was ever asked about, because the
+        // compensating guard was keyed on the *shape* `T* p = &c;` and on a
+        // call argument spelled `&c`.
+        {"an_aggregate_initializer_cannot_put_a_mutable_pointer_in_a_field",
+         "struct H { int* p; };\n"
+         "int main() {\n"
+         "    const int c = 5;\n"
+         "    H h{&c};\n"
+         "    [[scpp::unsafe]] { *h.p = 9; }\n"
+         "    return c;\n"
+         "}\n",
+         9, "drop 'const'", "'c' is declared const"},
+        {"an_equals_brace_aggregate_initializer_is_checked_the_same_way",
+         "struct H { int* p; };\n"
+         "int main() {\n"
+         "    const int c = 5;\n"
+         "    H h = {&c};\n"
+         "    [[scpp::unsafe]] { *h.p = 9; }\n"
+         "    return c;\n"
+         "}\n",
+         9, "drop 'const'", "'c' is declared const"},
+        {"assigning_into_a_pointer_field_cannot_drop_const",
+         "const int g = 5;\n"
+         "struct H { int* p; };\n"
+         "int main() {\n"
+         "    int v = 1;\n"
+         "    H h{&v};\n"
+         "    h.p = &g;\n"
+         "    [[scpp::unsafe]] { *h.p = 9; }\n"
+         "    return g;\n"
+         "}\n",
+         9, "drop 'const'", "the global 'g' is declared const"},
+        {"a_lambda_body_cannot_take_a_mutable_pointer_to_a_captured_const",
+         "int main() {\n"
+         "    const int c = 5;\n"
+         "    auto f = [&c]() { int* p = &c; [[scpp::unsafe]] { *p = 9; } return c; };\n"
+         "    return f();\n"
+         "}\n",
+         9, "drop 'const'", "'c' is read-only"},
+        {"a_function_cannot_return_a_mutable_pointer_to_a_const_global",
+         "const int g = 5;\n"
+         "int* leak() { return &g; }\n"
+         "int main() {\n"
+         "    int* p = leak();\n"
+         "    [[scpp::unsafe]] { *p = 9; }\n"
+         "    return g;\n"
+         "}\n",
+         9, "drop 'const'", "the value returned from leak"},
+        {"a_conditional_expression_cannot_launder_const_away",
+         "int main() {\n"
+         "    const int c = 5;\n"
+         "    int v = 1;\n"
+         "    int* p = (v > 0) ? &c : &v;\n"
+         "    [[scpp::unsafe]] { *p = 9; }\n"
+         "    return c;\n"
+         "}\n",
+         9, "same type", "conditional"},
+    };
+    for (const EscapeCase& escape_case : escape_cases) {
+        std::string case_name = escape_case.name;
+        cases_run++;
+        auto result = try_compile_and_run(escape_case.source, case_name);
+        expect(!result.has_value(),
+               case_name + ": expected a mutable handle to a const object to be rejected, but it compiled and ran "
+                           "to exit " +
+                   (result.has_value() ? std::to_string(result.value().exit_code) : std::string{"?"}) +
+                   " (before this change it returned " + std::to_string(escape_case.wrong_exit) +
+                   ", the value written through the const object)");
+        if (!result.has_value()) {
+            std::string message = result.error().what();
+            expect(message.find(escape_case.rule) != std::string::npos,
+                   case_name + ": expected the diagnostic to name the rule ('" + std::string(escape_case.rule) +
+                       "'), got " + message);
+            expect(message.find(escape_case.names_source) != std::string::npos,
+                   case_name + ": expected the diagnostic to name the const object ('" +
+                       std::string(escape_case.names_source) + "'), got " + message);
+        }
+    }
+}
+
+// The constant evaluator has been an independent second implementation of
+// every rule checked so far, so it gets its own cell rather than being
+// assumed to inherit one. Two things are asserted: that a `constexpr` object
+// is const (it was not -- `constexpr int g = 5;` handed out `int* p = &g;`
+// and the write landed), and that the evaluator and codegen do not disagree
+// about a const global's value. Before this change they *agreed on the wrong
+// value*: the program below returned 95, meaning the run-time read of `g`
+// saw the 9 written through the laundered pointer while the folded
+// `constexpr k` still said 5 -- two answers to one question, and neither
+// pass complained.
+void run_const_escape_constant_evaluator_tests() {
+    {
+        std::string case_name = "a_constexpr_object_is_const_for_the_purpose_of_taking_its_address";
+        cases_run++;
+        auto result = try_compile_and_run("constexpr int g = 5;\n"
+                                          "int main() {\n"
+                                          "    int* p = &g;\n"
+                                          "    [[scpp::unsafe]] { *p = 9; }\n"
+                                          "    return g;\n"
+                                          "}\n",
+                                          case_name);
+        expect(!result.has_value(),
+               case_name + ": expected [dcl.constexpr]/1 to make the object const, but it compiled and ran to exit " +
+                   (result.has_value() ? std::to_string(result.value().exit_code) : std::string{"?"}) +
+                   " (before this change it returned 9)");
+        if (!result.has_value()) {
+            std::string message = result.error().what();
+            expect(message.find("drop 'const'") != std::string::npos,
+                   case_name + ": expected the const-dropping diagnostic, got " + message);
+            expect(message.find("declared constexpr") != std::string::npos,
+                   case_name + ": expected the diagnostic to say the object is constexpr, got " + message);
+        }
+    }
+    {
+        std::string case_name = "the_constant_evaluator_and_codegen_cannot_disagree_about_a_const_global";
+        cases_run++;
+        auto result = try_compile_and_run("const int g = 5;\n"
+                                          "int main() {\n"
+                                          "    int* p = &g;\n"
+                                          "    [[scpp::unsafe]] { *p = 9; }\n"
+                                          "    constexpr int k = 5;\n"
+                                          "    return g * 10 + k;\n"
+                                          "}\n",
+                                          case_name);
+        expect(!result.has_value(),
+               case_name + ": expected the write through the const global to be rejected, but it compiled and ran "
+                           "to exit " +
+                   (result.has_value() ? std::to_string(result.value().exit_code) : std::string{"?"}) +
+                   " (before this change it returned 95: the run-time read of 'g' saw 9 while the folded value "
+                   "still said 5)");
+    }
+}
+
+// The other half, and the one that stops this from being a fix that simply
+// rejects more: every reading form stays legal, and the lvalue-to-rvalue
+// conversion ([conv.lval]/1, which drops the cv-qualification) has to keep
+// letting a const object initialize, be passed to, and be returned as a
+// value. That conversion did not exist before this change -- constness lived
+// on the declaration and never on the type, so nothing needed it -- and
+// putting const on the type is exactly what makes it load-bearing.
+void run_const_escape_still_accepted_tests() {
+    struct AcceptCase {
+        const char* name;
+        const char* source;
+        int expected_exit;
+    };
+    const AcceptCase accept_cases[] = {
+        {"a_const_pointer_may_still_be_taken_to_a_const_global",
+         "const int gsrc = 5;\n"
+         "int main() {\n"
+         "    const int* p = &gsrc;\n"
+         "    int v = 0;\n"
+         "    [[scpp::unsafe]] { v = *p; }\n"
+         "    return v;\n"
+         "}\n",
+         5},
+        {"a_const_array_may_still_decay_to_a_pointer_to_const",
+         "int main() {\n"
+         "    const char w[6]{\"hello\"};\n"
+         "    const char* p = w;\n"
+         "    int v = 0;\n"
+         "    [[scpp::unsafe]] { v = static_cast<int>(p[0]); }\n"
+         "    return v;\n"
+         "}\n",
+         104},
+        {"a_const_object_may_still_initialize_a_value",
+         "int main() {\n"
+         "    const int c = 5;\n"
+         "    int v = c;\n"
+         "    v = v + 1;\n"
+         "    return v;\n"
+         "}\n",
+         6},
+        {"a_const_object_may_still_be_passed_by_value",
+         "int twice(int v) { return v * 2; }\n"
+         "int main() {\n"
+         "    const int c = 5;\n"
+         "    return twice(c);\n"
+         "}\n",
+         10},
+        {"a_const_object_may_still_be_returned_by_value",
+         "int give() { const int c = 5; return c; }\n"
+         "int main() { return give(); }\n",
+         5},
+        {"a_const_object_may_still_deduce_a_value_through_auto",
+         "int main() {\n"
+         "    const int c = 5;\n"
+         "    auto v = c;\n"
+         "    v = v + 2;\n"
+         "    return v;\n"
+         "}\n",
+         7},
+        {"a_shared_reference_may_still_bind_to_a_const_global",
+         "const int gsrc = 5;\n"
+         "int main() {\n"
+         "    const int& r = gsrc;\n"
+         "    return r;\n"
+         "}\n",
+         5},
+        {"a_span_of_const_may_still_view_a_const_global_array",
+         "const int ga[3] = {1,2,3};\n"
+         "int main() {\n"
+         "    std::span<const int> s = ga;\n"
+         "    return s[0] + s[2];\n"
+         "}\n",
+         4},
+        {"a_range_for_over_a_const_array_may_still_read_its_elements",
+         "const int ga[3] = {1,2,3};\n"
+         "int main() {\n"
+         "    int total = 0;\n"
+         "    for (const int& v : ga) { total = total + v; }\n"
+         "    return total;\n"
+         "}\n",
+         6},
+        {"a_mutable_pointer_may_still_be_taken_to_a_mutable_global",
+         "int gsrc = 5;\n"
+         "int main() {\n"
+         "    int* p = &gsrc;\n"
+         "    [[scpp::unsafe]] { *p = 9; }\n"
+         "    return gsrc;\n"
+         "}\n",
+         9},
+        {"an_aggregate_initializer_may_still_hold_a_mutable_pointer",
+         "struct H { int* p; };\n"
+         "int main() {\n"
+         "    int v = 5;\n"
+         "    H h{&v};\n"
+         "    [[scpp::unsafe]] { *h.p = 9; }\n"
+         "    return v;\n"
+         "}\n",
+         9},
+    };
+    for (const AcceptCase& accept_case : accept_cases) {
+        std::string case_name = accept_case.name;
+        cases_run++;
+        auto result = try_compile_and_run(accept_case.source, case_name);
+        expect(result.has_value(),
+               case_name + ": expected this reading form to stay legal, got " +
+                   (result.has_value() ? std::string{} : std::string(result.error().what())));
+        if (result.has_value()) {
+            expect(result.value().exit_code == accept_case.expected_exit,
+                   case_name + ": expected exit " + std::to_string(accept_case.expected_exit) + ", got exit " +
+                       std::to_string(result.value().exit_code));
+        }
+    }
+}
+
 int main() {
     run_test_case_files();
     run_driver_single_test_case_files();
@@ -10825,6 +11174,9 @@ int main() {
     test_compile_to_executable_returns_engaged_expected_on_success();
     test_compile_to_executable_returns_disengaged_expected_on_failure_without_throwing();
     run_namespace_scope_char_array_initialization_tests();
+    run_const_escape_rejection_tests();
+    run_const_escape_constant_evaluator_tests();
+    run_const_escape_still_accepted_tests();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

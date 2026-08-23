@@ -120,7 +120,19 @@ namespace {
     }
 
 
+    // [conv.lval]/1: an lvalue read yields a prvalue of the
+    // *cv-unqualified* type. Kept deliberately in the same shape as
+    // movecheck's infer_expr_type/infer_expr_lvalue_type pair -- arrays
+    // are exempt because they decay ([conv.array]) rather than convert,
+    // and decay carries the qualifier into the pointee.
     std::optional<Type> Codegen::infer_type(const Expr& expr)
+{
+        std::optional<Type> type = infer_lvalue_type(expr);
+        if (type.has_value() && type->kind != TypeKind::Array) type->is_const_qualified = false;
+        return type;
+    }
+
+    std::optional<Type> Codegen::infer_lvalue_type(const Expr& expr)
 {
         switch (expr.kind) {
             // A brace-enclosed initializer list has no type of its own:
@@ -193,8 +205,13 @@ namespace {
             }
 
             case ExprKind::Member: {
-                std::optional<Type> base = infer_type(*expr.lhs);
+                // [expr.ref]/4 -- see movecheck's matching Member arm in
+                // calls.cppm: the base is asked for its *lvalue* type so
+                // the qualifier this rule propagates hasn't already been
+                // stripped by [conv.lval].
+                std::optional<Type> base = infer_lvalue_type(*expr.lhs);
                 if (!base) return std::nullopt;
+                const bool base_is_const = base->kind == TypeKind::Reference ? !base->is_mutable_ref : base->is_const_qualified;
                 // See codegen_lvalue's Identifier case: a Reference-typed
                 // base (e.g. `this`) auto-dereferences to its pointee.
                 const Type& base_named =
@@ -213,16 +230,18 @@ namespace {
                 // pointee too, exactly like codegen_lvalue's own
                 // (matching) Member-case fix -- `this.b`'s *type* is the
                 // referent's type, not "a reference to it".
-                return field_type.kind == TypeKind::Reference ? *field_type.pointee : field_type;
+                return member_access_type(field_type, base_is_const);
             }
 
             case ExprKind::Subscript: {
-                std::optional<Type> base = infer_type(*expr.lhs);
+                // [expr.sub]/1 -- see movecheck's matching Subscript arm.
+                std::optional<Type> base = infer_lvalue_type(*expr.lhs);
                 if (!base) return std::nullopt;
+                const bool base_is_const = base->kind == TypeKind::Reference ? !base->is_mutable_ref : base->is_const_qualified;
                 const Type& effective = base->kind == TypeKind::Reference && base->pointee ? *base->pointee : *base;
-                if (effective.kind == TypeKind::Array) return *effective.element;
-                if (effective.kind == TypeKind::Span) return *effective.pointee;
-                if (effective.kind == TypeKind::Pointer) return *effective.pointee;
+                if (effective.kind == TypeKind::Array) return member_access_type(*effective.element, base_is_const || effective.is_const_qualified);
+                if (effective.kind == TypeKind::Span) return member_access_type(*effective.pointee, !effective.is_mutable_ref);
+                if (effective.kind == TypeKind::Pointer) return member_access_type(*effective.pointee, !effective.is_mutable_pointee);
                 if (effective.kind == TypeKind::Named &&
                     (effective.name == "std::vector" || effective.name == "vector" ||
                      effective.name.starts_with("std::vector.") || effective.name.starts_with("vector."))) {
@@ -252,16 +271,18 @@ namespace {
                         if (std::optional<Type> fn_ptr = resolve_function_designator_type(expr)) return fn_ptr;
                         std::optional<Type> operand = infer_type(*expr.lhs);
                         if (!operand) return std::nullopt;
-                        Type result;
-                        result.kind = TypeKind::Pointer;
+                        // [expr.unary.op]/3: "pointer to T" for T the
+                        // operand's type, cv-qualifiers included. Kept
+                        // deliberately identical to movecheck's own copy
+                        // in calls.cppm's infer_expr_type, minus the
+                        // place-reachability half that needs a Body --
+                        // movecheck rejects those before codegen runs.
                         if (operand->kind == TypeKind::Reference && operand->pointee) {
-                            result.pointee = std::make_shared<Type>(*operand->pointee);
-                            result.is_mutable_pointee = operand->is_mutable_ref;
-                        } else {
-                            result.pointee = std::make_shared<Type>(std::move(*operand));
-                            result.is_mutable_pointee = true; // &expr always yields a mutable T* (ch05 §5.7)
+                            Type referent = *operand->pointee;
+                            if (!operand->is_mutable_ref) referent.is_const_qualified = true;
+                            return pointer_to(std::move(referent));
                         }
-                        return result;
+                        return pointer_to(std::move(*operand));
                     }
                     case UnaryOp::Deref: {
                         std::optional<Type> operand = infer_type(*expr.lhs);
