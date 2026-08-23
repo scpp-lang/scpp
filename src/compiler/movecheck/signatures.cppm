@@ -78,6 +78,8 @@ using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature
 [[nodiscard]] DataflowError read_only_write_error(const Expr& place, const Body& body, const Signatures& signatures,
                                                   const std::string& operator_spelling, SourceLocation loc);
 [[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
+[[nodiscard]] bool produces_rvalue_of_type(const Expr& expr, const Type& expected_type, const Body& body,
+                                           const Signatures& signatures);
 
 
 [[nodiscard]] std::string describe_constructor_candidate(const FunctionSignature& candidate) {
@@ -762,6 +764,56 @@ struct ConstructedOwner {
 // type at all. Used only by apply_expr's Member case, to tell a
 // class-typed base (access-controlled, ch04 §4.2) apart from a
 // struct-typed one (never access-controlled, ch04 §4.1).
+// The constructor-selection half of the shared [over.ics.rank]
+// vocabulary. Parameter 0 is the constructor's own `this`, which is not
+// an argument of the call, so it is skipped rather than ranked.
+[[nodiscard]] std::vector<ArgumentConversion> constructor_argument_conversions(const FunctionSignature& candidate,
+                                                                               const std::vector<ExprPtr>& ctor_args,
+                                                                               const Body& body,
+                                                                               const Signatures& signatures) {
+    auto strip_to_value = [](Type type) {
+        if (type.kind == TypeKind::Reference && type.pointee != nullptr) type = *type.pointee;
+        type.is_const_qualified = false;
+        return type;
+    };
+    std::vector<ArgumentConversion> result;
+    for (std::size_t i = 0; i < ctor_args.size(); i++) {
+        ArgumentConversion conversion{};
+        conversion.rank = ConversionRank::Identity;
+        if (i + 1 >= candidate.param_types.size()) {
+            conversion.unknown = true;
+            result.push_back(conversion);
+            continue;
+        }
+        const Type& param_type = candidate.param_types[i + 1];
+        Type target = param_type;
+        if (param_type.kind == TypeKind::Reference) {
+            conversion.binds_reference = true;
+            conversion.reference_is_mutable = param_type.is_mutable_ref && !param_type.is_rvalue_ref;
+            conversion.reference_is_rvalue = param_type.is_rvalue_ref;
+            if (param_type.pointee != nullptr) target = *param_type.pointee;
+        }
+        Type target_value = target;
+        target_value.is_const_qualified = false;
+        conversion.argument_is_rvalue = produces_rvalue_of_type(*ctor_args[i], target_value, body, signatures);
+        std::optional<Type> arg_type = infer_expr_type(*ctor_args[i], body, signatures);
+        if (!arg_type.has_value()) {
+            conversion.unknown = true;
+        } else {
+            Type from = decay_array_to_pointer(*arg_type);
+            if (types_equal(strip_to_value(from), strip_to_value(target))) {
+                conversion.rank = ConversionRank::Identity;
+            } else if (is_qualification_conversion(from, target)) {
+                conversion.rank = ConversionRank::Qualification;
+            } else {
+                conversion.rank = ConversionRank::Conversion;
+            }
+        }
+        result.push_back(conversion);
+    }
+    return result;
+}
+
 [[nodiscard]] const FunctionSignature* resolve_constructor_signature(const std::string& class_name,
                                                                      const std::vector<ExprPtr>& ctor_args,
                                                                      const Body& body, const Signatures& signatures) {
@@ -799,60 +851,38 @@ struct ConstructedOwner {
             std::cerr << "  candidate " << describe_constructor_candidate(*candidate) << "\n";
         }
     }
-    auto exact_type_match = [&](const FunctionSignature* candidate) {
-        for (std::size_t i = 0; i < ctor_args.size(); i++) {
-            std::optional<Type> arg_type = infer_expr_type(*ctor_args[i], body, signatures);
-            if (!arg_type.has_value()) return false;
-            if (!types_equal(*arg_type, candidate->param_types[i + 1])) return false;
-        }
-        return true;
-    };
-    for (const FunctionSignature* candidate : matches) {
-        if (exact_type_match(candidate)) {
-            if (should_trace()) {
-                std::cerr << "  winner exact " << describe_constructor_candidate(*candidate) << "\n";
-            }
-            return candidate;
-        }
-    }
     if (matches.size() == 1) return matches[0];
+    // [over.match.best]/2.4: a non-template is better than a template.
+    {
+        std::vector<const FunctionSignature*> non_generic;
+        for (const FunctionSignature* candidate : matches) {
+            if (!candidate->is_generic_template) non_generic.push_back(candidate);
+        }
+        if (!non_generic.empty()) matches = std::move(non_generic);
+        if (matches.size() == 1) return matches[0];
+    }
+    // [over.ics.rank] through the shared algebra, the same one codegen's
+    // two resolvers, movecheck's resolve_overload and the constant
+    // evaluator use.
+    //
+    // This was a *sixth* independent answer to "which candidate is
+    // better?", and the most arbitrary of them: it returned the first
+    // candidate that matched exactly (not the best), then the first
+    // non-generic one (not the best), then a mutable-reference score
+    // that fell back to `matches[0]` on a tie. Three "first one wins"
+    // rules in a row, in the pass whose job is to check the very
+    // constructor codegen will emit.
+    std::vector<std::vector<ArgumentConversion>> conversions;
     for (const FunctionSignature* candidate : matches) {
-        if (!candidate->is_generic_template) {
-            if (should_trace()) {
-                std::cerr << "  winner first-non-generic " << describe_constructor_candidate(*candidate) << "\n";
-            }
-            return candidate;
-        }
+        conversions.push_back(constructor_argument_conversions(*candidate, ctor_args, body, signatures));
     }
-    auto mutable_ref_score = [&](const FunctionSignature& candidate) {
-        int score = 0;
-        for (std::size_t i = 0; i < ctor_args.size(); i++) {
-            const Type& param_type = candidate.param_types[i + 1];
-            if (is_reference(param_type) && param_type.is_mutable_ref &&
-                !is_read_only_reachable(*ctor_args[i], body, signatures)) {
-                score++;
-            }
-        }
-        return score;
-    };
-    const FunctionSignature* best = matches[0];
-    int best_score = mutable_ref_score(*best);
-    bool unique_best = true;
-    for (std::size_t i = 1; i < matches.size(); i++) {
-        int score = mutable_ref_score(*matches[i]);
-        if (score > best_score) {
-            best = matches[i];
-            best_score = score;
-            unique_best = true;
-        } else if (score == best_score) {
-            unique_best = false;
-        }
+    std::vector<std::size_t> best_indices = best_viable_candidates(conversions);
+    if (best_indices.size() != 1) {
+        if (should_trace()) std::cerr << "  no unique best candidate (" << best_indices.size() << " tied)\n";
+        return nullptr;
     }
-    const FunctionSignature* winner = unique_best ? best : matches[0];
-    if (should_trace()) {
-        std::cerr << "  winner mutable-ref-score " << describe_constructor_candidate(*winner)
-                  << " unique=" << (unique_best ? "yes" : "no") << "\n";
-    }
+    const FunctionSignature* winner = matches[best_indices[0]];
+    if (should_trace()) std::cerr << "  winner " << describe_constructor_candidate(*winner) << "\n";
     return winner;
 }
 
@@ -1272,8 +1302,9 @@ struct ConstructedOwner {
             if (same_params && existing.receiver_ref_qualifier == sig.receiver_ref_qualifier) {
                 return std::unexpected(DataflowError("redefinition of '" + fn.name +
                                      "': a previous declaration with an identical parameter list already "
-                                     "exists (ch05 §5.10 -- functions can only be overloaded by parameter "
-                                     "list, return type alone doesn't count as a difference)",
+                                     "exists ([basic.def.odr]/1 with [over.load]/2 -- functions can only be "
+                                     "overloaded by parameter list, return type alone doesn't count as a "
+                                     "difference)",
                     fn.loc));
             }
         }

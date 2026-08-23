@@ -1,0 +1,20 @@
+import std;
+
+// The constant evaluator ranked nothing beyond "a non-template beats a
+// template", so it called every remaining tie ambiguous while codegen
+// picked a winner: the same call folded and executed selected different
+// functions. Both digits must name the same overload.
+constexpr int f(int& x) { return 1; }
+constexpr int f(const int& x) { return 2; }
+
+constexpr int folded() {
+    int a = 3;
+    return f(a);
+}
+
+int main() {
+    int a = 3;
+    int at_runtime = f(a);
+    constexpr int at_compile_time = folded();
+    return at_runtime * 10 + at_compile_time;
+}

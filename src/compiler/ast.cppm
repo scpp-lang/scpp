@@ -1086,6 +1086,152 @@ class Expr {
     return result;
 }
 
+// [conv.qual]: `int*` converts to `const int*` by adding qualification.
+// [over.ics.scs] still calls that Exact Match rank, but
+// [over.ics.rank]/3.2.1 prefers the shorter sequence, so an `int*`
+// argument takes an `int*` parameter over a `const int*` one.
+[[nodiscard]] inline bool is_qualification_conversion(const Type& from, const Type& to) {
+    if (from.kind != TypeKind::Pointer || to.kind != TypeKind::Pointer) return false;
+    if (from.pointee == nullptr || to.pointee == nullptr) return false;
+    if (from.is_mutable_pointee == to.is_mutable_pointee) return false;
+    if (!from.is_mutable_pointee) return false;
+    Type relaxed = from;
+    relaxed.is_mutable_pointee = to.is_mutable_pointee;
+    relaxed.is_const_qualified = to.is_const_qualified;
+    return types_equal(relaxed, to);
+}
+
+// [over.ics.scs] Table 17's conversion ranks, best first. `Identity` and
+// `Qualification` are both "Exact Match" rank in the standard's table;
+// they are kept apart here because [over.ics.rank]/3.2.1 still prefers
+// the shorter sequence between them (an `int*` argument prefers an
+// `int*` parameter over a `const int*` one).
+enum class ConversionRank {
+    Identity,
+    Qualification,
+    Promotion,
+    Conversion,
+    NotViable,
+};
+
+// One argument's implicit conversion sequence, reduced to exactly the
+// facts [over.ics.rank] compares. Every pass that resolves an overload
+// fills this in from whatever it knows about the argument; the *ranking*
+// itself then happens in one place, below, so that codegen, movecheck and
+// the constant evaluator cannot answer "which function does this call
+// name?" differently.
+//
+// The ordering [over.ics.rank] defines is a *partial* order: two
+// sequences may be indistinguishable without either being better, and
+// that is precisely what makes `f(int)` versus `f(const int&)` ambiguous
+// for an lvalue argument rather than a win for one of them. A scalar
+// score cannot express it -- with a total order there is always a
+// maximum, so an ambiguous call silently resolves to whichever candidate
+// the scoring happened to favour.
+struct ArgumentConversion {
+    ConversionRank rank{ConversionRank::NotViable};
+    // The parameter is of reference type, and this sequence binds it.
+    bool binds_reference{false};
+    // `T&` rather than `const T&` ([over.ics.rank]/3.2.6 prefers it when
+    // both bind the same argument).
+    bool reference_is_mutable{false};
+    // `T&&` ([over.ics.rank]/3.2.3 prefers it for an rvalue argument).
+    bool reference_is_rvalue{false};
+    // The argument is an rvalue -- spec §6.6(1)'s "fresh value", i.e. a
+    // `std::move`, a call, or a directly constructed temporary.
+    bool argument_is_rvalue{false};
+    // The pass could not type this argument at all. An unknown sequence
+    // is *indistinguishable* from every other one, which keeps a pass
+    // that cannot see an argument's type (movecheck cannot type every
+    // Member/Subscript chain) from inventing a preference.
+    bool unknown{false};
+};
+
+// Rank as a number, so the ordering is written once. (Also the only
+// spelling the self-hosted front end accepts: scpp compares enum class
+// values with `==` and `!=` only, and ast.cppm compiles with it.)
+[[nodiscard]] inline int conversion_rank_order(ConversionRank rank) {
+    switch (rank) {
+        case ConversionRank::Identity: return 0;
+        case ConversionRank::Qualification: return 1;
+        case ConversionRank::Promotion: return 2;
+        case ConversionRank::Conversion: return 3;
+        case ConversionRank::NotViable: return 4;
+    }
+    return 4;
+}
+
+// [over.ics.rank]: -1 when `a` is better, +1 when `b` is better, 0 when
+// neither is better than the other. Returning 0 is a real answer, not a
+// failure to decide.
+[[nodiscard]] inline int compare_argument_conversions(const ArgumentConversion& a, const ArgumentConversion& b) {
+    if (a.unknown || b.unknown) return 0;
+    if (a.rank != b.rank) return conversion_rank_order(a.rank) < conversion_rank_order(b.rank) ? -1 : 1;
+    // /3.2.3: for an rvalue argument, binding an rvalue reference beats
+    // binding an lvalue reference.
+    if (a.binds_reference && b.binds_reference && a.argument_is_rvalue && b.argument_is_rvalue &&
+        a.reference_is_rvalue != b.reference_is_rvalue) {
+        return a.reference_is_rvalue ? -1 : 1;
+    }
+    // /3.2.6: two reference bindings that differ only in the referent's
+    // const-qualification -- the less qualified one wins.
+    if (a.binds_reference && b.binds_reference && a.reference_is_rvalue == b.reference_is_rvalue &&
+        a.reference_is_mutable != b.reference_is_mutable) {
+        return a.reference_is_mutable ? -1 : 1;
+    }
+    // Everything else -- notably a by-value parameter against a
+    // reference parameter -- is indistinguishable.
+    return 0;
+}
+
+// [over.match.best]/2: a candidate is better only if no argument is
+// worse and at least one argument is better.
+[[nodiscard]] inline int compare_candidate_conversions(const std::vector<ArgumentConversion>& a,
+                                                       const std::vector<ArgumentConversion>& b) {
+    if (a.size() != b.size()) return 0;
+    bool any_better = false;
+    bool any_worse = false;
+    for (std::size_t i = 0; i < a.size(); i++) {
+        int comparison = compare_argument_conversions(a[i], b[i]);
+        if (comparison < 0) any_better = true;
+        if (comparison > 0) any_worse = true;
+    }
+    if (any_better && !any_worse) return -1;
+    if (any_worse && !any_better) return 1;
+    return 0;
+}
+
+// [over.match.best]/1: the best viable function is the one better than
+// every other viable one. Returns a single index when there is such a
+// candidate, and otherwise every candidate no other candidate beats --
+// which is the set a diagnostic has to name, because those are exactly
+// the ones the call is ambiguous between.
+[[nodiscard]] inline std::vector<std::size_t>
+best_viable_candidates(const std::vector<std::vector<ArgumentConversion>>& candidates) {
+    std::vector<std::size_t> result{};
+    if (candidates.empty()) return result;
+    for (std::size_t i = 0; i < candidates.size(); i++) {
+        bool better_than_all = true;
+        for (std::size_t j = 0; j < candidates.size() && better_than_all; j++) {
+            if (i == j) continue;
+            if (compare_candidate_conversions(candidates[i], candidates[j]) >= 0) better_than_all = false;
+        }
+        if (better_than_all) {
+            result.push_back(i);
+            return result;
+        }
+    }
+    for (std::size_t i = 0; i < candidates.size(); i++) {
+        bool beaten = false;
+        for (std::size_t j = 0; j < candidates.size() && !beaten; j++) {
+            if (i == j) continue;
+            if (compare_candidate_conversions(candidates[j], candidates[i]) < 0) beaten = true;
+        }
+        if (!beaten) result.push_back(i);
+    }
+    return result;
+}
+
 enum class StmtKind {
     VarDecl,
     Return,
@@ -3644,15 +3790,15 @@ public:
 
 [[nodiscard]] inline std::string describe_type_brief_reference(const Type& type) {
     if (type.pointee == nullptr) return "&?";
+    // C++'s own spelling. This used to print a shared reference as
+    // `T&` and a mutable one as `T&mut`, which names two *different*
+    // C++ types than the ones meant: a `const int&` parameter appeared
+    // in a candidate list as `f(int&)`, i.e. as the very overload it
+    // was being distinguished from.
     std::string result{""};
+    if (!type.is_rvalue_ref && !type.is_mutable_ref && !type.pointee->is_const_qualified) result += "const ";
     result += describe_type_brief(*type.pointee);
-    if (type.is_rvalue_ref) {
-        result += "&&";
-    } else if (type.is_mutable_ref) {
-        result += "&mut";
-    } else {
-        result += "&";
-    }
+    result += type.is_rvalue_ref ? "&&" : "&";
     return result;
 }
 

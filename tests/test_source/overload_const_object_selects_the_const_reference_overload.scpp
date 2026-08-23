@@ -1,0 +1,12 @@
+import std;
+
+// `f(int&)` is not viable for a read-only argument, so `f(const int&)` is
+// the unique best candidate -- not a tie. Before the viability rule
+// existed both were viable, tied, and the call was rejected as ambiguous.
+int f(const int& x) { return 1; }
+int f(int& x) { return 2; }
+
+int main() {
+    const int c = 3;
+    return f(c);
+}

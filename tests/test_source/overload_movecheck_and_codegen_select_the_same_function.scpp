@@ -1,0 +1,14 @@
+import std;
+
+// movecheck resolved overloads with its own scalar score and fell back to
+// `matches[0]` on a tie, so it move-checked `f(int)` -- which borrows
+// nothing -- while codegen emitted `f(int&)`, whose `x = 99` then ran
+// unchecked. The returned value names which one actually ran.
+int f(int x) { return 1; }
+int f(int& x) { x = 99; return 2; }
+
+int main() {
+    const int c = 3;
+    int chosen = f(c);
+    return chosen * 100 + c;
+}

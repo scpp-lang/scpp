@@ -1,0 +1,14 @@
+import std;
+
+// The same rule for a namespace-scope constant. codegen's
+// is_read_only_place saw only *local* constness, so a `const` global read
+// back as writable and this program returned 99.
+const int c = 3;
+
+int f(int x) { return 0; }
+int f(int& x) { x = 99; return 0; }
+
+int main() {
+    int ignored = f(c);
+    return c;
+}

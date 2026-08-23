@@ -39,6 +39,7 @@ enum class CallRejectionReason {
     ReceiverRefQualifier,
     ArgumentCount,
     ArgumentType,
+    ArgumentIsReadOnly,
 };
 
 struct CallCandidateRejection {
@@ -475,6 +476,14 @@ private:
     CallCandidateRejection classify_call_candidate(const Function& fn, const std::vector<ExprPtr>& args,
                                                    std::size_t param_offset, bool receiver_is_mutable,
                                                    const Expr* receiver_expr);
+
+    // One entry per argument -- with the implicit object parameter as
+    // entry zero when there is a receiver -- in the vocabulary
+    // [over.ics.rank] compares. Feeds ast.cppm's shared ranking algebra,
+    // which is the only place a "which candidate is better?" question is
+    // answered.
+    std::vector<ArgumentConversion> argument_conversions_for(const Function& fn, const std::vector<ExprPtr>& args,
+                                                             std::size_t param_offset, const Expr* receiver_expr);
 
     // `display_name` is the call as *written* (`f`, `Box::take`), never
     // codegen's mangled `Box_take`; `callee_name` stays the mangled name

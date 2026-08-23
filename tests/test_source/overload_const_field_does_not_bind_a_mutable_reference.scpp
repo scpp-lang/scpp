@@ -1,0 +1,17 @@
+import std;
+
+// A `const` data member reached through an otherwise mutable object is
+// still read-only. is_read_only_place only recursed to the base place,
+// so the field's own qualifier was invisible and this returned 99.
+struct Holder {
+    const int value;
+};
+
+int f(int x) { return 0; }
+int f(int& x) { x = 99; return 0; }
+
+int main() {
+    Holder h{3};
+    int ignored = f(h.value);
+    return h.value;
+}

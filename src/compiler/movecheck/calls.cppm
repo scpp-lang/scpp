@@ -183,7 +183,8 @@ struct NodiscardInfo {
                                                      const Body& body,
                                                      const Signatures& signatures);
 [[nodiscard]] const FunctionSignature* resolve_overload(const Expr& call_expr, const CalleeSignature& callee,
-                                                        const Body& body, const Signatures& signatures);
+                                                        const Body& body, const Signatures& signatures,
+                                                          std::vector<const FunctionSignature*>* out_ambiguous = nullptr);
 [[nodiscard]] const FunctionSignature* find_const_blocked_method_candidate(const Expr& call_expr,
                                                                            const CalleeSignature& callee,
                                                                            const Body& body,
@@ -464,7 +465,8 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 // smaller sub-expression.
 [[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] const FunctionSignature* resolve_overload(const Expr& call_expr, const CalleeSignature& callee,
-                                                          const Body& body, const Signatures& signatures);
+                                                          const Body& body, const Signatures& signatures,
+                                                          std::vector<const FunctionSignature*>* out_ambiguous);
 [[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] bool produces_rvalue_of_type(const Expr& expr, const Type& expected_type, const Body& body,
                                             const Signatures& signatures);
@@ -796,6 +798,20 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
         if (const_reference_binds_materialized_temporary(arg, param_type, body, signatures)) {
             return true;
         }
+        // [over.ics.ref]/1: a `T&` binds only to an lvalue. A
+        // prvalue -- spec §6.6(1)'s "fresh value": a call's returned
+        // value, a `new`, a constructed temporary -- has no place to
+        // borrow from, so no conversion sequence exists and the
+        // candidate is not viable. The Move/literal list just below
+        // was a hand-enumerated subset of the same rule that left
+        // `Call` out, which is why `f(g())` with `f(int)` and
+        // `f(int&)` declared did not simply pick `f(int)`: `f(int&)`
+        // stayed viable, tied, and the call was rejected for trying
+        // to borrow `g()`'s result.
+        if (param_type.is_mutable_ref && param_type.pointee != nullptr &&
+            produces_rvalue_of_type(arg, *param_type.pointee, body, signatures)) {
+            return false;
+        }
         // A bare lvalue-like place (Identifier/Member/Subscript/a
         // unique_ptr or raw pointer's Deref -- the same shapes
         // resolve_borrow_source_root accepts as a borrow source) is
@@ -929,18 +945,12 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
 // when no candidate matches (the caller reports a clear "no matching
 // overload" diagnostic) or when `callee.key` names nothing at all.
 //
-// When strictly more than one candidate matches (only possible via the
-// by-value/by-reference axis -- two overloads can never share an
-// identical parameter-type list, ch05 §5.10), applies the "T& beats
-// const T& for a mutable lvalue" tie-break (reused from real C++,
-// resolving the const/non-const method-overloading case, e.g.
-// get()/get() const) across every reference-typed parameter position
-// (including an implicit `this`, ch05 §5.9) where the matches disagree
-// on mutability. If that still doesn't produce a unique winner, this is
-// a genuine ambiguity this version has no further tie-break for --
-// falls back to the first match found (in declaration order) rather
-// than crashing, since v0.1's scalar-only overload sets make actually
-// reaching this exceedingly rare in a real, well-formed program.
+// When strictly more than one candidate is viable, ranks them with the
+// shared [over.ics.rank] algebra in ast.cppm -- the same one codegen and
+// the constant evaluator use, so that all three passes name the same
+// function. A call with no single best viable candidate is ambiguous
+// ([over.match.best]) and resolves to nothing; describe_overload_failure
+// reports it by name.
 // Explains a resolve_overload failure, for the case where the *name*
 // exists and only the call doesn't fit it.
 //
@@ -969,6 +979,23 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     std::string candidate_list;
     for (const FunctionSignature& sig : candidates) {
         candidate_list += "\n  candidate: " + describe_signature(sig);
+    }
+
+    // Ambiguity is reported before any per-candidate rejection, because
+    // there is no rejection to report: every tied candidate matched.
+    // Worded identically to codegen's describe_call_resolution_failure --
+    // one question, one message, whichever pass happens to reach it
+    // first. This used to fall through to "no overload of 'f' matches
+    // these argument types", which is factually the opposite of what
+    // happened: they all matched.
+    {
+        std::vector<const FunctionSignature*> tied;
+        if (resolve_overload(call_expr, callee, body, signatures, &tied) == nullptr && tied.size() > 1) {
+            std::string result = "ambiguous call to '" + display_name + "': " + std::to_string(tied.size()) +
+                                 " overloads match these argument types equally well and none is better than the others ([over.match.best])";
+            for (const FunctionSignature* sig : tied) result += "\n  candidate: " + describe_signature(*sig);
+            return result;
+        }
     }
 
     std::vector<const FunctionSignature*> right_arity;
@@ -1001,20 +1028,98 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
                    std::to_string(i + 1) + " is " +
                    (actual.has_value() ? "'" + describe_type_brief(*actual) + "'" : "a different type") + ", but '" +
                    describe_signature(*sig) + "' expects '" + describe_type_brief(param_type) +
-                   "' (spec ch05.10 -- overload resolution is exact type match only; an explicit "
-                   "static_cast<T> may be required)" +
+                   "' (spec §16.3(3) -- an argument of scalar type matches a parameter of scalar "
+                   "type only if the two types are the same; an explicit static_cast<T> may be required)" +
                    (candidates.size() > 1 ? candidate_list : std::string());
         }
     }
     return "no overload of '" + display_name +
-           "' matches these argument types (spec ch05.10 -- overload resolution is exact type match only; an "
-           "explicit static_cast<T> may be required)" +
+           "' matches these argument types (spec §16.3(3) -- an argument of scalar type matches a "
+           "parameter of scalar type only if the two types are the same; an explicit static_cast<T> may be required)" +
            candidate_list;
 }
 
 
+// The movecheck half of the shared [over.ics.rank] vocabulary: one entry
+// per argument, with the implicit object parameter as entry zero when
+// there is a receiver. Deliberately the same shape codegen's
+// argument_conversions_for produces, because the two passes must not
+// answer "which function does this call name?" differently -- a call
+// move-checked against one signature and emitted against another is the
+// hazard already flagged where apply_reference_argument reasons about
+// resolution.
+[[nodiscard]] std::vector<ArgumentConversion> argument_conversions_for(const Expr& call_expr,
+                                                                       const FunctionSignature& candidate,
+                                                                       const CalleeSignature& callee, const Body& body,
+                                                                       const Signatures& signatures) {
+    auto strip_to_value = [](Type type) {
+        if (type.kind == TypeKind::Reference && type.pointee != nullptr) type = *type.pointee;
+        type.is_const_qualified = false;
+        return type;
+    };
+    auto reference_facts = [](const Type& type, ArgumentConversion& conversion) {
+        if (type.kind != TypeKind::Reference) return;
+        conversion.binds_reference = true;
+        conversion.reference_is_mutable = type.is_mutable_ref && !type.is_rvalue_ref;
+        conversion.reference_is_rvalue = type.is_rvalue_ref;
+    };
+    std::vector<ArgumentConversion> result;
+    if (callee.param_offset == 1 && call_expr.lhs != nullptr && !candidate.param_types.empty()) {
+        ArgumentConversion receiver_conversion{};
+        receiver_conversion.rank = ConversionRank::Identity;
+        reference_facts(candidate.param_types[0], receiver_conversion);
+        if (candidate.param_types[0].pointee != nullptr) {
+            receiver_conversion.argument_is_rvalue =
+                produces_rvalue_of_type(*call_expr.lhs, *candidate.param_types[0].pointee, body, signatures);
+            if (!candidate.param_types[0].is_mutable_ref && is_read_only_reachable(*call_expr.lhs, body, signatures)) {
+                receiver_conversion.unknown = true;
+            }
+        }
+        result.push_back(receiver_conversion);
+    }
+    std::size_t fixed_param_count = candidate.param_types.size() - callee.param_offset;
+    for (std::size_t i = 0; i < call_expr.args.size(); i++) {
+        ArgumentConversion conversion{};
+        conversion.rank = ConversionRank::Identity;
+        if (i >= fixed_param_count) {
+            conversion.unknown = true;
+            result.push_back(conversion);
+            continue;
+        }
+        const Type& param_type = candidate.param_types[i + callee.param_offset];
+        reference_facts(param_type, conversion);
+        Type target = param_type;
+        if (param_type.kind == TypeKind::Reference && param_type.pointee != nullptr) target = *param_type.pointee;
+        Type target_value = target;
+        target_value.is_const_qualified = false;
+        conversion.argument_is_rvalue = produces_rvalue_of_type(*call_expr.args[i], target_value, body, signatures);
+        std::optional<Type> arg_type = infer_expr_type(*call_expr.args[i], body, signatures);
+        if (!arg_type.has_value()) {
+            // movecheck cannot type every expression shape -- Member and
+            // Subscript chains in particular, since it has no Program
+            // access to their field types. An unknown sequence compares
+            // equal to every other, so a shape movecheck cannot see
+            // never invents a preference codegen would not agree with.
+            conversion.unknown = true;
+        } else {
+            Type from = decay_array_to_pointer(*arg_type);
+            if (types_equal(strip_to_value(from), strip_to_value(target))) {
+                conversion.rank = ConversionRank::Identity;
+            } else if (is_qualification_conversion(from, target)) {
+                conversion.rank = ConversionRank::Qualification;
+            } else {
+                conversion.rank = ConversionRank::Conversion;
+            }
+        }
+        result.push_back(conversion);
+    }
+    return result;
+}
+
 [[nodiscard]] const FunctionSignature* resolve_overload(const Expr& call_expr, const CalleeSignature& callee,
-                                                          const Body& body, const Signatures& signatures) {
+                                                          const Body& body, const Signatures& signatures,
+                                                          std::vector<const FunctionSignature*>* out_ambiguous) {
+    if (out_ambiguous != nullptr) out_ambiguous->clear();
     if (callee.direct_signature.has_value()) {
         return signature_accepts_argument_count(*callee.direct_signature, call_expr.args.size(), callee.param_offset)
                    ? &*callee.direct_signature
@@ -1071,8 +1176,17 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
         }
         std::size_t fixed_param_count = candidate.param_types.size() - callee.param_offset;
         for (std::size_t i = 0; all_match && i < call_expr.args.size() && i < fixed_param_count; i++) {
-            all_match = argument_matches_parameter(*call_expr.args[i], candidate.param_types[i + callee.param_offset],
-                                                     body, signatures);
+            const Type& param_type = candidate.param_types[i + callee.param_offset];
+            all_match = argument_matches_parameter(*call_expr.args[i], param_type, body, signatures);
+            // [over.ics.ref]: a read-only argument forms no conversion
+            // sequence to a `T&` parameter, so the candidate is not
+            // viable -- the same rule codegen's classify_call_candidate
+            // applies, asked here so that the two passes select the same
+            // function.
+            if (all_match && is_reference(param_type) && param_type.is_mutable_ref && !param_type.is_rvalue_ref &&
+                is_read_only_reachable(*call_expr.args[i], body, signatures)) {
+                all_match = false;
+            }
         }
         if (all_match) matches.push_back(&candidate);
     }
@@ -1086,51 +1200,53 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     }
     if (matches.size() <= 1) return matches.empty() ? nullptr : matches[0];
 
-    // Tie-break: prefer whichever match has the most mutable-reference
-    // parameters among positions where the argument is itself a mutable
-    // place (including `this`, checked the same way as above) -- the
-    // higher-scoring candidate is the more "specific" one a mutable
-    // argument licenses, exactly like real C++'s own T&-over-const-T&
-    // preference.
-    auto mutable_ref_score = [&](const FunctionSignature& candidate) {
-        int score = 0;
-        if (callee.param_offset == 1 && call_expr.lhs && candidate.param_types[0].is_mutable_ref &&
-            !is_read_only_reachable(*call_expr.lhs, body, signatures)) {
-            score++;
-        }
-        if (callee.param_offset == 1 && call_expr.lhs) {
+    // The implicit object parameter's ref-qualifier, when the class
+    // declares both a qualified and an unqualified overload of the same
+    // name -- C++ makes that pair ill-formed to declare, so there is no
+    // [over.ics.rank] rule for it and it stays a narrowing preference
+    // rather than part of the ranking below. Kept identical to codegen's
+    // resolve_overload_by_type so the two passes select the same
+    // function for `std::move(x).error()`.
+    if (callee.param_offset == 1 && call_expr.lhs != nullptr) {
+        std::vector<const FunctionSignature*> ref_qualified;
+        for (const FunctionSignature* candidate : matches) {
+            if (candidate->receiver_ref_qualifier == ReceiverRefQualifier::None) continue;
+            if (candidate->param_types.empty() || candidate->param_types[0].pointee == nullptr) continue;
             bool receiver_is_rvalue =
-                candidate.param_types[0].kind == TypeKind::Reference && candidate.param_types[0].pointee != nullptr &&
-                produces_rvalue_of_type(*call_expr.lhs, *candidate.param_types[0].pointee, body, signatures);
-            if ((receiver_is_rvalue && candidate.receiver_ref_qualifier == ReceiverRefQualifier::RValue) ||
-                (!receiver_is_rvalue && candidate.receiver_ref_qualifier == ReceiverRefQualifier::LValue)) {
-                score += 2;
+                produces_rvalue_of_type(*call_expr.lhs, *candidate->param_types[0].pointee, body, signatures);
+            if (receiver_is_rvalue ? candidate->receiver_ref_qualifier == ReceiverRefQualifier::RValue
+                                   : candidate->receiver_ref_qualifier == ReceiverRefQualifier::LValue) {
+                ref_qualified.push_back(candidate);
             }
         }
-        std::size_t fixed_param_count = candidate.param_types.size() - callee.param_offset;
-        for (std::size_t i = 0; i < call_expr.args.size() && i < fixed_param_count; i++) {
-            const Type& param_type = candidate.param_types[i + callee.param_offset];
-            if (is_reference(param_type) && param_type.is_mutable_ref &&
-                !is_read_only_reachable(*call_expr.args[i], body, signatures)) {
-                score++;
-            }
-        }
-        return score;
-    };
-    const FunctionSignature* best = matches[0];
-    int best_score = mutable_ref_score(*best);
-    bool unique_best = true;
-    for (std::size_t i = 1; i < matches.size(); i++) {
-        int score = mutable_ref_score(*matches[i]);
-        if (score > best_score) {
-            best = matches[i];
-            best_score = score;
-            unique_best = true;
-        } else if (score == best_score) {
-            unique_best = false;
-        }
+        if (!ref_qualified.empty()) matches = std::move(ref_qualified);
+        if (matches.size() == 1) return matches[0];
     }
-    return unique_best ? best : matches[0];
+
+    // [over.match.best] over [over.ics.rank], using the same shared
+    // algebra codegen and the constant evaluator use.
+    //
+    // This used to be a scalar `mutable_ref_score` followed by
+    // `return unique_best ? best : matches[0];` -- on a tie, the
+    // candidate that happened to be declared first, with no diagnostic.
+    // Two things were wrong with that. A scalar score cannot represent
+    // [over.ics.rank]'s "neither is better", which is the whole content
+    // of an ambiguous call; and the fallback made movecheck select a
+    // signature codegen does not select, so a call could be
+    // move-checked against `f(int)` while `f(int&)` was emitted.
+    // A genuinely ambiguous call has no selection to make: codegen
+    // rejects the program with the ambiguity message, so there is no
+    // emitted code for the checks below to have missed.
+    std::vector<std::vector<ArgumentConversion>> conversions;
+    for (const FunctionSignature* candidate : matches) {
+        conversions.push_back(argument_conversions_for(call_expr, *candidate, callee, body, signatures));
+    }
+    std::vector<std::size_t> best = best_viable_candidates(conversions);
+    if (best.size() == 1) return matches[best[0]];
+    if (out_ambiguous != nullptr) {
+        for (std::size_t index : best) out_ambiguous->push_back(matches[index]);
+    }
+    return nullptr;
 }
 [[nodiscard]] const FunctionSignature* find_const_blocked_method_candidate(const Expr& call_expr,
                                                                            const CalleeSignature& callee,

@@ -1,0 +1,12 @@
+import std;
+
+// [over.ics.ref]/1: a `T&` binds only to an lvalue, and spec §6.6(1)
+// makes a call's returned value a fresh value. `f(int&)` is therefore not
+// viable and `f(int)` wins outright. The hand-enumerated "Move or a
+// literal is not a place" list left `Call` out, so `f(int&)` stayed
+// viable and the call was rejected for trying to borrow `g()`'s result.
+int g() { return 7; }
+int f(int x) { return 1; }
+int f(int& x) { return 2; }
+
+int main() { return f(g()); }
