@@ -1515,7 +1515,25 @@ namespace {
             }
             return result;
         }
-        return "class '" + class_name + "' has no constructor matching this call";
+        // [dcl.init]/16.6: direct-initialization from a single operand of
+        // the destination's own type resolves against the constructors,
+        // and the copy constructor is the candidate it is looking for.
+        // When spec §6.5(2) has removed that constructor, "no constructor
+        // matches" is true but unhelpful -- it points at the call rather
+        // than at the rule. `T t = s;` already names §6.5(2); `T t{s};`
+        // and `T t = {s};` ask the same question and must get the same
+        // answer.
+        // Asked of is_bare_same_type_copy_source, the same predicate
+        // movecheck asks: a prvalue operand of the destination's own type
+        // is *move* construction (spec §6.4(2)), which §6.5(2) does not
+        // govern, so only a bare lvalue reaches this message.
+        if (args.size() == 1 && args[0] != nullptr && !is_copy_constructible(class_name) &&
+            is_bare_same_type_copy_source(*args[0], named_type(class_name))) {
+            return std::string(record_keyword(class_name, *program_)) + " '" + class_name +
+                   "' is not copy-constructible (spec §6.5(2)) -- this construction is not permitted";
+        }
+        return std::string(record_keyword(class_name, *program_)) + " '" + class_name +
+               "' has no constructor matching this call";
     }
 
 

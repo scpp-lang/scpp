@@ -1,0 +1,16 @@
+// spec §6.5(3) *does* carry the reference-member carve-out ("unless the
+// class has a non-static data member of reference type, in which case it
+// has no copy assignment operator") -- a reference cannot be re-seated by
+// assignment. Paired with
+// copy_construction_allowed_for_struct_with_reference_member on the same
+// type: construction binds once and is allowed, assignment re-seats and
+// is not.
+struct RefBox { int& r; };
+int main() {
+    int a = 1;
+    int b = 2;
+    RefBox x{a};
+    RefBox y{b};
+    y = x;
+    return y.r - 1;
+}

@@ -1,0 +1,14 @@
+// spec §6.5(2) applies in every position that copies, not just at a
+// declaration: capturing by copy is a copy construction too.
+class RefHolder {
+public:
+    virtual ~RefHolder() { return; }
+    RefHolder(int& r) : r{r} { return; }
+    int& r;
+};
+int main() {
+    int a = 1;
+    RefHolder x{a};
+    auto f = [x]() { return x.r; };
+    return f() - 1;
+}

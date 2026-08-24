@@ -1,0 +1,8 @@
+// [class.union]/2: "An object of a class with a non-static data member of
+// reference type cannot be a member of a union." The spec's ch06 delta
+// says nothing about unions, so the ordinary C++ rule applies unchanged.
+// Distinct from a *struct* reference field, which is well-formed --
+// lifting the blanket "a reference cannot be a struct field" restriction
+// must not lift this one with it.
+union Overlap { int& r; int v; };
+int main() { return 0; }

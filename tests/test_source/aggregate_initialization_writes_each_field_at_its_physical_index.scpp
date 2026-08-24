@@ -1,0 +1,18 @@
+// [dcl.init.aggr]/3: each element of the initializer list initializes the
+// corresponding member -- "corresponding" being the *declared* member,
+// not the n-th element of the lowered LLVM body, which carries explicit
+// i8 padding members between them (see declare_struct). Every other
+// codegen site maps through physical_field_index; the brace-init cursor
+// did not, so a struct with internal padding had its later fields written
+// into the padding and read back as garbage.
+struct Padded { char c; int i; };
+struct Wide { int p; double d; };
+int main() {
+    Padded a{'x', 7};
+    if (a.i != 7) { return 99; }
+    if (a.c != 'x') { return 98; }
+    Wide w{1, 2.5};
+    if (w.d != 2.5) { return 97; }
+    if (w.p != 1) { return 96; }
+    return 0;
+}

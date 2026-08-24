@@ -1,0 +1,14 @@
+// spec §6.5(2) gives a struct an implicitly-defined copy constructor (a
+// struct has no user-declared destructor -- §11.1(2.1)), and copying a
+// reference member copies the *binding*: both objects then name the same
+// referent. That is exactly ordinary C++ ([class.copy.ctor]/14).
+struct RefBox { int& r; };
+int main() {
+    int a = 1;
+    RefBox b{a};
+    RefBox c = b;
+    c.r = 5;
+    if (a != 5) { return 99; }
+    if (b.r != 5) { return 98; }
+    return 0;
+}

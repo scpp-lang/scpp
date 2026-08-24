@@ -1,0 +1,16 @@
+// spec §6.6(4)/(8) with §6.5(2): passing by value needs a copy
+// constructor, and §6.5(2) leaves a class that declares a destructor
+// without one -- a reference member does not change that (only §6.4(3)
+// and §6.5(3) name a reference member, and both are about *assignment*).
+class RefHolder {
+public:
+    virtual ~RefHolder() { return; }
+    RefHolder(int& r) : r{r} { return; }
+    int& r;
+};
+int take(RefHolder h) { return h.r; }
+int main() {
+    int a = 1;
+    RefHolder x{a};
+    return take(x) - 1;
+}

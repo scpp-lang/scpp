@@ -1,0 +1,15 @@
+// spec §11.1(4): "Rules (2) and (3) do not otherwise restrict a
+// `struct`." Nothing in the spec removes a reference-typed non-static
+// data member from a struct, and §6.1(5) explicitly regulates "a
+// constructor for a class *or struct* with a reference member", so the
+// construct exists and must alias rather than copy.
+struct RefBox { int& r; };
+int main() {
+    int a = 1;
+    RefBox b{a};
+    b.r = 5;
+    if (a != 5) { return 99; }
+    a = 8;
+    if (b.r != 8) { return 98; }
+    return 0;
+}

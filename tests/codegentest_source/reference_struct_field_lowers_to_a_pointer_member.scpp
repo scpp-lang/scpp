@@ -1,0 +1,15 @@
+// spec §11.1(4): "Rules (2) and (3) do not otherwise restrict a `struct`.
+// A `struct` may declare ... non-static data members ... exactly as the
+// ordinary C++ rules permit." §6.1(5) then *regulates* the construct --
+// "a constructor for a class or struct with a reference member is
+// ill-formed unless that member is initialized" -- a rule that would have
+// nothing to govern if a struct could not have one. So a reference-typed
+// struct field is well-formed and lowers exactly like a class's: a
+// pointer member, stored as the address of the referent.
+struct RefBox { int& r; };
+int main() {
+    int x = 1;
+    RefBox b{x};
+    b.r = 9;
+    return x - 9;
+}

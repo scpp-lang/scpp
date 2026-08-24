@@ -1272,16 +1272,46 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         auto record_llvm_type_result = to_llvm_type(target.type);
         if (!record_llvm_type_result.has_value()) return std::unexpected(std::move(record_llvm_type_result).error());
         llvm::LLVMTypeRef record_llvm_type = std::move(record_llvm_type_result).value();
+        // declare_struct interleaves explicit i8 padding members into the
+        // LLVM struct body wherever a field needs more alignment than the
+        // running offset has, so a field's declaration index is not its
+        // LLVM element index. physical_field_index is the mapping; every
+        // other member access in codegen already goes through it, and
+        // this one silently wrote each padded field's initializer into
+        // the preceding pad (`struct P { int p; double d; };` left `d`
+        // holding garbage).
+        auto record_info_it = structs_.find(target.type.name);
+        if (record_info_it == structs_.end()) {
+            return std::unexpected(CodegenError("unknown struct '" + target.type.name + "'", current_loc_));
+        }
+        const StructInfo& record_info = record_info_it->second;
         while (static_cast<std::size_t>(covered) < def->fields.size() && index < args.size()) {
             const StructField& field = def->fields[static_cast<std::size_t>(covered)];
             llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(
-                builder_, record_llvm_type, target.ptr, static_cast<unsigned int>(covered), "agg.field");
+                builder_, record_llvm_type, target.ptr,
+                record_info.physical_field_index(static_cast<std::size_t>(covered)), "agg.field");
             if (auto r = initialize_storage_from_brace_args_cursor(
                     LValue{field_ptr, field.type, alignment_for_type(field.type)}, args, index);
                 !r.has_value()) {
                 return std::unexpected(std::move(r).error());
             }
             ++covered;
+        }
+        // [dcl.init.aggr]/5: a member the list does not reach is
+        // initialized from its own default member initializer, else
+        // value-initialized. Done here, per record, rather than as a
+        // whole-object pre-pass in the caller, for two reasons: a record
+        // reached by brace elision is only ever partially covered and
+        // the caller cannot see which of its members the cursor
+        // consumed; and a member that has no value-initialization at all
+        // -- a reference, spec §6.1(5) -- must be diagnosed exactly when
+        // the list fails to reach it, not unconditionally.
+        for (std::size_t rest = static_cast<std::size_t>(covered); rest < def->fields.size(); ++rest) {
+            if (auto r = emit_field_initialization(target.ptr, target.type.name, def->fields[rest],
+                                                   /*explicit_initializer=*/nullptr);
+                !r.has_value()) {
+                return std::unexpected(std::move(r).error());
+            }
         }
         return {};
     }
@@ -1312,13 +1342,17 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             message += " given";
             return std::unexpected(CodegenError(message, current_loc_));
         }
-        // Value-initialize the whole object first and overwrite the
-        // members the list reaches, so "every member the list does not
-        // reach is value-initialized" stays literally the empty-args
-        // path rather than a second copy of it -- including that
-        // member's own default member initializer, which [dcl.init.aggr]
-        // prefers over value-initialization.
-        if (auto r = initialize_storage_from_brace_args(target, {}); !r.has_value()) return std::unexpected(std::move(r).error());
+        // Zero the whole object -- padding included -- and let the fill
+        // below initialize the members the list reaches and
+        // value-initialize the ones it does not. Value-initializing
+        // every member up front and overwriting the covered ones would
+        // read the same, but it asks for a value-initialization of
+        // members that are about to be given one, which is not merely
+        // redundant for a reference member: spec §6.1(5) gives a
+        // reference no empty state, so there is no such
+        // value-initialization to ask for.
+        if (auto r = zero_initialize_storage(target.ptr, target.type, target.alignment); !r.has_value())
+            return std::unexpected(std::move(r).error());
         std::size_t index = 0;
         std::int64_t covered = 0;
         if (auto r = fill_aggregate_from_cursor(target, args, index, covered); !r.has_value()) {

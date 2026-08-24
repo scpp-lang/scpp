@@ -4030,4 +4030,18 @@ public:
     return result;
 }
 
+// spec §6.4/§6.5/§6.6 govern every *class type*, which in
+// [class.pre]/[dcl.type] terms includes `struct`. A diagnostic about one
+// of those rules must name the keyword the user actually wrote, so that a
+// struct and a class violating the same rule read as the same rule rather
+// than as two different ones. Lives here, next to Program itself, because
+// both movecheck and codegen diagnose those clauses and neither can
+// import the other's partitions -- a second copy would be free to drift.
+[[nodiscard]] inline std::string_view record_keyword(const std::string& record_name, const Program& program) {
+    for (const StructDef& def : program.structs) {
+        if (def.name == record_name) return "struct";
+    }
+    return "class";
+}
+
 } // namespace scpp

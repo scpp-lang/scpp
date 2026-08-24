@@ -120,7 +120,6 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 [[nodiscard]] bool is_copy_constructible(const std::string& class_name, const Program& program);
 [[nodiscard]] bool is_copy_assignable(const std::string& class_name, const Program& program);
 [[nodiscard]] bool is_freely_copyable_value_type(const Type& type, const Program& program);
-[[nodiscard]] std::string_view record_keyword(const std::string& record_name, const Program& program);
 
 [[nodiscard]] const FunctionSignature* resolve_constructor_signature(const std::string& class_name,
                                                                      const std::vector<ExprPtr>& ctor_args,
@@ -143,18 +142,6 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 [[nodiscard]] std::expected<void, DataflowError> validate_lifetime_annotation_placement(const Function& fn);
 [[nodiscard]] std::expected<std::vector<std::size_t>, DataflowError> resolve_returned_lifetime_param_indices(const Function& fn);
 [[nodiscard]] std::expected<Signatures, DataflowError> build_signatures(const Program& program);
-
-// spec §6.4/§6.5/§6.6 govern every *class type*, which in
-// [class.pre]/[dcl.type] terms includes `struct`. A diagnostic about one
-// of those rules must name the keyword the user actually wrote, so that a
-// struct and a class violating the same rule read as the same rule rather
-// than as two different ones.
-[[nodiscard]] std::string_view record_keyword(const std::string& record_name, const Program& program) {
-    for (const StructDef& def : program.structs) {
-        if (def.name == record_name) return "struct";
-    }
-    return "class";
-}
 
 // spec §6.5: whether `class_name` has declared its own copy constructor
 // -- a function named "class_name_new" (see parse_class_def) whose sole
@@ -784,13 +771,14 @@ struct ConstructedOwner {
 // every field is itself copy-constructible (spec §6.5(5)'s own
 // recursive note) -- a user-declared copy constructor always wins
 // regardless of fields (it's the user's own code, not compiler-derived).
+//
+// Deliberately *no* reference-member exception. Spec §6.4(3) and
+// §6.5(3) each carry one ("unless the class has a non-static data
+// member of reference type"), because a reference cannot be re-seated
+// by *assignment*; §6.4(2) and §6.5(2) carry none, because a reference
+// is bound once and copy *construction* is exactly such a binding.
+// is_field_copy_constructible says the same thing for the field itself.
 [[nodiscard]] bool is_copy_constructible(const std::string& class_name, const Program& program) {
-    auto has_direct_reference_field = [&](const auto& fields) {
-        for (const auto& field : fields) {
-            if (field.type.kind == TypeKind::Reference) return true;
-        }
-        return false;
-    };
     if (const Function* user_copy = find_user_declared_copy_ctor(class_name, program); user_copy != nullptr) {
         // [dcl.fct.def.delete]/1: a deleted definition is still a
         // declaration -- it suppresses nothing less than a defined one
@@ -803,7 +791,7 @@ struct ConstructedOwner {
     }
     for (const ClassDef& def : program.classes) {
         if (def.name != class_name) continue;
-        if (has_user_declared_dtor(class_name, program) && !has_direct_reference_field(def.fields)) return false;
+        if (has_user_declared_dtor(class_name, program)) return false;
         for (const ClassField& f : def.fields) {
             if (!is_field_copy_constructible(f.type, program)) return false;
         }
@@ -811,7 +799,7 @@ struct ConstructedOwner {
     }
     for (const StructDef& def : program.structs) {
         if (def.name != class_name) continue;
-        if (has_user_declared_dtor(class_name, program) && !has_direct_reference_field(def.fields)) return false;
+        if (has_user_declared_dtor(class_name, program)) return false;
         for (const StructField& f : def.fields) {
             if (!is_field_copy_constructible(f.type, program)) return false;
         }

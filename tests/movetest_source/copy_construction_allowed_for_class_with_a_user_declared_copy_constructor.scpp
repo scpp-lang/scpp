@@ -1,0 +1,17 @@
+// The other side of spec §6.5(2): it removes only the *implicitly-defined*
+// copy constructor. A class that declares its own keeps it, reference
+// member or not -- the deletion of the reference carve-out must not
+// tighten this case.
+class RefHolder {
+public:
+    virtual ~RefHolder() { return; }
+    RefHolder(int& r) : r{r} { return; }
+    RefHolder(const RefHolder& other) : r{other.r} { return; }
+    int& r;
+};
+int main() {
+    int a = 1;
+    RefHolder x{a};
+    RefHolder y = x;
+    return y.r - 1;
+}

@@ -637,11 +637,40 @@ namespace scpp {
     const Type& aggregate_type, const std::vector<ExprPtr>& elements, const Body& body, const Signatures& signatures,
     const SourceLocation& loc, const std::string& target_name, bool report_errors) {
     if (!report_errors || elements.empty() || body.program == nullptr) return {};
+    // [dcl.init.list]/3.3: "if T is a class type and the initializer list
+    // has a single element of type cv U, where U is T or a class derived
+    // from T, the object is initialized from that element" -- by
+    // *constructor*, so §6.5(2) decides, and the field-wise aggregate
+    // path below never applies. Reached for a class, whose fields
+    // find_struct_def cannot resolve at all, and for a struct, whose
+    // first field would otherwise be bound to the whole object.
+    if (aggregate_type.kind == TypeKind::Named && elements.size() == 1 && elements[0] != nullptr &&
+        is_named_record_type(aggregate_type, body) &&
+        is_bare_same_type_copy_source(*elements[0], aggregate_type, body, signatures)) {
+        return check_record_copy_element_binding(aggregate_type, *elements[0], body, signatures, loc, target_name,
+                                                 report_errors);
+    }
     if (aggregate_type.kind == TypeKind::Array && aggregate_type.element != nullptr) {
+        // Not every caller has a name to give ({} initialization of a
+        // temporary, for one), and "''s elements" reads as a defect in
+        // the compiler rather than in the program.
+        const std::string element_name =
+            target_name.empty() ? std::string("an array element") : target_name + "'s elements";
         for (const ExprPtr& element : elements) {
             if (element == nullptr || element->kind == ExprKind::BracedInitList) continue;
+            // An array element is copy-initialized exactly like a struct
+            // field is ([dcl.init.aggr]/4 covers both), so it asks the
+            // same §6.5(2) question -- this branch used to run only the
+            // conversion checks below, which is how `C arr[1]{x};` copied
+            // a class that has no copy constructor while `C y = x;` and
+            // `struct Holder { C c; } h{x};` were both rejected.
+            if (auto _r = check_record_copy_element_binding(*aggregate_type.element, *element, body, signatures, loc,
+                                                           element_name, report_errors);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             if (auto _r = check_value_binding_conversions(*aggregate_type.element, *element, body, signatures, loc,
-                                                          target_name + "'s elements", report_errors);
+                                                          element_name, report_errors);
                 !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
@@ -663,11 +692,18 @@ namespace scpp {
             }
             continue;
         }
-        if (auto _r = check_record_copy_element_binding(def->fields[index].type, element, body, signatures, loc,
-                                                       aggregate_type.name + "::" + def->fields[index].name,
-                                                       report_errors);
-            !_r.has_value()) {
-            return std::unexpected(std::move(_r).error());
+        // Struct-typed fields only -- see check_record_copy_element_binding's
+        // own comment: a class-typed field of a struct is rejected by the
+        // field validation in codegen/layout.cppm, and answering the copy
+        // question first would name a fix that rejection then forbids.
+        if (def->fields[index].type.kind == TypeKind::Named &&
+            find_struct_def(*body.program, def->fields[index].type.name) != nullptr) {
+            if (auto _r = check_record_copy_element_binding(def->fields[index].type, element, body, signatures, loc,
+                                                           aggregate_type.name + "::" + def->fields[index].name,
+                                                           report_errors);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
         if (auto _r = check_value_binding_conversions(def->fields[index].type, element, body, signatures, loc,
                                                       aggregate_type.name + "::" + def->fields[index].name,
@@ -689,20 +725,23 @@ namespace scpp {
 // spec says cannot be copied, and (before the destructor fix in
 // codegen/lifetime.cppm) leaked the copy on top.
 //
-// Only a *struct*-typed field is asked about, which is exactly the
-// reachable set rather than a restriction: an aggregate is always a
-// struct (this function resolves its fields through find_struct_def), and
-// a class-typed field of a struct is ill-formed independently
-// (codegen/layout.cppm's field validation). Asking here about a
-// class-typed field would answer "'S' is not copy-constructible" for a
-// program whose actual defect is the field declaration -- naming a fix
-// (give 'S' a copy constructor) that the next diagnostic then forbids.
+// Asks about any named record, struct or class: the same question is
+// reached from three element positions -- a struct field, an *array*
+// element, and a braced list holding a single operand of the
+// destination's own type ([dcl.init.list]/3.3, which is copy
+// construction and not aggregate initialization at all). Only the
+// struct-field caller narrows it to a struct-typed field, and it does so
+// at its own call site because the reason belongs to it: a class-typed
+// field of a struct is ill-formed independently (codegen/layout.cppm's
+// field validation), so answering "'S' is not copy-constructible" there
+// would name a fix (give 'S' a copy constructor) that the next
+// diagnostic then forbids.
 [[nodiscard]] std::expected<void, DataflowError> check_record_copy_element_binding(
     const Type& field_type, const Expr& element, const Body& body, const Signatures& signatures,
     const SourceLocation& loc, const std::string& target_name, bool report_errors) {
     if (!report_errors || body.program == nullptr) return {};
     if (field_type.kind != TypeKind::Named) return {};
-    if (find_struct_def(*body.program, field_type.name) == nullptr) return {};
+    if (!is_named_record_type(field_type, body)) return {};
     if (is_freely_copyable_class_value_source(element, field_type, body, signatures)) return {};
     if (!is_bare_same_type_copy_source(element, field_type, body, signatures)) return {};
     if (is_copy_constructible(field_type.name, *body.program)) return {};
@@ -1649,6 +1688,33 @@ struct ConvertingConstructorBinding {
         }
     }
     std::string class_name = constructed_type.name;
+    // [class.copy.ctor]/6 + [dcl.init]/16.6.2: a record with no
+    // user-declared copy constructor still has one *implicitly declared*,
+    // and direct-initialization from a single operand of the
+    // destination's own type is *copy construction* -- never an aggregate
+    // element bound to field 0 (which is what `T(other)` used to become,
+    // reporting "enum class values do not implicitly convert" for
+    // `Token` -> `Token::kind` inside a monomorphized std::vector<Token>).
+    // When the record declares none of its own, spec §6.5(2) alone
+    // decides whether one exists, and that question has to be asked
+    // before a constructor is selected: the arity shortcut below (a lone
+    // candidate of the right arity wins with no type check at all -- the
+    // #484 arity gate) otherwise picks the record's unrelated
+    // one-parameter constructor, and `T y{x};` / `T y = {x};` / a copy
+    // into an array element slip past §6.5(2) entirely while `T y = x;`
+    // is correctly rejected. One question, one message: every spelling of
+    // the same copy must reach the same rule.
+    if (report_errors && ctor_args.size() == 1 && ctor_args[0] != nullptr && body.program != nullptr &&
+        is_named_record_type(constructed_type, body) &&
+        !has_user_declared_copy_ctor(class_name, *body.program) &&
+        !is_freely_copyable_class_value_source(*ctor_args[0], constructed_type, body, signatures) &&
+        is_bare_same_type_copy_source(*ctor_args[0], constructed_type, body, signatures) &&
+        !is_copy_constructible(class_name, *body.program)) {
+        return std::unexpected(
+            DataflowError(std::string(record_keyword(class_name, *body.program)) + " '" + class_name +
+                              "' is not copy-constructible (spec §6.5(2)) -- this construction is not permitted",
+                          state.current_loc));
+    }
     std::string ctor_name = class_name + "_new";
     auto is_constructor_clone_name = [&](std::string_view name) {
         return name == ctor_name || (!name.empty() && name.starts_with(ctor_name + "."));
@@ -1747,21 +1813,23 @@ struct ConvertingConstructorBinding {
     // constructor has one *implicitly declared*, and [dcl.init]/16.6.2.2
     // only reaches parenthesized aggregate initialization when "no
     // constructor is viable" -- so a single argument already of the
-    // constructed type is copy construction, never an aggregate element
-    // bound to field 0. Nothing modelled that implicit constructor here:
-    // a plain aggregate has no constructor *signature* at all, so `sig`
-    // stayed null and `T(other)` fell straight into the aggregate branch
-    // below, which bound the whole `T` to its first field -- e.g.
-    // `new (&fresh[i]) T(other.at(i))` inside a monomorphized
-    // std::vector<Token> reported "enum class values do not implicitly
-    // convert" for `Token` -> `Token::kind`. Masked while §6.4/§6.5 only
-    // applied to `class`: a class always has a user-declared destructor
-    // (spec §11.5(1)) and so must declare its copy constructor
-    // explicitly, which does produce a signature.
+    // constructed type is copy or move construction, never an aggregate
+    // element bound to field 0. Nothing modelled that implicit
+    // constructor here: a plain aggregate has no constructor *signature*
+    // at all, so `sig` stayed null and `T(other)` fell straight into the
+    // aggregate branch below, which bound the whole `T` to its first
+    // field -- e.g. `new (&fresh[i]) T(other.at(i))` inside a
+    // monomorphized std::vector<Token> reported "enum class values do
+    // not implicitly convert" for `Token` -> `Token::kind`.
     //
-    // spec §6.5(2) decides whether that implicit copy constructor exists,
-    // and this reports the same diagnostic the declaration-position gate
-    // does when it does not.
+    // Whether that constructor exists is spec §6.5(2)'s question, and it
+    // is now asked at the top of this function instead of here, because
+    // `sig` is not null in every spelling that asks it -- see that
+    // block's own comment. What is left here is only the "this is not
+    // aggregate initialization" half, which still has to run for a
+    // *deleted* copy constructor (the one case the block above steps
+    // aside for, since a deleted function is selected and then rejected
+    // by name -- [dcl.fct.def.delete]/2).
     if (sig == nullptr && ctor_args.size() == 1 && ctor_args[0] != nullptr && body.program != nullptr &&
         is_named_record_type(constructed_type, body)) {
         std::optional<Type> arg_type = infer_expr_type(*ctor_args[0], body, signatures);
@@ -1770,7 +1838,8 @@ struct ConvertingConstructorBinding {
             source = source->pointee.get();
         }
         if (source != nullptr && source->kind == TypeKind::Named && source->name == constructed_type.name) {
-            if (report_errors && !is_copy_constructible(class_name, *body.program)) {
+            if (report_errors && !is_copy_constructible(class_name, *body.program) &&
+                is_bare_same_type_copy_source(*ctor_args[0], constructed_type, body, signatures)) {
                 return std::unexpected(DataflowError(
                     std::string(record_keyword(class_name, *body.program)) + " '" + class_name +
                         "' is not copy-constructible (spec §6.5(2)) -- this construction is not permitted",

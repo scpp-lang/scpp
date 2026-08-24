@@ -156,8 +156,16 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
             case TypeKind::Function:
                 return std::unexpected(CodegenError("a bare function type cannot be a struct field in this version", current_loc_));
             case TypeKind::Reference:
-                return std::unexpected(CodegenError("a reference cannot be a struct field in this version",
-                    current_loc_));
+                // Spec §11.1(4): rules §11.1(2)/(3) "do not otherwise
+                // restrict a `struct`. A `struct` may declare ...
+                // non-static data members ... exactly as the ordinary
+                // C++ rules permit", and spec §6.1(5) regulates "a
+                // constructor for a class *or struct* with a reference
+                // member" -- a rule that would have nothing to govern if
+                // a struct could not have one. A union still cannot
+                // ([class.union]/2); declare_struct's union branch says
+                // so directly.
+                return {};
             case TypeKind::Span:
                 return std::unexpected(CodegenError("a std::span cannot be a struct field in this version (it is a "
                                     "lifetime-checked borrowed view; use class instead)",
@@ -256,6 +264,18 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
             info.abi_align = static_cast<unsigned>(final_align);
         } else {
             for (const StructField& field : def.fields) {
+                // [class.union]/2: "A union shall not have a non-static
+                // data member of reference type." Unlike the struct
+                // restrictions above this one is a plain C++ rule that
+                // spec §11.1(4) adopts unchanged, so it is asked here
+                // rather than in validate_trivial, which struct fields
+                // share.
+                if (field.type.kind == TypeKind::Reference) {
+                    return std::unexpected(CodegenError("union '" + def.name + "' field '" + field.name +
+                                                        "': a union shall not have a non-static data member of "
+                                                        "reference type ([class.union]/2)",
+                        current_loc_));
+                }
                 if (auto validate_result = validate_trivial(field.type, in_progress); !validate_result.has_value()) {
                     return std::unexpected(CodegenError(std::string(def.is_union ? "union '" : "struct '") + def.name + "' field '" +
                                             field.name + "': " + validate_result.error().what() +

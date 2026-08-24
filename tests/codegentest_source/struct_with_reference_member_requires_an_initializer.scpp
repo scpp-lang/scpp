@@ -1,0 +1,9 @@
+// spec §6.1(5) / [dcl.init.aggr]/5: a reference has no empty state, so an
+// aggregate member of reference type left uncovered by the initializer
+// list cannot be value-initialized -- `RefBox b{};` is ill-formed, as
+// clang says too ("reference member of type 'int &' uninitialized").
+struct RefBox { int& r; };
+int main() {
+    RefBox b{};
+    return 0;
+}

@@ -1,0 +1,19 @@
+// Spec §11.1(4): rules §11.1(2)/(3) "do not otherwise restrict a
+// `struct`. A `struct` may declare ... non-static data members ...
+// exactly as the ordinary C++ rules permit", and spec §6.1(5) regulates
+// "a constructor for a class *or struct* with a reference member" -- a
+// rule with nothing to govern if a struct could not have one. This case
+// previously asserted the opposite, citing a `ch04 §4.1` that does not
+// exist; the reference member aliases its referent, exactly as in C++.
+struct Ref {
+    int& r;
+};
+
+int main() {
+    int a = 1;
+    Ref h{a};
+    h.r = 42;
+    Ref copy{h};
+    copy.r = copy.r - 42;
+    return a;
+}
