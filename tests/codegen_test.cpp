@@ -1939,6 +1939,201 @@ std::string function_ir(const std::string& ir, const std::string& function_name)
 // emitted -- as a definition that traps, mirroring the Itanium ABI's
 // __cxa_deleted_virtual. Without it the program fails at *link* time
 // with an undefined reference, which is a diagnostic no user can act on.
+// [expr.const] is a rule about what a constant expression may *do*, not a
+// rule about which functions exist. A non-`constexpr` function is a
+// perfectly good candidate that must take part in overload resolution and
+// only then be diagnosed as unusable -- exactly the shape
+// [dcl.fct.def.delete]/2 has for a deleted function. The evaluator instead
+// removed every RuntimeOnly candidate *before* selecting, so with
+// `f(int)` and `constexpr f(const int&)` declared it silently folded the
+// second where clang++-22 -std=c++26 reports "call to 'f' is ambiguous"
+// and codegen, one AST away, reported the ambiguity too.
+void test_constant_evaluator_keeps_runtime_only_candidates_in_its_candidate_set() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "int f(int x) { return 1; }\n"
+        "constexpr int f(const int& x) { return 2; }\n"
+        "int main() { constexpr int k = f(1); return k; }\n");
+    expect(!ir_result.has_value(),
+           "constexpr_runtime_only_candidate_kept: neither candidate is better for an `int` prvalue, "
+           "so the call is ambiguous rather than a silent fold of the constexpr one");
+    if (ir_result.has_value()) return;
+    expect(ir_result.error().message.find("ambiguous call to 'f'") != std::string::npos,
+           "constexpr_runtime_only_candidate_kept: expected an ambiguity diagnostic, got: " +
+               ir_result.error().message);
+}
+
+// The same program at namespace scope, where no movecheck body pass runs
+// and the constant evaluator's answer is the only answer. This is the
+// position the defect actually hid in: the block-scope spelling above was
+// caught by codegen a moment later, this one folded to 2 and shipped.
+void test_constant_evaluator_keeps_runtime_only_candidates_at_namespace_scope() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "int f(int x) { return 1; }\n"
+        "constexpr int f(const int& x) { return 2; }\n"
+        "constexpr int k = f(1);\n"
+        "int main() { return k; }\n");
+    expect(!ir_result.has_value(),
+           "constexpr_runtime_only_candidate_kept_ns: a namespace-scope constexpr initializer must "
+           "resolve the call the same way every other position does");
+    if (ir_result.has_value()) return;
+    expect(ir_result.error().message.find("ambiguous call to 'f'") != std::string::npos,
+           "constexpr_runtime_only_candidate_kept_ns: expected an ambiguity diagnostic, got: " +
+               ir_result.error().message);
+}
+
+// The control for the two above: when the runtime candidate is the one
+// selected, it is rejected *after* selection, in the one shared wording.
+void test_constant_evaluator_reports_a_selected_runtime_only_function_after_selecting_it() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "int f(int x) { return 1; }\n"
+        "int main() { constexpr int k = f(1); return k; }\n");
+    expect(!ir_result.has_value(),
+           "constexpr_runtime_only_selected: a non-constexpr function may be named but not called "
+           "during constant evaluation");
+    if (ir_result.has_value()) return;
+    expect(ir_result.error().message.find("immediate evaluation may only call constexpr/consteval "
+                                          "functions") != std::string::npos,
+           "constexpr_runtime_only_selected: expected the post-selection diagnostic, got: " +
+               ir_result.error().message);
+}
+
+// [expr.const]/13: an immediate invocation is a call that *names* an
+// immediate function, and which function a call names is settled by
+// overload resolution. Deciding it by scanning declarations for the name
+// made an ordinary runtime call unwritable next to a `consteval`
+// overload: `f(1)` selects `f(int)`, yet the whole call was force-folded
+// and then rejected with "immediate evaluation may only call
+// constexpr/consteval functions". clang++-22 -std=c++26 compiles it.
+void test_a_consteval_overload_does_not_force_folding_of_a_runtime_call() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "int f(int x) { return 1; }\n"
+        "consteval int f(double x) { return 2; }\n"
+        "int main() { return f(1); }\n");
+    expect(ir_result.has_value(),
+           "consteval_overload_does_not_poison_runtime_call: overload resolution selects `f(int)`, "
+           "which is not an immediate function, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " +
+                                                            ir_result.error().message));
+    if (!ir_result.has_value()) return;
+    expect(ir_result.value().find("call ") != std::string::npos,
+           "consteval_overload_does_not_poison_runtime_call: the selected function is a runtime one, "
+           "so the call must survive into the IR rather than be folded away");
+}
+
+// The same question in a namespace-scope initializer, the position with
+// no movecheck pass behind it.
+void test_a_consteval_overload_does_not_force_folding_at_namespace_scope() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "int f(int x) { return 1; }\n"
+        "consteval int f(double x) { return 2; }\n"
+        "int g = f(1);\n"
+        "int main() { return g; }\n");
+    expect(ir_result.has_value(),
+           "consteval_overload_does_not_poison_global_init: got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " +
+                                                            ir_result.error().message));
+}
+
+// `is_class_name` answers the class-vs-struct *access* question and was
+// asked the receiver question instead, so a `struct` lost its entire
+// method candidate set during constant evaluation while the identical
+// `class` folded. codegen's collect_call_candidates has always matched on
+// the record.
+void test_constant_evaluation_finds_methods_on_a_struct_receiver() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct S { int v; constexpr int doubled() const { return v * 2; } };\n"
+        "int main() { constexpr S s{21}; constexpr int k = s.doubled(); return k; }\n");
+    expect(ir_result.has_value(),
+           "constexpr_struct_method_receiver: a struct receiver has methods, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " +
+                                                            ir_result.error().message));
+    if (!ir_result.has_value()) return;
+    expect(ir_result.value().find("42") != std::string::npos,
+           "constexpr_struct_method_receiver: expected the folded constant 42 in the IR");
+}
+
+// The evaluator ranked free-function candidates and returned the *first*
+// matching method, constructor and converting constructor. Ranking is not
+// a property of which kind of function is being called, so a tie has to
+// read as a tie in all four positions.
+void test_constant_evaluation_ranks_method_overloads_rather_than_taking_the_first() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct S { int v;\n"
+        "  int m(int x) const { return 1; }\n"
+        "  constexpr int m(const int& x) const { return 2; } };\n"
+        "int main() { constexpr S s{0}; constexpr int k = s.m(1); return k; }\n");
+    expect(!ir_result.has_value(),
+           "constexpr_method_ranking: `m(int)` and `m(const int&)` are indistinguishable for an "
+           "`int` prvalue, so the call has no best viable candidate");
+    if (ir_result.has_value()) return;
+    expect(ir_result.error().message.find("ambiguous method 'm'") != std::string::npos,
+           "constexpr_method_ranking: expected an ambiguity diagnostic, got: " +
+               ir_result.error().message);
+}
+
+void test_constant_evaluation_ranks_constructor_overloads_rather_than_taking_the_first() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct S { int v;\n"
+        "  S(int x) : v{1} {}\n"
+        "  constexpr S(const int& x) : v{2} {} };\n"
+        "int main() { constexpr S s{1}; return s.v; }\n");
+    expect(!ir_result.has_value(),
+           "constexpr_constructor_ranking: two constructors match equally well, so the "
+           "initialization is ambiguous");
+    if (ir_result.has_value()) return;
+    expect(ir_result.error().message.find("ambiguous constructor for type 'S'") != std::string::npos,
+           "constexpr_constructor_ranking: expected an ambiguity diagnostic, got: " +
+               ir_result.error().message);
+}
+
+// The converting-constructor lookup asked the same class-only question,
+// so a `struct` parameter could not be initialized from a convertible
+// argument during constant evaluation while a `class` parameter could.
+void test_constant_evaluation_finds_a_converting_constructor_on_a_struct_parameter() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "struct W { int v; constexpr W(const int& x) : v{x + 41} {} };\n"
+        "constexpr int take(W w) { return w.v; }\n"
+        "int main() { constexpr int k = take(1); return k; }\n");
+    expect(ir_result.has_value(),
+           "constexpr_struct_converting_ctor: got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " +
+                                                            ir_result.error().message));
+    if (!ir_result.has_value()) return;
+    expect(ir_result.value().find("42") != std::string::npos,
+           "constexpr_struct_converting_ctor: expected the folded constant 42 in the IR");
+}
+
+// [conv.lval]/1 with [dcl.init]/16: a by-value parameter is initialized
+// from the argument's value, so the argument's own top-level const takes
+// no part in viability. A namespace-scope `constexpr int` carries its
+// declared `const int` type on its cell, so comparing it made every such
+// constant unusable as an argument -- reported, misleadingly, as "no
+// constexpr/consteval overload of 'f' matches this immediate call".
+void test_a_namespace_scope_constant_is_a_viable_constexpr_call_argument() {
+    cases_run++;
+    auto ir_result = try_generate_ir(
+        "constexpr int f(int x) { return x + 41; }\n"
+        "constexpr int a = 1;\n"
+        "constexpr int k = f(a);\n"
+        "int main() { return k; }\n");
+    expect(ir_result.has_value(),
+           "constexpr_global_constant_argument: got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " +
+                                                            ir_result.error().message));
+    if (!ir_result.has_value()) return;
+    expect(ir_result.value().find("42") != std::string::npos,
+           "constexpr_global_constant_argument: expected the folded constant 42 in the IR");
+}
+
 void test_a_deleted_virtual_is_emitted_as_a_trapping_definition() {
     std::string case_name = "a_deleted_virtual_is_emitted_as_a_trapping_definition";
     cases_run++;
@@ -5166,6 +5361,16 @@ int main() {
     test_constant_evaluator_keeps_deleted_candidates_in_its_candidate_set();
     test_constant_evaluator_reports_a_selected_deleted_function_as_deleted();
     test_constant_evaluator_still_folds_when_the_deleted_candidate_loses();
+    test_constant_evaluator_keeps_runtime_only_candidates_in_its_candidate_set();
+    test_constant_evaluator_keeps_runtime_only_candidates_at_namespace_scope();
+    test_constant_evaluator_reports_a_selected_runtime_only_function_after_selecting_it();
+    test_a_consteval_overload_does_not_force_folding_of_a_runtime_call();
+    test_a_consteval_overload_does_not_force_folding_at_namespace_scope();
+    test_constant_evaluation_finds_methods_on_a_struct_receiver();
+    test_constant_evaluation_ranks_method_overloads_rather_than_taking_the_first();
+    test_constant_evaluation_ranks_constructor_overloads_rather_than_taking_the_first();
+    test_constant_evaluation_finds_a_converting_constructor_on_a_struct_parameter();
+    test_a_namespace_scope_constant_is_a_viable_constexpr_call_argument();
     test_a_deleted_virtual_is_emitted_as_a_trapping_definition();
     test_generate_returns_engaged_expected_on_success();
     test_generate_returns_disengaged_expected_on_failure_without_throwing();
