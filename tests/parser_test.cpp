@@ -1342,6 +1342,59 @@ void test_defaulted_move_special_members_parse_without_parameter_names() {
            "defaulted_move_special_members_parse_without_parameter_names: expected defaulted move assignment");
 }
 
+// `= delete` is now parsed by one shared suffix helper rather than the
+// five hand-copied `= default`/`= 0` tails it used to be spread across
+// (member, out-of-line member, constructor, ordinary member, free
+// function), so every position is pinned here at once. A free function
+// is deliberately included: unlike `= default`, which
+// [dcl.fct.def.default]/1 restricts to special members, any function may
+// be deleted.
+void test_deleted_functions_parse_in_every_position() {
+    scpp::Program program = expect_parse_ok(
+        "int free_fn(int x) = delete;\n"
+        "class Foo {\n"
+        "public:\n"
+        "    Foo() = default;\n"
+        "    Foo(const Foo& other) = delete;\n"
+        "    int member(int x) = delete;\n"
+        "    Foo& operator=(const Foo& other) = delete;\n"
+        "    virtual ~Foo() = default;\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    auto deleted_named = [&](std::string_view name, std::size_t params) {
+        for (const scpp::Function& fn : program.functions) {
+            if (fn.name == name && fn.params.size() == params) return fn.is_deleted;
+        }
+        return false;
+    };
+    expect(deleted_named("free_fn", 1), "deleted_functions_parse_in_every_position: expected a deleted free function");
+    expect(deleted_named("Foo_new", 2), "deleted_functions_parse_in_every_position: expected a deleted copy constructor");
+    expect(deleted_named("Foo_member", 2), "deleted_functions_parse_in_every_position: expected a deleted member");
+    expect(deleted_named("Foo_operator_assign", 2),
+           "deleted_functions_parse_in_every_position: expected a deleted copy assignment");
+    const scpp::Function* default_ctor = nullptr;
+    for (const scpp::Function& fn : program.functions) {
+        if (fn.name == "Foo_new" && fn.params.size() == 1) default_ctor = &fn;
+    }
+    expect(default_ctor != nullptr && default_ctor->is_defaulted && !default_ctor->is_deleted,
+           "deleted_functions_parse_in_every_position: expected `= default` and `= delete` to stay distinct");
+}
+
+// [dcl.fct.def.default]/1 restricts `= default` to special members, so a
+// free function may only be deleted -- and the diagnostic must say so
+// rather than offering `default`, which the next diagnostic would then
+// reject.
+void test_a_defaulted_free_function_is_rejected_naming_only_delete() {
+    auto result = scpp::parse("int free_fn(int x) = default;\nint main() { return 0; }\n");
+    expect(!result.has_value(), "a_defaulted_free_function_is_rejected_naming_only_delete: expected a ParseError");
+    if (!result.has_value()) {
+        std::string message = result.error().what();
+        expect(message.find("'delete'") != std::string::npos && message.find("default") == std::string::npos,
+               "a_defaulted_free_function_is_rejected_naming_only_delete: expected the message to offer only "
+               "'delete', got " + message);
+    }
+}
+
 void test_defaulted_non_special_member_is_rejected() {
     bool threw = false;
     if (auto _r = scpp::parse("class Foo {\n"
@@ -6554,6 +6607,8 @@ int main() {
     test_out_of_line_member_definition_signature_mismatch_is_rejected();
     test_user_declared_move_assignment_operator_is_rejected();
     test_defaulted_move_special_members_parse_without_parameter_names();
+    test_deleted_functions_parse_in_every_position();
+    test_a_defaulted_free_function_is_rejected_naming_only_delete();
     test_defaulted_non_special_member_is_rejected();
     test_equality_operator_methods_parse();
     test_static_cast_parses();

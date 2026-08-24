@@ -490,6 +490,25 @@ private:
                                     "' is marked 'override' but does not override any base virtual member (spec §11.5(5))",
                                     fn->loc));
             }
+            // [class.virtual]/17: a function with a deleted definition
+            // shall not override one without, and vice versa -- otherwise
+            // the deletion is silently reachable (or silently escapable)
+            // through a base reference, which is the whole point of the
+            // rule.
+            if (overrides) {
+                auto base_slot_it = base_virtual_candidates.find(slot);
+                if (base_slot_it != base_virtual_candidates.end()) {
+                    for (const Provider& provider : base_slot_it->second) {
+                        if (provider.fn == nullptr || provider.fn->is_deleted == fn->is_deleted) continue;
+                        return std::unexpected(DataflowError(
+                            "member '" + name + "' of class '" + def->name + "' is " +
+                                (fn->is_deleted ? "defined as '= delete' but overrides a base virtual member that is not"
+                                                : "not deleted but overrides a base virtual member that is defined as '= delete'") +
+                                " ([class.virtual]/17 -- a deleted and a non-deleted function may not override one another)",
+                            fn->loc));
+                    }
+                }
+            }
             bool is_effectively_virtual = fn->is_virtual || overrides;
             if (is_effectively_virtual) {
                 own_virtual_slots[slot] = Provider{def, fn, slot, name};

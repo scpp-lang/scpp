@@ -2282,7 +2282,7 @@ private:
                a.eval_mode == b.eval_mode && a.receiver_ref_qualifier == b.receiver_ref_qualifier &&
                a.is_static == b.is_static && a.access == b.access && a.member_owner_class == b.member_owner_class &&
                a.is_virtual == b.is_virtual && a.is_override == b.is_override && a.is_pure == b.is_pure &&
-               a.is_defaulted == b.is_defaulted;
+               a.is_defaulted == b.is_defaulted && a.is_deleted == b.is_deleted;
     }
 
     [[nodiscard]] bool same_template_param_shape(const std::vector<GenericTypeParam>& a,
@@ -2541,13 +2541,16 @@ private:
     }
 
     [[nodiscard]] bool is_bodyless_free_function_forward_decl(const Function& fn) const {
+        // [dcl.fct.def.delete]/1: `= delete` *is* a definition, so a
+        // deleted free function is never a forward declaration awaiting
+        // one (and, by /4, must be the first declaration).
         return !parsing_compiled_module_interface() && fn.body == nullptr && fn.owning_module.empty() && !fn.is_extern_c &&
-               !fn.is_module_extern && (fn.params.empty() || fn.params[0].name != "this");
+               !fn.is_module_extern && !fn.is_deleted && (fn.params.empty() || fn.params[0].name != "this");
     }
 
     [[nodiscard]] bool is_bodyless_member_forward_decl(const Function& fn) const {
         return fn.expects_out_of_line_definition && fn.body == nullptr && !fn.member_owner_class.empty() && !fn.is_pure &&
-               !fn.is_defaulted;
+               !fn.is_defaulted && !fn.is_deleted;
     }
 
     [[nodiscard]] static bool is_bodyless_extern_c_declaration(const Function& fn) {
@@ -2708,6 +2711,7 @@ private:
         comparable.receiver_ref_qualifier = parsed.fn.receiver_ref_qualifier;
         comparable.return_lifetime = parsed.fn.return_lifetime;
         comparable.is_defaulted = parsed.fn.is_defaulted;
+        comparable.is_deleted = parsed.fn.is_deleted;
         comparable.params = parsed.fn.params;
         comparable.name = declared.name;
         comparable.member_owner_class = declared.member_owner_class;
@@ -2762,6 +2766,7 @@ private:
         std::vector<MemberInitializer>& parsed_member_initializers_ref = parsed.fn.member_initializers;
         declared.member_initializers = std::move(parsed_member_initializers_ref);
         if (parsed.fn.is_defaulted) declared.is_defaulted = true;
+        if (parsed.fn.is_deleted) declared.is_deleted = true;
         declared.expects_out_of_line_definition = false;
     }
 
@@ -2782,6 +2787,20 @@ private:
     // parameter instead.
     [[nodiscard]] std::expected<bool, ParseError> finish_out_of_line_member_definition(Program& program,
                                                                         ParsedOutOfLineMemberDefinition parsed) {
+        // [dcl.fct.def.delete]/4: a deleted definition shall be the
+        // first declaration of the function. Asked here, before the
+        // signature search below, because the generic
+        // "does not match its earlier declaration exactly" answer that
+        // search would otherwise give answers a question the user did
+        // not ask -- the declarator *does* match; being out of line is
+        // the whole problem.
+        if (parsed.fn.is_deleted) {
+            std::string message{"'= delete' on the out-of-line definition of member '"};
+            message += out_of_line_member_display_name(parsed);
+            message += "': a deleted definition shall be the first declaration of the function ";
+            message += "([dcl.fct.def.delete]/4) -- write '= delete' on the declaration inside the class instead";
+            return std::unexpected(ParseError(parsed.fn.loc.line, parsed.fn.loc.column, message));
+        }
         std::string expected_suffix = out_of_line_member_suffix(parsed.kind, parsed.member_name);
         Function* exact_match = nullptr;
         bool saw_mismatch = false;
@@ -2831,19 +2850,7 @@ private:
     // finish_out_of_line_member_definition's comment above for why.
     [[nodiscard]] std::expected<void, ParseError> parse_out_of_line_member_body_or_default(Function& fn, const char* entity) {
         if (match(TokenKind::Assign)) {
-            if (!match(TokenKind::KwDefault)) {
-                const Token& tok = peek();
-                {
-                    std::string _msg_2491{"expected 'default' after '=' in "};
-                    _msg_2491 += entity;
-                    return std::unexpected(ParseError(tok.line, tok.column, _msg_2491));
-                }
-            }
-            fn.is_defaulted = true;
-            auto semi_result = expect(TokenKind::Semicolon, "';'");
-            if (!semi_result.has_value()) return std::unexpected(std::move(semi_result).error());
-            fn.body = nullptr;
-            return {};
+            return parse_deleted_defaulted_or_pure_suffix(fn, /*allow_default=*/true, /*allow_pure=*/false, entity);
         }
         if (match(TokenKind::Semicolon)) {
             fn.body = nullptr;
@@ -3159,6 +3166,18 @@ private:
                 for (std::size_t j = i + 1; j < program.functions.size(); j++) {
                     const Function& candidate = program.functions[j];
                     if (!same_function_declarator(fn, candidate)) continue;
+                    // [dcl.fct.def.delete]/4, the free-function twin of
+                    // the member rule in
+                    // finish_out_of_line_member_definition: the
+                    // declarator matches, so the generic mismatch
+                    // message below would answer the wrong question.
+                    if (candidate.is_deleted && !fn.is_deleted) {
+                        std::string _msg_delete4{"'= delete' on a later declaration of '"};
+                        _msg_delete4 += fn.name;
+                        _msg_delete4 += "': a deleted definition shall be the first declaration of the function ";
+                        _msg_delete4 += "([dcl.fct.def.delete]/4) -- write '= delete' on the first declaration instead";
+                        return std::unexpected(ParseError(candidate.loc.line, candidate.loc.column, _msg_delete4));
+                    }
                     {
                         std::string _msg_2759{"definition of ordinary forward declaration '"};
                         _msg_2759 += fn.name;
@@ -4467,6 +4486,7 @@ private:
         clone.is_override = fn.is_override;
         clone.is_pure = fn.is_pure;
         clone.is_defaulted = fn.is_defaulted;
+        clone.is_deleted = fn.is_deleted;
         clone.expects_out_of_line_definition = false;
         clone.forwards_to = fn.forwards_to;
         clone.namespace_path = fn.namespace_path;
@@ -6329,24 +6349,64 @@ private:
         return {};
     }
 
+    // [dcl.fct.def.default], [dcl.fct.def.delete] and [class.abstract]/2:
+    // the three things a declarator may end with instead of a body. One
+    // implementation, because "may this be written `= delete`?" is one
+    // question that had four independent answers -- three of them
+    // character-for-character copies of each other that all knew about
+    // `default` and `0` and none of which knew about `delete`, and a
+    // fourth (the out-of-line one) that knew only about `default`.
+    //
+    // `allow_pure` is false exactly where a pure-specifier is not
+    // grammatically available (an out-of-line definition, a free
+    // function); `= delete` is available everywhere a function is
+    // declared, which is why it takes no flag.
+    [[nodiscard]] std::expected<void, ParseError> parse_deleted_defaulted_or_pure_suffix(Function& fn, bool allow_default,
+                                                                                         bool allow_pure,
+                                                                                         const char* entity) {
+        if (allow_default && match(TokenKind::KwDefault)) {
+            fn.is_defaulted = true;
+            if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            fn.body = nullptr;
+            return {};
+        }
+        if (match(TokenKind::KwDelete)) {
+            fn.is_deleted = true;
+            if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            fn.body = nullptr;
+            return {};
+        }
+        if (allow_pure && check(TokenKind::IntegerLiteral) && peek().text == "0") {
+            advance();
+            fn.is_pure = true;
+            if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            fn.body = nullptr;
+            return {};
+        }
+        const Token& tok = peek();
+        {
+            std::string _msg_delete_suffix{"expected "};
+            if (allow_pure) {
+                _msg_delete_suffix += "'default', 'delete' or '0'";
+            } else if (allow_default) {
+                _msg_delete_suffix += "'default' or 'delete'";
+            } else {
+                _msg_delete_suffix += "'delete'";
+            }
+            _msg_delete_suffix += " after '=' in ";
+            _msg_delete_suffix += entity;
+            return std::unexpected(ParseError(tok.line, tok.column, _msg_delete_suffix));
+        }
+    }
+
     [[nodiscard]] std::expected<StmtPtr, ParseError> parse_member_function_suffix(Function& fn) {
         if (auto _rv = parse_function_trailing_attributes(fn, "a member function declarator"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
         fn.is_override = match(TokenKind::KwOverride);
         if (match(TokenKind::Assign)) {
-            if (match(TokenKind::KwDefault)) {
-                fn.is_defaulted = true;
-                if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
-                return std::unique_ptr<Stmt>{};
+            if (auto _rv = parse_deleted_defaulted_or_pure_suffix(fn, /*allow_default=*/true, /*allow_pure=*/true, "a member declaration");
+                !_rv.has_value()) {
+                return std::unexpected(std::move(_rv).error());
             }
-            auto value_tok_result = expect(TokenKind::IntegerLiteral, "'default' or '0'");
-            if (!value_tok_result.has_value()) return std::unexpected(std::move(value_tok_result).error());
-            const Token& value_tok = std::move(value_tok_result).value();
-            if (value_tok.text != "0") {
-                return std::unexpected(ParseError(value_tok.line, value_tok.column,
-                                 "expected 'default' or '0' after '=' in a member declaration"));
-            }
-            fn.is_pure = true;
-            if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
             return std::unique_ptr<Stmt>{};
         }
         if (match(TokenKind::Semicolon)) return std::unique_ptr<Stmt>{};
@@ -7958,8 +8018,10 @@ private:
         fn.namespace_path = namespace_stack_;
         fn.is_exported = is_exported;
         if (!generic_method_owner_id.empty()) fn.generic_method_owner_id = generic_method_owner_id;
+        // A deleted definition *is* the definition ([dcl.fct.def.delete]/1),
+        // so it no more expects a later out-of-line one than `= default` does.
         fn.expects_out_of_line_definition =
-            fn.body == nullptr && fn.owning_module.empty() && !fn.is_pure && !fn.is_defaulted;
+            fn.body == nullptr && fn.owning_module.empty() && !fn.is_pure && !fn.is_defaulted && !fn.is_deleted;
     }
 
     // Was a local `enter_member_template_context` lambda inside
@@ -8366,21 +8428,10 @@ private:
                     fn.member_initializers = std::move(fn_member_initializers_result).value();
                 }
                 if (match(TokenKind::Assign)) {
-                    if (match(TokenKind::KwDefault)) {
-                        fn.is_defaulted = true;
-                        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
-                        fn.body = nullptr;
-                    } else {
-                        auto value_tok_result = expect(TokenKind::IntegerLiteral, "'default' or '0'");
-                        if (!value_tok_result.has_value()) return std::unexpected(std::move(value_tok_result).error());
-                        const Token& value_tok = std::move(value_tok_result).value();
-                        if (value_tok.text != "0") {
-                            return std::unexpected(ParseError(value_tok.line, value_tok.column,
-                                             "expected 'default' or '0' after '=' in a member declaration"));
-                        }
-                        fn.is_pure = true;
-                        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
-                        fn.body = nullptr;
+                    if (auto _rv = parse_deleted_defaulted_or_pure_suffix(fn, /*allow_default=*/true, /*allow_pure=*/true,
+                                                                          "a member declaration");
+                        !_rv.has_value()) {
+                        return std::unexpected(std::move(_rv).error());
                     }
                 } else {
                     auto fn_body_result = parse_member_body_or_declaration();
@@ -8692,21 +8743,10 @@ private:
                 if (!fn_requires_result.has_value()) return std::unexpected(std::move(fn_requires_result).error());
                 fn.method_requires_concept = std::move(fn_requires_result).value();
                 if (match(TokenKind::Assign)) {
-                    if (match(TokenKind::KwDefault)) {
-                        fn.is_defaulted = true;
-                        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
-                        fn.body = nullptr;
-                    } else {
-                        auto value_tok_result = expect(TokenKind::IntegerLiteral, "'default' or '0'");
-                        if (!value_tok_result.has_value()) return std::unexpected(std::move(value_tok_result).error());
-                        const Token& value_tok = std::move(value_tok_result).value();
-                        if (value_tok.text != "0") {
-                            return std::unexpected(ParseError(value_tok.line, value_tok.column,
-                                             "expected 'default' or '0' after '=' in a member declaration"));
-                        }
-                        fn.is_pure = true;
-                        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
-                        fn.body = nullptr;
+                    if (auto _rv = parse_deleted_defaulted_or_pure_suffix(fn, /*allow_default=*/true, /*allow_pure=*/true,
+                                                                          "a member declaration");
+                        !_rv.has_value()) {
+                        return std::unexpected(std::move(_rv).error());
                     }
                 } else if (match(TokenKind::Semicolon)) {
                     fn.body = nullptr;
@@ -8997,6 +9037,20 @@ private:
         }
 
         if (match(TokenKind::Semicolon)) {
+            return fn;
+        }
+
+        // [dcl.fct.def.delete]/1: a free function may be defined as
+        // deleted. `= default` is grammatically available here too and is
+        // rejected further on by validate_defaulted_special_member, which
+        // already owns the "which functions may be defaulted" question --
+        // parsing it here and rejecting it there keeps that one question
+        // in one place instead of splitting it across the grammar.
+        if (match(TokenKind::Assign)) {
+            if (auto _rv = parse_deleted_defaulted_or_pure_suffix(fn, /*allow_default=*/false, /*allow_pure=*/false, "a function declaration");
+                !_rv.has_value()) {
+                return std::unexpected(std::move(_rv).error());
+            }
             return fn;
         }
 

@@ -167,7 +167,10 @@ namespace scpp {
             }
             return false;
         };
-        if (find_user_declared_copy_ctor_ast(class_name) != nullptr) return true;
+        if (const Function* user_copy = find_user_declared_copy_ctor_ast(class_name); user_copy != nullptr) {
+            // [dcl.fct.def.delete]/1, mirroring movecheck's is_copy_constructible.
+            return !user_copy->is_deleted;
+        }
         if (find_user_declared_copy_assign_ast(class_name) != nullptr) {
             return false;
         }
@@ -183,7 +186,9 @@ namespace scpp {
 
     [[nodiscard]] bool Codegen::is_copy_assignable(const std::string& class_name)
 {
-        if (find_user_declared_copy_assign_ast(class_name) != nullptr) return true;
+        if (const Function* user_assign = find_user_declared_copy_assign_ast(class_name); user_assign != nullptr) {
+            return !user_assign->is_deleted;
+        }
         if (has_user_declared_dtor(class_name) || find_user_declared_copy_ctor_ast(class_name) != nullptr) {
             return false;
         }

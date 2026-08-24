@@ -2074,6 +2074,13 @@ class Function {
     // Special-member functions only: whether the declaration is defaulted
     // (`= default`).
     bool is_defaulted = false;
+    // Whether the declaration is a deleted definition (`= delete`,
+    // [dcl.fct.def.delete]/1). A deleted function is declared and takes
+    // part in overload resolution exactly like any other; naming it in a
+    // way that would call it is what makes the program ill-formed
+    // ([dcl.fct.def.delete]/2). It is therefore *not* removed from any
+    // candidate set -- see resolve_overload's own comment.
+    bool is_deleted = false;
     // Member declarations only: parsed in the current translation unit as
     // a declaration-without-body that expects a later out-of-line
     // definition. Cleared again on imported/cloned declarations and once a
@@ -2724,6 +2731,7 @@ inline Function::Function(const Function& other)
       is_override{other.is_override},
       is_pure{other.is_pure},
       is_defaulted{other.is_defaulted},
+      is_deleted{other.is_deleted},
       expects_out_of_line_definition{other.expects_out_of_line_definition},
       forwards_to{other.forwards_to},
       namespace_path{other.namespace_path},
@@ -3771,6 +3779,21 @@ public:
             return true;
     }
     return true;
+}
+
+// [dcl.fct.def.delete]/2: a program that *names* a deleted function is
+// ill-formed. The one wording every pass uses -- movecheck (call,
+// constructor, copy assignment, function designator) and the constant
+// evaluator alike -- so a `constexpr` context and a runtime context give
+// the same answer to the same question in the same words.
+[[nodiscard]] inline std::string deleted_function_error_message(const std::string& subject, const SourceLocation& deleted_at) {
+    std::string result{"cannot call "};
+    result += subject;
+    result += ": it is defined as '= delete', declared at line ";
+    result += std::to_string(static_cast<std::int64_t>(deleted_at.line));
+    result += " ([dcl.fct.def.delete]/2 -- a deleted function takes part in overload resolution and was ";
+    result += "selected here, but naming it is ill-formed)";
+    return result;
 }
 
 [[nodiscard]] inline std::string describe_type_brief_named(const Type& type) {

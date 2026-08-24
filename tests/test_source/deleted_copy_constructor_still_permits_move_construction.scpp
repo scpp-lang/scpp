@@ -1,0 +1,20 @@
+import std;
+
+// A deleted copy constructor is what makes a type non-copyable, which is
+// the point of `= delete` in an ownership language. spec §6.4(2): every
+// class type still has an implicitly-defined move constructor, so moving
+// stays available and must select the move, not the deleted copy.
+class Owned {
+public:
+    int value;
+    Owned(int v) : value{v} {}
+    Owned(const Owned& other) = delete;
+    virtual ~Owned() = default;
+};
+
+int consume(Owned box) { return box.value; }
+
+int main() {
+    Owned original{7};
+    return consume(std::move(original));
+}

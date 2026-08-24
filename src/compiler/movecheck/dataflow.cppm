@@ -1314,6 +1314,9 @@ struct ConvertingConstructorBinding {
             describe_overload_failure(expr, callee, callee_display, name_it->second, body, signatures),
             state.current_loc));
     }
+    if (report_errors && sig != nullptr && sig->is_deleted) {
+        return std::unexpected(DataflowError(deleted_function_error_message("'" + callee_display + "'", sig->loc), state.current_loc));
+    }
     if (report_errors && sig != nullptr && sig->access == AccessSpecifier::Private &&
         !sig->member_owner_class.empty() && !grants_private_access(state, sig->member_owner_class)) {
         return std::unexpected(DataflowError("cannot call private member function '" + callee_display + "' of class '" +
@@ -1698,6 +1701,10 @@ struct ConvertingConstructorBinding {
             !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
+    }
+    if (report_errors && sig != nullptr && sig->is_deleted) {
+        return std::unexpected(DataflowError(deleted_function_error_message("the constructor of '" + class_name + "'", sig->loc),
+            state.current_loc));
     }
     if (report_errors && sig != nullptr && sig->access == AccessSpecifier::Private &&
         !sig->member_owner_class.empty() && !grants_private_access(state, sig->member_owner_class)) {
@@ -2302,6 +2309,20 @@ struct ConvertingConstructorBinding {
                 // for that case; this exists for the Member-target case
                 // specifically, previously a real, unchecked gap -- see
                 // is_bare_same_type_copy_source's own comment).
+                if (report_errors && target_class_type.has_value() && body.program != nullptr &&
+                    is_bare_same_type_copy_source(*expr.rhs, *target_class_type, body, signatures)) {
+                    // [dcl.fct.def.delete]/2 answers first: "this operator
+                    // is deleted" is a strictly more specific answer than
+                    // "this class is not copy-assignable", which is what
+                    // §6.5(3)'s suppression rule below reports.
+                    const Function* user_assign = find_user_declared_copy_assign(target_class_type->name, *body.program);
+                    if (user_assign != nullptr && user_assign->is_deleted) {
+                        return std::unexpected(DataflowError(
+                            deleted_function_error_message("the copy assignment operator of '" + target_class_type->name + "'",
+                                                           user_assign->loc),
+                            state.current_loc));
+                    }
+                }
                 if (report_errors && target_class_type.has_value() &&
                     is_bare_same_type_copy_source(*expr.rhs, *target_class_type, body, signatures) &&
                     (state.classes_with_copy_assign == nullptr ||
@@ -2862,6 +2883,14 @@ struct ConvertingConstructorBinding {
     state.current_loc = stmt.loc;
     switch (stmt.kind) {
         case MirStatementKind::Declare:
+            if (report_errors && body.program != nullptr && stmt.type.kind == TypeKind::Named &&
+                has_deleted_dtor(stmt.type.name, *body.program)) {
+                return std::unexpected(DataflowError("cannot create an object of type '" + stmt.type.name +
+                                     "': its destructor is defined as '= delete' ([class.dtor]/14 -- the object "
+                                     "would be destroyed at the end of this scope, and a deleted destructor "
+                                     "cannot be invoked)",
+                    state.current_loc));
+            }
             // ch04 §4.2: a constructor-call VarDecl (`ClassName name
             // (args);`) needs its own arguments' move/borrow effects
             // applied -- see MirStatement::ctor_args' own comment for
@@ -2976,6 +3005,23 @@ struct ConvertingConstructorBinding {
                         state.current_loc));
                 }
                 return {};
+            }
+            // [dcl.fct.def.delete]/2: `a = b` with an lvalue `b` of the same
+            // record type *names* the copy assignment operator, so deleting
+            // it makes this assignment ill-formed. Asked here, before the
+            // `class`-only branch below, because nothing in docs/spec/
+            // distinguishes `struct` from `class` for §6.5 -- and a struct
+            // reaching codegen with this spelling emitted a call to a
+            // function that has no callable definition at all.
+            if (report_errors && body.program != nullptr && (*local_type).kind == TypeKind::Named &&
+                stmt.expr != nullptr && is_bare_same_type_copy_source(*stmt.expr, (*local_type), body, signatures)) {
+                const Function* user_assign = find_user_declared_copy_assign((*local_type).name, *body.program);
+                if (user_assign != nullptr && user_assign->is_deleted) {
+                    return std::unexpected(DataflowError(
+                        deleted_function_error_message("the copy assignment operator of '" + (*local_type).name + "'",
+                                                       user_assign->loc),
+                        state.current_loc));
+                }
             }
             if (state.class_names != nullptr &&
                 (*local_type).kind == TypeKind::Named && state.class_names->contains((*local_type).name)) {
@@ -4072,9 +4118,20 @@ struct SwitchCaseKey {
     // class can never contain itself by value (infinite size), so the
     // field-containment recursion this walks is always a DAG, not a
     // graph that could cycle.
+    // spec §6.5 governs every *class type*, which in [class.pre]/[dcl.type]
+    // terms includes `struct` (see is_copy_constructible/is_copy_assignable
+    // themselves, which both search program.structs as well). Enumerating
+    // only program.classes here left every struct outside the set, so the
+    // three gates that consult it -- field copy assignment, whole-local
+    // copy assignment, and lambda capture-by-copy -- silently licensed
+    // copies of structs the predicate says have no such operation at all.
     std::unordered_set<std::string> classes_with_copy_ctor;
     std::unordered_set<std::string> classes_with_copy_assign;
     for (const ClassDef& def : program.classes) {
+        if (is_copy_constructible(def.name, program)) classes_with_copy_ctor.insert(def.name);
+        if (is_copy_assignable(def.name, program)) classes_with_copy_assign.insert(def.name);
+    }
+    for (const StructDef& def : program.structs) {
         if (is_copy_constructible(def.name, program)) classes_with_copy_ctor.insert(def.name);
         if (is_copy_assignable(def.name, program)) classes_with_copy_assign.insert(def.name);
     }

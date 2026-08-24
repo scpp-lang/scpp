@@ -785,6 +785,7 @@ private:
 
     [[nodiscard]] std::expected<void, CodegenError> define_function(const Function& fn);
 
+    [[nodiscard]] std::expected<void, CodegenError> define_deleted_function(const Function& fn);
     [[nodiscard]] std::expected<void, CodegenError> define_defaulted_function(const Function& fn);
 
     // ch05 §5.14: emits a thin, codegen-only wrapper body for a

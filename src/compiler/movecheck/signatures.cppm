@@ -36,6 +36,12 @@ struct FunctionSignature {
     SourceLocation loc;
     ReceiverRefQualifier receiver_ref_qualifier = ReceiverRefQualifier::None;
     bool is_generic_template = false;
+    // [dcl.fct.def.delete]/2: a deleted function still takes part in
+    // overload resolution -- it is *naming* the winner that is
+    // ill-formed -- so this must travel with the signature rather than
+    // remove the candidate from the set.
+    bool is_deleted = false;
+    std::string display_name;
 };
 
 namespace {
@@ -144,13 +150,17 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 // own worked example, and the overwhelmingly common real-world one,
 // uses; a mutable-reference-parameter copy constructor, while legal
 // real C++, is out of scope for this recognition).
-[[nodiscard]] bool has_user_declared_copy_ctor(const std::string& class_name, const Program& program) {
+[[nodiscard]] const Function* find_user_declared_copy_ctor(const std::string& class_name, const Program& program) {
     for (const Function& fn : program.functions) {
         if (is_copy_constructor_function(fn) && fn.member_owner_class == class_name) {
-            return true;
+            return &fn;
         }
     }
-    return false;
+    return nullptr;
+}
+
+[[nodiscard]] bool has_user_declared_copy_ctor(const std::string& class_name, const Program& program) {
+    return find_user_declared_copy_ctor(class_name, program) != nullptr;
 }
 
 // spec §6.5: whether `class_name` has declared its own copy assignment
@@ -160,22 +170,41 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 // exactly (an operator= overload taking any other shape is simply an
 // ordinary, unrelated overload of the name -- not *the* copy assignment
 // operator this recognizes).
-[[nodiscard]] bool has_user_declared_copy_assign(const std::string& class_name, const Program& program) {
+[[nodiscard]] const Function* find_user_declared_copy_assign(const std::string& class_name, const Program& program) {
     for (const Function& fn : program.functions) {
         if (is_copy_assignment_function(fn) && fn.member_owner_class == class_name) {
-            return true;
+            return &fn;
         }
     }
-    return false;
+    return nullptr;
 }
 
-[[nodiscard]] bool has_user_declared_dtor(const std::string& class_name, const Program& program) {
+[[nodiscard]] bool has_user_declared_copy_assign(const std::string& class_name, const Program& program) {
+    return find_user_declared_copy_assign(class_name, program) != nullptr;
+}
+
+[[nodiscard]] const Function* find_user_declared_dtor(const std::string& class_name, const Program& program) {
     for (const Function& fn : program.functions) {
         if (!fn.name.ends_with("_delete") || fn.params.size() != 1) continue;
         if (fn.member_owner_class != class_name) continue;
-        if (is_special_member_this_param(fn.params[0].type, class_name)) return true;
+        if (is_special_member_this_param(fn.params[0].type, class_name)) return &fn;
     }
-    return false;
+    return nullptr;
+}
+
+[[nodiscard]] bool has_user_declared_dtor(const std::string& class_name, const Program& program) {
+    return find_user_declared_dtor(class_name, program) != nullptr;
+}
+
+// [class.dtor]/14: a program is ill-formed if a potentially-invoked
+// destructor is deleted. scpp destroys every class-typed object at the
+// end of its scope, so *creating* one is exactly such a potential
+// invocation -- the error belongs at the declaration, not at some later
+// point where the destructor is implicitly named and nothing in the
+// source text mentions it.
+[[nodiscard]] bool has_deleted_dtor(const std::string& class_name, const Program& program) {
+    const Function* dtor = find_user_declared_dtor(class_name, program);
+    return dtor != nullptr && dtor->is_deleted;
 }
 // Certain stdlib "view" wrappers intentionally behave like scalar pairs at
 // by-value boundaries even though they are spelled as classes with
@@ -707,7 +736,13 @@ struct ConstructedOwner {
         }
         return false;
     };
-    if (has_user_declared_copy_ctor(class_name, program)) return true;
+    if (const Function* user_copy = find_user_declared_copy_ctor(class_name, program); user_copy != nullptr) {
+        // [dcl.fct.def.delete]/1: a deleted definition is still a
+        // declaration -- it suppresses nothing less than a defined one
+        // would -- but the class then has no copy constructor that spec
+        // §6.6(4)'s "has a copy constructor" test can be satisfied by.
+        return !user_copy->is_deleted;
+    }
     if (has_user_declared_copy_assign(class_name, program)) {
         return false;
     }
@@ -735,7 +770,9 @@ struct ConstructedOwner {
 // no compiler-provided copy assignment operator at all, exactly
 // mirroring move assignment's identical spec §6.4(3) rule).
 [[nodiscard]] bool is_copy_assignable(const std::string& class_name, const Program& program) {
-    if (has_user_declared_copy_assign(class_name, program)) return true;
+    if (const Function* user_assign = find_user_declared_copy_assign(class_name, program); user_assign != nullptr) {
+        return !user_assign->is_deleted;
+    }
     if (has_user_declared_dtor(class_name, program) || has_user_declared_copy_ctor(class_name, program)) {
         return false;
     }
@@ -1292,6 +1329,8 @@ struct ConstructedOwner {
         sig.loc = fn.loc;
         sig.receiver_ref_qualifier = fn.receiver_ref_qualifier;
         sig.is_generic_template = fn.is_generic_template;
+        sig.is_deleted = fn.is_deleted;
+        sig.display_name = fn.name;
         std::vector<FunctionSignature>& overloads = signatures[fn.name];
         for (const FunctionSignature& existing : overloads) {
             if (existing.is_generic_template != sig.is_generic_template) continue;

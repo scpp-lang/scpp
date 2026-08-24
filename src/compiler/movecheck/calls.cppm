@@ -193,7 +193,8 @@ struct NodiscardInfo {
 [[nodiscard]] bool same_function_pointer_shape_ignoring_unsafe(const Type& a, const Type& b);
 [[nodiscard]] std::optional<Type> resolve_function_designator_type(const Expr& expr, const Type& target_type,
                                                                    const Body& body,
-                                                                   const Signatures& signatures);
+                                                                   const Signatures& signatures,
+                                                                   const FunctionSignature** out_selected = nullptr);
 [[nodiscard]] std::expected<void, DataflowError> check_function_pointer_assignment(const Type& target_type, const Expr& expr, const Body& body,
                                        const Signatures& signatures, SourceLocation loc,
                                        const std::string& target_name, bool report_errors);
@@ -1296,7 +1297,9 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
 }
 
 [[nodiscard]] std::optional<Type> resolve_function_designator_type(const Expr& expr, const Type& target_type,
-                                                                   const Body& body, const Signatures& signatures) {
+                                                                   const Body& body, const Signatures& signatures,
+                                                                   const FunctionSignature** out_selected) {
+    if (out_selected != nullptr) *out_selected = nullptr;
     auto signature_set_for_name = [&](std::string_view name) -> const std::vector<FunctionSignature>* {
         auto it = signatures.find(std::string(name));
         return it == signatures.end() ? nullptr : &it->second;
@@ -1334,7 +1337,10 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     for (const FunctionSignature& sig : *candidates) {
         if (!compile_time_dependency_visible_in_body(sig, body)) continue;
         Type candidate = function_pointer_type_from_signature(sig);
-        if (same_function_pointer_shape_ignoring_unsafe(candidate, target_type)) return candidate;
+        if (same_function_pointer_shape_ignoring_unsafe(candidate, target_type)) {
+            if (out_selected != nullptr) *out_selected = &sig;
+            return candidate;
+        }
     }
     if (body.program != nullptr && !source->explicit_template_args.empty()) {
         bool saw_visible_generic_template = false;
@@ -1424,7 +1430,16 @@ std::expected<void, DataflowError> check_function_pointer_assignment(const Type&
     // excluding it here would have made `nullptr_t` convert to every
     // pointer type but one.
     if (is_nullptr_literal(expr)) return {};
-    std::optional<Type> source_type = resolve_function_designator_type(expr, target_type, body, signatures);
+    const FunctionSignature* designated = nullptr;
+    std::optional<Type> source_type = resolve_function_designator_type(expr, target_type, body, signatures, &designated);
+    // [dcl.fct.def.delete]/2: forming a pointer to a deleted function
+    // *names* it just as calling it does. Nothing else would ever report
+    // it -- the pointer's own signature check passes, and no source text
+    // ever calls the deleted body.
+    if (designated != nullptr && designated->is_deleted) {
+        return std::unexpected(DataflowError(
+            deleted_function_error_message("'" + designated->display_name + "'", designated->loc), loc));
+    }
     if (!source_type) source_type = infer_expr_type(expr, body, signatures);
     if (!source_type || !is_function_pointer(*source_type)) {
         return std::unexpected(DataflowError("cannot initialize function pointer '" + target_name +
