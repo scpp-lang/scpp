@@ -4,14 +4,14 @@ template<>
 class TagList<> {
     public:
         virtual ~TagList() = default;
-    TagList() { return; }
+    constexpr TagList() { return; }
 };
 
 template<typename Head, typename... Tail>
 class TagList<Head, Tail...> : private TagList<Tail...> {
     public:
         virtual ~TagList() override = default;
-    TagList() { return; }
+    constexpr TagList() { return; }
 };
 
 consteval int take(TagList<> tags) {

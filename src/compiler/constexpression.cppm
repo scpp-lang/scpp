@@ -632,6 +632,66 @@ public:
         return evaluate_expr(expr);
     }
 
+    // [expr.const]/13: an immediate invocation is a call that *names* an
+    // immediate function -- and which function a call names is settled by
+    // overload resolution ([over.match]/3), never by scanning
+    // declarations for the name. Asking the name alone made an ordinary
+    // runtime call unwritable beside a `consteval` overload: with
+    // `int f(int)` and `consteval int f(double)` declared, `f(1)` selects
+    // `f(int)` and is a plain runtime call, yet it was force-folded and
+    // then rejected with "immediate evaluation may only call
+    // constexpr/consteval functions" -- in a plain `return f(1);`, in a
+    // `static` local's initializer and in a namespace-scope
+    // initializer alike, while clang compiles all three.
+    //
+    // The declaration scan survives only as the fast path: it avoids
+    // evaluating arguments for the overwhelming majority of calls that
+    // have no `consteval` overload at all, and it answers directly when
+    // every arity-matching candidate is `consteval`, where resolution
+    // has nothing else to choose. A *mixed* set is resolved for real,
+    // through the same find_callable every other call in this file uses.
+    [[nodiscard]] bool call_names_immediate_function(const Expr& expr) {
+        if (expr.kind != ExprKind::Call || expr.lhs) return false;
+        std::string suffix{};
+        suffix += "::";
+        suffix += expr.name;
+        bool any_immediate = false;
+        bool any_other = false;
+        for (const Function& fn : program_.functions) {
+            if (fn.name != expr.name && !fn.name.ends_with(suffix)) continue;
+            if (fn.params.size() != expr.args.size()) continue;
+            if (fn.eval_mode == FunctionEvalMode::Consteval) {
+                any_immediate = true;
+            } else {
+                any_other = true;
+            }
+        }
+        if (!any_immediate) return false;
+        if (!any_other) return true;
+        frames_.clear();
+        steps_ = 0;
+        call_depth_ = 0;
+        std::vector<std::shared_ptr<Cell>> arg_values{};
+        arg_values.reserve(expr.args.size());
+        for (const ExprPtr& arg : expr.args) {
+            if (arg != nullptr && arg->kind == ExprKind::BracedInitList) {
+                arg_values.push_back(nullptr);
+                continue;
+            }
+            // An argument that is not itself constant-evaluable leaves
+            // the question unanswerable here; keeping the immediate
+            // reading preserves the diagnostic the call would otherwise
+            // have produced instead of silently letting it through.
+            auto arg_result = evaluate_expr(*arg);
+            if (!arg_result.has_value()) return true;
+            arg_values.push_back(std::move(arg_result).value());
+        }
+        OptionalFunctionRef callee =
+            find_callable(expr.name, arg_values, expr.explicit_global_qualification, &expr.args);
+        if (!callee.has_value()) return true;
+        return callee->get().eval_mode == FunctionEvalMode::Consteval;
+    }
+
     [[nodiscard]] std::expected<void, ConstexprError> validate_constexpr_locals(Function& fn) {
         if (!fn.body) return {};
         frames_.clear();
@@ -1921,8 +1981,28 @@ private:
         return result;
     }
 
+    // [over.match.best]/2's diagnostic, in one place: a tie between free
+    // functions, between methods and between constructors is the same
+    // finding and must read the same way. The three sites used to have
+    // one message between them.
+    [[nodiscard]] std::string ambiguous_candidates_message(const std::string& what,
+                                                           const std::vector<const Function*>& tied,
+                                                           const std::string& display_name) {
+        std::string message{};
+        message += "ambiguous ";
+        message += what;
+        message += ": ";
+        message += std::to_string(tied.size());
+        message += " overloads match these argument types equally well and none is better than the others ([over.match.best])";
+        for (const Function* fn : tied) {
+            message += "\n  candidate: ";
+            message += describe_constexpr_candidate(*fn, display_name);
+        }
+        return message;
+    }
+
     [[nodiscard]] OptionalFunctionRef find_callable(const std::string& name, const std::vector<std::shared_ptr<Cell>>& args,
-                                                bool require_constexpr, bool explicit_global_qualification = false,
+                                                bool explicit_global_qualification = false,
                                                 const std::vector<ExprPtr>* arg_exprs = nullptr,
                                                 std::vector<const Function*>* out_ambiguous = nullptr) {
         if (out_ambiguous != nullptr) out_ambiguous->clear();
@@ -1935,7 +2015,7 @@ private:
                 }
                 candidate += "::";
                 candidate += name;
-                if (OptionalFunctionRef found = find_callable_exact(candidate, args, require_constexpr, arg_exprs, out_ambiguous);
+                if (OptionalFunctionRef found = find_callable_exact(candidate, args, arg_exprs, out_ambiguous);
                     found.has_value()) {
                     return found;
                 }
@@ -1944,11 +2024,11 @@ private:
                 if (out_ambiguous != nullptr && out_ambiguous->size() > 1) return {};
             }
         }
-        return find_callable_exact(name, args, require_constexpr, arg_exprs, out_ambiguous);
+        return find_callable_exact(name, args, arg_exprs, out_ambiguous);
     }
 
     [[nodiscard]] OptionalFunctionRef find_callable_exact(const std::string& name, const std::vector<std::shared_ptr<Cell>>& args,
-                                                bool require_constexpr, const std::vector<ExprPtr>* arg_exprs = nullptr,
+                                                const std::vector<ExprPtr>* arg_exprs = nullptr,
                                                 std::vector<const Function*>* out_ambiguous = nullptr) {
         if (!functions_by_name_.contains(name)) return {};
         // Collect every match rather than returning the first. Returning
@@ -1959,18 +2039,6 @@ private:
         std::vector<const Function*> matches{};
         for (std::size_t fn_index : functions_by_name_.at(name)) {
             const Function& fn = program_.functions[fn_index];
-            // [dcl.fct.def.delete]/2: a deleted function has no body but is
-            // still a candidate. Dropping it here *removed it from the
-            // candidate set*, which is exactly what the rule forbids --
-            // `f(int) = delete` beside `f(const int&)` silently folded to
-            // the second at namespace scope (where no movecheck body pass
-            // runs) while codegen reported the deletion: the same
-            // expression meaning different functions depending on whether
-            // it was constant-evaluated. Selection now sees it; naming it
-            // is rejected after selection, in call_function, in the one
-            // shared wording movecheck uses.
-            if (!fn.body && !fn.is_deleted) continue;
-            if (require_constexpr && fn.eval_mode == FunctionEvalMode::RuntimeOnly) continue;
             if (fn.params.size() != args.size()) continue;
             bool params_match = true;
             for (std::size_t i = 0; i < args.size(); ++i) {
@@ -1982,13 +2050,77 @@ private:
                     }
                     continue;
                 }
-                if (!constexpr_argument_matches_parameter(fn.params[i].type, args[i], require_constexpr)) {
+                if (!constexpr_argument_matches_parameter(fn.params[i].type, args[i])) {
                     params_match = false;
                     break;
                 }
             }
             if (params_match) matches.push_back(&fn);
         }
+        return best_candidate(matches, args, arg_exprs, /*param_offset=*/0, out_ambiguous);
+    }
+
+    // [over.match.best], stated *once* for every resolver in this file.
+    //
+    // find_callable_exact used to be the only one that ranked; the method,
+    // constructor and converting-constructor lookups each returned the
+    // first candidate whose parameters matched, so a `constexpr` call
+    // picked whichever overload happened to be declared first while
+    // codegen -- which has always ranked -- picked the best one, and
+    // neither reported the ambiguity C++ requires. Ranking is not a
+    // property of *which kind* of function is being called, so it lives
+    // in one place and every caller reaches it.
+    //
+    // `param_offset` is 1 for a member function, whose params[0] is the
+    // implicit object parameter and has no argument opposite it.
+    [[nodiscard]] OptionalFunctionRef best_candidate(std::vector<const Function*>& matches,
+                                                     const std::vector<std::shared_ptr<Cell>>& args,
+                                                     const std::vector<ExprPtr>* arg_exprs, std::size_t param_offset,
+                                                     std::vector<const Function*>* out_ambiguous) {
+        // [basic.def]/1: a declaration and the definition it belongs to
+        // declare *one* function, so a redeclaration is not a second
+        // candidate. This used to be expressed as "skip any function with
+        // no body", which is a different rule and removed candidates the
+        // language keeps: a `= delete`d function ([dcl.fct.def.delete]/2,
+        // fixed once already) and -- the case that survived it -- an
+        // *imported* non-constexpr function, whose body is not serialized
+        // into the importing translation unit's .scppm at all. That made
+        // a module-loaded candidate set differ from the identical
+        // same-file one: `pick(int)` beside `constexpr pick(const int&)`
+        // is ambiguous when both are written locally and silently folded
+        // to the second when they are imported.
+        //
+        // 7.3(2.2) is the rule for a genuinely bodyless callee -- "a call
+        // whose definition is unavailable for constant evaluation,
+        // including an imported definition whose compile-time body is not
+        // provided ... the program is ill-formed" -- and it is worded, as
+        // every clause of 7.3 is, about what evaluation *would evaluate*.
+        // It rejects after selection, in call_function; it does not
+        // withdraw the declaration from overload resolution.
+        std::vector<const Function*> distinct{};
+        for (const Function* fn : matches) {
+            bool redeclares_a_definition = false;
+            if (!fn->body) {
+                for (const Function* other : matches) {
+                    if (other == fn || !other->body) continue;
+                    if (other->member_owner_class != fn->member_owner_class) continue;
+                    if (other->params.size() != fn->params.size()) continue;
+                    bool same_signature = true;
+                    for (std::size_t i = 0; i < fn->params.size(); ++i) {
+                        if (!types_equal(other->params[i].type, fn->params[i].type)) {
+                            same_signature = false;
+                            break;
+                        }
+                    }
+                    if (same_signature) {
+                        redeclares_a_definition = true;
+                        break;
+                    }
+                }
+            }
+            if (!redeclares_a_definition) distinct.push_back(fn);
+        }
+        matches = std::move(distinct);
         if (matches.empty()) return {};
         if (matches.size() == 1) return make_function_ref(*matches[0]);
         // [over.match.best]/2.4: a non-template is better than a template.
@@ -2008,7 +2140,9 @@ private:
         // `f(const int&)` declared runs `f(int&)` at run time and was
         // rejected as ambiguous when folded.
         std::vector<std::vector<ArgumentConversion>> conversions{};
-        for (const Function* fn : matches) conversions.push_back(argument_conversions_for(*fn, args, arg_exprs));
+        for (const Function* fn : matches) {
+            conversions.push_back(argument_conversions_for(*fn, args, arg_exprs, param_offset));
+        }
         std::vector<std::size_t> best = best_viable_candidates(conversions);
         if (best.size() == 1) return make_function_ref(*matches[best[0]]);
         std::vector<const Function*> tied{};
@@ -2025,7 +2159,8 @@ private:
     // the ones that decide between two viable reference bindings.
     [[nodiscard]] std::vector<ArgumentConversion> argument_conversions_for(const Function& fn,
                                                                           const std::vector<std::shared_ptr<Cell>>& args,
-                                                                          const std::vector<ExprPtr>* arg_exprs) {
+                                                                          const std::vector<ExprPtr>* arg_exprs,
+                                                                          std::size_t param_offset = 0) {
         auto strip_to_value = [](Type type) {
             if (type.kind == TypeKind::Reference && type.pointee != nullptr) type = *type.pointee;
             type.is_const_qualified = false;
@@ -2036,7 +2171,7 @@ private:
             ArgumentConversion conversion{};
             conversion.rank = ConversionRank::Identity;
             const Expr* arg_expr = arg_exprs != nullptr && i < arg_exprs->size() ? (*arg_exprs)[i].get() : nullptr;
-            if (i >= fn.params.size() || args[i] == nullptr ||
+            if (i + param_offset >= fn.params.size() || args[i] == nullptr ||
                 (arg_expr != nullptr && arg_expr->kind == ExprKind::BracedInitList)) {
                 // A braced list has no type of its own, so there is
                 // nothing to rank; an unknown sequence compares equal to
@@ -2045,7 +2180,7 @@ private:
                 result.push_back(conversion);
                 continue;
             }
-            const Type& param_type = fn.params[i].type;
+            const Type& param_type = fn.params[i + param_offset].type;
             Type target = param_type;
             if (param_type.kind == TypeKind::Reference) {
                 conversion.binds_reference = true;
@@ -2067,38 +2202,26 @@ private:
     }
 
     [[nodiscard]] OptionalFunctionRef find_single_argument_converting_constructor(const std::string& class_name,
-                                                                              const std::shared_ptr<Cell>& arg,
-                                                                              bool require_constexpr) {
+                                                                              const std::shared_ptr<Cell>& arg) {
         std::string constructor_name{};
         constructor_name += class_name;
         constructor_name += "_new";
         if (!functions_by_name_.contains(constructor_name)) return {};
+        std::vector<std::shared_ptr<Cell>> args{};
+        args.push_back(arg);
+        std::vector<const Function*> matches{};
         for (std::size_t fn_index : functions_by_name_.at(constructor_name)) {
             const Function& fn = program_.functions[fn_index];
-            // [dcl.fct.def.delete]/2: a deleted function has no body but is
-            // still a candidate. Dropping it here *removed it from the
-            // candidate set*, which is exactly what the rule forbids --
-            // `f(int) = delete` beside `f(const int&)` silently folded to
-            // the second at namespace scope (where no movecheck body pass
-            // runs) while codegen reported the deletion: the same
-            // expression meaning different functions depending on whether
-            // it was constant-evaluated. Selection now sees it; naming it
-            // is rejected after selection, in call_function, in the one
-            // shared wording movecheck uses.
-            if (!fn.body && !fn.is_deleted) continue;
-            if (require_constexpr && fn.eval_mode == FunctionEvalMode::RuntimeOnly) continue;
             if (fn.params.size() != 2) continue;
             const Type& param_type = fn.params[1].type;
             const Type& arg_type = arg->type;
             if (param_type.kind == TypeKind::Reference) {
-                if (param_type.pointee && types_equal(*param_type.pointee, arg_type)) {
-                    return make_function_ref(fn);
-                }
-            } else if (types_equal(param_type, arg_type)) {
-                return make_function_ref(fn);
+                if (param_type.pointee && types_equal(*param_type.pointee, arg_type)) matches.push_back(&fn);
+            } else if (types_equal_ignoring_top_level_const(param_type, arg_type)) {
+                matches.push_back(&fn);
             }
         }
-        return {};
+        return best_candidate(matches, args, /*arg_exprs=*/nullptr, /*param_offset=*/1, /*out_ambiguous=*/nullptr);
     }
 
     [[nodiscard]] bool is_same_or_base_class_type(const Type& expected, const Type& actual) const {
@@ -2145,8 +2268,7 @@ private:
         return alias;
     }
 
-    [[nodiscard]] bool constexpr_argument_matches_parameter(const Type& param_type, const std::shared_ptr<Cell>& arg,
-                                                            bool require_constexpr) {
+    [[nodiscard]] bool constexpr_argument_matches_parameter(const Type& param_type, const std::shared_ptr<Cell>& arg) {
         const Type& arg_type = arg->type;
         if (param_type.kind == TypeKind::Reference) {
             if (!param_type.pointee) return false;
@@ -2160,9 +2282,23 @@ private:
             }
             return false;
         }
-        if (is_same_or_base_class_type(param_type, arg_type)) return true;
-        if (param_type.kind == TypeKind::Named && is_class_name(param_type.name)) {
-            return find_single_argument_converting_constructor(param_type.name, arg, require_constexpr).has_value();
+        // [conv.lval]/1 with [dcl.init]/16: a by-value parameter is
+        // initialized from the argument's *value*, so the argument's own
+        // top-level const takes no part in whether the candidate is
+        // viable. Comparing it made a `constexpr int a = 1;` at namespace
+        // scope -- whose cell carries the declared `const int` type --
+        // fail to match an `int` parameter, so `f(a)` reported "no
+        // constexpr/consteval overload matches" while codegen, which has
+        // always compared through types_equal_ignoring_top_level_const,
+        // accepted it. argument_conversions_for already strips it before
+        // *ranking*; viability now asks the same question.
+        Type param_value_type = param_type;
+        param_value_type.is_const_qualified = false;
+        Type arg_value_type = arg_type;
+        arg_value_type.is_const_qualified = false;
+        if (is_same_or_base_class_type(param_value_type, arg_value_type)) return true;
+        if (param_type.kind == TypeKind::Named && is_record_name(param_type.name)) {
+            return find_single_argument_converting_constructor(param_type.name, arg).has_value();
         }
         return false;
     }
@@ -2191,79 +2327,31 @@ private:
 
     [[nodiscard]] OptionalFunctionRef find_constructor(const std::string& class_name,
                                                    const std::vector<std::shared_ptr<Cell>>& args,
-                                                   bool require_constexpr) {
+                                                   std::vector<const Function*>* out_ambiguous = nullptr) {
+        if (out_ambiguous != nullptr) out_ambiguous->clear();
         std::string constructor_name{};
         constructor_name += class_name;
         constructor_name += "_new";
         if (!functions_by_name_.contains(constructor_name)) return {};
+        std::vector<const Function*> matches{};
         for (std::size_t fn_index : functions_by_name_.at(constructor_name)) {
             const Function& fn = program_.functions[fn_index];
-            // [dcl.fct.def.delete]/2: a deleted function has no body but is
-            // still a candidate. Dropping it here *removed it from the
-            // candidate set*, which is exactly what the rule forbids --
-            // `f(int) = delete` beside `f(const int&)` silently folded to
-            // the second at namespace scope (where no movecheck body pass
-            // runs) while codegen reported the deletion: the same
-            // expression meaning different functions depending on whether
-            // it was constant-evaluated. Selection now sees it; naming it
-            // is rejected after selection, in call_function, in the one
-            // shared wording movecheck uses.
-            if (!fn.body && !fn.is_deleted) continue;
-            if (require_constexpr && fn.eval_mode == FunctionEvalMode::RuntimeOnly) continue;
             if (fn.params.size() != args.size() + 1) continue;
             bool params_match = true;
             for (std::size_t i = 0; i < args.size(); ++i) {
-                const Type& param_type = fn.params[i + 1].type;
-                const Type& arg_type = args[i]->type;
-                if (param_type.kind == TypeKind::Reference) {
-                    if (!param_type.pointee) {
-                        params_match = false;
-                        break;
-                    }
-                    if (types_equal(*param_type.pointee, arg_type)) continue;
-                    if (param_type.pointee->is_const_qualified) {
-                        Type unqualified = *param_type.pointee;
-                        unqualified.is_const_qualified = false;
-                        if (types_equal(unqualified, arg_type)) continue;
-                    }
-                    {
-                        params_match = false;
-                        break;
-                    }
-                } else if (!types_equal(param_type, arg_type)) {
+                // Hand-rolled reference/const matching here was a fifth
+                // copy of constexpr_argument_matches_parameter that had
+                // drifted: it knew nothing of base classes or of
+                // converting constructors, so a constructor argument
+                // accepted everywhere else was rejected here.
+                if (!constexpr_argument_matches_parameter(fn.params[i + 1].type, args[i])) {
                     params_match = false;
                     break;
                 }
             }
-            if (params_match) return make_function_ref(fn);
+            if (params_match) matches.push_back(&fn);
         }
-        return {};
-    }
-
-    [[nodiscard]] bool has_runtime_only_match(const std::string& name, const std::vector<std::shared_ptr<Cell>>& args,
-                                              const std::vector<ExprPtr>* arg_exprs = nullptr) {
-        if (!functions_by_name_.contains(name)) return false;
-        for (std::size_t fn_index : functions_by_name_.at(name)) {
-            const Function& fn = program_.functions[fn_index];
-            if (!fn.body || fn.eval_mode != FunctionEvalMode::RuntimeOnly || fn.params.size() != args.size()) continue;
-            bool params_match = true;
-            for (std::size_t i = 0; i < args.size(); ++i) {
-                const Expr* arg_expr = arg_exprs != nullptr && i < arg_exprs->size() ? (*arg_exprs)[i].get() : nullptr;
-                if (arg_expr != nullptr && arg_expr->kind == ExprKind::BracedInitList) {
-                    if (!braced_init_list_can_initialize(fn.params[i].type, arg_expr->args, arg_expr->loc)) {
-                        params_match = false;
-                        break;
-                    }
-                    continue;
-                }
-                if (!constexpr_argument_matches_parameter(fn.params[i].type, args[i], /*require_constexpr=*/false)) {
-                    params_match = false;
-                    break;
-                }
-            }
-            if (params_match) return true;
-        }
-        return false;
+        return best_candidate(matches, args, /*arg_exprs=*/nullptr, /*param_offset=*/1, out_ambiguous);
     }
 
     [[nodiscard]] bool is_constructor_function(const Function& fn) const {
@@ -2626,7 +2714,7 @@ private:
                 if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
                 arg_values.push_back(std::move(arg_result).value());
             }
-            if (OptionalFunctionRef ctor_ref = find_constructor(field_type.name, arg_values, /*require_constexpr=*/true);
+            if (OptionalFunctionRef ctor_ref = find_constructor(field_type.name, arg_values);
                 ctor_ref.has_value()) {
                 const Function& ctor = ctor_ref->get();
                 std::vector<Binding> bindings{};
@@ -3175,9 +3263,9 @@ private:
                         if (!cloned.has_value()) return std::unexpected(std::move(cloned).error());
                         bindings.push_back(Binding{std::move(cloned).value(), false});
                     } else if (!types_equal(param.type, value->type) &&
-                               param.type.kind == TypeKind::Named && is_class_name(param.type.name)) {
+                               param.type.kind == TypeKind::Named && is_record_name(param.type.name)) {
                         OptionalFunctionRef ctor_ref =
-                            find_single_argument_converting_constructor(param.type.name, value, /*require_constexpr=*/true);
+                            find_single_argument_converting_constructor(param.type.name, value);
                         if (!ctor_ref.has_value()) {
                             std::string message{};
                             message += "constexpr call has no viable converting constructor for parameter '";
@@ -3215,8 +3303,9 @@ private:
 
     [[nodiscard]] std::expected<OptionalFunctionRef, ConstexprError> find_method_callable(const Expr& receiver_expr, const std::string& method_name,
                                                        const std::vector<std::shared_ptr<Cell>>& arg_values,
-                                                       bool require_constexpr,
-                                                       const std::vector<ExprPtr>* arg_exprs = nullptr) {
+                                                       const std::vector<ExprPtr>* arg_exprs = nullptr,
+                                                       std::vector<const Function*>* out_ambiguous = nullptr) {
+        if (out_ambiguous != nullptr) out_ambiguous->clear();
         std::shared_ptr<Cell> receiver_value{};
         bool receiver_is_lvalue = false;
         bool receiver_read_only = false;
@@ -3237,27 +3326,23 @@ private:
             if (!receiver_value_result.has_value()) return std::unexpected(std::move(receiver_value_result).error());
             receiver_value = std::move(receiver_value_result).value();
         }
-        if (receiver_value->type.kind != TypeKind::Named || !is_class_name(receiver_value->type.name)) return {};
+        // A `struct` receiver used to lose its entire candidate set here:
+        // is_class_name answers the class-vs-struct *access* question, and
+        // it is not the question a method call asks. codegen's
+        // collect_call_candidates has always matched on the record, so
+        // `constexpr S s{0}; s.m();` reported "no constexpr/consteval
+        // overload of method 'm' matches" for a struct while the
+        // identical class compiled.
+        if (receiver_value->type.kind != TypeKind::Named || !is_record_name(receiver_value->type.name)) return {};
 
         std::string full_name{};
         full_name += receiver_value->type.name;
         full_name += "_";
         full_name += method_name;
         if (!functions_by_name_.contains(full_name)) return {};
+        std::vector<const Function*> matches{};
         for (std::size_t fn_index : functions_by_name_.at(full_name)) {
             const Function& fn = program_.functions[fn_index];
-            // [dcl.fct.def.delete]/2: a deleted function has no body but is
-            // still a candidate. Dropping it here *removed it from the
-            // candidate set*, which is exactly what the rule forbids --
-            // `f(int) = delete` beside `f(const int&)` silently folded to
-            // the second at namespace scope (where no movecheck body pass
-            // runs) while codegen reported the deletion: the same
-            // expression meaning different functions depending on whether
-            // it was constant-evaluated. Selection now sees it; naming it
-            // is rejected after selection, in call_function, in the one
-            // shared wording movecheck uses.
-            if (!fn.body && !fn.is_deleted) continue;
-            if (require_constexpr && fn.eval_mode == FunctionEvalMode::RuntimeOnly) continue;
             if (fn.params.size() != arg_values.size() + 1 || fn.params.empty()) continue;
 
             const Type& this_type = fn.params[0].type;
@@ -3281,14 +3366,14 @@ private:
                     }
                     continue;
                 }
-                if (!constexpr_argument_matches_parameter(fn.params[i + 1].type, arg_values[i], require_constexpr)) {
+                if (!constexpr_argument_matches_parameter(fn.params[i + 1].type, arg_values[i])) {
                     params_match = false;
                     break;
                 }
             }
-            if (params_match) return make_function_ref(fn);
+            if (params_match) matches.push_back(&fn);
         }
-        return {};
+        return best_candidate(matches, arg_values, arg_exprs, /*param_offset=*/1, out_ambiguous);
     }
 
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_constructor_expr(const Expr& expr) {
@@ -3314,8 +3399,13 @@ private:
             if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
             arg_values.push_back(std::move(arg_result).value());
         }
-        OptionalFunctionRef ctor_ref = find_constructor(expr.name, arg_values, /*require_constexpr=*/true);
+        std::vector<const Function*> tied_constructors{};
+        OptionalFunctionRef ctor_ref = find_constructor(expr.name, arg_values, &tied_constructors);
         if (!ctor_ref.has_value()) {
+            if (tied_constructors.size() > 1) {
+                return std::unexpected(ConstexprError(expr.loc, ambiguous_candidates_message(
+                    "constructor for type '" + expr.name + "'", tied_constructors, expr.name)));
+            }
             if (expr.args.empty() &&
                 (classes_by_name_.contains(expr.name) || structs_by_name_.contains(expr.name))) {
                 if (auto result = apply_default_initializers_to_named_object(object, object_type, expr.loc); !result.has_value()) {
@@ -3337,12 +3427,6 @@ private:
                     return std::unexpected(std::move(result).error());
                 }
                 return object;
-            }
-            std::string constructor_name{};
-            constructor_name += expr.name;
-            constructor_name += "_new";
-            if (has_runtime_only_match(constructor_name, arg_values)) {
-                return std::unexpected(ConstexprError(expr.loc, "immediate evaluation may only call constexpr/consteval constructors"));
             }
             std::string message{};
             message += "no constexpr/consteval constructor matches for type '";
@@ -3410,11 +3494,16 @@ private:
                     if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
                     arg_values.push_back(std::move(arg_result).value());
                 }
-                auto fn_result = find_method_callable(*expr.lhs, expr.name, arg_values, /*require_constexpr=*/true,
-                                                      &expr.args);
+                std::vector<const Function*> tied_methods{};
+                auto fn_result =
+                    find_method_callable(*expr.lhs, expr.name, arg_values, &expr.args, &tied_methods);
                 if (!fn_result.has_value()) return std::unexpected(std::move(fn_result).error());
                 OptionalFunctionRef method_ref = fn_result.value();
                 if (!method_ref.has_value()) {
+                    if (tied_methods.size() > 1) {
+                        return std::unexpected(ConstexprError(expr.loc, ambiguous_candidates_message(
+                            "method '" + expr.name + "'", tied_methods, expr.name)));
+                    }
                     std::string message{};
                     message += "no constexpr/consteval overload of method '";
                     message += expr.name;
@@ -3427,7 +3516,7 @@ private:
                 for (const ExprPtr& arg : expr.args) all_args.push_back(arg.get());
                 return call_with_expr_arg_views(method_ref->get(), all_args, expr.loc);
             }();
-        if (is_class_name(expr.name)) return evaluate_constructor_expr(expr);
+        if (is_record_name(expr.name)) return evaluate_constructor_expr(expr);
         std::vector<std::shared_ptr<Cell>> arg_values{};
         arg_values.reserve(expr.args.size());
         for (const ExprPtr& arg : expr.args) {
@@ -3446,25 +3535,12 @@ private:
         }
         std::vector<const Function*> tied_callees{};
         OptionalFunctionRef callee_ref =
-            find_callable(expr.name, arg_values, /*require_constexpr=*/true, expr.explicit_global_qualification,
-                          &expr.args, &tied_callees);
+            find_callable(expr.name, arg_values, expr.explicit_global_qualification, &expr.args, &tied_callees);
         if (!callee_ref.has_value())
             return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                 if (tied_callees.size() > 1) {
-                    std::string message{};
-                    message += "ambiguous call to '";
-                    message += expr.name;
-                    message += "': ";
-                    message += std::to_string(tied_callees.size());
-                    message += " overloads match these argument types equally well and none is better than the others ([over.match.best])";
-                    for (const Function* fn : tied_callees) {
-                        message += "\n  candidate: ";
-                        message += describe_constexpr_candidate(*fn, expr.name);
-                    }
-                    return std::unexpected(ConstexprError(expr.loc, message));
-                }
-                if (has_runtime_only_match(expr.name, arg_values, &expr.args)) {
-                    return std::unexpected(ConstexprError(expr.loc, "immediate evaluation may only call constexpr/consteval functions"));
+                    return std::unexpected(ConstexprError(expr.loc, ambiguous_candidates_message(
+                        "call to '" + expr.name + "'", tied_callees, expr.name)));
                 }
                 std::string message{};
                 message += "no constexpr/consteval overload of '";
@@ -3675,7 +3751,7 @@ private:
                         }
                         return std::nullopt;
                     }
-                    if (is_class_name(expr.name)) return named_type(expr.name);
+                    if (is_record_name(expr.name)) return named_type(expr.name);
                     if (functions_by_name_.contains(expr.name)) {
                         for (std::size_t fn_index : functions_by_name_.at(expr.name)) {
                             const Function& fn = program_.functions[fn_index];
@@ -4102,8 +4178,22 @@ private:
                         std::string constructor_name{};
                         constructor_name += stmt.type.name;
                         constructor_name += "_new";
-                        OptionalFunctionRef ctor_ref = find_callable(constructor_name, arg_values, /*require_constexpr=*/true);
+                        std::vector<const Function*> tied_constructors{};
+                        OptionalFunctionRef ctor_ref = find_callable(
+                            constructor_name, arg_values, /*explicit_global_qualification=*/false,
+                            /*arg_exprs=*/nullptr, &tied_constructors);
                         if (!ctor_ref.has_value()) {
+                            // A tie is the answer, not a miss: falling
+                            // through to "no constexpr/consteval
+                            // constructor matches" reported the absence
+                            // of something that was in fact present
+                            // twice, and pre-empted codegen's own
+                            // ambiguity diagnostic.
+                            if (tied_constructors.size() > 1) {
+                                return std::unexpected(ConstexprError(stmt.loc, ambiguous_candidates_message(
+                                    "constructor for type '" + stmt.type.name + "'", tied_constructors,
+                                    stmt.type.name)));
+                            }
                             if (stmt.ctor_args.empty() &&
                                 (classes_by_name_.contains(stmt.type.name) || structs_by_name_.contains(stmt.type.name))) {
                                 if (auto result = apply_default_initializers_to_named_object(cell, stmt.type, stmt.loc);
@@ -4319,18 +4409,6 @@ private:
         return ExecOutcome{};
     }
 };
-
-[[nodiscard]] bool has_unique_consteval_function(const Program& program, const Expr& expr) {
-    if (expr.kind != ExprKind::Call || expr.lhs) return false;
-    bool found_one = false;
-    for (const Function& fn : program.functions) {
-        if (fn.name != expr.name || fn.eval_mode != FunctionEvalMode::Consteval) continue;
-        if (fn.params.size() != expr.args.size()) continue;
-        if (found_one) return false;
-        found_one = true;
-    }
-    return found_one;
-}
 
 [[nodiscard]] bool expr_depends_on_runtime_bindings(const Expr& expr) {
     switch (expr.kind) {
@@ -4578,7 +4656,7 @@ private:
 [[nodiscard]] std::expected<void, ConstexprError> collect_runtime_expr_rewrites(const Program& program, Expr& expr, ConstexprEngine& engine,
                                    std::vector<ExprRewrite>& expr_rewrites,
                                    std::vector<std::reference_wrapper<Stmt>>& consteval_if_rewrites) {
-    if (has_unique_consteval_function(program, expr) && !expr_depends_on_runtime_bindings(expr)) {
+    if (!expr_depends_on_runtime_bindings(expr) && engine.call_names_immediate_function(expr)) {
         auto value_result = engine.evaluate_root_expr(expr);
         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
         expr_rewrites.push_back(ExprRewrite{expr, std::move(value_result).value()});

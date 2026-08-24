@@ -2477,13 +2477,13 @@ void run_consteval_tests() {
             "class TagList<> {\n"
             "public:\n"
             "    virtual ~TagList() = default;\n"
-            "    TagList() { return; }\n"
+            "    constexpr TagList() { return; }\n"
             "};\n"
             "template<typename Head, typename... Tail>\n"
             "class TagList<Head, Tail...> : private TagList<Tail...> {\n"
             "public:\n"
             "    virtual ~TagList() override = default;\n"
-            "    TagList() { return; }\n"
+            "    constexpr TagList() { return; }\n"
             "};\n"
             "consteval int take(TagList<> tags) {\n"
             "    return 41;\n"
@@ -2522,13 +2522,13 @@ void run_consteval_tests() {
             "class TagList<> {\n"
             "public:\n"
             "    virtual ~TagList() = default;\n"
-            "    TagList() { return; }\n"
+            "    constexpr TagList() { return; }\n"
             "};\n"
             "template<typename Head, typename... Tail>\n"
             "class TagList<Head, Tail...> : private TagList<Tail...> {\n"
             "public:\n"
             "    virtual ~TagList() override = default;\n"
-            "    TagList() { return; }\n"
+            "    constexpr TagList() { return; }\n"
             "};\n"
             "consteval int take_ref(const TagList<>& tags) {\n"
             "    return 41;\n"
@@ -9798,6 +9798,63 @@ void run_broken_module_dump_is_opt_in_tests() {
     }
 }
 
+// An *imported* non-constexpr function has no body in the importing
+// translation unit -- only compile-time-eligible bodies are serialized
+// into a `.scppm`. The constant evaluator's candidate collection used to
+// skip every bodyless function, so a module-loaded candidate set was not
+// the same set as the identical same-file one: `pick(int)` beside
+// `constexpr pick(const int&)` is ambiguous when both are written locally
+// and silently folded to the second when they are imported.
+//
+// 7.3(2.2) names this exact case -- "a call whose definition is
+// unavailable for constant evaluation, including an imported definition
+// whose compile-time body is not provided" -- and, like every clause of
+// 7.3, states it as a rejection of what evaluation *would evaluate*, not
+// as a withdrawal of the declaration from overload resolution.
+void run_imported_candidate_set_parity_tests() {
+    std::string case_name = "imported_runtime_candidate_stays_in_the_candidate_set";
+    cases_run++;
+    std::filesystem::path root = std::filesystem::current_path() / case_name;
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    std::filesystem::path module_source = root / "probe_mod.scpp";
+    std::filesystem::path interface_path = root / "probe_mod.scppm";
+    std::filesystem::path archive_path = root / "libprobe_mod.scppa";
+    std::filesystem::path consumer_source = root / "consumer.scpp";
+    write_text_file(module_source,
+                    "export module probe_mod;\n"
+                    "export int pick(int x) { return 1; }\n"
+                    "export constexpr int pick(const int& x) { return 2; }\n");
+    write_text_file(consumer_source,
+                    "import probe_mod;\n"
+                    "int main() { constexpr int k = pick(1); return k; }\n");
+
+    std::filesystem::path cold_exe = root / "cold_app";
+    RunResult cold_build = run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() +
+                                               " -o " + cold_exe.string() + " --import probe_mod=" +
+                                               module_source.string() + " 2>&1");
+    expect(cold_build.exit_code != 0 &&
+               cold_build.stdout_text.find("ambiguous call to 'pick'") != std::string::npos,
+           case_name + ": a module compiled from source must give the same ambiguity the same-file "
+                       "spelling gives, got: " + cold_build.stdout_text);
+
+    RunResult emit = run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " +
+                                          module_source.string() + " --interface-out " + interface_path.string() +
+                                          " --archive-out " + archive_path.string() + " 2>&1");
+    expect(emit.exit_code == 0, case_name + ": build-module failed: " + emit.stdout_text);
+    std::filesystem::remove(module_source);
+
+    std::filesystem::path warm_exe = root / "warm_app";
+    RunResult warm_build = run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() +
+                                               " -o " + warm_exe.string() + " --import probe_mod=" +
+                                               interface_path.string() + " 2>&1");
+    expect(warm_build.exit_code != 0 &&
+               warm_build.stdout_text.find("ambiguous call to 'pick'") != std::string::npos,
+           case_name + ": a candidate loaded from a .scppm must rank alongside the constexpr one "
+                       "rather than be dropped for having no body, got: " + warm_build.stdout_text);
+    std::filesystem::remove_all(root);
+}
+
 void run_scppm_payload_round_trip_tests() {
     // Compiles `consumer` against `module_source` twice -- once with the module
     // as source (cold) and once through a `build-module` `.scppm` artifact
@@ -11747,6 +11804,7 @@ int main() {
     run_return_type_checking_runtime_tests();
     run_generic_body_clone_fidelity_tests();
     run_scppm_payload_round_trip_tests();
+    run_imported_candidate_set_parity_tests();
     run_broken_module_dump_is_opt_in_tests();
     run_equality_operator_tests();
     test_compile_to_executable_returns_engaged_expected_on_success();
