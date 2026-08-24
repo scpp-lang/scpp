@@ -1959,7 +1959,17 @@ private:
         std::vector<const Function*> matches{};
         for (std::size_t fn_index : functions_by_name_.at(name)) {
             const Function& fn = program_.functions[fn_index];
-            if (!fn.body) continue;
+            // [dcl.fct.def.delete]/2: a deleted function has no body but is
+            // still a candidate. Dropping it here *removed it from the
+            // candidate set*, which is exactly what the rule forbids --
+            // `f(int) = delete` beside `f(const int&)` silently folded to
+            // the second at namespace scope (where no movecheck body pass
+            // runs) while codegen reported the deletion: the same
+            // expression meaning different functions depending on whether
+            // it was constant-evaluated. Selection now sees it; naming it
+            // is rejected after selection, in call_function, in the one
+            // shared wording movecheck uses.
+            if (!fn.body && !fn.is_deleted) continue;
             if (require_constexpr && fn.eval_mode == FunctionEvalMode::RuntimeOnly) continue;
             if (fn.params.size() != args.size()) continue;
             bool params_match = true;
@@ -2065,7 +2075,17 @@ private:
         if (!functions_by_name_.contains(constructor_name)) return {};
         for (std::size_t fn_index : functions_by_name_.at(constructor_name)) {
             const Function& fn = program_.functions[fn_index];
-            if (!fn.body) continue;
+            // [dcl.fct.def.delete]/2: a deleted function has no body but is
+            // still a candidate. Dropping it here *removed it from the
+            // candidate set*, which is exactly what the rule forbids --
+            // `f(int) = delete` beside `f(const int&)` silently folded to
+            // the second at namespace scope (where no movecheck body pass
+            // runs) while codegen reported the deletion: the same
+            // expression meaning different functions depending on whether
+            // it was constant-evaluated. Selection now sees it; naming it
+            // is rejected after selection, in call_function, in the one
+            // shared wording movecheck uses.
+            if (!fn.body && !fn.is_deleted) continue;
             if (require_constexpr && fn.eval_mode == FunctionEvalMode::RuntimeOnly) continue;
             if (fn.params.size() != 2) continue;
             const Type& param_type = fn.params[1].type;
@@ -2178,7 +2198,17 @@ private:
         if (!functions_by_name_.contains(constructor_name)) return {};
         for (std::size_t fn_index : functions_by_name_.at(constructor_name)) {
             const Function& fn = program_.functions[fn_index];
-            if (!fn.body) continue;
+            // [dcl.fct.def.delete]/2: a deleted function has no body but is
+            // still a candidate. Dropping it here *removed it from the
+            // candidate set*, which is exactly what the rule forbids --
+            // `f(int) = delete` beside `f(const int&)` silently folded to
+            // the second at namespace scope (where no movecheck body pass
+            // runs) while codegen reported the deletion: the same
+            // expression meaning different functions depending on whether
+            // it was constant-evaluated. Selection now sees it; naming it
+            // is rejected after selection, in call_function, in the one
+            // shared wording movecheck uses.
+            if (!fn.body && !fn.is_deleted) continue;
             if (require_constexpr && fn.eval_mode == FunctionEvalMode::RuntimeOnly) continue;
             if (fn.params.size() != args.size() + 1) continue;
             bool params_match = true;
@@ -2985,6 +3015,16 @@ private:
             return [&]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                 return std::unexpected(ConstexprError(loc, "immediate evaluation may only call constexpr/consteval functions"));
             }();
+        // [dcl.fct.def.delete]/2, asked at the evaluator's single call
+        // funnel -- plain call, method call and constructor all arrive
+        // here -- so a constant-evaluated call and a runtime call give
+        // the same answer to the same question, in the same words.
+        if (fn.is_deleted) {
+            std::string subject{"'"};
+            subject += fn.name;
+            subject += "'";
+            return std::unexpected(ConstexprError(loc, deleted_function_error_message(subject, fn.loc)));
+        }
         if (!fn.body) return std::unexpected(ConstexprError(loc, "cannot evaluate a declaration-only function at compile time"));
         // The depth counter below is the limit a program is judged against,
         // but it is only safe while limits_.max_recursion_depth levels
@@ -3206,7 +3246,17 @@ private:
         if (!functions_by_name_.contains(full_name)) return {};
         for (std::size_t fn_index : functions_by_name_.at(full_name)) {
             const Function& fn = program_.functions[fn_index];
-            if (!fn.body) continue;
+            // [dcl.fct.def.delete]/2: a deleted function has no body but is
+            // still a candidate. Dropping it here *removed it from the
+            // candidate set*, which is exactly what the rule forbids --
+            // `f(int) = delete` beside `f(const int&)` silently folded to
+            // the second at namespace scope (where no movecheck body pass
+            // runs) while codegen reported the deletion: the same
+            // expression meaning different functions depending on whether
+            // it was constant-evaluated. Selection now sees it; naming it
+            // is rejected after selection, in call_function, in the one
+            // shared wording movecheck uses.
+            if (!fn.body && !fn.is_deleted) continue;
             if (require_constexpr && fn.eval_mode == FunctionEvalMode::RuntimeOnly) continue;
             if (fn.params.size() != arg_values.size() + 1 || fn.params.empty()) continue;
 

@@ -50,6 +50,7 @@ namespace scpp {
     clone.is_override = fn.is_override;
     clone.is_pure = fn.is_pure;
     clone.is_defaulted = fn.is_defaulted;
+    clone.is_deleted = fn.is_deleted;
     clone.access = fn.access;
     clone.eval_mode = fn.eval_mode;
     clone.namespace_path = fn.namespace_path;

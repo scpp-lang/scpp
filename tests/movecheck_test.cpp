@@ -166,6 +166,208 @@ void run_test_case_files() {
     }
 }
 
+// [dcl.fct.def.delete]/2: a deleted function takes part in overload
+// resolution and, when selected, naming it is ill-formed. Pinned as a
+// *message* test rather than an accept/reject one, because pre-fix the
+// program failed at parse ("expected 'default' or '0' but found
+// 'delete'") -- a rejection that has nothing to do with the rule under
+// test, which is the #484 arity-gate trap in its exact shape. Only the
+// message distinguishes "rejected for the right reason".
+void test_calling_a_deleted_function_says_it_is_deleted() {
+    cases_run++;
+    std::optional<std::string> message = move_error_message(
+        "int f(int x) = delete;\n"
+        "int main() {\n"
+        "    int a = 1;\n"
+        "    return f(a);\n"
+        "}\n");
+    expect(message.has_value(), "calling_a_deleted_function_says_it_is_deleted: expected a rejection");
+    expect(message.value_or("").find("'= delete'") != std::string::npos &&
+               message.value_or("").find("[dcl.fct.def.delete]/2") != std::string::npos,
+           "calling_a_deleted_function_says_it_is_deleted: expected the deletion diagnostic, got " +
+               message.value_or(""));
+    // ... and the message must name *where* it was deleted, so the
+    // reader can find the declaration that made the call ill-formed.
+    expect(message.value_or("").find("declared at line 1") != std::string::npos,
+           "calling_a_deleted_function_says_it_is_deleted: expected the deletion site, got " + message.value_or(""));
+}
+
+// The deleted candidate must be *selected* normally -- deletion is not a
+// viability rule at the function level. If it were implemented as a
+// candidate-set removal, this call would silently resolve to `g(long)`
+// and compile; the rejection is the evidence that it did not.
+void test_a_deleted_function_is_selected_before_it_is_rejected() {
+    cases_run++;
+    std::optional<std::string> message = move_error_message(
+        "int g(int x) = delete;\n"
+        "int g(long x) { return 2; }\n"
+        "int main() {\n"
+        "    int a = 1;\n"
+        "    return g(a);\n"
+        "}\n");
+    expect(message.has_value(),
+           "a_deleted_function_is_selected_before_it_is_rejected: expected the exact-match deleted overload to win "
+           "and the call to be rejected");
+    expect(message.value_or("").find("[dcl.fct.def.delete]/2") != std::string::npos,
+           "a_deleted_function_is_selected_before_it_is_rejected: expected the deletion diagnostic, got " +
+               message.value_or(""));
+}
+
+// A deleted copy constructor is how a non-copyable type is spelled. Each
+// site the language performs an implicit copy must ask.
+void test_a_deleted_copy_constructor_rejects_every_implicit_copy() {
+    cases_run++;
+    std::string type =
+        "class Owned {\n"
+        "public:\n"
+        "    int value;\n"
+        "    Owned(int v) : value{v} {}\n"
+        "    Owned(const Owned& other) = delete;\n"
+        "    virtual ~Owned() = default;\n"
+        "};\n";
+    std::optional<std::string> copy_init = move_error_message(
+        type +
+        "int main() {\n"
+        "    Owned a{1};\n"
+        "    Owned b{a};\n"
+        "    return b.value;\n"
+        "}\n");
+    expect(copy_init.has_value() && copy_init.value_or("").find("[dcl.fct.def.delete]/2") != std::string::npos,
+           "a_deleted_copy_constructor_rejects_every_implicit_copy: expected copy-initialization to be rejected as "
+           "deleted, got " + copy_init.value_or("<accepted>"));
+
+    cases_run++;
+    std::optional<std::string> by_value_argument = move_error_message(
+        type +
+        "int take(Owned box) { return box.value; }\n"
+        "int main() {\n"
+        "    Owned a{1};\n"
+        "    return take(a);\n"
+        "}\n");
+    expect(by_value_argument.has_value(),
+           "a_deleted_copy_constructor_rejects_every_implicit_copy: expected passing by value to be rejected");
+
+    cases_run++;
+    std::optional<std::string> captured_by_copy = move_error_message(
+        type +
+        "int main() {\n"
+        "    Owned a{1};\n"
+        "    auto f = [a]() { return a.value; };\n"
+        "    return f();\n"
+        "}\n");
+    expect(captured_by_copy.has_value(),
+           "a_deleted_copy_constructor_rejects_every_implicit_copy: expected capture-by-copy to be rejected");
+}
+
+// [dcl.fct.def.delete]/2 again, on the assignment operator: the copy
+// assignment of a class whose `operator=` is deleted must be rejected at
+// the assignment, naming the deletion.
+void test_a_deleted_copy_assignment_rejects_assignment() {
+    cases_run++;
+    std::optional<std::string> message = move_error_message(
+        "class Owned {\n"
+        "public:\n"
+        "    int value;\n"
+        "    Owned(int v) : value{v} {}\n"
+        "    Owned& operator=(const Owned& other) = delete;\n"
+        "    virtual ~Owned() = default;\n"
+        "};\n"
+        "int main() {\n"
+        "    Owned a{1};\n"
+        "    Owned b{2};\n"
+        "    a = b;\n"
+        "    return a.value;\n"
+        "}\n");
+    expect(message.has_value() && message.value_or("").find("[dcl.fct.def.delete]/2") != std::string::npos,
+           "a_deleted_copy_assignment_rejects_assignment: expected the deletion diagnostic, got " +
+               message.value_or("<accepted>"));
+}
+
+// [dcl.fct.def.delete]/2 covers *naming*, not just calling: forming a
+// pointer to a deleted function names it too. Checked by construction
+// rather than assumed from the call path -- taking an address is a
+// separate expression position and a pass that only asked at calls would
+// let this through.
+void test_taking_the_address_of_a_deleted_function_is_rejected() {
+    cases_run++;
+    std::optional<std::string> message = move_error_message(
+        "int f(int x) = delete;\n"
+        "int main() {\n"
+        "    int (*p)(int) = f;\n"
+        "    return 0;\n"
+        "}\n");
+    expect(message.has_value() && message.value_or("").find("[dcl.fct.def.delete]/2") != std::string::npos,
+           "taking_the_address_of_a_deleted_function_is_rejected: expected the deletion diagnostic, got " +
+               message.value_or("<accepted>"));
+}
+
+// [class.virtual]/17: an overrider and the function it overrides must
+// agree on deletion. Both directions, since a rule checked in one
+// direction only is half a rule.
+void test_a_deleted_override_must_match_the_function_it_overrides() {
+    cases_run++;
+    std::string base =
+        "class Base {\n"
+        "public:\n"
+        "    Base() {}\n"
+        "    virtual int m(int x) { return 1; }\n"
+        "    virtual ~Base() = default;\n"
+        "};\n";
+    std::optional<std::string> deleted_overrider = move_error_message(
+        base +
+        "class Derived : public Base {\n"
+        "public:\n"
+        "    Derived() {}\n"
+        "    int m(int x) override = delete;\n"
+        "    virtual ~Derived() = default;\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    expect(deleted_overrider.has_value() &&
+               deleted_overrider.value_or("").find("[class.virtual]/17") != std::string::npos,
+           "a_deleted_override_must_match_the_function_it_overrides: expected a deleted overrider of a non-deleted "
+           "virtual to be rejected, got " + deleted_overrider.value_or("<accepted>"));
+
+    cases_run++;
+    std::optional<std::string> non_deleted_overrider = move_error_message(
+        "class Base {\n"
+        "public:\n"
+        "    Base() {}\n"
+        "    virtual int m(int x) = delete;\n"
+        "    virtual ~Base() = default;\n"
+        "};\n"
+        "class Derived : public Base {\n"
+        "public:\n"
+        "    Derived() {}\n"
+        "    int m(int x) override { return 2; }\n"
+        "    virtual ~Derived() = default;\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    expect(non_deleted_overrider.has_value() &&
+               non_deleted_overrider.value_or("").find("[class.virtual]/17") != std::string::npos,
+           "a_deleted_override_must_match_the_function_it_overrides: expected a non-deleted overrider of a deleted "
+           "virtual to be rejected, got " + non_deleted_overrider.value_or("<accepted>"));
+}
+
+// [class.dtor]/14: an object whose destructor is deleted cannot be
+// created, because it could never be destroyed.
+void test_an_object_with_a_deleted_destructor_cannot_be_created() {
+    cases_run++;
+    std::optional<std::string> message = move_error_message(
+        "class Pinned {\n"
+        "public:\n"
+        "    int value;\n"
+        "    Pinned(int v) : value{v} {}\n"
+        "    virtual ~Pinned() = delete;\n"
+        "};\n"
+        "int main() {\n"
+        "    Pinned a{1};\n"
+        "    return a.value;\n"
+        "}\n");
+    expect(message.has_value() && message.value_or("").find("[class.dtor]/14") != std::string::npos,
+           "an_object_with_a_deleted_destructor_cannot_be_created: expected the deleted-destructor diagnostic, got " +
+               message.value_or("<accepted>"));
+}
+
 void test_range_for_const_reference_rejects_mutation() {
     cases_run++;
     expect(throws_move_error(
@@ -2398,6 +2600,13 @@ int main() {
     test_mutable_reborrow_allows_parent_read_while_live();
     test_mutable_reborrow_rejects_parent_write_while_live();
     test_mutable_reborrow_parent_becomes_usable_after_scope();
+    test_calling_a_deleted_function_says_it_is_deleted();
+    test_a_deleted_function_is_selected_before_it_is_rejected();
+    test_a_deleted_copy_constructor_rejects_every_implicit_copy();
+    test_a_deleted_copy_assignment_rejects_assignment();
+    test_taking_the_address_of_a_deleted_function_is_rejected();
+    test_a_deleted_override_must_match_the_function_it_overrides();
+    test_an_object_with_a_deleted_destructor_cannot_be_created();
     test_range_for_const_reference_rejects_mutation();
     test_range_for_mutable_reference_over_span_is_accepted();
     test_range_for_const_reference_over_span_rejects_mutation();

@@ -3842,6 +3842,78 @@ void run_cli_extension_tests() {
         std::filesystem::remove_all(root);
     }
 
+    // `= delete` is declaration state that has to survive a cached
+    // (warm) build: the consumer below is compiled against the emitted
+    // `.scppm` alone, with the module's own source removed, exactly as a
+    // warm rebuild does. Per #435 this serializer has silently dropped
+    // fields before, and a deleted function that comes back non-deleted
+    // is not a rejected build -- it is a *different function being
+    // called*, which is the worst shape a round-trip bug can take. Both
+    // directions are pinned: the deleted overload must still lose to a
+    // better match (so the module is usable at all), and it must still
+    // be rejected when it wins.
+    {
+        std::string case_name = "deleted_functions_survive_the_scppm_round_trip";
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::path module_source = root / "delmod.scpp";
+        std::filesystem::path interface_path = root / "delmod.scppm";
+        std::filesystem::path archive_path = root / "libdelmod.scppa";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module delmod;\n"
+                        "namespace delmod {\n"
+                        "    export int pick(double x) = delete;\n"
+                        "    export int pick(int x) { return 7; }\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+        std::filesystem::remove(module_source);
+
+        std::filesystem::path good_source = root / "good.scpp";
+        std::filesystem::path good_exe = root / "good_app";
+        write_text_file(good_source,
+                        "import delmod;\n"
+                        "int main() {\n"
+                        "    int a = 1;\n"
+                        "    return delmod::pick(a);\n"
+                        "}\n");
+        RunResult good_build =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + good_source.string() + " -o " +
+                                good_exe.string() + " --import delmod=" + interface_path.string() + " 2>&1");
+        expect(good_build.exit_code == 0,
+               case_name + ": the non-deleted overload should still be selectable across the round trip, got '" +
+                   good_build.stdout_text + "'");
+        if (good_build.exit_code == 0) {
+            RunResult good_run = run_command_capture(good_exe.string() + " 2>&1");
+            expect(good_run.exit_code == 7,
+                   case_name + ": expected the non-deleted overload to run, got exit " +
+                       std::to_string(good_run.exit_code));
+        }
+
+        std::filesystem::path bad_source = root / "bad.scpp";
+        write_text_file(bad_source,
+                        "import delmod;\n"
+                        "int main() {\n"
+                        "    double a = 1.0;\n"
+                        "    return delmod::pick(a);\n"
+                        "}\n");
+        RunResult bad_build =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + bad_source.string() + " -o " +
+                                (root / "bad_app").string() + " --import delmod=" + interface_path.string() + " 2>&1");
+        expect(bad_build.exit_code != 0,
+               case_name + ": a call selecting the deleted overload must still be rejected after the round trip");
+        expect(bad_build.stdout_text.find("[dcl.fct.def.delete]/2") != std::string::npos,
+               case_name + ": expected the shared deletion diagnostic from the imported declaration, got '" +
+                   bad_build.stdout_text + "'");
+        std::filesystem::remove_all(root);
+    }
+
     // Regression test for a real compiler bug in driver.cppm's
     // hoist_non_partition_imports: a bare `module;` line (the global
     // module fragment opener ch11 §11.2 requires to precede the module

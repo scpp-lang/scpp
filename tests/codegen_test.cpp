@@ -1674,6 +1674,71 @@ void test_multidimensional_array_addresses_each_cell_distinctly() {
            "multidim_cells: expected a[1][2]==12 and a[0][1]==1 to fold to 1201");
 }
 
+// The constant evaluator is a second implementation of overload
+// selection, and it had removed every bodyless function from its own
+// candidate set (`if (!fn.body) continue;`, in four separate copies).
+// A deleted function is bodyless, so `[dcl.fct.def.delete]/2`'s
+// "takes part in overload resolution" was inverted there specifically:
+// at namespace scope -- where movecheck's body pass never runs, so the
+// evaluator answers alone -- `f(int) = delete` beside `f(const int&)`
+// silently folded to the second and the program exited 2, while the
+// same call written in a function body was reported as ambiguous. The
+// same expression meaning different functions depending on whether it
+// was constant-evaluated is the divergence family behind #480, #484,
+// #485, #491, #492 and #494; deletion is what made it observable.
+void test_constant_evaluator_keeps_deleted_candidates_in_its_candidate_set() {
+    std::string case_name = "constant_evaluator_keeps_deleted_candidates_in_its_candidate_set";
+    cases_run++;
+    auto ir = try_generate_ir(
+        "constexpr int f(int x) = delete;\n"
+        "constexpr int f(const int& x) { return 2; }\n"
+        "constexpr int k = f(1);\n"
+        "int main() { return k; }\n");
+    expect(!ir.has_value(), case_name + ": expected the namespace-scope constant initializer to be rejected");
+    if (!ir.has_value()) {
+        expect(ir.error().message.find("ambiguous") != std::string::npos,
+               case_name + ": expected the deleted candidate to make the call ambiguous, got " + ir.error().message);
+    }
+}
+
+// ... and when the deleted candidate is the one selected, the evaluator
+// must give the same answer, in the same words, that movecheck gives.
+void test_constant_evaluator_reports_a_selected_deleted_function_as_deleted() {
+    std::string case_name = "constant_evaluator_reports_a_selected_deleted_function_as_deleted";
+    cases_run++;
+    auto ir = try_generate_ir(
+        "constexpr int f(int x) = delete;\n"
+        "constexpr int k = f(1);\n"
+        "int main() { return k; }\n");
+    expect(!ir.has_value(), case_name + ": expected the call to the deleted function to be rejected");
+    if (!ir.has_value()) {
+        expect(ir.error().kind == "ConstexprError",
+               case_name + ": expected the constant evaluator to be the pass that rejects, got " + ir.error().kind);
+        expect(ir.error().message.find("[dcl.fct.def.delete]/2") != std::string::npos,
+               case_name + ": expected the shared deletion diagnostic, got " + ir.error().message);
+    }
+}
+
+// A deleted candidate that loses selection must not affect the result:
+// the whole point of keeping it in the candidate set is that it is
+// *ranked*, not ignored and not fatal.
+void test_constant_evaluator_still_folds_when_the_deleted_candidate_loses() {
+    std::string case_name = "constant_evaluator_still_folds_when_the_deleted_candidate_loses";
+    cases_run++;
+    auto ir = try_generate_ir(
+        "constexpr int f(double x) = delete;\n"
+        "constexpr int f(int x) { return 3; }\n"
+        "constexpr int k = f(1);\n"
+        "int main() { return k; }\n");
+    expect(ir.has_value(), case_name + ": expected the better non-deleted match to be selected and folded, got " +
+                               (ir.has_value() ? std::string{} : ir.error().message));
+    if (ir.has_value()) {
+        expect(ir.value().find("ret i32 3") != std::string::npos,
+               case_name + ": expected the folded value of the non-deleted overload in the emitted IR");
+    }
+}
+
+
 void test_generate_returns_engaged_expected_on_success() {
     cases_run++;
     scpp::Program program = parse_with_std_imports(
@@ -1868,6 +1933,31 @@ std::string function_ir(const std::string& ir, const std::string& function_name)
         begin = ir.find("define ", signature_end);
     }
     return {};
+}
+
+// A deleted *virtual* still occupies a vtable slot, so it must still be
+// emitted -- as a definition that traps, mirroring the Itanium ABI's
+// __cxa_deleted_virtual. Without it the program fails at *link* time
+// with an undefined reference, which is a diagnostic no user can act on.
+void test_a_deleted_virtual_is_emitted_as_a_trapping_definition() {
+    std::string case_name = "a_deleted_virtual_is_emitted_as_a_trapping_definition";
+    cases_run++;
+    auto ir = try_generate_ir(
+        "class Base {\n"
+        "public:\n"
+        "    Base() {}\n"
+        "    virtual int m(int x) = delete;\n"
+        "    virtual ~Base() = default;\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    expect(ir.has_value(), case_name + ": expected the class to be emitted, got " +
+                               (ir.has_value() ? std::string{} : ir.error().message));
+    if (ir.has_value()) {
+        std::string body = function_ir(ir.value(), "Base_m");
+        expect(!body.empty(), case_name + ": expected a definition of the deleted virtual `Base_m`");
+        expect(body.find("unreachable") != std::string::npos,
+               case_name + ": expected the deleted virtual's body to trap, got " + body);
+    }
 }
 
 // Counts non-overlapping occurrences of `needle` in `haystack`.
@@ -5073,6 +5163,10 @@ int main() {
     test_candidate_signatures_print_reference_parameters_in_cpp_spelling();
     test_auto_reference_to_a_reference_returning_call_collapses();
     test_auto_reference_to_a_reference_returning_method_collapses();
+    test_constant_evaluator_keeps_deleted_candidates_in_its_candidate_set();
+    test_constant_evaluator_reports_a_selected_deleted_function_as_deleted();
+    test_constant_evaluator_still_folds_when_the_deleted_candidate_loses();
+    test_a_deleted_virtual_is_emitted_as_a_trapping_definition();
     test_generate_returns_engaged_expected_on_success();
     test_generate_returns_disengaged_expected_on_failure_without_throwing();
     run_constexpr_engine_direct_api_tests();

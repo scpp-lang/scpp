@@ -251,6 +251,9 @@ namespace scpp {
                 // defining this one; here there is nothing left to do
                 // beyond the plain declaration declare_function already
                 // emitted above.
+            } else if (fn.is_deleted) {
+                if (auto r = define_deleted_function(fn); !r.has_value()) return std::unexpected(std::move(r).error());
+                defined_a_body = true;
             } else if (fn.is_defaulted) {
                 if (auto r = define_defaulted_function(fn); !r.has_value()) return std::unexpected(std::move(r).error());
                 defined_a_body = true;

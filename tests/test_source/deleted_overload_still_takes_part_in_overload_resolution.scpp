@@ -1,0 +1,18 @@
+import std;
+
+// [dcl.fct.def.delete]/2: a deleted function is *selected* by overload
+// resolution like any other candidate -- only naming the selected one is
+// ill-formed. So a deleted candidate that is a worse match must still lose
+// to a better one, and the program is well-formed. Asserting on the return
+// value rather than on compilation, because the evidence this test exists
+// for is *which* function ran.
+int pick(double x) = delete;
+int pick(int x) { return 3; }
+
+int pick_ptr(const int* x) = delete;
+int pick_ptr(int* x) { return 4; }
+
+int main() {
+    int a = 1;
+    return pick(a) + pick_ptr(&a) * 10;
+}

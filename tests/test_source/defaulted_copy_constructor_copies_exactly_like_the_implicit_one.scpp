@@ -1,0 +1,29 @@
+import std;
+
+// `= default` must produce the same object the implicit member would.
+// A `= default` that silently differs from the implicit one is a
+// wrong-answer defect, so this compares the two side by side in one
+// program: `Explicit` writes `= default`, `Implicit` writes nothing.
+struct Implicit {
+public:
+    int a;
+    int b;
+};
+
+struct Explicit {
+public:
+    int a;
+    int b;
+    Explicit(int x, int y) : a{x}, b{y} {}
+    Explicit(const Explicit& other) = default;
+};
+
+int main() {
+    Implicit one{4, 5};
+    Implicit one_copy{one};
+    Explicit two{4, 5};
+    Explicit two_copy{two};
+    if (one_copy.a != two_copy.a) return 1;
+    if (one_copy.b != two_copy.b) return 2;
+    return one_copy.a * 10 + two_copy.b;
+}

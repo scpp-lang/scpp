@@ -61,7 +61,7 @@ namespace scpp {
         // real, defined body too (define_forwarding_function), just
         // never an scpp-level AST one -- eligible for the same internal
         // linkage as an ordinary defined function.
-        bool has_definition = fn.body != nullptr || fn.is_defaulted || !fn.forwards_to.empty();
+        bool has_definition = fn.body != nullptr || fn.is_defaulted || fn.is_deleted || !fn.forwards_to.empty();
         if (has_definition && !fn.is_exported && !fn.is_extern_c &&
             (!fn.owning_module.empty() || !program_->module_name.empty() || fn.is_compile_time_dependency)) {
             linkage = llvm::LLVMInternalLinkage;
@@ -172,6 +172,36 @@ namespace scpp {
         llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
         current_debug_scope_ = nullptr;
         current_subprogram_ = nullptr;
+        return {};
+    }
+
+
+    // [dcl.fct.def.delete]/2 makes *naming* a deleted function ill-formed,
+    // and movecheck rejects every such name before codegen runs -- so no
+    // call to this body can exist in a well-formed program. It is emitted
+    // anyway because a deleted *virtual* member still occupies a vtable
+    // slot, and that slot needs an address: exactly what the Itanium ABI
+    // spends `__cxa_deleted_virtual` on. Without it the vtable holds an
+    // undefined reference and the program fails at *link* time, naming a
+    // mangled symbol instead of the source construct.
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::define_deleted_function(const Function& fn)
+{
+        llvm::LLVMValueRef llvm_fn = llvm::LLVMGetNamedFunction(module_, overload_names_.at(&fn).c_str());
+        if (llvm_fn == nullptr) {
+            return std::unexpected(CodegenError("function '" + fn.name + "' was not declared before definition", fn.loc));
+        }
+        current_function_def_ = &fn;
+        unsafe_depth_ = 0;
+        if (auto r = attach_debug_subprogram(llvm_fn, fn); !r.has_value()) return std::unexpected(std::move(r).error());
+        llvm::LLVMBasicBlockRef entry = llvm::LLVMAppendBasicBlockInContext(context_, llvm_fn, "entry");
+        llvm::LLVMPositionBuilderAtEnd(builder_, entry);
+        current_loc_ = fn.loc;
+        llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
+        locals_.clear();
+        scope_stack_.clear();
+        build_call(get_or_declare_abort(), {});
+        llvm::LLVMBuildUnreachable(builder_);
+        current_function_def_ = nullptr;
         return {};
     }
 

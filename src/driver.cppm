@@ -62,7 +62,7 @@ struct DriverError : std::runtime_error {
     DriverErrorKind kind;
 };
 
-inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 9;
+inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 10;
 inline constexpr std::string_view SCPPM_COMPILE_TIME_AST_MAGIC = "SAST";
 
 struct CompileTimePayloadPlan {
@@ -1931,6 +1931,7 @@ void write_function(std::ostream& out, const Function& fn) {
     write_u8(out, fn.is_override ? 1u : 0u);
     write_u8(out, fn.is_pure ? 1u : 0u);
     write_u8(out, fn.is_defaulted ? 1u : 0u);
+    write_u8(out, fn.is_deleted ? 1u : 0u);
     write_string(out, fn.forwards_to);
     write_u32_le(out, static_cast<std::uint32_t>(fn.namespace_path.size()));
     for (const std::string& segment : fn.namespace_path) write_string(out, segment);
@@ -2043,6 +2044,9 @@ void write_function(std::ostream& out, const Function& fn) {
     auto is_defaulted_r = read_u8(in, context + " is_defaulted");
     if (!is_defaulted_r.has_value()) return std::unexpected(std::move(is_defaulted_r).error());
     fn.is_defaulted = is_defaulted_r.value() != 0u;
+    auto is_deleted_r = read_u8(in, context + " is_deleted");
+    if (!is_deleted_r.has_value()) return std::unexpected(std::move(is_deleted_r).error());
+    fn.is_deleted = is_deleted_r.value() != 0u;
     auto forwards_to_r = read_string(in, context + " forwards_to");
     if (!forwards_to_r.has_value()) return std::unexpected(std::move(forwards_to_r).error());
     fn.forwards_to = std::move(forwards_to_r).value();
@@ -2089,7 +2093,7 @@ void write_function(std::ostream& out, const Function& fn) {
            a.is_nodiscard == b.is_nodiscard && a.nodiscard_reason == b.nodiscard_reason &&
            a.member_owner_class == b.member_owner_class && a.is_static == b.is_static && a.access == b.access &&
            a.is_virtual == b.is_virtual && a.is_override == b.is_override && a.is_pure == b.is_pure &&
-           a.is_defaulted == b.is_defaulted;
+           a.is_defaulted == b.is_defaulted && a.is_deleted == b.is_deleted;
 }
 
 [[nodiscard]] bool same_template_param_shape(const std::vector<GenericTypeParam>& a,
