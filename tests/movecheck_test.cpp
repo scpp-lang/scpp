@@ -2584,7 +2584,289 @@ void test_a_mutable_raw_pointer_cannot_point_at_a_string_literal() {
            "mutable_pointer_to_literal: expected a rejection, got acceptance");
 }
 
+// spec §6.5(2)/(3) say "A class type", which in [class.pre]/[dcl.type]
+// terms includes `struct` -- and both clauses' own normative examples are
+// spelled `struct` (§6.4's `struct Inner`/`struct Outer`, §6.5's
+// `struct RefCounted`). The implementation asked DataflowState::
+// class_names, which enumerated only program.classes, so every one of
+// these gates was silently inert for a struct. Each case pairs the struct
+// with its `class` control: the rule is the same, so the message must be
+// too (modulo the keyword naming what was actually declared).
+void test_struct_obeys_the_same_copy_rules_as_class() {
+    // §6.5(3): a user-declared destructor suppresses copy assignment.
+    // Pre-fix the struct form was *accepted* and ran `~S` twice on the
+    // same value while never running it for the overwritten one -- a
+    // destructor duplicated, not merely a copy permitted.
+    cases_run++;
+    std::string body =
+        "int main() {\n"
+        "    S a{1};\n"
+        "    S b{2};\n"
+        "    a = b;\n"
+        "    return a.v;\n"
+        "}\n";
+    std::optional<std::string> struct_dtor = move_error_message(
+        "struct S {\n"
+        "    int v;\n"
+        "    S(int x) : v{x} {}\n"
+        "    ~S() {}\n"
+        "};\n" + body);
+    std::optional<std::string> class_dtor = move_error_message(
+        "class S {\n"
+        "public:\n"
+        "    int v;\n"
+        "    S(int x) : v{x} {}\n"
+        "    virtual ~S() {}\n"
+        "};\n" + body);
+    expect(struct_dtor.has_value(),
+           "struct_obeys_the_same_copy_rules_as_class: expected the struct copy assignment to be rejected");
+    expect(struct_dtor.value_or("").find("struct 'S' is not copy-assignable (spec §6.5(3))") != std::string::npos,
+           "struct_obeys_the_same_copy_rules_as_class: expected the §6.5(3) diagnostic naming a struct, got " +
+               struct_dtor.value_or("<accepted>"));
+    expect(class_dtor.value_or("").find("class 'S' is not copy-assignable (spec §6.5(3))") != std::string::npos,
+           "struct_obeys_the_same_copy_rules_as_class: expected the class control to report the same rule, got " +
+               class_dtor.value_or("<accepted>"));
+
+    // §6.5(3): a user-declared *copy constructor* suppresses copy
+    // assignment just as a destructor does. This is the shape reported
+    // as #495 defect 3.
+    cases_run++;
+    std::optional<std::string> struct_copy_ctor = move_error_message(
+        "struct S {\n"
+        "    int v;\n"
+        "    S(int x) : v{x} {}\n"
+        "    S(const S& other) : v{other.v} {}\n"
+        "};\n" + body);
+    expect(struct_copy_ctor.value_or("").find("struct 'S' is not copy-assignable (spec §6.5(3))") != std::string::npos,
+           "struct_obeys_the_same_copy_rules_as_class: expected a user-declared copy constructor to suppress copy "
+           "assignment for a struct, got " + struct_copy_ctor.value_or("<accepted>"));
+
+    // §6.4(3): a reference-typed member removes move assignment. Same
+    // rule, same message, for both spellings.
+    cases_run++;
+    std::string ref_body =
+        "int main() {\n"
+        "    int x = 1;\n"
+        "    S a{x};\n"
+        "    int y = 2;\n"
+        "    S b{y};\n"
+        "    a = std::move(b);\n"
+        "    return a.r;\n"
+        "}\n";
+    std::optional<std::string> struct_ref = move_error_message(
+        "struct S {\n"
+        "    int& r;\n"
+        "    S(int& x) : r{x} {}\n"
+        "};\n" + ref_body);
+    expect(struct_ref.value_or("").find("struct 'S' has a reference-typed member, so it has no move assignment "
+                                        "operator (spec §6.4(3))") != std::string::npos,
+           "struct_obeys_the_same_copy_rules_as_class: expected the §6.4(3) diagnostic naming a struct, got " +
+               struct_ref.value_or("<accepted>"));
+}
+
+// spec §6.5(2) at the aggregate-element position. Every other position
+// that copy-initializes a record already asked; this one did not, so the
+// element was copied *and* (before the destructor fix) leaked.
+void test_an_aggregate_element_obeys_the_copy_constructor_rule() {
+    cases_run++;
+    std::optional<std::string> message = move_error_message(
+        "struct S {\n"
+        "    int v;\n"
+        "    S(int x) : v{x} {}\n"
+        "    ~S() {}\n"
+        "};\n"
+        "struct Holder {\n"
+        "    S s;\n"
+        "};\n"
+        "int main() {\n"
+        "    S a{1};\n"
+        "    Holder h{a};\n"
+        "    return h.s.v;\n"
+        "}\n");
+    expect(message.value_or("").find("struct 'S' is not copy-constructible (spec §6.5(2))") != std::string::npos &&
+               message.value_or("").find("'Holder::s'") != std::string::npos,
+           "an_aggregate_element_obeys_the_copy_constructor_rule: expected the §6.5(2) diagnostic naming the element, "
+           "got " + message.value_or("<accepted>"));
+
+    // [dcl.fct.def.delete]/2 still answers first when the copy
+    // constructor is deleted rather than merely suppressed.
+    cases_run++;
+    std::optional<std::string> deleted = move_error_message(
+        "struct S {\n"
+        "    int v;\n"
+        "    S(int x) : v{x} {}\n"
+        "    S(const S& other) = delete;\n"
+        "};\n"
+        "struct Holder {\n"
+        "    S s;\n"
+        "};\n"
+        "int main() {\n"
+        "    S a{1};\n"
+        "    Holder h{a};\n"
+        "    return h.s.v;\n"
+        "}\n");
+    expect(deleted.value_or("").find("[dcl.fct.def.delete]/2") != std::string::npos,
+           "an_aggregate_element_obeys_the_copy_constructor_rule: expected the deletion diagnostic to answer first, "
+           "got " + deleted.value_or("<accepted>"));
+
+    // One question, one message: `Holder h = {a};` is the same
+    // initialization as `Holder h{a};`, but the two spellings take
+    // different routes ([dcl.init.list] -- the `= {...}` form arrives as a
+    // BracedInitList initializer of the local, the brace form as a
+    // constructor-call expression). Once §6.5 applied to structs, the
+    // record branch of the declaration handler swallowed the first of
+    // those without ever reaching the element checks. Guards that both
+    // spellings still answer with the same diagnostic.
+    cases_run++;
+    std::optional<std::string> equals_brace = move_error_message(
+        "struct S {\n"
+        "    int v;\n"
+        "    S(int x) : v{x} {}\n"
+        "    ~S() {}\n"
+        "};\n"
+        "struct Holder {\n"
+        "    S s;\n"
+        "};\n"
+        "int main() {\n"
+        "    S a{1};\n"
+        "    Holder h = {a};\n"
+        "    return h.s.v;\n"
+        "}\n");
+    expect(equals_brace.value_or("") == message.value_or("<accepted>"),
+           "an_aggregate_element_obeys_the_copy_constructor_rule: expected `Holder h = {a};` to give the same "
+           "diagnostic as `Holder h{a};` (" + message.value_or("<accepted>") + "), got " +
+               equals_brace.value_or("<accepted>"));
+}
+
+// A call that returns by reference names already-existing storage, so it
+// is an lvalue copy source exactly like a named place.
+// Codegen::is_lvalue_copy_source_shape already said so (citing
+// `container.at(i)`); movecheck's copy of the same predicate did not, and
+// once §6.5 started applying to structs that disagreement rejected
+// `Token using_tok = using_tok_result.value();` in the compiler's own
+// parser. Guards that the two copies agree.
+void test_a_reference_returning_call_is_a_copy_source() {
+    cases_run++;
+    expect(!throws_move_error(
+               "import std;\n"
+               "struct S {\n"
+               "    int v;\n"
+               "};\n"
+               "std::expected<S, int> make() { return {2}; }\n"
+               "int main() {\n"
+               "    auto r = make();\n"
+               "    if (!r.has_value()) { return 1; }\n"
+               "    S copy = r.value();\n"
+               "    return copy.v;\n"
+               "}\n"),
+           "a_reference_returning_call_is_a_copy_source: expected a reference-returning call to be a legal copy "
+           "source");
+
+    // ... but `std::move(r).value()` is an *rvalue*: produces_rvalue_of_
+    // type carves it out because the signature database models `.value()`
+    // with a single receiver-category-agnostic `T&` return. The two
+    // predicates must agree about that too, or every such extraction in
+    // the compiler's own sources becomes a copy assignment of a type that
+    // has no copy assignment operator.
+    cases_run++;
+    expect(!throws_move_error(
+               "import std;\n"
+               "class Holder {\n"
+               "public:\n"
+               "    std::unique_ptr<int> p;\n"
+               "    Holder() : p{nullptr} {}\n"
+               "    virtual ~Holder() = default;\n"
+               "};\n"
+               "std::expected<std::unique_ptr<int>, int> make() { return std::make_unique<int>(7); }\n"
+               "int main() {\n"
+               "    Holder h{};\n"
+               "    auto r = make();\n"
+               "    if (!r.has_value()) { return 1; }\n"
+               "    h.p = std::move(r).value();\n"
+               "    return 0;\n"
+               "}\n"),
+           "a_reference_returning_call_is_a_copy_source: expected std::move(r).value() to stay an rvalue");
+}
+
+// spec §6.1(3.1) and §6.1(4) say "class **or struct**" in as many words,
+// but only the class enumeration ever asked whether a constructor
+// initializes every member: a struct constructor could leave one out and
+// the member was then read from uninitialized storage. Guards that both
+// record keywords give the same answer to the same question.
+void test_a_struct_constructor_must_initialize_every_member() {
+    cases_run++;
+    std::optional<std::string> as_struct = move_error_message(
+        "struct S {\n"
+        "    int a;\n"
+        "    int b;\n"
+        "    S(int x) : a{x} {}\n"
+        "};\n"
+        "int main() {\n"
+        "    S s{1};\n"
+        "    return s.b;\n"
+        "}\n");
+    expect(as_struct.value_or("").find("constructor for struct 'S' leaves member(s) 'b' uninitialized") !=
+                   std::string::npos &&
+               as_struct.value_or("").find("spec §6.1(4)") != std::string::npos,
+           "a_struct_constructor_must_initialize_every_member: expected the §6.1(4) diagnostic, got " +
+               as_struct.value_or("<accepted>"));
+
+    cases_run++;
+    std::optional<std::string> as_class = move_error_message(
+        "class C {\n"
+        "public:\n"
+        "    int a;\n"
+        "    int b;\n"
+        "    C(int x) : a{x} {}\n"
+        "    virtual ~C() = default;\n"
+        "};\n"
+        "int main() {\n"
+        "    C c{1};\n"
+        "    return c.b;\n"
+        "}\n");
+    expect(as_class.value_or("") == std::string{"constructor for class 'C'"} +
+                                        as_struct.value_or("<accepted>").substr(
+                                            std::string{"constructor for struct 'S'"}.size()),
+           "a_struct_constructor_must_initialize_every_member: expected the class control to give the same message "
+           "modulo the keyword and the name, got " + as_class.value_or("<accepted>"));
+
+    // §6.1(3.1): naming a member the struct does not have is the other
+    // half of the same rule, and was equally unasked.
+    cases_run++;
+    std::optional<std::string> unknown = move_error_message(
+        "struct S {\n"
+        "    int a;\n"
+        "    S(int x) : a{x}, nope{x} {}\n"
+        "};\n"
+        "int main() {\n"
+        "    S s{1};\n"
+        "    return s.a;\n"
+        "}\n");
+    expect(unknown.value_or("").find("constructor for struct 'S' names unknown member 'nope'") != std::string::npos,
+           "a_struct_constructor_must_initialize_every_member: expected the unknown-member diagnostic, got " +
+               unknown.value_or("<accepted>"));
+
+    // An in-class default member initializer covers the member, exactly
+    // as §6.1(4.2) says -- guards against over-tightening.
+    cases_run++;
+    expect(!throws_move_error(
+               "struct S {\n"
+               "    int a;\n"
+               "    int b = 2;\n"
+               "    S(int x) : a{x} {}\n"
+               "};\n"
+               "int main() {\n"
+               "    S s{1};\n"
+               "    return s.b - 2;\n"
+               "}\n"),
+           "a_struct_constructor_must_initialize_every_member: a default member initializer must satisfy §6.1(4.2)");
+}
+
 int main() {
+    test_struct_obeys_the_same_copy_rules_as_class();
+    test_an_aggregate_element_obeys_the_copy_constructor_rule();
+    test_a_reference_returning_call_is_a_copy_source();
+    test_a_struct_constructor_must_initialize_every_member();
     test_a_mutable_raw_pointer_cannot_point_at_a_string_literal();
     run_test_case_files();
     test_literal_adoption_covers_every_scalar_type();

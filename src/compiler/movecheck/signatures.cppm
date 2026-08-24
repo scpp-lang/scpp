@@ -120,6 +120,7 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 [[nodiscard]] bool is_copy_constructible(const std::string& class_name, const Program& program);
 [[nodiscard]] bool is_copy_assignable(const std::string& class_name, const Program& program);
 [[nodiscard]] bool is_freely_copyable_value_type(const Type& type, const Program& program);
+[[nodiscard]] std::string_view record_keyword(const std::string& record_name, const Program& program);
 
 [[nodiscard]] const FunctionSignature* resolve_constructor_signature(const std::string& class_name,
                                                                      const std::vector<ExprPtr>& ctor_args,
@@ -142,6 +143,18 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 [[nodiscard]] std::expected<void, DataflowError> validate_lifetime_annotation_placement(const Function& fn);
 [[nodiscard]] std::expected<std::vector<std::size_t>, DataflowError> resolve_returned_lifetime_param_indices(const Function& fn);
 [[nodiscard]] std::expected<Signatures, DataflowError> build_signatures(const Program& program);
+
+// spec §6.4/§6.5/§6.6 govern every *class type*, which in
+// [class.pre]/[dcl.type] terms includes `struct`. A diagnostic about one
+// of those rules must name the keyword the user actually wrote, so that a
+// struct and a class violating the same rule read as the same rule rather
+// than as two different ones.
+[[nodiscard]] std::string_view record_keyword(const std::string& record_name, const Program& program) {
+    for (const StructDef& def : program.structs) {
+        if (def.name == record_name) return "struct";
+    }
+    return "class";
+}
 
 // spec §6.5: whether `class_name` has declared its own copy constructor
 // -- a function named "class_name_new" (see parse_class_def) whose sole
@@ -222,16 +235,16 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 // spec §6.5(5)'s own note: a field's own copy-constructibility -- a
 // reference always is (bound once, from the source's own referent,
 // exactly like move construction's identical carve-out, spec §6.4); a
-// nested class recurses (except the same named "freely copyable value
-// type" stdlib view-wrappers is_freely_copyable_value_type already
-// carves out at every other copy-related boundary -- e.g.
+// nested *record* -- class or struct alike, since §6.5 governs every
+// "class type" and [class.pre] makes that include `struct` -- recurses
+// (except the same named "freely copyable value type" stdlib
+// view-wrappers is_freely_copyable_value_type already carves out at
+// every other copy-related boundary -- e.g.
 // is_freely_copyable_class_value_source -- a struct/class field of one
 // of those types, such as std::string_view, is copy-constructible
 // exactly like the wrapper itself always is, regardless of its own
-// user-declared special members); everything else (scalar, struct --
-// always bitwise-copyable per ch04 §4.1 regardless of its own fields,
-// raw pointer, array of any of these) is unconditionally
-// copy-constructible.
+// user-declared special members); everything else (scalar, raw pointer,
+// array of any of these) is unconditionally copy-constructible.
 [[nodiscard]] bool is_field_copy_constructible(const Type& type, const Program& program) {
     if (type.kind == TypeKind::Reference) return true;
     if (type.kind == TypeKind::Array) return is_field_copy_constructible(*type.element, program);
@@ -240,7 +253,10 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
         for (const ClassDef& def : program.classes) {
             if (def.name == type.name) return is_copy_constructible(type.name, program);
         }
-        return true; // scalar, struct, or an unrecognized/generic-witness name
+        for (const StructDef& def : program.structs) {
+            if (def.name == type.name) return is_copy_constructible(type.name, program);
+        }
+        return true; // scalar or an unrecognized/generic-witness name
     }
     return true; // Pointer, Span, ...: always bitwise-copyable, no restriction
 }
@@ -250,15 +266,16 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 // identical "can't be re-seated" carve-out); is_copy_assignable's own
 // direct-field loop already rejects a *directly* reference-typed field
 // before ever consulting this helper, but nested recursion still needs
-// its own answer for one reachable transitively (impossible in the
-// current v0.1 subset, since a struct/class field can never itself be
-// reference-typed except via this exact direct case -- kept anyway for
-// symmetry and defensiveness).
+// its own answer for one reachable transitively.
 [[nodiscard]] bool is_field_copy_assignable(const Type& type, const Program& program) {
     if (type.kind == TypeKind::Reference) return false;
     if (type.kind == TypeKind::Array) return is_field_copy_assignable(*type.element, program);
     if (type.kind == TypeKind::Named) {
+        if (is_freely_copyable_value_type(type, program)) return true;
         for (const ClassDef& def : program.classes) {
+            if (def.name == type.name) return is_copy_assignable(type.name, program);
+        }
+        for (const StructDef& def : program.structs) {
             if (def.name == type.name) return is_copy_assignable(type.name, program);
         }
         return true;
@@ -616,6 +633,15 @@ struct ConstructedOwner {
 // emit_constructor_member_initializers walks `struct_def->fields` in
 // declaration order exactly as the class branch does, so writing them
 // out of order reorders them just as silently.
+//
+// spec §6.1(3.1) and §6.1(4) both say "class **or struct**" in as many
+// words -- this is not even the "a class type includes struct" reading
+// the §6.4/§6.5 rules need. Only the order and `this`-usage halves were
+// asked here, so `struct S { int a; int b; S(int x) : a{x} {} };`
+// compiled and `s.b` read uninitialized storage, while the identical
+// class was rejected. The two functions now ask the same questions in
+// the same order; the array-typed-field exemption mirrors the class
+// version's exactly.
 [[nodiscard]] std::expected<void, DataflowError> validate_struct_constructor_member_initialization(const Function& ctor,
                                                                                                   const StructDef& def,
                                                                                                   const Program& program) {
@@ -624,6 +650,35 @@ struct ConstructedOwner {
         return {};
     }
     if (!ctor.body) return {};
+    if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return {};
+    std::unordered_set<std::string> direct_field_names;
+    for (const StructField& field : def.fields) direct_field_names.insert(field.name);
+    for (const MemberInitializer& init : ctor.member_initializers) {
+        if (!direct_field_names.contains(init.member_name)) {
+            return std::unexpected(DataflowError("constructor for struct '" + def.name + "' names unknown member '" +
+                                    init.member_name + "' in its member-initializer-list",
+                                init.loc.is_known() ? init.loc : ctor.loc));
+        }
+    }
+    std::vector<std::string> missing;
+    for (const StructField& field : def.fields) {
+        if (field.type.kind == TypeKind::Array) continue;
+        bool covered_by_ctor = std::any_of(ctor.member_initializers.begin(), ctor.member_initializers.end(),
+                                           [&](const MemberInitializer& init) { return init.member_name == field.name; });
+        if (!covered_by_ctor && !field.default_initializer.has_value()) missing.push_back(field.name);
+    }
+    if (!missing.empty()) {
+        std::string names;
+        for (std::size_t i = 0; i < missing.size(); i++) {
+            if (i > 0) names += ", ";
+            names += "'" + missing[i] + "'";
+        }
+        return std::unexpected(DataflowError("constructor for struct '" + def.name + "' leaves member(s) " + names +
+                                " uninitialized; each constructor must initialize every non-static data member "
+                                "either via its own member-initializer-list or an in-class default member "
+                                "initializer (spec §6.1(4))",
+                            ctor.loc));
+    }
     std::vector<std::optional<std::size_t>> ranks;
     ranks.reserve(ctor.member_initializers.size());
     for (const MemberInitializer& init : ctor.member_initializers) {

@@ -1622,6 +1622,7 @@ void write_struct_def(std::ostream& out, const StructDef& def) {
     write_u32_le(out, static_cast<std::uint32_t>(def.fields.size()));
     for (const StructField& field : def.fields) write_struct_field(out, field);
     write_u8(out, def.is_union ? 1u : 0u);
+    write_u8(out, def.is_concept_witness ? 1u : 0u);
     write_u8(out, def.is_packed ? 1u : 0u);
     write_u32_le(out, static_cast<std::uint32_t>(def.alignment_specs.size()));
     for (const AlignmentSpecifier& spec : def.alignment_specs) write_alignment_specifier(out, spec);
@@ -1661,6 +1662,9 @@ void write_struct_def(std::ostream& out, const StructDef& def) {
     auto is_union_r = read_u8(in, context + " is_union");
     if (!is_union_r.has_value()) return std::unexpected(std::move(is_union_r).error());
     def.is_union = is_union_r.value() != 0u;
+    auto is_witness_r = read_u8(in, context + " is_concept_witness");
+    if (!is_witness_r.has_value()) return std::unexpected(std::move(is_witness_r).error());
+    def.is_concept_witness = is_witness_r.value() != 0u;
     auto is_packed_r = read_u8(in, context + " is_packed");
     if (!is_packed_r.has_value()) return std::unexpected(std::move(is_packed_r).error());
     def.is_packed = is_packed_r.value() != 0u;

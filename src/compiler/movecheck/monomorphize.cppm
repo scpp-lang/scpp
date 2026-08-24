@@ -2224,15 +2224,22 @@ private:
 
     // witness struct standing in for a bare (unconstrained) generic
     // type parameter -- see check_generic_type_methods_once's own
-    // comment for why this is a struct (never registered as a "known
-    // class" for movecheck's by-value-parameter/no-reassignment
-    // restrictions, DataflowState::class_names -- deliberately: a bare
-    // type parameter is checked optimistically, as if freely copyable).
+    // comment. A bare type parameter is checked optimistically, as if
+    // freely copyable, so spec §6.4/§6.5/§6.6's ownership rules must not
+    // fire for it; StructDef::is_concept_witness says so directly, the
+    // same way ClassDef::is_concept_witness always did for a *concept*-
+    // constrained parameter's witness class.
+    //
+    // That exemption used to be spelled by merely *being* a struct, back
+    // when those rules consulted DataflowState::class_names and so were
+    // inert for every struct in the language -- a compensation for the
+    // defect, not a statement of the rule.
     [[nodiscard]] std::string bare_witness_struct_name() {
         if (bare_witness_struct_name_.empty()) {
             bare_witness_struct_name_ = "__generic_bare_witness";
             StructDef witness;
             witness.name = bare_witness_struct_name_;
+            witness.is_concept_witness = true;
             program_.structs.push_back(std::move(witness));
         }
         return bare_witness_struct_name_;

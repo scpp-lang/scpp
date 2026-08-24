@@ -1,0 +1,41 @@
+// spec §6.5(2)/(3) govern "a class type", which in [class.pre]/[dcl.type]
+// terms includes `struct` -- and §6.5's own normative example is spelled
+// `struct RefCounted`. A struct-typed field with its own destructor must
+// therefore be torn down when the enclosing record dies, exactly like a
+// class-typed one: codegen decided "does this need teardown?" by asking
+// find_class_def, so a record whose *fields* need destruction but which
+// declares no destructor of its own was silently skipped. Masked for
+// classes only because spec §11.5(1) forces every class to declare a
+// virtual destructor, so the "no destructor of its own" case cannot arise
+// there.
+import std;
+
+struct S {
+    int v;
+    S(int x) : v{x} {}
+    ~S() { std::print("~S {}\n", this.v); }
+};
+
+struct Holder {
+    S s;
+    Holder(int x) : s{x} {}
+};
+
+S make(int x) {
+    S t{x};
+    return t;
+}
+
+int main() {
+    {
+        Holder h{7};
+        std::print("made {}\n", h.s.v);
+    }
+    // A by-value return of a struct must destroy the returned object
+    // exactly once. Before the implicit-move-on-return gate stopped
+    // asking find_class_def, the local was copied out and *both* copies
+    // were destroyed.
+    S b{make(5)};
+    std::print("have {}\n", b.v);
+    return 0;
+}
