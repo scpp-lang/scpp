@@ -1,0 +1,30 @@
+// Spec §6.5(2): "A class type that has a user-declared destructor or a
+// user-declared copy assignment operator, and no user-declared copy
+// constructor, has no copy constructor." Spec §11.5(1) forces every
+// class to declare a destructor, so no class has an implicitly-defined
+// copy constructor -- the reference member changes nothing here, and the
+// identical program with an `int` member is rejected identically.
+//
+// Contrast class_move_construction_allowed_for_class_with_reference_member.scpp:
+// §6.4(2) has no such suppression, so *move* construction is allowed.
+// The reference-member carve-out belongs to §6.4(3)/§6.5(3), the two
+// *assignment* clauses, and to neither construction clause. This case
+// previously asserted that copy construction was allowed here, citing a
+// `ch04 §4.2` that does not exist.
+class RefHolder {
+    public:
+        virtual ~RefHolder() { return; }
+public:
+    RefHolder(int& r) : r{r} {
+        return;
+    }
+private:
+    int& r;
+};
+
+int main() {
+    int a = 1;
+    RefHolder x{a};
+    RefHolder y{x};
+    return 0;
+}

@@ -4133,6 +4133,82 @@ void run_cli_extension_tests() {
         std::filesystem::remove_all(root);
     }
 
+    // A record's copy semantics are a property of the record, not of the
+    // translation unit it was written in: spec 6.5(2) must reach an imported
+    // class exactly as it reaches a local one, and 6.5(2)'s absent
+    // reference-member carve-out must not reappear at the module boundary.
+    {
+        std::string case_name = "cli_imported_record_keeps_its_reference_member_copy_semantics";
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::path module_source = root / "refs.scpp";
+        std::filesystem::path interface_path = root / "refs.scppm";
+        std::filesystem::path archive_path = root / "librefs.scppa";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module refs;\n"
+                        "namespace refs {\n"
+                        "    export class RefHolder {\n"
+                        "    public:\n"
+                        "        RefHolder(int32_t& source) : slot{source} { return; }\n"
+                        "        virtual ~RefHolder() = default;\n"
+                        "        int32_t& slot;\n"
+                        "    };\n"
+                        "    export struct RefBox {\n"
+                        "        int32_t& slot;\n"
+                        "    };\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+
+        std::filesystem::path class_consumer = root / "class_main.scpp";
+        write_text_file(class_consumer,
+                        "import refs;\n"
+                        "int main() {\n"
+                        "    int32_t a = 1;\n"
+                        "    refs::RefHolder holder{a};\n"
+                        "    refs::RefHolder copy{holder};\n"
+                        "    return (int)(copy.slot - 1);\n"
+                        "}\n");
+        RunResult class_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + class_consumer.string() + " -o " +
+                                exe_path.string() + " --import refs=" + interface_path.string() + " 2>&1");
+        expect(class_result.exit_code != 0,
+               case_name + ": copying an imported class with a reference member must be rejected, got '" +
+                   class_result.stdout_text + "'");
+        expect(class_result.stdout_text.find("6.5(2)") != std::string::npos,
+               case_name + ": the imported class rejection should name spec 6.5(2), got '" +
+                   class_result.stdout_text + "'");
+
+        std::filesystem::path struct_consumer = root / "struct_main.scpp";
+        write_text_file(struct_consumer,
+                        "import refs;\n"
+                        "int main() {\n"
+                        "    int32_t a = 41;\n"
+                        "    refs::RefBox box{a};\n"
+                        "    refs::RefBox copy{box};\n"
+                        "    copy.slot = copy.slot + 1;\n"
+                        "    return (int)(a - 42);\n"
+                        "}\n");
+        RunResult struct_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + struct_consumer.string() + " -o " +
+                                exe_path.string() + " --import refs=" + interface_path.string() + " 2>&1");
+        expect(struct_result.exit_code == 0,
+               case_name + ": copying an imported struct with a reference member should build, got '" +
+                   struct_result.stdout_text + "'");
+        RunResult struct_run = run_command_capture(exe_path.string() + " 2>&1");
+        expect(struct_run.exit_code == 0,
+               case_name + ": the imported struct's copy must alias the same referent, got exit " +
+                   std::to_string(struct_run.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
     {
         std::string case_name = "cli_build_module_with_partition_roundtrips_without_sources";
         std::filesystem::path root =
@@ -4852,6 +4928,14 @@ void run_cli_extension_tests() {
                                                 "public:\n"
                                                 "    virtual ~Adder() { return; }\n"
                                                 "    Adder(int& value) : value{value} {\n"
+                                                "        return;\n"
+                                                "    }\n"
+                                                // spec 6.5(2) has no reference-member carve-out, so a
+                                                // class that declares a destructor has no
+                                                // implicitly-defined copy constructor whatever its
+                                                // fields are; the copy this case exercises must come
+                                                // from one the class declares.
+                                                "    Adder(const Adder& source) : value{source.value} {\n"
                                                 "        return;\n"
                                                 "    }\n"
                                                 "    int call(int x) const {\n"

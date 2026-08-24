@@ -6,6 +6,16 @@ public:
         return;
     }
 
+    // spec §6.5(2) leaves *no* implicitly-defined copy constructor on a
+    // class that declares a destructor -- and §11.5(1) makes every class
+    // declare one. A reference member does not change that (§6.5(2) has
+    // no reference carve-out; only §6.4(3)/§6.5(3) do, and both are about
+    // assignment). So the copy construction this case is *about* has to
+    // come from a copy constructor the class declares itself.
+    Adder(const Adder& source) : value{source.value} {
+        return;
+    }
+
     int call(int x) const {
         return x + this->value;
     }

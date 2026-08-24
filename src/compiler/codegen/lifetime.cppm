@@ -159,14 +159,13 @@ namespace scpp {
     }
 
 
+    // Deliberately *no* reference-member exception -- see movecheck's
+    // is_copy_constructible, whose answer this one must agree with:
+    // §6.4(3)/§6.5(3) carve out a reference member because it cannot be
+    // re-seated by assignment; §6.4(2)/§6.5(2) do not, because copy
+    // construction binds it once.
     [[nodiscard]] bool Codegen::is_copy_constructible(const std::string& class_name)
 {
-        auto has_direct_reference_field = [&](const std::vector<Type>& field_types) {
-            for (const Type& field_type : field_types) {
-                if (field_type.kind == TypeKind::Reference) return true;
-            }
-            return false;
-        };
         if (const Function* user_copy = find_user_declared_copy_ctor_ast(class_name); user_copy != nullptr) {
             // [dcl.fct.def.delete]/1, mirroring movecheck's is_copy_constructible.
             return !user_copy->is_deleted;
@@ -176,7 +175,7 @@ namespace scpp {
         }
         auto it = structs_.find(class_name);
         if (it == structs_.end()) return false;
-        if (has_user_declared_dtor(class_name) && !has_direct_reference_field(it->second.field_types)) return false;
+        if (has_user_declared_dtor(class_name)) return false;
         for (const Type& field_type : it->second.field_types) {
             if (!is_field_copy_constructible(field_type)) return false;
         }
@@ -448,6 +447,15 @@ namespace scpp {
         if (type.kind == TypeKind::Array) {
             return type.element != nullptr && type.array_size > 0 && type_needs_nontrivial_default_init(*type.element);
         }
+        // Spec §6.1(5): "Because a reference has no empty state, a
+        // constructor for a class or struct with a reference member is
+        // ill-formed unless that member is initialized ...". Value-
+        // initializing a reference member is therefore not the no-op a
+        // zero fill would make it -- it is ill-formed, which is what
+        // initialize_storage_from_brace_args says when it is handed no
+        // initializer for a Reference target. Answering "false" here
+        // skipped that call and left the member holding a null.
+        if (type.kind == TypeKind::Reference) return true;
         if (type.kind != TypeKind::Named) return false;
         if (find_class_def(type.name) != nullptr) return true;
         // A struct's default member initializers are as real as a

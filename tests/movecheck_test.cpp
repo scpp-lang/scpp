@@ -166,6 +166,132 @@ void run_test_case_files() {
     }
 }
 
+// spec §6.5(2): "A class type that has a user-declared destructor or a
+// user-declared copy assignment operator, and no user-declared copy
+// constructor, has no copy constructor." Unlike §6.4(3) and §6.5(3), it
+// carries *no* reference-member carve-out -- and the implementation had
+// one, spelled `has_user_declared_dtor(...) && !has_direct_reference_field(...)`.
+// §11.5(1) makes every class declare a destructor, so that second operand
+// was the only thing that could ever hand a class back a copy
+// constructor, and it did so for exactly the classes that must not have
+// one. Each cell is paired with the same class minus the reference
+// member: pre-fix the pair disagreed, which is the whole defect.
+void test_a_reference_member_does_not_grant_a_class_a_copy_constructor() {
+    const std::string with_reference =
+        "class RefHolder {\n"
+        "public:\n"
+        "    virtual ~RefHolder() { return; }\n"
+        "    RefHolder(int& r) : r{r} { return; }\n"
+        "    int& r;\n"
+        "};\n";
+    const std::string without_reference =
+        "class ValHolder {\n"
+        "public:\n"
+        "    virtual ~ValHolder() { return; }\n"
+        "    ValHolder(int v) : v{v} { return; }\n"
+        "    int v;\n"
+        "};\n";
+
+    struct Cell {
+        std::string name;
+        std::string reference_body;
+        std::string control_body;
+    };
+    const std::vector<Cell> cells = {
+        {"copy_init",
+         "int main() { int a = 1; RefHolder x{a}; RefHolder y = x; return y.r; }\n",
+         "int main() { ValHolder x{1}; ValHolder y = x; return y.v; }\n"},
+        {"brace_init",
+         "int main() { int a = 1; RefHolder x{a}; RefHolder y{x}; return y.r; }\n",
+         "int main() { ValHolder x{1}; ValHolder y{x}; return y.v; }\n"},
+        {"brace_eq_init",
+         "int main() { int a = 1; RefHolder x{a}; RefHolder y = {x}; return y.r; }\n",
+         "int main() { ValHolder x{1}; ValHolder y = {x}; return y.v; }\n"},
+        {"by_value_argument",
+         "int take(RefHolder h) { return h.r; }\n"
+         "int main() { int a = 1; RefHolder x{a}; return take(x); }\n",
+         "int take(ValHolder h) { return h.v; }\n"
+         "int main() { ValHolder x{1}; return take(x); }\n"},
+        {"lambda_capture_by_copy",
+         "int main() { int a = 1; RefHolder x{a}; auto f = [x]() { return x.r; }; return f(); }\n",
+         "int main() { ValHolder x{1}; auto f = [x]() { return x.v; }; return f(); }\n"},
+        {"array_element",
+         "int main() { int a = 1; RefHolder x{a}; RefHolder arr[1]{x}; return arr[0].r; }\n",
+         "int main() { ValHolder x{1}; ValHolder arr[1]{x}; return arr[0].v; }\n"},
+    };
+
+    for (const Cell& cell : cells) {
+        cases_run++;
+        std::optional<std::string> reference_message = move_error_message(with_reference + cell.reference_body);
+        std::optional<std::string> control_message = move_error_message(without_reference + cell.control_body);
+        expect(reference_message.has_value(),
+               "a_reference_member_does_not_grant_a_class_a_copy_constructor/" + cell.name +
+                   ": expected the reference-member class to be rejected, got <accepted>");
+        expect(control_message.has_value(),
+               "a_reference_member_does_not_grant_a_class_a_copy_constructor/" + cell.name +
+                   ": expected the control class to be rejected, got <accepted>");
+        // One question, one message: the reference member is not a
+        // separate rule, so it must not read as one.
+        // `by_value_argument` and `lambda_capture_by_copy` are rejected by
+        // the binding diagnostics for those two positions, which explain
+        // the requirement rather than cite the clause; every other
+        // spelling reaches §6.5(2) by name.
+        if (cell.name != "by_value_argument" && cell.name != "lambda_capture_by_copy") {
+            expect(reference_message.value_or("<accepted>").find("§6.5(2)") != std::string::npos,
+                   "a_reference_member_does_not_grant_a_class_a_copy_constructor/" + cell.name +
+                       ": expected the rejection to name spec §6.5(2), got " +
+                       reference_message.value_or("<accepted>"));
+            // Same message modulo the type's own name: the reference member
+            // is not a separate rule, so it must not read as one.
+            auto without_type_name = [](std::string message, const std::string& type_name) {
+                for (std::size_t at = message.find(type_name); at != std::string::npos;
+                     at = message.find(type_name, at)) {
+                    message.replace(at, type_name.size(), "T");
+                }
+                return message;
+            };
+            expect(without_type_name(reference_message.value_or("<accepted>"), "RefHolder") ==
+                       without_type_name(control_message.value_or("<accepted!>"), "ValHolder"),
+                   "a_reference_member_does_not_grant_a_class_a_copy_constructor/" + cell.name +
+                       ": the reference-member class and its control must be rejected by the same rule, got '" +
+                       reference_message.value_or("<accepted>") + "' vs '" + control_message.value_or("<accepted>") +
+                       "'");
+        }
+    }
+}
+
+// The struct control for the test above, on the *same* clause. §6.5(2)
+// keys off a user-declared destructor, and §11.1(2.1) means a struct never
+// has one -- so a struct keeps its implicitly-defined copy constructor,
+// reference member and all. The discriminator is the destructor, never
+// the reference: a struct that declares one loses the copy constructor
+// exactly like a class does.
+void test_a_struct_with_a_reference_member_is_still_copy_constructible() {
+    cases_run++;
+    expect(!throws_move_error(
+               "struct RefBox { int& r; };\n"
+               "int main() { int a = 1; RefBox x{a}; RefBox y = x; return y.r; }\n"),
+           "a_struct_with_a_reference_member_is_still_copy_constructible: expected the copy to be accepted");
+
+    cases_run++;
+    std::optional<std::string> with_dtor = move_error_message(
+        "struct RefBox { int& r; ~RefBox() { return; } };\n"
+        "int main() { int a = 1; RefBox x{a}; RefBox y = x; return y.r; }\n");
+    expect(with_dtor.has_value() && with_dtor.value_or("").find("§6.5(2)") != std::string::npos,
+           "a_struct_with_a_reference_member_is_still_copy_constructible: a struct that declares a destructor must "
+           "lose the copy constructor for the same reason a class does, got " + with_dtor.value_or("<accepted>"));
+
+    // ... and §6.5(3) *does* carry the carve-out, so the same struct is
+    // not copy-assignable. Construction binds once; assignment re-seats.
+    cases_run++;
+    std::optional<std::string> assign = move_error_message(
+        "struct RefBox { int& r; };\n"
+        "int main() { int a = 1; int b = 2; RefBox x{a}; RefBox y{b}; y = x; return y.r; }\n");
+    expect(assign.has_value() && assign.value_or("").find("§6.5(3)") != std::string::npos,
+           "a_struct_with_a_reference_member_is_still_copy_constructible: expected §6.5(3) to reject the "
+           "assignment, got " + assign.value_or("<accepted>"));
+}
+
 // [dcl.fct.def.delete]/2: a deleted function takes part in overload
 // resolution and, when selected, naming it is ill-formed. Pinned as a
 // *message* test rather than an accept/reject one, because pre-fix the
@@ -2882,6 +3008,8 @@ int main() {
     test_mutable_reborrow_allows_parent_read_while_live();
     test_mutable_reborrow_rejects_parent_write_while_live();
     test_mutable_reborrow_parent_becomes_usable_after_scope();
+    test_a_reference_member_does_not_grant_a_class_a_copy_constructor();
+    test_a_struct_with_a_reference_member_is_still_copy_constructible();
     test_calling_a_deleted_function_says_it_is_deleted();
     test_a_deleted_function_is_selected_before_it_is_rejected();
     test_a_deleted_copy_constructor_rejects_every_implicit_copy();

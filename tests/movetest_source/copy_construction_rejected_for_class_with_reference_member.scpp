@@ -1,0 +1,19 @@
+// spec §6.5(2): "A class type that has a user-declared destructor ... and
+// no user-declared copy constructor, has no copy constructor." Unlike
+// §6.4(3)/§6.5(3), §6.5(2) carries *no* reference-member carve-out, so a
+// reference member cannot hand back the copy constructor §11.5(1)'s
+// mandatory virtual destructor has already taken away. Copying such a
+// class would give two owners of the same binding and run the destructor
+// once per copy.
+class RefHolder {
+public:
+    virtual ~RefHolder() { return; }
+    RefHolder(int& r) : r{r} { return; }
+    int& r;
+};
+int main() {
+    int a = 1;
+    RefHolder x{a};
+    RefHolder y = x;
+    return y.r - 1;
+}

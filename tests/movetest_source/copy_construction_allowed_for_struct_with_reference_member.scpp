@@ -1,0 +1,13 @@
+// The struct control for
+// copy_construction_rejected_for_class_with_reference_member: spec
+// §6.5(2) is about a *user-declared destructor*, and §11.1(2.1) means a
+// struct never has one, so a struct keeps its implicitly-defined copy
+// constructor -- reference member or not. Same clause, opposite answer,
+// and the discriminator is the destructor, never the reference.
+struct RefBox { int& r; };
+int main() {
+    int a = 1;
+    RefBox x{a};
+    RefBox y = x;
+    return y.r - 1;
+}
