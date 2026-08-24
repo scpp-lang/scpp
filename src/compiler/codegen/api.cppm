@@ -1310,6 +1310,16 @@ private:
 
     [[nodiscard]] bool class_has_destructor_in_chain(const std::string& class_name);
 
+    // Whether destroying an object of `record_name` does anything at all:
+    // it (or an ordinary/interface base) declares a destructor, or one of
+    // its non-static data members transitively needs teardown. spec §6.3
+    // destroys every subobject, but class_has_destructor_in_chain only
+    // answers the first half -- which was invisible for a `class`, since
+    // spec §11.5(1) makes every class declare a virtual destructor that
+    // reaches its members anyway, and wrong for a `struct`, which need
+    // declare none.
+    [[nodiscard]] bool record_needs_teardown(const std::string& record_name);
+
     void emit_destructor_chain_calls(const std::string& class_name, llvm::LLVMValueRef object_ptr);
 
     // spec §6.4: a fresh, zero-initialized (`false`) `i1` slot for

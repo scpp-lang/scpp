@@ -61,12 +61,6 @@ namespace {
            is_float_scalar_name(target_type.name);
 }
 
-[[nodiscard]] bool is_named_record_type_for_call_binding(const Type& type, const Program& program) {
-    if (type.kind != TypeKind::Named) return false;
-    if (std::ranges::any_of(program.classes, [&](const ClassDef& def) { return def.name == type.name; })) return true;
-    return std::ranges::any_of(program.structs, [&](const StructDef& def) { return def.name == type.name; });
-}
-
 [[nodiscard]] bool is_nullptr_literal(const Expr& expr) {
     return expr.kind == ExprKind::NullptrLiteral;
 }
@@ -764,7 +758,7 @@ namespace {
             }
             return false;
         }
-        if (is_named_record_type_for_call_binding(param_type, *program_)) {
+        if (is_named_record_type(param_type)) {
             return (is_bare_same_type_copy_source(arg, param_type) && is_copy_constructible(param_type.name)) ||
                    produces_rvalue_of_type(arg, param_type);
         }

@@ -38,6 +38,9 @@ namespace scpp {
 [[nodiscard]] std::expected<void, DataflowError> check_aggregate_element_conversions(
     const Type& aggregate_type, const std::vector<ExprPtr>& elements, const Body& body, const Signatures& signatures,
     const SourceLocation& loc, const std::string& target_name, bool report_errors);
+[[nodiscard]] std::expected<void, DataflowError> check_record_copy_element_binding(
+    const Type& field_type, const Expr& element, const Body& body, const Signatures& signatures,
+    const SourceLocation& loc, const std::string& target_name, bool report_errors);
 [[nodiscard]] std::expected<void, DataflowError> check_assignment_target_conversions(const Expr& place, const Expr& value,
                                                                                      const Body& body,
                                                                                      const DataflowState& state,
@@ -68,7 +71,7 @@ namespace scpp {
                                        const Signatures& signatures, bool report_errors);
 [[nodiscard]] bool write_is_licensed_by_mutable_reborrow_lender(const Expr& target, const DataflowState& state,
                                                                 const Body& body, const Signatures& signatures);
-[[nodiscard]] bool is_lvalue_copy_source_shape(const Expr& expr);
+[[nodiscard]] bool is_lvalue_copy_source_shape(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type,
                                                  const Body& body, const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> apply_statement(const MirStatement& stmt, DataflowState& state, const Body& body,
@@ -660,6 +663,12 @@ namespace scpp {
             }
             continue;
         }
+        if (auto _r = check_record_copy_element_binding(def->fields[index].type, element, body, signatures, loc,
+                                                       aggregate_type.name + "::" + def->fields[index].name,
+                                                       report_errors);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
         if (auto _r = check_value_binding_conversions(def->fields[index].type, element, body, signatures, loc,
                                                       aggregate_type.name + "::" + def->fields[index].name,
                                                       report_errors);
@@ -668,6 +677,47 @@ namespace scpp {
         }
     }
     return {};
+}
+
+// spec §6.5(2): an aggregate element of *record* type is copy-initialized
+// from a same-type lvalue element, and a record with a user-declared
+// destructor or copy assignment operator (and no user-declared copy
+// constructor) has no copy constructor to call. Every other position that
+// copy-initializes a record -- a local declaration, a by-value argument,
+// a `return` operand -- already asks this; the aggregate-element position
+// did not, so `struct Holder { S s; }; Holder h{a};` copied an `S` the
+// spec says cannot be copied, and (before the destructor fix in
+// codegen/lifetime.cppm) leaked the copy on top.
+//
+// Only a *struct*-typed field is asked about, which is exactly the
+// reachable set rather than a restriction: an aggregate is always a
+// struct (this function resolves its fields through find_struct_def), and
+// a class-typed field of a struct is ill-formed independently
+// (codegen/layout.cppm's field validation). Asking here about a
+// class-typed field would answer "'S' is not copy-constructible" for a
+// program whose actual defect is the field declaration -- naming a fix
+// (give 'S' a copy constructor) that the next diagnostic then forbids.
+[[nodiscard]] std::expected<void, DataflowError> check_record_copy_element_binding(
+    const Type& field_type, const Expr& element, const Body& body, const Signatures& signatures,
+    const SourceLocation& loc, const std::string& target_name, bool report_errors) {
+    if (!report_errors || body.program == nullptr) return {};
+    if (field_type.kind != TypeKind::Named) return {};
+    if (find_struct_def(*body.program, field_type.name) == nullptr) return {};
+    if (is_freely_copyable_class_value_source(element, field_type, body, signatures)) return {};
+    if (!is_bare_same_type_copy_source(element, field_type, body, signatures)) return {};
+    if (is_copy_constructible(field_type.name, *body.program)) return {};
+    // [dcl.fct.def.delete]/2 answers first: naming a deleted function is
+    // a strictly more specific answer than §6.5(2)'s suppression rule.
+    const Function* user_copy_ctor = find_user_declared_copy_ctor(field_type.name, *body.program);
+    if (user_copy_ctor != nullptr && user_copy_ctor->is_deleted) {
+        return std::unexpected(DataflowError(
+            deleted_function_error_message("the copy constructor of '" + field_type.name + "'", user_copy_ctor->loc),
+            loc));
+    }
+    return std::unexpected(DataflowError(std::string(record_keyword(field_type.name, *body.program)) + " '" +
+                                             field_type.name + "' is not copy-constructible (spec §6.5(2)) -- '" +
+                                             target_name + "' cannot be initialized this way",
+                                         loc));
 }
 
 // spec §6: the conversion rules above, applied to an assignment whose
@@ -1175,7 +1225,7 @@ struct ConvertingConstructorBinding {
     const Type& destination_type, const Expr& source, const DataflowState& state, const Body& body,
     const Signatures& signatures, bool report_errors) {
     ConvertingConstructorBinding binding;
-    if (!is_named_record_type_for_call_binding(destination_type, body)) return binding;
+    if (!is_named_record_type(destination_type, body)) return binding;
     binding.ctor = find_single_argument_converting_constructor_signature(destination_type, source, body, signatures);
     if (binding.ctor == nullptr) return binding;
     if (report_errors && binding.ctor->is_unsafe && state.unsafe_depth == 0) {
@@ -1275,7 +1325,7 @@ struct ConvertingConstructorBinding {
         }
     }
     if (!expr.lhs && direct_call_type.has_value() && direct_call_type->kind == TypeKind::Named &&
-        state.class_names != nullptr && state.class_names->contains(expr.name)) {
+        direct_call_type->name == expr.name && is_named_record_type(*direct_call_type, body)) {
         return check_constructor_arguments(*direct_call_type, expr.args, state, body, signatures, report_errors);
     }
     CalleeSignature callee = resolve_callee_signature(expr, body, signatures, state.class_field_types);
@@ -1467,7 +1517,7 @@ struct ConvertingConstructorBinding {
             }
             bool class_value_param =
                 sig != nullptr && param_index < sig->param_types.size() &&
-                is_named_record_type_for_call_binding(sig->param_types[param_index], body);
+                is_named_record_type(sig->param_types[param_index], body);
             bool copyable_lvalue_source =
                 class_value_param && is_copyable_class_lvalue_boundary_source(arg, sig->param_types[param_index], body, signatures);
             bool freely_copyable_value_source =
@@ -1486,7 +1536,9 @@ struct ConvertingConstructorBinding {
                 if (std::optional<std::string> why = explain_unusable_class_value_source(arg); why.has_value()) {
                     return std::unexpected(DataflowError(*why, state.current_loc));
                 }
-                return std::unexpected(DataflowError("passing class '" + sig->param_types[param_index].name +
+                return std::unexpected(DataflowError("passing " +
+                                     std::string(record_keyword(sig->param_types[param_index].name, *body.program)) +
+                                     " '" + sig->param_types[param_index].name +
                                      "' by value requires either an implicitly copyable same-type source or "
                                      "a fresh value such as std::move(x) or a call returning by value",
                     state.current_loc));
@@ -1691,6 +1743,42 @@ struct ConvertingConstructorBinding {
                                 state.current_loc));
         }
     }
+    // [class.copy.ctor]/6: a record type with no user-declared copy
+    // constructor has one *implicitly declared*, and [dcl.init]/16.6.2.2
+    // only reaches parenthesized aggregate initialization when "no
+    // constructor is viable" -- so a single argument already of the
+    // constructed type is copy construction, never an aggregate element
+    // bound to field 0. Nothing modelled that implicit constructor here:
+    // a plain aggregate has no constructor *signature* at all, so `sig`
+    // stayed null and `T(other)` fell straight into the aggregate branch
+    // below, which bound the whole `T` to its first field -- e.g.
+    // `new (&fresh[i]) T(other.at(i))` inside a monomorphized
+    // std::vector<Token> reported "enum class values do not implicitly
+    // convert" for `Token` -> `Token::kind`. Masked while §6.4/§6.5 only
+    // applied to `class`: a class always has a user-declared destructor
+    // (spec §11.5(1)) and so must declare its copy constructor
+    // explicitly, which does produce a signature.
+    //
+    // spec §6.5(2) decides whether that implicit copy constructor exists,
+    // and this reports the same diagnostic the declaration-position gate
+    // does when it does not.
+    if (sig == nullptr && ctor_args.size() == 1 && ctor_args[0] != nullptr && body.program != nullptr &&
+        is_named_record_type(constructed_type, body)) {
+        std::optional<Type> arg_type = infer_expr_type(*ctor_args[0], body, signatures);
+        const Type* source = arg_type.has_value() ? &*arg_type : nullptr;
+        if (source != nullptr && source->kind == TypeKind::Reference && source->pointee != nullptr) {
+            source = source->pointee.get();
+        }
+        if (source != nullptr && source->kind == TypeKind::Named && source->name == constructed_type.name) {
+            if (report_errors && !is_copy_constructible(class_name, *body.program)) {
+                return std::unexpected(DataflowError(
+                    std::string(record_keyword(class_name, *body.program)) + " '" + class_name +
+                        "' is not copy-constructible (spec §6.5(2)) -- this construction is not permitted",
+                    state.current_loc));
+            }
+            return {};
+        }
+    }
     // [dcl.init.aggr]/4: with no constructor resolved and arguments
     // present, this is aggregate initialization -- the same rule, and the
     // same function, that the `T x = {...}` spelling goes through in
@@ -1775,7 +1863,7 @@ struct ConvertingConstructorBinding {
         } else {
             bool class_value_param =
                 sig != nullptr && param_index < sig->param_types.size() &&
-                is_named_record_type_for_call_binding(sig->param_types[param_index], body);
+                is_named_record_type(sig->param_types[param_index], body);
             bool copyable_lvalue_source =
                 class_value_param && is_copyable_class_lvalue_boundary_source(arg, sig->param_types[param_index], body, signatures);
             bool freely_copyable_value_source =
@@ -1795,7 +1883,9 @@ struct ConvertingConstructorBinding {
                 if (std::optional<std::string> why = explain_unusable_class_value_source(arg); why.has_value()) {
                     return std::unexpected(DataflowError(*why, state.current_loc));
                 }
-                return std::unexpected(DataflowError("passing class '" + sig->param_types[param_index].name +
+                return std::unexpected(DataflowError("passing " +
+                                     std::string(record_keyword(sig->param_types[param_index].name, *body.program)) +
+                                     " '" + sig->param_types[param_index].name +
                                      "' by value requires either an implicitly copyable same-type source or "
                                      "a fresh value such as std::move(x) or a call returning by value",
                     state.current_loc));
@@ -2137,7 +2227,7 @@ struct ConvertingConstructorBinding {
                     }
                 }
             }
-            if (expr.type.kind == TypeKind::Named && state.class_names != nullptr && state.class_names->contains(expr.type.name)) {
+            if (is_named_record_type(expr.type, body)) {
                 bool move_shape = expr.args.size() == 1 && expr.args[0]->kind == ExprKind::Move &&
                                   produces_rvalue_of_type(*expr.args[0], expr.type, body, signatures);
                 bool freely_copyable_copy_shape =
@@ -2264,8 +2354,7 @@ struct ConvertingConstructorBinding {
                 std::optional<Type> target_class_type;
                 if (expr.lhs->kind == ExprKind::Identifier) {
                     const Type* target_type = body.type_if_local(*expr.lhs);
-                    if (target_type != nullptr && target_type->kind == TypeKind::Named &&
-                        state.class_names != nullptr && state.class_names->contains(target_type->name)) {
+                    if (target_type != nullptr && is_named_record_type(*target_type, body)) {
                         target_is_movable_class = true;
                         target_class_type = *target_type;
                     }
@@ -2287,8 +2376,7 @@ struct ConvertingConstructorBinding {
                     // std::move(i); }`) works the same way as any other
                     // class move.
                     std::optional<Type> field_type = resolve_member_field_type(*expr.lhs, body, state, signatures);
-                    if (field_type.has_value() && field_type->kind == TypeKind::Named &&
-                        state.class_names != nullptr && state.class_names->contains(field_type->name)) {
+                    if (field_type.has_value() && is_named_record_type(*field_type, body)) {
                         target_is_movable_class = true;
                         target_class_type = field_type;
                     }
@@ -2327,7 +2415,9 @@ struct ConvertingConstructorBinding {
                     is_bare_same_type_copy_source(*expr.rhs, *target_class_type, body, signatures) &&
                     (state.classes_with_copy_assign == nullptr ||
                      !state.classes_with_copy_assign->contains(target_class_type->name))) {
-                    return std::unexpected(DataflowError("class '" + target_class_type->name +
+                    return std::unexpected(DataflowError(
+                        std::string(record_keyword(target_class_type->name, *body.program)) + " '" +
+                                         target_class_type->name +
                                          "' is not copy-assignable (spec §6.5(3)) -- this assignment is not "
                                          "licensed",
                         state.current_loc));
@@ -2813,13 +2903,13 @@ struct ConvertingConstructorBinding {
     return source_type != nullptr && types_equal(*source_type, constructed_type);
 }
 
-[[nodiscard]] bool is_lvalue_copy_source_shape(const Expr& expr) {
+[[nodiscard]] bool is_lvalue_copy_source_shape(const Expr& expr, const Body& body, const Signatures& signatures) {
     switch (expr.kind) {
         case ExprKind::Identifier:
             return true;
         case ExprKind::Member:
         case ExprKind::Subscript:
-            return expr.lhs != nullptr && is_lvalue_copy_source_shape(*expr.lhs);
+            return expr.lhs != nullptr && is_lvalue_copy_source_shape(*expr.lhs, body, signatures);
         case ExprKind::Unary: {
             if (expr.unary_op != UnaryOp::Deref || expr.lhs == nullptr) return false;
             // A user-written `*p` (a raw pointer or smart-pointer local
@@ -2828,7 +2918,7 @@ struct ConvertingConstructorBinding {
             // borrow sources (borrows.cppm) -- a dereferenced pointer is
             // just as legitimate an lvalue copy source as a plain
             // Member/Subscript root.
-            if (!expr.implicit_arrow_deref) return is_lvalue_copy_source_shape(*expr.lhs);
+            if (!expr.implicit_arrow_deref) return is_lvalue_copy_source_shape(*expr.lhs, body, signatures);
             // `p->x` on a smart-pointer `p`: monomorphize.cppm's
             // rewrite_arrow_receiver desugars this into exactly this
             // Unary/Deref node wrapping one (or more, chained) compiler-
@@ -2846,7 +2936,39 @@ struct ConvertingConstructorBinding {
             while (receiver->kind == ExprKind::Call && receiver->name == "operator_arrow" && receiver->lhs != nullptr) {
                 receiver = receiver->lhs.get();
             }
-            return is_lvalue_copy_source_shape(*receiver);
+            return is_lvalue_copy_source_shape(*receiver, body, signatures);
+        }
+        case ExprKind::Call: {
+            // A call that returns by reference names already-existing
+            // storage -- `container.at(i)`, `expected.value()` -- and is
+            // just as much an lvalue copy source as a named place is. A
+            // by-value call is a fresh prvalue and stays excluded, so it
+            // is handled by the produces_rvalue_of_type branch that runs
+            // before every caller of this predicate.
+            //
+            // The one exception is the same one produces_rvalue_of_type
+            // carves out and must agree with: a method called directly on
+            // a `std::move(...)` receiver (`std::move(r).value()`, this
+            // codebase's idiom for extracting a std::expected payload) is
+            // an *rvalue*, because the signature database models
+            // `.value()` with a single receiver-category-agnostic `T&`
+            // return rather than a separate `&&`-qualified overload.
+            // Treating it as a place would classify 321 such extractions
+            // in the compiler's own sources as copy assignments of
+            // non-copy-assignable types.
+            //
+            // Codegen::is_lvalue_copy_source_shape (codegen/semantics.cppm)
+            // is a second copy of this predicate and already had this
+            // case, citing `container.at(i)` by name; this one did not,
+            // so movecheck rejected a copy codegen was perfectly willing
+            // to emit. Masked while §6.5 only gated `class` types: no
+            // class-typed local is initialized from a reference-returning
+            // call anywhere in the compiler's own sources, but
+            // `Token using_tok = using_tok_result.value();`
+            // (parser.cppm) is exactly that shape on a struct.
+            if (expr.lhs != nullptr && expr.lhs->kind == ExprKind::Move) return false;
+            std::optional<Type> call_type = infer_expr_type(expr, body, signatures);
+            return call_type.has_value() && call_type->kind == TypeKind::Reference;
         }
         default:
             return false;
@@ -2864,7 +2986,7 @@ struct ConvertingConstructorBinding {
         return source_type.kind == TypeKind::Named && dest_type.kind == TypeKind::Named &&
                source_type.name == dest_type.name;
     };
-    if (!is_lvalue_copy_source_shape(expr)) return false;
+    if (!is_lvalue_copy_source_shape(expr, body, signatures)) return false;
     std::optional<Type> source_type = infer_expr_type(expr, body, signatures);
     if (!source_type.has_value()) return false;
     if (same_named_record_type_ignoring_top_level_const(*source_type, target_type) ||
@@ -3023,23 +3145,48 @@ struct ConvertingConstructorBinding {
                         state.current_loc));
                 }
             }
-            if (state.class_names != nullptr &&
-                (*local_type).kind == TypeKind::Named && state.class_names->contains((*local_type).name)) {
-                // ch04 §4.2: unlike a plain `struct` (an ordinary,
-                // freely-reassignable trivial value), a class-typed local
-                // is conservatively bound once at construction and never
-                // reassigned in this version -- this *is* a soundness
-                // necessity, not just a temporary restriction: without a
-                // real copy constructor/assignment operator (out of
-                // scope for v0.1 -- ch04's own "full class checking
-                // rules" note), a plain bitwise reassignment would copy
-                // whatever resource-owning fields the class has (e.g. a
-                // raw handle its destructor later frees), and both the
-                // old and new bindings' destructors would then
-                // independently try to release the *same* resource at
-                // their respective scope exits -- a double-free/use-
-                // after-free. Lifting this needs real copy semantics
-                // designed first, not just permission to reassign.
+            if (is_named_record_type(*local_type, body)) {
+                // [dcl.init.list]: a braced initializer is not a copy, a
+                // move or a conversion of anything -- its *elements* bind,
+                // one to each field, so nothing below has a question to
+                // ask about it and every exit below returns before the
+                // single check_value_binding_conversions call at the end
+                // of this case. Asked here so the element checks run for
+                // a record-typed local exactly as they do for every other
+                // target: `struct H { int* p; }; const int c = 5;
+                // H h = {&c};` otherwise handed out a mutable pointer
+                // into a const object, while the `H h{&c};` spelling of
+                // the same initialization was rejected -- that one lowers
+                // to a constructor-call expression and reaches
+                // check_aggregate_element_conversions through
+                // check_constructor_arguments instead.
+                if (stmt.expr != nullptr && stmt.expr->kind == ExprKind::BracedInitList) {
+                    if (auto _r = check_value_binding_conversions((*local_type), *stmt.expr, body, signatures,
+                                                                  state.current_loc, target_name, report_errors);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
+                // spec §6.4/§6.5 govern every *class type*, which in
+                // [class.pre]/[dcl.type] terms includes `struct` -- §6.5's
+                // own worked example is spelled `struct RefCounted`. This
+                // gate previously asked DataflowState::class_names (the
+                // `class`-only set access control needs), citing a
+                // "ch04 §4.2" clause that does not exist in docs/spec/, so
+                // a record-typed local declared `struct` was reassigned by
+                // a plain bitwise copy no matter what §6.5(2)/(3) said
+                // about it. A `struct S { int* p; ~S(); }` reassigned that
+                // way left the old value's resource unreleased and the new
+                // one's released twice -- exactly the double-free this
+                // gate exists to prevent, reachable through the keyword
+                // the gate did not look at.
+                //
+                // A record with no user-declared destructor, copy
+                // constructor or copy assignment operator still *has* an
+                // implicitly-defined copy assignment operator (§6.5(3)),
+                // so the ordinary trivial struct stays freely assignable;
+                // what changes is that the ones §6.5(3) says have no such
+                // operator are now told so.
                 //
                 // This MIR-level Assign statement, though, is *also* how
                 // a `VarDecl`'s own `= expr` initializer lowers (see
@@ -3088,7 +3235,8 @@ struct ConvertingConstructorBinding {
                         }
                         if (has_reference_member) {
                             return std::unexpected(DataflowError(
-                                "class '" + (*local_type).name +
+                                std::string(record_keyword((*local_type).name, *body.program)) + " '" +
+                                    (*local_type).name +
                                     "' has a reference-typed member, so it has no move assignment operator "
                                     "(spec §6.4(3)) -- '" + target_name + "' cannot be reassigned",
                                 state.current_loc));
@@ -3096,7 +3244,9 @@ struct ConvertingConstructorBinding {
                         auto borrow_it = state.borrows.find(stmt.local);
                         if (borrow_it != state.borrows.end() &&
                             (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-                            return std::unexpected(DataflowError("cannot assign to class variable '" + target_name +
+                            return std::unexpected(DataflowError("cannot assign to " +
+                                                 std::string(record_keyword((*local_type).name, *body.program)) +
+                                                 " variable '" + target_name +
                                                  "': it is currently borrowed",
                                 state.current_loc));
                         }
@@ -3130,7 +3280,9 @@ struct ConvertingConstructorBinding {
                         if (!freely_copyable_assign_source &&
                             (state.classes_with_copy_assign == nullptr ||
                              !state.classes_with_copy_assign->contains((*local_type).name))) {
-                            return std::unexpected(DataflowError("class '" + (*local_type).name +
+                            return std::unexpected(DataflowError(
+                                std::string(record_keyword((*local_type).name, *body.program)) + " '" +
+                                                 (*local_type).name +
                                                  "' is not copy-assignable (spec §6.5(3)) -- '" + target_name +
                                                  "' cannot be reassigned this way",
                                 state.current_loc));
@@ -3138,7 +3290,9 @@ struct ConvertingConstructorBinding {
                         auto borrow_it = state.borrows.find(stmt.local);
                         if (borrow_it != state.borrows.end() &&
                             (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
-                            return std::unexpected(DataflowError("cannot assign to class variable '" + target_name +
+                            return std::unexpected(DataflowError("cannot assign to " +
+                                                 std::string(record_keyword((*local_type).name, *body.program)) +
+                                                 " variable '" + target_name +
                                                  "': it is currently borrowed",
                                 state.current_loc));
                         }
@@ -3151,9 +3305,13 @@ struct ConvertingConstructorBinding {
                     return {};
                 }
                 if (report_errors && state.locals.contains(stmt.local)) {
-                    return std::unexpected(DataflowError("class '" + (*local_type).name + "'-typed variable '" + target_name +
-                                         "' cannot be reassigned after construction in this version (no copy "
-                                         "semantics are defined yet -- see ch04 §4.2)",
+                    return std::unexpected(DataflowError(
+                        std::string(record_keyword((*local_type).name, *body.program)) + " '" +
+                                         (*local_type).name + "'-typed variable '" + target_name +
+                                         "' cannot be reassigned from this expression: spec §6.4(3) licenses an "
+                                         "rvalue of the same type (std::move(x), or a call returning by value) "
+                                         "and spec §6.5(3) an lvalue of the same type when the type is "
+                                         "copy-assignable",
                         state.current_loc));
                 }
                 if (stmt.expr->kind == ExprKind::Lambda) {
@@ -3264,11 +3422,12 @@ struct ConvertingConstructorBinding {
                                 return std::unexpected(DataflowError(*why, state.current_loc));
                             }
                             return std::unexpected(DataflowError(
-                                "class '" + (*local_type).name + "'-typed variable '" + target_name +
+                                std::string(record_keyword((*local_type).name, *body.program)) + " '" +
+                                    (*local_type).name + "'-typed variable '" + target_name +
                                     "' can only be initialized via brace-init ('" +
                                     (*local_type).name + " " + target_name +
                                     "{args};'), std::move of the same type, a converting constructor of '" +
-                                    (*local_type).name + "', or (if the class is copy-"
+                                    (*local_type).name + "', or (if the type is copy-"
                                     "constructible, spec §6.5) an implicitly copyable source of another '" +
                                     (*local_type).name + "' value",
                                 state.current_loc));
@@ -3276,7 +3435,9 @@ struct ConvertingConstructorBinding {
                         if (!freely_copyable_init_source &&
                             (state.classes_with_copy_ctor == nullptr ||
                              !state.classes_with_copy_ctor->contains((*local_type).name))) {
-                            return std::unexpected(DataflowError("class '" + (*local_type).name +
+                            return std::unexpected(DataflowError(
+                                std::string(record_keyword((*local_type).name, *body.program)) + " '" +
+                                                 (*local_type).name +
                                                  "' is not copy-constructible (spec §6.5(2)) -- '" + target_name +
                                                  "' cannot be initialized this way",
                                 state.current_loc));
@@ -3668,7 +3829,7 @@ struct ConvertingConstructorBinding {
                 }
                 return {};
             }
-            bool return_is_class_value = is_named_class_type(fn.return_type, body);
+            bool return_is_class_value = is_named_record_type(fn.return_type, body);
             bool implicit_move_source =
                 return_is_class_value && is_implicit_move_return_source(*term.return_value, fn.return_type, body);
             bool freely_copyable_return_source =

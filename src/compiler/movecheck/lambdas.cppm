@@ -109,9 +109,9 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
         // §4.1/§4.2 question of `class` vs `struct`, for access control)
         // left by-value capture of a struct entirely ungated, so a struct
         // with no copy constructor at all was copied into the closure
-        // silently. is_named_record_type_for_call_binding is the same
+        // silently. is_named_record_type is the same
         // question the by-value *parameter* boundary already asks.
-        if (is_named_record_type_for_call_binding(source_type, body)) {
+        if (is_named_record_type(source_type, body)) {
             bool is_copy_source = is_bare_same_type_copy_source(source, source_type, body, signatures);
             bool is_freely_copyable_source =
                 is_freely_copyable_class_value_source(source, source_type, body, signatures);

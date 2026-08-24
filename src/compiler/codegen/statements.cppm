@@ -693,8 +693,8 @@ namespace scpp {
                             auto lvalue_result = codegen_lvalue(*stmt.expr);
                             if (!lvalue_result.has_value()) return std::unexpected(std::move(lvalue_result).error());
                             value = std::move(lvalue_result).value().ptr;
-                        } else if (current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Named &&
-                                              find_class_def(current_function_def_->return_type.name) != nullptr &&
+                        } else if (current_function_def_ != nullptr &&
+                                              is_named_record_type(current_function_def_->return_type) &&
                                               is_implicit_move_return_source(*stmt.expr, current_function_def_->return_type)) {
                             Expr implicit_move;
                             implicit_move.kind = ExprKind::Move;

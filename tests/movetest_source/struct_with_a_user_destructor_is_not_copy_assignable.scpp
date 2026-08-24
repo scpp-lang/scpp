@@ -1,0 +1,22 @@
+// spec §6.5(3): "A class type that has a user-declared destructor ... and
+// no user-declared copy assignment operator has no copy assignment
+// operator." §6.5's own normative example (`struct RefCounted`) is spelled
+// `struct`, so the rule covers struct exactly as it covers class. The gate
+// consulted DataflowState::class_names, built from program.classes alone,
+// so this program was accepted and ran `~S` twice for the same value.
+import std;
+
+struct S {
+    int* p;
+    S(int* q) : p{q} {}
+    ~S() {}
+};
+
+int main() {
+    int x = 1;
+    int y = 2;
+    S a{&x};
+    S b{&y};
+    a = b;
+    return 0;
+}

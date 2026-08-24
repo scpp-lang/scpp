@@ -150,7 +150,7 @@ struct NodiscardInfo {
                                                                              const Signatures& signatures);
 
         [[nodiscard]] bool is_named_class_type(const Type& type, const Body& body);
-[[nodiscard]] bool is_named_record_type_for_call_binding(const Type& type, const Body& body);
+[[nodiscard]] bool is_named_record_type(const Type& type, const Body& body);
 [[nodiscard]] bool compile_time_dependency_visible_in_body(const FunctionSignature& candidate, const Body& body);
 
 // Whether `sig` can be called with `arg_count` arguments, accounting for
@@ -507,6 +507,13 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
             expr.name.starts_with("vector<"));
 }
 
+// Whether `type` names a `class` specifically -- *not* a struct. Only
+// three questions are genuinely class-only: access control (a struct's
+// members are never access-controlled), virtual/interface membership
+// ([spec §11.1(2.3)]: a struct shall not declare a virtual member), and
+// the mandatory virtual destructor ([spec §11.5(1)]). Every
+// copy/move/ownership rule (§6.4/§6.5/§6.6) is about *record* types and
+// must ask is_named_record_type instead.
 [[nodiscard]] bool is_named_class_type(const Type& type, const Body& body) {
     if (type.kind != TypeKind::Named || body.program == nullptr) return false;
     for (const ClassDef& def : body.program->classes) {
@@ -620,11 +627,19 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     return args.size() <= 1;
 }
 
-[[nodiscard]] bool is_named_record_type_for_call_binding(const Type& type, const Body& body) {
+// Whether `type` names a user-declared *record* type -- a `class` or a
+// `struct`. This is the question spec §6.4/§6.5/§6.6 ask: those clauses
+// govern "a class type", which in [class.pre]/[dcl.type] terms is any
+// class, struct or union, and §6.5's own worked example is spelled
+// `struct RefCounted`. Deliberately *not* is_named_class_type, which
+// answers the narrower `class`-vs-`struct` question access control (and
+// only access control) needs -- asking that one for an ownership rule is
+// what left every struct outside §6.4/§6.5 entirely.
+[[nodiscard]] bool is_named_record_type(const Type& type, const Body& body) {
     if (is_named_class_type(type, body)) return true;
     if (type.kind != TypeKind::Named || body.program == nullptr) return false;
     for (const StructDef& def : body.program->structs) {
-        if (def.name == type.name) return true;
+        if (def.name == type.name) return !def.is_concept_witness;
     }
     return false;
 }
@@ -690,14 +705,14 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
 
 [[nodiscard]] bool is_copyable_class_lvalue_boundary_source(const Expr& expr, const Type& target_type, const Body& body,
                                                             const Signatures& signatures) {
-    return body.program != nullptr && is_named_record_type_for_call_binding(target_type, body) &&
+    return body.program != nullptr && is_named_record_type(target_type, body) &&
            is_bare_same_type_copy_source(expr, target_type, body, signatures) &&
            is_copy_constructible(target_type.name, *body.program);
 }
 
 [[nodiscard]] bool is_freely_copyable_class_value_source(const Expr& expr, const Type& target_type, const Body& body,
                                                          const Signatures& signatures) {
-    if (body.program == nullptr || !is_named_record_type_for_call_binding(target_type, body) ||
+    if (body.program == nullptr || !is_named_record_type(target_type, body) ||
         !is_freely_copyable_value_type(target_type, *body.program)) {
         return false;
     }
@@ -775,7 +790,7 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
         return false;
     }
     if (produces_rvalue_of_type(arg, *param_type.pointee, body, signatures)) return true;
-    return is_named_record_type_for_call_binding(*param_type.pointee, body) &&
+    return is_named_record_type(*param_type.pointee, body) &&
            find_single_argument_converting_constructor_signature(*param_type.pointee, arg, body, signatures) != nullptr;
 }
 
@@ -831,13 +846,13 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
     if (!arg_type.has_value()) return false;
     if (!argument_type_matches_parameter(*arg_type, param_type, body)) {
-        if (is_named_record_type_for_call_binding(param_type, body) &&
+        if (is_named_record_type(param_type, body) &&
             find_single_argument_converting_constructor_signature(param_type, arg, body, signatures) != nullptr) {
             return true;
         }
         return false;
     }
-    if (is_named_record_type_for_call_binding(param_type, body)) {
+    if (is_named_record_type(param_type, body)) {
         return is_copyable_class_lvalue_boundary_source(arg, param_type, body, signatures) ||
                is_freely_copyable_class_value_source(arg, param_type, body, signatures) ||
                produces_rvalue_of_type(arg, param_type, body, signatures);
@@ -874,7 +889,7 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     }
     std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
     if (!arg_type.has_value() || !argument_type_matches_parameter(*arg_type, effective_param_type, body)) return false;
-    if (is_named_record_type_for_call_binding(effective_param_type, body)) {
+    if (is_named_record_type(effective_param_type, body)) {
         return is_copyable_class_lvalue_boundary_source(arg, effective_param_type, body, signatures) ||
                is_freely_copyable_class_value_source(arg, effective_param_type, body, signatures) ||
                produces_rvalue_of_type(arg, effective_param_type, body, signatures);

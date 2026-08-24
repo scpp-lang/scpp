@@ -2449,6 +2449,23 @@ class StructDef {
     // flag for layout and safety-rule differences (e.g. all union members
     // overlap at offset 0, and union-member access is unsafe-gated).
     bool is_union = false;
+    // ch05 §5.14: the struct sibling of ClassDef::is_concept_witness --
+    // true for the synthetic aggregate standing in for a *bare*
+    // (unconstrained) generic type parameter while the template's own
+    // definition is checked. A bare parameter guarantees nothing beyond
+    // the universal baseline (move, store as a field, pass, return), so
+    // the witness is checked optimistically, as if freely copyable, and
+    // the spec §6.4/§6.5/§6.6 ownership rules must not fire for it: it is
+    // not a real type and every call site is monomorphized against a
+    // concrete one instead.
+    //
+    // This used to be spelled by *being* a struct, back when those rules
+    // consulted DataflowState::class_names and so were inert for every
+    // struct in the language. Making them ask "is this a record type?" --
+    // which is what §6.5's own text ("A class type", [class.pre]) says --
+    // removed that accidental exemption, so the exemption is now stated
+    // directly, exactly as ClassDef::is_concept_witness always stated it.
+    bool is_concept_witness = false;
     // `[[scpp::packed]]` on a struct/union declaration -- requests C-style
     // packed layout (no implicit padding between fields, overall alignment 1)
     // for FFI-facing aggregates.

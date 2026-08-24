@@ -337,6 +337,18 @@ namespace scpp {
     }
 
 
+    [[nodiscard]] bool Codegen::record_needs_teardown(const std::string& record_name)
+{
+        if (class_has_destructor_in_chain(record_name)) return true;
+        auto info_it = structs_.find(record_name);
+        if (info_it == structs_.end()) return false;
+        for (const Type& field_type : info_it->second.field_types) {
+            if (type_has_destructor(field_type)) return true;
+        }
+        return false;
+    }
+
+
     [[nodiscard]] bool Codegen::class_has_destructor_in_chain(const std::string& class_name)
 {
         if (find_destructor(class_name) != nullptr) return true;
@@ -427,7 +439,7 @@ namespace scpp {
         if (type.kind == TypeKind::Array) {
             return type.element != nullptr && type.array_size > 0 && type_has_destructor(*type.element);
         }
-        return type.kind == TypeKind::Named && class_has_destructor_in_chain(type.name);
+        return type.kind == TypeKind::Named && record_needs_teardown(type.name);
     }
 
 
@@ -478,7 +490,14 @@ namespace scpp {
             return;
         }
         if (type.kind != TypeKind::Named) return;
-        emit_destructor_chain_calls(type.name, ptr);
+        // Not emit_destructor_chain_calls directly: a record with no
+        // destructor of its own still has to release whatever its members
+        // own (spec §6.3 destroys every subobject). A `class` always
+        // reaches its members through the virtual destructor spec §11.5(1)
+        // makes it declare, so this only ever mattered for a `struct` --
+        // and asking about the destructor alone left a struct's
+        // record-typed members never destroyed at all.
+        codegen_destroy_old_class_state_for_move_assign(ptr, type.name, /*moved_flag=*/nullptr);
     }
 
 
