@@ -227,8 +227,12 @@ private:
         return "?";
     }
 
-    [[nodiscard]] static bool is_constructor_slot(const Function& fn) { return fn.name.ends_with("_new"); }
-    [[nodiscard]] static bool is_destructor_slot(const Function& fn) { return fn.name.ends_with("_delete"); }
+    [[nodiscard]] static bool is_constructor_slot(const Function& fn) {
+        return is_special_member_mangled_name(fn.name, fn.member_owner_class, "_new");
+    }
+    [[nodiscard]] static bool is_destructor_slot(const Function& fn) {
+        return is_special_member_mangled_name(fn.name, fn.member_owner_class, "_delete");
+    }
     [[nodiscard]] static std::string instantiated_template_source_name(std::string_view class_name) {
         std::size_t dot = class_name.find('.');
         return dot == std::string_view::npos ? std::string() : std::string(class_name.substr(0, dot));

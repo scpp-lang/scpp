@@ -1,0 +1,1 @@
+sequence: define void @C_new.double | %v = getelementptr inbounds nuw %class.C | store i32 7, ptr %v

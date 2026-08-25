@@ -1,0 +1,19 @@
+// The destructor mirror of the same predicate: `int thing_delete()` mangles
+// to `C_thing_delete`, which *ends with* `_delete`, so the interface/vtable
+// slot key for it was computed as "~" and the class was then rejected with
+// "member '~' of class 'C' overrides a base virtual member but omits
+// 'override'" -- a spurious rejection naming a member the source never
+// declared.
+class C {
+public:
+    virtual ~C() = default;
+    C() = default;
+    int thing_delete() { return 41; }
+    int v = 7;
+};
+
+int main() {
+    C c{};
+    print_int(c.thing_delete());
+    return 0;
+}

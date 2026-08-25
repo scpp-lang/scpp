@@ -3917,6 +3917,70 @@ void run_cli_extension_tests() {
         std::filesystem::remove_all(root);
     }
 
+    // A constructor *template* across a module boundary, pinned by the
+    // member value rather than by accept/reject. This is a third shape
+    // beside #498 (the wrong symbol was emitted, which `ld` caught) and
+    // #499 (no call was emitted at all): here the right symbol was
+    // selected and the call *was* emitted, and the callee itself was
+    // empty -- no base construction, no vtable pointer, no default member
+    // initializers and no member-initializer list. Both sub-questions are
+    // therefore asserted: which symbol the consumer references, and that
+    // running it actually produces the initialized value.
+    //
+    // Run warm, from the cached interface with the module source removed,
+    // because the mem-initializer-list is serialized state like any other
+    // and a clone that drops it reads exactly like a clone that never had
+    // one.
+    {
+        std::string case_name = "imported_constructor_template_runs_its_member_initializers";
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::path module_source = root / "genctormod.scpp";
+        std::filesystem::path interface_path = root / "genctormod.scppm";
+        std::filesystem::path archive_path = root / "libgenctormod.scppa";
+        std::filesystem::path consumer_source = root / "app.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module genctormod;\n"
+                        "export class C {\n"
+                        "public:\n"
+                        "    virtual ~C() = default;\n"
+                        "    C() = default;\n"
+                        "    template<typename T> C(T x) : v{7} { return; }\n"
+                        "    int v = 0;\n"
+                        "};\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+        std::filesystem::remove(module_source);
+        write_text_file(consumer_source,
+                        "import genctormod;\n"
+                        "int main() {\n"
+                        "    double d = 1.5;\n"
+                        "    C c{d};\n"
+                        "    return c.v;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import genctormod=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": the imported constructor template should instantiate, got '" +
+                   build_result.stdout_text + "'");
+        RunResult symbols = run_command_capture("nm --defined-only " + exe_path.string() + " 2>&1");
+        expect(symbols.stdout_text.find("C_new.double") != std::string::npos,
+               case_name + ": expected the monomorphized constructor clone C_new.double to be emitted");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 7,
+               case_name + ": expected the member-initializer list to run across the module boundary, got exit " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
     // `= delete` is declaration state that has to survive a cached
     // (warm) build: the consumer below is compiled against the emitted
     // `.scppm` alone, with the module's own source removed, exactly as a

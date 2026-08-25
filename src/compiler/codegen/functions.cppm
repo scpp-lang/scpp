@@ -216,7 +216,7 @@ namespace scpp {
         bool is_defaulted_move_constructor = is_move_constructor_function(fn);
         bool is_defaulted_copy_assignment = is_copy_assignment_function(fn);
         bool is_defaulted_move_assignment = is_move_assignment_function(fn);
-        bool is_defaulted_destructor = fn.name.ends_with("_delete") && fn.params.size() == 1;
+        bool is_defaulted_destructor = is_destructor_function(fn);
         bool is_defaulted_equality = is_defaulted_equality_operator_function(fn);
         if (!is_defaulted_default_constructor && !is_defaulted_copy_constructor && !is_defaulted_move_constructor &&
             !is_defaulted_copy_assignment && !is_defaulted_move_assignment && !is_defaulted_destructor &&

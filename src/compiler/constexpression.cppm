@@ -2354,12 +2354,11 @@ private:
         return best_candidate(matches, args, /*arg_exprs=*/nullptr, /*param_offset=*/1, out_ambiguous);
     }
 
-    [[nodiscard]] bool is_constructor_function(const Function& fn) const {
-        if (fn.member_owner_class.empty() || !fn.name.ends_with("_new") || fn.params.empty()) return false;
-        const Type& this_param = fn.params[0].type;
-        return this_param.kind == TypeKind::Reference && this_param.pointee != nullptr &&
-               this_param.pointee->kind == TypeKind::Named && this_param.pointee->name == fn.member_owner_class;
-    }
+    // The evaluator asks the same question as movecheck and codegen and now
+    // gets it from the same place: the owner-anchored is_constructor_function
+    // beside the AST. Its own copy tested only `name.ends_with("_new")`, so
+    // execute_constructor_member_initializers below silently did nothing for
+    // every monomorphized generic constructor.
 
     [[nodiscard]] std::expected<void, ConstexprError> apply_default_initializers_to_named_object(const std::shared_ptr<Cell>& object_cell, const Type& object_type,
                                                     const SourceLocation& loc) {

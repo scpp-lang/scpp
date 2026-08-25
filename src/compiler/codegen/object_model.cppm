@@ -145,7 +145,7 @@ namespace scpp {
         }
         for (const Function& fn : program_->functions) {
             if (fn.member_owner_class != interface_name || fn.is_static || !fn.is_virtual || !fn.forwards_to.empty()) continue;
-            if (fn.name.ends_with("_new")) continue;
+            if (is_special_member_mangled_name(fn.name, fn.member_owner_class, "_new")) continue;
             std::string slot_key = interface_method_slot_key(fn);
             auto slot_it = slot_indices.find(slot_key);
             if (slot_it == slot_indices.end()) {
@@ -241,7 +241,7 @@ namespace scpp {
 
     [[nodiscard]] bool Codegen::interface_destructor_uses_raw_this(const Function& fn) const
 {
-        return fn.name.ends_with("_delete") && !fn.member_owner_class.empty() && type_names_interface(fn.member_owner_class);
+        return is_special_member_mangled_name(fn.name, fn.member_owner_class, "_delete") && type_names_interface(fn.member_owner_class);
     }
 
 
@@ -351,8 +351,8 @@ namespace scpp {
         }
         for (const Function& fn : program_->functions) {
             if (fn.member_owner_class != class_name || fn.is_static || !fn.forwards_to.empty()) continue;
-            if (fn.name.ends_with("_new")) continue;
-            if (fn.name.ends_with("_delete")) continue;
+            if (is_special_member_mangled_name(fn.name, fn.member_owner_class, "_new")) continue;
+            if (is_special_member_mangled_name(fn.name, fn.member_owner_class, "_delete")) continue;
             std::string slot_key = interface_method_slot_key(fn);
             auto slot_it = slot_indices.find(slot_key);
             bool is_effectively_virtual = fn.is_virtual || slot_it != slot_indices.end();
@@ -464,7 +464,7 @@ namespace scpp {
 
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::interface_dispatch_entry_for(const std::string& concrete_class_name, const Function& method)
 {
-        if (method.name.ends_with("_delete")) {
+        if (is_special_member_mangled_name(method.name, method.member_owner_class, "_delete")) {
             return get_or_create_interface_destructor_thunk(concrete_class_name, method);
         }
         auto provider_result = resolve_interface_slot_provider(concrete_class_name, interface_method_slot_key(method));
@@ -514,22 +514,6 @@ namespace scpp {
     }
 
 
-    [[nodiscard]] bool Codegen::is_constructor_function(const Function& fn) const
-{
-        if (fn.member_owner_class.empty() || !fn.name.ends_with("_new") || fn.params.empty()) return false;
-        const Type& this_param = fn.params[0].type;
-        return this_param.kind == TypeKind::Reference && this_param.pointee != nullptr &&
-               this_param.pointee->kind == TypeKind::Named && this_param.pointee->name == fn.member_owner_class;
-    }
-
-
-    [[nodiscard]] bool Codegen::is_destructor_function(const Function& fn) const
-{
-        if (fn.member_owner_class.empty() || !fn.name.ends_with("_delete") || fn.params.size() != 1) return false;
-        const Type& this_param = fn.params[0].type;
-        return this_param.kind == TypeKind::Reference && this_param.pointee != nullptr &&
-               this_param.pointee->kind == TypeKind::Named && this_param.pointee->name == fn.member_owner_class;
-    }
 
 
     [[nodiscard]] std::string Codegen::unqualified_template_base_name(std::string_view class_name) const
@@ -796,7 +780,7 @@ namespace scpp {
     [[nodiscard]] bool Codegen::class_has_any_constructor(const std::string& class_name) const
 {
         return std::any_of(program_->functions.begin(), program_->functions.end(),
-                           [&, this](const Function& fn) { return is_constructor_function(fn) && fn.member_owner_class == class_name; });
+                           [&](const Function& fn) { return is_constructor_function(fn) && fn.member_owner_class == class_name; });
     }
 
 

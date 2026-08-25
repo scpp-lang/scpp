@@ -2298,25 +2298,60 @@ class Function {
     return spelled_base == owner_base;
 }
 
+// A special member's mangled name is its owning class's own synthesized name
+// followed by a role marker (`_new` for a constructor, `_delete` for a
+// destructor). Two things make a bare "does the name end with the marker?"
+// test wrong in both directions, and the compiler carried that test in three
+// separate copies:
+//
+//  * Monomorphizing a *generic constructor* (`template<typename T> C(T)`)
+//    appends "." plus the mangled template arguments to the clone's name, so
+//    the instantiated constructor is spelled `C_new.double` and does not end
+//    with `_new` at all. Every site that asked "is this a constructor?" by
+//    suffix answered *no* for it, and codegen consequently emitted its body
+//    with no base-class construction, no vtable pointer, no default member
+//    initializers and no member-initializer list -- a silent miscompile.
+//    (Monomorphizing a generic *class* instead renames the owner, giving
+//    `C.int_new` for owner `C.int`, which the suffix test happened to accept;
+//    that is why only generic constructors were affected.)
+//  * Conversely an ordinary method whose own name ends in `_new` -- `void
+//    thing_new()` on class `C`, mangled `C_thing_new` -- satisfies the suffix
+//    test and takes a `C&` first parameter, so it was misclassified as a
+//    constructor.
+//
+// Anchoring the marker to the owner's name instead of to the end of the string
+// answers both. A partial/variadic class specialization synthesizes its members
+// against `<owner>__<template-owner-id>` (see parse_class_body_into), so one
+// such disambiguator is tolerated between the class name and the marker.
+[[nodiscard]] inline bool is_special_member_mangled_name(std::string_view name, std::string_view owner_name,
+                                                        std::string_view role_marker) {
+    if (owner_name.size() == 0) return false;
+    if (name.size() < owner_name.size()) return false;
+    if (!(name.substr(0, owner_name.size()) == owner_name)) return false;
+    std::string_view tail{name.substr(owner_name.size())};
+    std::string_view specialization_marker{"__"};
+    if (tail.size() >= specialization_marker.size() &&
+        tail.substr(0, specialization_marker.size()) == specialization_marker) {
+        std::size_t marker_pos = tail.rfind(role_marker);
+        if (marker_pos == static_cast<std::size_t>(-1)) return false;
+        tail = tail.substr(marker_pos);
+    }
+    if (tail == role_marker) return true;
+    if (tail.size() <= role_marker.size()) return false;
+    if (!(tail.substr(0, role_marker.size()) == role_marker)) return false;
+    std::string_view clone_suffix_start{"."};
+    return tail.substr(role_marker.size(), clone_suffix_start.size()) == clone_suffix_start;
+}
+
 [[nodiscard]] inline bool is_constructor_function(const Function& fn) {
     if (fn.member_owner_class.size() == 0 || fn.params.size() == 0) return false;
-    std::string_view name_view{fn.name};
-    std::string_view new_suffix{"_new"};
-    if (name_view.size() < new_suffix.size()) return false;
-    std::size_t suffix_pos = name_view.size() - new_suffix.size();
-    std::string_view actual_suffix{name_view.substr(suffix_pos)};
-    if (!(actual_suffix == new_suffix)) return false;
+    if (!is_special_member_mangled_name(fn.name, fn.member_owner_class, "_new")) return false;
     return is_special_member_this_param(fn.params[0].type, fn.member_owner_class);
 }
 
 [[nodiscard]] inline bool is_destructor_function(const Function& fn) {
     if (fn.member_owner_class.size() == 0 || fn.params.size() != 1) return false;
-    std::string_view name_view{fn.name};
-    std::string_view delete_suffix{"_delete"};
-    if (name_view.size() < delete_suffix.size()) return false;
-    std::size_t suffix_pos = name_view.size() - delete_suffix.size();
-    std::string_view actual_suffix{name_view.substr(suffix_pos)};
-    if (!(actual_suffix == delete_suffix)) return false;
+    if (!is_special_member_mangled_name(fn.name, fn.member_owner_class, "_delete")) return false;
     return is_special_member_this_param(fn.params[0].type, fn.member_owner_class);
 }
 

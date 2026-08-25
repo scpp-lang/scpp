@@ -423,7 +423,7 @@ namespace scpp {
 
     [[nodiscard]] std::string Codegen::method_lookup_name(const Function& fn)
 {
-        if (fn.name.ends_with("_delete")) return "~";
+        if (is_special_member_mangled_name(fn.name, fn.member_owner_class, "_delete")) return "~";
         if (fn.name.ends_with("_operator_deref")) return "operator*";
         if (fn.name.ends_with("_operator_arrow")) return "operator->";
         if (fn.name.ends_with("_operator_assign")) return "operator=";

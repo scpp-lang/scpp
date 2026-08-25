@@ -864,13 +864,12 @@ private:
 
     [[nodiscard]] std::expected<void, CodegenError> codegen_copy_construct_class(llvm::LLVMValueRef dest_ptr, llvm::LLVMValueRef src_ptr, const std::string& class_name);
 
-    [[nodiscard]] bool is_constructor_function(const Function& fn) const;
-
-    // The exact mirror of is_constructor_function: `fn` is the destructor
-    // of the class it is a member of. Used to give destruction the same
-    // "every lowering of this special member runs the class's own member
-    // logic" hook that construction already has.
-    [[nodiscard]] bool is_destructor_function(const Function& fn) const;
+    // is_constructor_function / is_destructor_function deliberately have no
+    // Codegen member of their own: both used to be re-implemented here with a
+    // bare `name.ends_with("_new")` / `ends_with("_delete")` test, which
+    // answered *no* for every monomorphized generic constructor. The single
+    // owner-anchored definition now lives beside the AST (ast.cppm) and is
+    // found here by unqualified lookup.
 
     [[nodiscard]] std::string unqualified_template_base_name(std::string_view class_name) const;
 

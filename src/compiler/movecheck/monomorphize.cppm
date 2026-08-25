@@ -534,6 +534,42 @@ private:
         return {};
     }
 
+    // ch06 §6.1: a constructor's mem-initializer-list is the *second*
+    // place a Function stores expressions, and a clone that carries only
+    // the body is a constructor whose members are never initialized. The
+    // list has to travel with every clone for the same reason the body
+    // does, and every substitution the body gets it gets too -- only the
+    // substitution differs between clone paths, never the enumeration.
+    //
+    // Seven clone paths build a Function from a template here. Four had
+    // a hand-written copy of this enumeration; three -- the
+    // converting-constructor instantiation, instantiate_full_header_
+    // generic_clone and the concept-witness clone -- cloned the body,
+    // substituted into it, and never touched the list at all. The
+    // converting-constructor path is the one every `C c{x}` against a
+    // constructor template goes through, so an instantiated generic
+    // constructor was built with an empty mem-initializer-list and
+    // initialized nothing. Taking the substitution as a callback makes
+    // the enumeration the shared part: an eighth clone path cannot forget
+    // the list, because it cannot construct one without saying what to
+    // substitute into it.
+    template <typename SubstituteExpr>
+    [[nodiscard]] std::expected<void, DataflowError> clone_member_initializers(const Function& tmpl, Function& clone,
+                                                                               SubstituteExpr&& substitute) {
+        clone.member_initializers = tmpl.member_initializers;
+        for (MemberInitializer& init : clone.member_initializers) {
+            if (init.initializer.expr != nullptr) {
+                if (auto _r = substitute(*init.initializer.expr); !_r.has_value())
+                    return std::unexpected(std::move(_r).error());
+            }
+            for (ExprPtr& arg : init.initializer.brace_args) {
+                if (arg == nullptr) continue;
+                if (auto _r = substitute(*arg); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            }
+        }
+        return {};
+    }
+
     // ch05 §5.12/ch06 §6.1: everything this pass does to a function
     // body -- resolving a lambda to a synthesized closure class,
     // monomorphizing a generic call, redirecting a bare call to a
@@ -1373,31 +1409,19 @@ private:
                 }
                 clone.params.push_back(std::move(np));
             }
-            clone.member_initializers = method_tmpl.member_initializers;
-            for (MemberInitializer& init : clone.member_initializers) {
-                if (init.initializer.expr) {
-                    substitute_type_params_in_expr(*init.initializer.expr, type_replacements);
-                    substitute_type_packs_in_expr(*init.initializer.expr, pack_replacements);
-                    for (std::size_t i = 0; i < template_params_copy.size() && i < non_type_args.size(); i++) {
-                        if (!template_params_copy[i].is_non_type) continue;
-                        substitute_non_type_param_in_expr(*init.initializer.expr, template_params_copy[i].name,
-                                                          non_type_args[i]);
-                    }
-                    if (auto _r = resolve_generic_types_in_expr(*init.initializer.expr); !_r.has_value()) {
-                        return std::unexpected(std::move(_r).error());
-                    }
-                }
-                for (ExprPtr& arg : init.initializer.brace_args) {
-                    substitute_type_params_in_expr(*arg, type_replacements);
-                    substitute_type_packs_in_expr(*arg, pack_replacements);
-                    for (std::size_t i = 0; i < template_params_copy.size() && i < non_type_args.size(); i++) {
-                        if (!template_params_copy[i].is_non_type) continue;
-                        substitute_non_type_param_in_expr(*arg, template_params_copy[i].name, non_type_args[i]);
-                    }
-                    if (auto _r = resolve_generic_types_in_expr(*arg); !_r.has_value()) {
-                        return std::unexpected(std::move(_r).error());
-                    }
-                }
+            if (auto _r = clone_member_initializers(
+                    method_tmpl, clone,
+                    [&](Expr& e) -> std::expected<void, DataflowError> {
+                        substitute_type_params_in_expr(e, type_replacements);
+                        substitute_type_packs_in_expr(e, pack_replacements);
+                        for (std::size_t i = 0; i < template_params_copy.size() && i < non_type_args.size(); i++) {
+                            if (!template_params_copy[i].is_non_type) continue;
+                            substitute_non_type_param_in_expr(e, template_params_copy[i].name, non_type_args[i]);
+                        }
+                        return resolve_generic_types_in_expr(e);
+                    });
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
             }
             clone.body = method_tmpl.body ? deep_clone_stmt(*method_tmpl.body) : nullptr;
             if (clone.body) {
@@ -2054,18 +2078,13 @@ private:
                 // initializers for every field and spuriously reports
                 // *every* generic class constructor as leaving all of
                 // its members uninitialized.
-                check_fn.member_initializers = method_tmpl.member_initializers;
-                for (MemberInitializer& init : check_fn.member_initializers) {
-                    if (init.initializer.expr) {
-                        substitute_type_params_in_expr(*init.initializer.expr, type_replacements);
-                        if (auto _r = resolve_generic_types_in_expr(*init.initializer.expr); !_r.has_value()) {
-                            return std::unexpected(std::move(_r).error());
-                        }
-                    }
-                    for (ExprPtr& arg : init.initializer.brace_args) {
-                        substitute_type_params_in_expr(*arg, type_replacements);
-                        if (auto _r = resolve_generic_types_in_expr(*arg); !_r.has_value()) return std::unexpected(std::move(_r).error());
-                    }
+                if (auto _r = clone_member_initializers(method_tmpl, check_fn,
+                                                        [&](Expr& e) -> std::expected<void, DataflowError> {
+                                                            substitute_type_params_in_expr(e, type_replacements);
+                                                            return resolve_generic_types_in_expr(e);
+                                                        });
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
                 }
                 check_fn.body = method_tmpl.body ? deep_clone_stmt(*method_tmpl.body) : nullptr;
                 if (check_fn.body) {
@@ -3017,22 +3036,15 @@ private:
                     }
                     clone.params.push_back(std::move(np));
                 }
-                clone.member_initializers = method_tmpl.member_initializers;
-                for (MemberInitializer& init : clone.member_initializers) {
-                    if (init.initializer.expr) {
-                        substitute_type_params_in_expr(*init.initializer.expr,
-                                                       class_selection.bindings.type_replacements);
-                        substitute_type_packs_in_expr(*init.initializer.expr,
-                                                      class_selection.bindings.type_pack_replacements);
-                        if (auto _r = resolve_generic_types_in_expr(*init.initializer.expr); !_r.has_value()) {
-                            return fail(std::move(_r).error());
-                        }
-                    }
-                    for (ExprPtr& arg : init.initializer.brace_args) {
-                        substitute_type_params_in_expr(*arg, class_selection.bindings.type_replacements);
-                        substitute_type_packs_in_expr(*arg, class_selection.bindings.type_pack_replacements);
-                        if (auto _r = resolve_generic_types_in_expr(*arg); !_r.has_value()) return fail(std::move(_r).error());
-                    }
+                if (auto _r = clone_member_initializers(
+                        method_tmpl, clone,
+                        [&](Expr& e) -> std::expected<void, DataflowError> {
+                            substitute_type_params_in_expr(e, class_selection.bindings.type_replacements);
+                            substitute_type_packs_in_expr(e, class_selection.bindings.type_pack_replacements);
+                            return resolve_generic_types_in_expr(e);
+                        });
+                    !_r.has_value()) {
+                    return fail(std::move(_r).error());
                 }
                 clone.body = method_tmpl.body ? deep_clone_stmt(*method_tmpl.body) : nullptr;
                 if (clone.body) {
@@ -3185,18 +3197,16 @@ private:
                     }
                     clone.params.push_back(std::move(new_param));
                 }
-                clone.member_initializers = method_tmpl.member_initializers;
-                for (MemberInitializer& init : clone.member_initializers) {
-                    if (init.initializer.expr) {
-                        for (std::size_t i = 0; i < params_copy.size(); i++) {
-                            substitute_non_type_param_in_expr(*init.initializer.expr, params_copy[i].name, non_type_args[i]);
-                        }
-                    }
-                    for (ExprPtr& arg : init.initializer.brace_args) {
-                        for (std::size_t i = 0; i < params_copy.size(); i++) {
-                            substitute_non_type_param_in_expr(*arg, params_copy[i].name, non_type_args[i]);
-                        }
-                    }
+                if (auto _r = clone_member_initializers(method_tmpl, clone,
+                                                        [&](Expr& e) -> std::expected<void, DataflowError> {
+                                                            for (std::size_t i = 0; i < params_copy.size(); i++) {
+                                                                substitute_non_type_param_in_expr(e, params_copy[i].name,
+                                                                                                  non_type_args[i]);
+                                                            }
+                                                            return {};
+                                                        });
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
                 }
                 clone.body = method_tmpl.body ? deep_clone_stmt(*method_tmpl.body) : nullptr;
                 if (clone.body) {
@@ -4398,6 +4408,16 @@ private:
                     }
                     clone.params.push_back(std::move(p));
                 }
+                if (auto _r = clone_member_initializers(tmpl, clone,
+                                                        [&](Expr& e) -> std::expected<void, DataflowError> {
+                                                            for (const auto& [name, replacement] : type_bindings) {
+                                                                substitute_type_param_in_expr(e, name, replacement);
+                                                            }
+                                                            return resolve_generic_types_in_expr(e);
+                                                        });
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
                 clone.body = tmpl.body ? deep_clone_stmt(*tmpl.body) : nullptr;
                 if (clone.body) {
                     for (const auto& [name, replacement] : type_bindings) {
@@ -4526,6 +4546,17 @@ private:
                 }
             }
             clone.params.push_back(std::move(p));
+        }
+        if (auto _r = clone_member_initializers(tmpl, clone,
+                                                [&](Expr& e) -> std::expected<void, DataflowError> {
+                                                    for (const auto& [name, replacement] : type_bindings) {
+                                                        substitute_type_param_in_expr(e, name, replacement);
+                                                    }
+                                                    substitute_type_packs_in_expr(e, pack_bindings);
+                                                    return resolve_generic_types_in_expr(e);
+                                                });
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
         }
         clone.body = tmpl.body ? deep_clone_stmt(*tmpl.body) : nullptr;
         if (clone.body) {
@@ -7399,6 +7430,16 @@ private:
             p.name = tmpl.params[i].name;
             p.type = concrete_param_types[i];
             clone.params.push_back(std::move(p));
+        }
+        if (auto _r = clone_member_initializers(tmpl, clone,
+                                                [&](Expr& e) -> std::expected<void, DataflowError> {
+                                                    for (const auto& [witness_name, concrete] : witness_replacements) {
+                                                        substitute_type_param_in_expr(e, witness_name, concrete);
+                                                    }
+                                                    return {};
+                                                });
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
         }
         clone.body = tmpl.body ? deep_clone_stmt(*tmpl.body) : nullptr;
         if (clone.body) {
