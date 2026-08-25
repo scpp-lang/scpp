@@ -153,31 +153,27 @@ struct NodiscardInfo {
 [[nodiscard]] bool is_named_record_type(const Type& type, const Body& body);
 [[nodiscard]] bool compile_time_dependency_visible_in_body(const FunctionSignature& candidate, const Body& body);
 
-// Whether `sig` can be called with `arg_count` arguments, accounting for
-// trailing defaulted parameters and varargs. Shared by constructor and
-// ordinary-call selection (dataflow.cppm) and by monomorphize.cppm's own
-// non-template-constructor preference check, so all three agree on what
-// "this overload has the right arity" means.
-[[nodiscard]] bool function_signature_accepts_argument_count(const FunctionSignature& sig, std::size_t arg_count,
-                                                             std::size_t param_offset);
 [[nodiscard]] bool is_copyable_class_lvalue_boundary_source(const Expr& expr, const Type& target_type,
                                                             const Body& body,
                                                             const Signatures& signatures);
 [[nodiscard]] bool is_freely_copyable_class_value_source(const Expr& expr, const Type& target_type, const Body& body,
                                                          const Signatures& signatures);
 [[nodiscard]] bool is_implicit_move_return_source(const Expr& expr, const Type& target_type, const Body& body);
+[[nodiscard]] std::vector<ArgumentConversion> constructor_argument_conversions(const FunctionSignature& candidate,
+                                                                               const std::vector<ExprPtr>& ctor_args,
+                                                                               const Body& body,
+                                                                               const Signatures& signatures);
 [[nodiscard]] const FunctionSignature* find_single_argument_converting_constructor_signature(
             const Type& class_type, const Expr& arg, const Body& body, const Signatures& signatures);
         [[nodiscard]] bool argument_type_matches_parameter(const Type& arg_type, const Type& param_type, const Body& body);
 [[nodiscard]] bool const_reference_binds_materialized_temporary(const Expr& arg, const Type& param_type,
                                                                 const Body& body,
-                                                                const Signatures& signatures);
+                                                                const Signatures& signatures,
+                                                                bool allow_user_defined_conversion = true);
 [[nodiscard]] bool argument_matches_parameter(const Expr& arg, const Type& param_type, const Body& body,
-                                              const Signatures& signatures);
-[[nodiscard]] bool argument_matches_parameter_for_constructor_selection(const Expr& arg,
-                                                                        const Type& param_type,
-                                                                        const Body& body,
-                                                                        const Signatures& signatures);
+                                              const Signatures& signatures,
+                                              bool allow_user_defined_conversion = true,
+                                              bool require_usable_class_value_source = true);
 [[nodiscard]] bool receiver_matches_method_qualifier(const Expr& receiver_expr,
                                                      const FunctionSignature& candidate,
                                                      const Body& body,
@@ -311,21 +307,6 @@ std::expected<void, DataflowError> check_enum_conversion_compatibility(const Typ
 // produces_rvalue_of_type so both resolve a method call's callee
 // identically.
 [[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
-
-namespace {
-[[nodiscard]] bool signature_accepts_argument_count(const FunctionSignature& sig, std::size_t arg_count,
-                                                    std::size_t param_offset) {
-    if (sig.param_types.size() < param_offset) return false;
-    std::size_t fixed_param_count = sig.param_types.size() - param_offset;
-    std::size_t min_required = fixed_param_count;
-    while (min_required > 0 && sig.param_default_exprs[param_offset + min_required - 1] != nullptr) {
-        min_required--;
-    }
-    if (arg_count < min_required) return false;
-    if (!sig.has_varargs && arg_count > fixed_param_count) return false;
-    return sig.has_varargs || arg_count <= fixed_param_count;
-}
-}
 
 void check_constructor_arguments(const std::string& class_name, const std::vector<ExprPtr>& ctor_args,
                                   DataflowState& state, const Body& body, const Signatures& signatures,
@@ -619,7 +600,7 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
             if (name != ctor_name && !(!name.empty() && name.starts_with(ctor_name + "."))) continue;
             for (const FunctionSignature& candidate : overloads) {
                 if (candidate.member_owner_class != type.name) continue;
-                if (function_signature_accepts_argument_count(candidate, args.size(), /*param_offset=*/1)) return true;
+                if (signature_accepts_argument_count(candidate, args.size(), /*param_offset=*/1)) return true;
             }
         }
         return args.empty();
@@ -642,19 +623,6 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
         if (def.name == type.name) return !def.is_concept_witness;
     }
     return false;
-}
-
-[[nodiscard]] bool function_signature_accepts_argument_count(const FunctionSignature& sig, std::size_t arg_count,
-                                                             std::size_t param_offset) {
-    if (sig.param_types.size() < param_offset) return false;
-    std::size_t fixed_param_count = sig.param_types.size() - param_offset;
-    std::size_t min_required = fixed_param_count;
-    while (min_required > 0 && sig.param_default_exprs[param_offset + min_required - 1] != nullptr) {
-        min_required--;
-    }
-    if (arg_count < min_required) return false;
-    if (!sig.has_varargs && arg_count > fixed_param_count) return false;
-    return sig.has_varargs || arg_count <= fixed_param_count;
 }
 
 [[nodiscard]] bool compile_time_dependency_visible_in_body(const FunctionSignature& candidate, const Body& body) {
@@ -785,17 +753,37 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
 }
 
 [[nodiscard]] bool const_reference_binds_materialized_temporary(const Expr& arg, const Type& param_type,
-                                                                const Body& body, const Signatures& signatures) {
+                                                                const Body& body, const Signatures& signatures,
+                                                                bool allow_user_defined_conversion) {
     if (!is_reference(param_type) || param_type.is_rvalue_ref || param_type.is_mutable_ref || param_type.pointee == nullptr) {
         return false;
     }
     if (produces_rvalue_of_type(arg, *param_type.pointee, body, signatures)) return true;
-    return is_named_record_type(*param_type.pointee, body) &&
+    return allow_user_defined_conversion && is_named_record_type(*param_type.pointee, body) &&
            find_single_argument_converting_constructor_signature(*param_type.pointee, arg, body, signatures) != nullptr;
 }
 
+// [over.best.ics]/4: when the argument being converted is itself the
+// argument of a user-defined conversion -- a converting constructor's own
+// parameter -- only standard conversion sequences are considered. That is
+// what `allow_user_defined_conversion` spells: user-defined conversions do
+// not chain. It is also what terminates the recursion below, since
+// find_single_argument_converting_constructor_signature asks this same
+// question of each candidate constructor's parameter.
+//
+// [dcl.init]/17.6.1: whether a by-value class argument can actually be
+// *copied* into its parameter is decided after a candidate is chosen, not
+// while choosing one -- clang selects `C(S)` for `C c{s}` and only then
+// reports S's deleted copy constructor. `require_usable_class_value_source`
+// spells that: constructor selection passes false so that a class-typed
+// parameter is matched on its type alone and the by-value/§6.5(2) rule
+// keeps its own, far more specific diagnostic downstream. Folding it into
+// viability instead makes the rejection contradict itself -- "no
+// constructor of 'C' matches: argument type is 'S'; candidate: C(S)".
 [[nodiscard]] bool argument_matches_parameter(const Expr& arg, const Type& param_type, const Body& body,
-                                                const Signatures& signatures) {
+                                                const Signatures& signatures,
+                                                bool allow_user_defined_conversion,
+                                                bool require_usable_class_value_source) {
     if (arg.kind == ExprKind::BracedInitList) {
         return braced_init_list_can_initialize(param_type, arg.args, body, signatures);
     }
@@ -811,7 +799,8 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
         // rvalue of the exact pointee type, or to a freshly
         // materialized temporary built from a converting constructor
         // such as `std::string{"..."}` from a string literal.
-        if (const_reference_binds_materialized_temporary(arg, param_type, body, signatures)) {
+        if (const_reference_binds_materialized_temporary(arg, param_type, body, signatures,
+                                                         allow_user_defined_conversion)) {
             return true;
         }
         // [over.ics.ref]/1: a `T&` binds only to an lvalue. A
@@ -843,16 +832,17 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
         std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
         return arg_type.has_value() && argument_type_matches_parameter(*arg_type, param_type, body);
     }
+    if (literal_argument_adopts_parameter_type(arg, param_type)) return true;
     std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
     if (!arg_type.has_value()) return false;
     if (!argument_type_matches_parameter(*arg_type, param_type, body)) {
-        if (is_named_record_type(param_type, body) &&
+        if (allow_user_defined_conversion && is_named_record_type(param_type, body) &&
             find_single_argument_converting_constructor_signature(param_type, arg, body, signatures) != nullptr) {
             return true;
         }
         return false;
     }
-    if (is_named_record_type(param_type, body)) {
+    if (require_usable_class_value_source && is_named_record_type(param_type, body)) {
         return is_copyable_class_lvalue_boundary_source(arg, param_type, body, signatures) ||
                is_freely_copyable_class_value_source(arg, param_type, body, signatures) ||
                produces_rvalue_of_type(arg, param_type, body, signatures);
@@ -860,46 +850,88 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     return true;
 }
 
-[[nodiscard]] bool constructor_parameter_accepts_argument_directly(const Expr& arg, const Type& param_type,
-                                                                   const Body& body, const Signatures& signatures) {
-    auto normalized_param_type = [&](Type type) {
-        if (type.kind == TypeKind::Named && !type.name.empty() && type.template_args.empty()) {
-            if (std::optional<Type> inferred = infer_expr_type(arg, body, signatures); inferred.has_value()) return *inferred;
-        }
-        return type;
-    };
-    if (is_nullptr_literal(arg) && param_type.kind == TypeKind::Pointer) return true;
-    Type effective_param_type = normalized_param_type(param_type);
-    if (is_reference(effective_param_type) && effective_param_type.is_rvalue_ref) {
-        return produces_rvalue_of_type(arg, *effective_param_type.pointee, body, signatures);
-    }
-    if (is_reference(effective_param_type)) {
-        if (!effective_param_type.is_mutable_ref && effective_param_type.pointee != nullptr &&
-            produces_rvalue_of_type(arg, *effective_param_type.pointee, body, signatures)) {
-            return true;
-        }
-        if (arg.kind == ExprKind::Move ||
-            arg.kind == ExprKind::IntegerLiteral || arg.kind == ExprKind::FloatLiteral ||
-            arg.kind == ExprKind::BoolLiteral || arg.kind == ExprKind::CharLiteral ||
-            arg.kind == ExprKind::StringLiteral) {
-            return false;
-        }
-        std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
-        return arg_type.has_value() && argument_type_matches_parameter(*arg_type, effective_param_type, body);
-    }
-    std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
-    if (!arg_type.has_value() || !argument_type_matches_parameter(*arg_type, effective_param_type, body)) return false;
-    if (is_named_record_type(effective_param_type, body)) {
-        return is_copyable_class_lvalue_boundary_source(arg, effective_param_type, body, signatures) ||
-               is_freely_copyable_class_value_source(arg, effective_param_type, body, signatures) ||
-               produces_rvalue_of_type(arg, effective_param_type, body, signatures);
-    }
-    return true;
+// A parameter that names a type which does not exist at this phase is a
+// monomorphization placeholder -- the `T` of `template<typename T> C(T)`.
+// Movecheck runs before those are substituted, so matching an argument
+// against one can only succeed: whatever the argument's type is, that is
+// what `T` will become. Every *other* named type does exist, and matching
+// against it is the check.
+//
+// Drawing that line is the whole of constructor type checking here. Without
+// it -- and the predicate below drew no line at all, substituting the
+// argument's own type for *every* bare named parameter type -- the
+// comparison compared a type with itself and could not fail: `C(int)`
+// "accepted" a double, a bool, a pointer and an unrelated record alike.
+// Codegen's copy of that predicate, under the same name, still carries the
+// same lambda with an empty body (semantics.cppm), so the two passes
+// answered "does this argument match this parameter?" differently and only
+// codegen's answer was a check -- which is why the front end appeared to
+// reject these calls while movecheck was silently selecting a constructor
+// for them.
+[[nodiscard]] bool named_type_is_monomorphization_placeholder(const Type& type, const Body& body) {
+    if (type.kind != TypeKind::Named || type.name.empty()) return false;
+    if (!type.template_args.empty() || !type.non_type_args.empty()) return false;
+    if (is_scalar_named_type(type) || is_void_named_type(type)) return false;
+    // spec §16.4(5): `nullptr_t` "is not a scalar type: it is not named in
+    // Table 1". It is nonetheless a real, spellable fundamental type, so it
+    // is not a placeholder -- and treating it as one makes
+    // `std::unique_ptr(nullptr_t)` accept every pointer argument that
+    // `unique_ptr(T*)` should take, the very hazard codegen's own
+    // resolver already carries a comment about.
+    if (is_nullptr_type(type)) return false;
+    if (is_enum_type(type, body.program)) return false;
+    return !is_named_record_type(type, body);
 }
 
+// "Does this argument bind to this parameter?" -- for a *constructor's*
+// parameter. Which is the same question argument_matches_parameter answers
+// for a function's, so it is answered by calling it, with the one thing that
+// genuinely differs applied first: a constructor may still carry an
+// unsubstituted template parameter as its parameter type.
+//
+// It used to be a second, hand-copied answer, and it had drifted from the
+// first in four ways, each an under-rejection or an over-rejection of its
+// own: it never let a `const std::string&` parameter bind a string literal
+// through a converting constructor ([over.ics.user], the case
+// const_reference_binds_materialized_temporary exists for); it never applied
+// [over.ics.ref]/1 to a `T&` parameter given a prvalue; it could not see a
+// nested braced-init-list argument at all; and a by-value record parameter
+// got no converting-constructor route either. A constructor call and a
+// function call were being judged by two different rules.
+[[nodiscard]] bool constructor_parameter_accepts_argument_directly(const Expr& arg, const Type& param_type,
+                                                                   const Body& body, const Signatures& signatures,
+                                                                   bool allow_user_defined_conversion,
+                                                                   bool require_usable_class_value_source) {
+    // A parameter naming a type that does not exist at this phase is a
+    // monomorphization placeholder -- the `T` of `template<typename T> C(T)`.
+    // Movecheck runs before those are substituted, so whatever the argument's
+    // type is, that is what `T` will become: substituting it is what makes the
+    // *type* half of the match trivially true. Nothing else about the match is
+    // -- a bare `std::unique_ptr` lvalue is no more a legitimate by-value
+    // argument for a `T` than for a spelled-out one -- so the substituted type
+    // goes through the same check as any other. Every *other* named type does
+    // exist, and matching against it is the check.
+    Type effective_param_type = param_type;
+    if (named_type_is_monomorphization_placeholder(param_type, body)) {
+        std::optional<Type> inferred = infer_expr_type(arg, body, signatures);
+        if (!inferred.has_value()) return true;
+        effective_param_type = *inferred;
+    }
+    return argument_matches_parameter(arg, effective_param_type, body, signatures,
+                                      allow_user_defined_conversion, require_usable_class_value_source);
+}
+
+// Selection proper. A class-typed parameter is matched on its type alone
+// here: the by-value copy rule ([dcl.init]/17.6.1, spec §6.5(2)) is applied
+// to the *selected* constructor's arguments downstream, where it has its own
+// diagnostic. Every other user of this predicate is answering "is this call
+// viable at all?" with no such downstream re-check, and keeps it.
 [[nodiscard]] bool argument_matches_parameter_for_constructor_selection(const Expr& arg, const Type& param_type,
-                                                                       const Body& body, const Signatures& signatures) {
-    return constructor_parameter_accepts_argument_directly(arg, param_type, body, signatures);
+                                                                       const Body& body, const Signatures& signatures,
+                                                                       bool allow_user_defined_conversion) {
+    return constructor_parameter_accepts_argument_directly(arg, param_type, body, signatures,
+                                                           allow_user_defined_conversion,
+                                                           /*require_usable_class_value_source=*/false);
 }
 
 [[nodiscard]] const FunctionSignature* find_single_argument_converting_constructor_signature(
@@ -913,6 +945,7 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
         return type;
     };
     if (class_type.kind != TypeKind::Named) return nullptr;
+    std::vector<const FunctionSignature*> matches;
     std::string ctor_name = class_type.name + "_new";
     auto is_constructor_clone_name = [&](std::string_view name) {
         return name == ctor_name || (!name.empty() && name.starts_with(ctor_name + "."));
@@ -929,12 +962,30 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
                  types_equal(*ctor_param_type.pointee, class_type))) {
                 continue;
             }
-            if (constructor_parameter_accepts_argument_directly(arg, ctor_param_type, body, signatures)) {
-                return &candidate;
+            if (constructor_parameter_accepts_argument_directly(arg, ctor_param_type, body, signatures,
+                                                               /*allow_user_defined_conversion=*/false,
+                                                               /*require_usable_class_value_source=*/true)) {
+                matches.push_back(&candidate);
             }
         }
     }
-    return nullptr;
+    if (matches.empty()) return nullptr;
+    if (matches.size() == 1) return matches[0];
+    // [over.ics.rank] through the shared algebra, exactly as codegen's
+    // find_single_argument_converting_constructor now does. This returned
+    // the first candidate the signature map happened to enumerate, which
+    // is not even a stable order -- so movecheck could decide a
+    // conversion existed via one constructor while codegen, ranking,
+    // found the pair ambiguous and emitted nothing.
+    std::vector<ExprPtr> single_arg;
+    single_arg.push_back(deep_clone_expr(arg));
+    std::vector<std::vector<ArgumentConversion>> conversions;
+    for (const FunctionSignature* candidate : matches) {
+        conversions.push_back(constructor_argument_conversions(*candidate, single_arg, body, signatures));
+    }
+    std::vector<std::size_t> best = best_viable_candidates(conversions);
+    if (best.size() != 1) return nullptr;
+    return matches[best[0]];
 }
 
 [[nodiscard]] bool receiver_matches_method_qualifier(const Expr& receiver_expr, const FunctionSignature& candidate,
@@ -1109,6 +1160,16 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
         Type target_value = target;
         target_value.is_const_qualified = false;
         conversion.argument_is_rvalue = produces_rvalue_of_type(*call_expr.args[i], target_value, body, signatures);
+        // spec §16.2(1): a literal argument *has* the parameter's scalar
+        // type, so the sequence is the identity, not a conversion --
+        // but only for the type §16.2(3) gives it absent a context; see
+        // literal_argument_ranks_as_identity.
+        if (literal_argument_adopts_parameter_type(*call_expr.args[i], param_type)) {
+            if (!literal_argument_ranks_as_identity(*call_expr.args[i], param_type))
+                conversion.rank = ConversionRank::Conversion;
+            result.push_back(conversion);
+            continue;
+        }
         std::optional<Type> arg_type = infer_expr_type(*call_expr.args[i], body, signatures);
         if (!arg_type.has_value()) {
             // movecheck cannot type every expression shape -- Member and

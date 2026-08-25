@@ -1,0 +1,17 @@
+import std;
+// [dcl.init]/16.6: `C c = d;` is a call to a converting constructor. When none
+// matches, the answer is [over.match.ctor], not a list of every initializer
+// spelling the language has -- and it must be an answer at all: this shape was
+// accepted and compiled into an unchecked byte copy.
+class C {
+public:
+    virtual ~C() = default;
+    C() = default;
+    C(int x) : v{x} { return; }
+    int v = 0;
+};
+int main() {
+    double d = 1.5;
+    C c = d;
+    return c.v;
+}

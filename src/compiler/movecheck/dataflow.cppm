@@ -1715,82 +1715,29 @@ struct ConvertingConstructorBinding {
                               "' is not copy-constructible (spec §6.5(2)) -- this construction is not permitted",
                           state.current_loc));
     }
-    std::string ctor_name = class_name + "_new";
-    auto is_constructor_clone_name = [&](std::string_view name) {
-        return name == ctor_name || (!name.empty() && name.starts_with(ctor_name + "."));
-    };
-    const FunctionSignature* sig = nullptr;
-    std::vector<const FunctionSignature*> constructor_candidates;
-    for (const auto& [name, overloads] : signatures) {
-        if (!is_constructor_clone_name(name)) continue;
-        for (const FunctionSignature& candidate : overloads) {
-            if (candidate.member_owner_class != class_name) continue;
-            constructor_candidates.push_back(&candidate);
-        }
-    }
-    if (!constructor_candidates.empty()) {
-        std::vector<const FunctionSignature*> visible_arity_matches;
-        for (const FunctionSignature* candidate : constructor_candidates) {
-            if (!compile_time_dependency_visible_in_body(*candidate, body)) continue;
-            if (!function_signature_accepts_argument_count(*candidate, ctor_args.size(), 1)) continue;
-            visible_arity_matches.push_back(candidate);
-        }
-        if (visible_arity_matches.size() == 1) {
-            sig = visible_arity_matches[0];
-        }
-        std::vector<const FunctionSignature*> matches;
-        if (sig == nullptr) {
-            for (const FunctionSignature* candidate : constructor_candidates) {
-                if (!compile_time_dependency_visible_in_body(*candidate, body)) continue;
-                if (!function_signature_accepts_argument_count(*candidate, ctor_args.size(), 1)) continue;
-                bool all_match = true;
-                for (std::size_t i = 0; all_match && i < ctor_args.size(); i++) {
-                    all_match = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
-                                                                                     candidate->param_types[i + 1], body,
-                                                                                     signatures);
-                }
-                if (all_match) matches.push_back(candidate);
-            }
-            if (matches.size() == 1) sig = matches[0];
-            // ch05 §5.10: an *exact* argument-type match is strictly more
-            // specific than merely "already monomorphized", so it is tried
-            // first. Trying the concrete-candidate fallback below first
-            // instead made the choice depend on the order `signatures`
-            // (an unordered_map) happens to enumerate its overloads in --
-            // e.g. `std::move_only_function<int(int)> f{Adder(2)};` picked
-            // whichever of that class's own already-instantiated
-            // constructor clones came out of the hash table first, which
-            // could be the `move_only_function<int(int)>` one rather than
-            // the `Adder` one, and changed when an unrelated `std` module
-            // partition was added.
-            if (sig == nullptr && !matches.empty()) {
-                auto exact_type_match = [&](const FunctionSignature* candidate) {
-                    for (std::size_t i = 0; i < ctor_args.size(); i++) {
-                        std::optional<Type> arg_type = infer_expr_type(*ctor_args[i], body, signatures);
-                        if (!arg_type.has_value()) return false;
-                        if (!types_equal(*arg_type, candidate->param_types[i + 1])) return false;
-                    }
-                    return true;
-                };
-                for (const FunctionSignature* candidate : matches) {
-                    if (exact_type_match(candidate)) {
-                        sig = candidate;
-                        break;
-                    }
-                }
-            }
-            if (sig == nullptr) {
-                for (const FunctionSignature* candidate : matches) {
-                    if (!candidate->is_generic_template) {
-                        sig = candidate;
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    // [over.match.ctor]: which constructor a call selects has exactly one
+    // answer, and resolve_constructor_signature is the one implementation
+    // of it -- the same one this function already used for the
+    // zero-argument case just below, the same [over.ics.rank] algebra
+    // codegen's resolve_constructor_overload_exact and the constant
+    // evaluator rank with.
+    //
+    // What stood here was a second, weaker answer to the same question: a
+    // candidate of the right *arity* won outright whenever it was the only
+    // one of that arity, with no argument type examined at all -- and only
+    // when it was *not* the only one did any type matching happen, in a
+    // chain that then took the first exact match and, failing that, the
+    // first non-generic candidate. A lone constructor was therefore
+    // selected for arguments it cannot accept, and everything downstream
+    // of `sig` (the deleted-, private- and unsafe-constructor
+    // diagnostics, and every argument's borrow/move effect) was applied
+    // against a signature overload resolution would never choose. The
+    // deleted-constructor message asserted the very thing the arity gate
+    // had skipped checking -- "a deleted function takes part in overload
+    // resolution and was selected here" -- for a call with no viable
+    // constructor at all.
+    const FunctionSignature* sig = resolve_constructor_signature(class_name, ctor_args, body, signatures);
     if (sig == nullptr && report_errors && ctor_args.empty()) {
-        static const std::vector<ExprPtr> no_ctor_args;
         if (body.program != nullptr && !class_has_any_constructor(class_name, *body.program)) {
             if (auto _r = ensure_implicit_default_construction_is_valid(class_name, state.current_class, body, signatures,
                                                           state.current_loc,
@@ -1801,13 +1748,10 @@ struct ConvertingConstructorBinding {
             }
             return {};
         }
-        sig = resolve_constructor_signature(class_name, no_ctor_args, body, signatures);
-        if (sig == nullptr) {
-            return std::unexpected(DataflowError("type '" + class_name +
-                                    "' has no default constructor; no constructor of '" + class_name +
-                                    "' matches 0 arguments",
-                                state.current_loc));
-        }
+        return std::unexpected(DataflowError("type '" + class_name +
+                                "' has no default constructor; no constructor of '" + class_name +
+                                "' matches 0 arguments",
+                            state.current_loc));
     }
     // [class.copy.ctor]/6: a record type with no user-declared copy
     // constructor has one *implicitly declared*, and [dcl.init]/16.6.2.2
@@ -1846,6 +1790,18 @@ struct ConvertingConstructorBinding {
                     state.current_loc));
             }
             return {};
+        }
+    }
+    // [dcl.init.aggr]: a record that declares constructors is not an
+    // aggregate, so with candidates present and none selected the call is
+    // ill-formed -- it is not silently something else. Reached only after
+    // the same-type block above, which owns spec §6.4(2)/§6.5(2).
+    if (sig == nullptr && report_errors && !ctor_args.empty() && body.program != nullptr &&
+        is_named_record_type(constructed_type, body)) {
+        if (std::optional<std::string> failure =
+                describe_constructor_selection_failure(class_name, ctor_args, body, signatures);
+            failure.has_value()) {
+            return std::unexpected(DataflowError(*std::move(failure), state.current_loc));
         }
     }
     // [dcl.init.aggr]/4: with no constructor resolved and arguments
@@ -3489,6 +3445,19 @@ struct ConvertingConstructorBinding {
                             if (std::optional<std::string> why = explain_unusable_class_value_source(*stmt.expr);
                                 why.has_value()) {
                                 return std::unexpected(DataflowError(*why, state.current_loc));
+                            }
+                            // [dcl.init]/16.6: the source is neither a copy
+                            // nor a move of the same type, so this is a call
+                            // to a converting constructor and failed as one.
+                            // Say which rule it failed -- no viable candidate
+                            // or an ambiguity -- rather than re-listing every
+                            // initializer shape the language has.
+                            std::vector<ExprPtr> init_args;
+                            init_args.push_back(deep_clone_expr(*stmt.expr));
+                            if (std::optional<std::string> failure = describe_constructor_selection_failure(
+                                    (*local_type).name, init_args, body, signatures);
+                                failure.has_value()) {
+                                return std::unexpected(DataflowError(*failure, state.current_loc));
                             }
                             return std::unexpected(DataflowError(
                                 std::string(record_keyword((*local_type).name, *body.program)) + " '" +

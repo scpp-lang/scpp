@@ -1,0 +1,24 @@
+import std;
+// [dcl.init]/17.6.1: whether a by-value class argument can be copied is
+// decided after a constructor is selected, not while selecting one. `C(S)`
+// is the match; S simply is not copy-constructible, and that is what the
+// diagnostic has to say.
+class S {
+public:
+    virtual ~S() = default;
+    S() = default;
+    S(int q) : w{q} { return; }
+    int w = 0;
+};
+class C {
+public:
+    virtual ~C() = default;
+    C() = default;
+    C(S s) : v{s.w} { return; }
+    int v = 0;
+};
+int main() {
+    S s{42};
+    C c{s};
+    return c.v;
+}

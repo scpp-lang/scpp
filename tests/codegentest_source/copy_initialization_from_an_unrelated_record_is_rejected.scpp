@@ -1,0 +1,27 @@
+// The other direction of the same branch: an Identifier of an unrelated
+// record type was copied byte-for-byte into the target. `c.v` read Other's
+// third int.
+import std;
+
+class Other {
+public:
+    virtual ~Other() = default;
+    Other() = default;
+    int a = 1;
+    int b = 2;
+    int c = 3;
+};
+
+class C {
+public:
+    virtual ~C() = default;
+    C() = default;
+    C(int x) : v{x} { return; }
+    int v = 0;
+};
+
+int main() {
+    Other o{};
+    C c = o;
+    return c.v;
+}

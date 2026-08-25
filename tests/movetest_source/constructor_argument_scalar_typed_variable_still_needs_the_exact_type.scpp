@@ -1,0 +1,16 @@
+import std;
+// Control for constructor_argument_literal_adopts_the_parameter_scalar_type:
+// §16.2(1) applies to a *literal*, which has no type of its own. A variable
+// has one, so §16.3(3) exactness applies to it unchanged.
+class C {
+public:
+    virtual ~C() = default;
+    C() = default;
+    C(int64_t x) : v{x} { return; }
+    int64_t v = 0;
+};
+int main() {
+    int n = 42;
+    C c{n};
+    return 0;
+}

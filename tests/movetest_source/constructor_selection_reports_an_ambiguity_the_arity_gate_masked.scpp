@@ -1,0 +1,32 @@
+import std;
+// Two converting constructors are reachable from an `int`, so [over.match.best]
+// has no single best candidate. The arity gate could not report this: with two
+// arity-1 candidates it selected neither and the call fell through to aggregate
+// initialization, which accepted it and copied bytes.
+class A {
+public:
+    virtual ~A() = default;
+    A() = default;
+    A(int q) : w{q} { return; }
+    int w = 0;
+};
+class B {
+public:
+    virtual ~B() = default;
+    B() = default;
+    B(int q) : w{q} { return; }
+    int w = 0;
+};
+class C {
+public:
+    virtual ~C() = default;
+    C() = default;
+    C(A a) : v{a.w} { return; }
+    C(B b) : v{b.w} { return; }
+    int v = 0;
+};
+int main() {
+    int n = 42;
+    C c = n;
+    return c.v;
+}

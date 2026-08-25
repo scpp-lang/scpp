@@ -1,0 +1,16 @@
+import std;
+// A lone candidate of the right *arity* used to be selected outright, with
+// no type check at all: `visible_arity_matches.size() == 1` won before
+// [over.match.ctor] ever ran. `C(int)` therefore "accepted" a double.
+class C {
+public:
+    virtual ~C() = default;
+    C() = default;
+    C(int x) : v{x} { return; }
+    int v = 0;
+};
+int main() {
+    double d = 1.5;
+    C c{d};
+    return c.v;
+}

@@ -1,0 +1,20 @@
+// The same unchecked "an Identifier initializer means a copy" branch existed
+// twice in codegen: once on the static-local path and once on the ordinary
+// local path. Both are pinned.
+import std;
+
+class C {
+public:
+    virtual ~C() = default;
+    C() = default;
+    C(int x) : v{x} { return; }
+    int v = 0;
+};
+
+int read() {
+    int d = 42;
+    static C c = d;
+    return c.v;
+}
+
+int main() { return read(); }

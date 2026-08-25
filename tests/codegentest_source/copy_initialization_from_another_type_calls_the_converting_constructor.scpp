@@ -1,0 +1,21 @@
+// `C c = d;` is a call to C's converting constructor. Codegen used to treat
+// *any* Identifier initializer for a record-typed local as a copy of the same
+// type -- "movecheck has already verified `x` is the exact same class type",
+// which movecheck did not do -- and emitted a memberwise copy from an `int`
+// into a `C`. `c.v` came out 0 instead of 42, with no diagnostic from any
+// pass and no wrong symbol for `ld` to catch, because there was no call.
+import std;
+
+class C {
+public:
+    virtual ~C() = default;
+    C() = default;
+    C(int x) : v{x} { return; }
+    int v = 0;
+};
+
+int main() {
+    int d = 42;
+    C c = d;
+    return c.v;
+}

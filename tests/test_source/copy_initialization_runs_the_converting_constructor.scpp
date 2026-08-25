@@ -1,0 +1,20 @@
+// End-to-end counterpart of the codegen fixture: the whole pipeline, run.
+// Before the constructor-selection fix `C c = d;` compiled into an unchecked
+// memberwise copy of an `int` into a `C`, so this program printed v=0 and
+// exited 0 having called no constructor at all.
+import std;
+
+class C {
+public:
+    virtual ~C() = default;
+    C() = default;
+    C(int x) : v{x * 2} { return; }
+    int v = 0;
+};
+
+int main() {
+    int d = 21;
+    C c = d;
+    std::print("v={}\n", c.v);
+    return c.v - 42;
+}

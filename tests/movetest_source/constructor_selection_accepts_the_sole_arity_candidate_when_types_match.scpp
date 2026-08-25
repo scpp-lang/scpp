@@ -1,0 +1,15 @@
+import std;
+// Control for constructor_selection_type_checks_the_sole_arity_candidate:
+// the same single candidate, given the type it actually declares.
+class C {
+public:
+    virtual ~C() = default;
+    C() = default;
+    C(int x) : v{x} { return; }
+    int v = 0;
+};
+int main() {
+    int d = 42;
+    C c{d};
+    return c.v;
+}

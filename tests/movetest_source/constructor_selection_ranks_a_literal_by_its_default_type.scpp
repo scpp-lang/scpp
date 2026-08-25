@@ -1,0 +1,20 @@
+import std;
+// spec §16.2(1) lets an integer-literal argument take *either* parameter's
+// scalar type, so both constructors are viable and the call looked ambiguous
+// once selection started type-checking. §16.3(3) forbids that outcome -- "a
+// call cannot be ambiguous by reason of a conversion between scalar types" --
+// and §16.2(3) supplies the tie-break: absent a determining context an
+// integer-literal has type `int`, which is the parameter [over.ics.rank] then
+// ranks as the identity. `std::mt19937 g{123}` is the real instance of this.
+class C {
+public:
+    virtual ~C() = default;
+    C() = default;
+    C(int x) : v{x} { return; }
+    C(uint32_t x) : v{1} { return; }
+    int v = 0;
+};
+int main() {
+    C c{123};
+    return c.v;
+}

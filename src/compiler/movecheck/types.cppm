@@ -54,6 +54,8 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred);
 [[nodiscard]] bool pointer_supports_arithmetic(const Type& type);
 [[nodiscard]] std::optional<Type> pointer_arithmetic_result_type(BinaryOp op, const Type& lhs, const Type& rhs);
 [[nodiscard]] bool literal_compatible_with_type(const Expr& literal, const Type& type);
+[[nodiscard]] bool literal_argument_adopts_parameter_type(const Expr& arg, const Type& param_type);
+[[nodiscard]] bool literal_argument_ranks_as_identity(const Expr& arg, const Type& param_type);
 [[nodiscard]] bool conditional_arm_types_agree(const Expr& then_arm, const Type& then_type, const Expr& else_arm,
                                                const Type& else_type);
 
@@ -360,6 +362,52 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
 // from here and every caller now resolves to the `scpp.ast` one.
 [[nodiscard]] bool literal_compatible_with_type(const Expr& literal, const Type& type) {
     return literal_adopts_type(literal, type, scpp::host_pointer_bit_width());
+}
+
+// spec §16.2(1): an integer-literal or floating-point-literal "has no type
+// of its own"; it "has the scalar type required by the context in which it
+// appears", and that clause names "the type of the parameter it is an
+// argument for" as one of those contexts, alongside the operands of a
+// binary operator and the arms of a conditional. §16.3(1) closes the loop:
+// "§16.2 applies first: a literal operand takes the required type rather
+// than being converted to it." So a literal argument forms an *identity*
+// conversion ([over.best.ics]) to any scalar parameter type it may adopt,
+// and §16.3(3)'s exactness requirement is met by construction rather than
+// by a conversion.
+//
+// The rule has had a single shared implementation all along --
+// literal_adopts_type in scpp.ast, reached here through
+// literal_compatible_with_type -- but only binary operands and conditional
+// arms consulted it. Argument position, named in the same sentence of
+// §16.2(1), did not: infer_expr_type answered with §16.2(3)'s *no-context*
+// default of `int`, and the match went ahead as though the literal were
+// typed. `R{0, 1}` against `R(int64_t, int64_t)` therefore had no viable
+// candidate. It was accepted anyway only because the arity gate selected
+// without asking, which is why removing that gate is what made this
+// visible.
+[[nodiscard]] bool literal_argument_adopts_parameter_type(const Expr& arg, const Type& param_type) {
+    return !is_reference(param_type) && is_untyped_numeric_literal(arg) &&
+           literal_compatible_with_type(arg, param_type);
+}
+
+// §16.2 is silent on which parameter's type a literal adopts when more
+// than one candidate would accept it -- §16.2(1) lists "the type of the
+// parameter it is an argument for" as though there were only ever one.
+// §16.3(3) settles it negatively: "a call cannot be ambiguous by reason
+// of a conversion between scalar types", so reporting `M{123}` against
+// `M(int)`/`M(uint32_t)` as ambiguous is itself a violation. §16.2(3)
+// supplies the missing tie-break: absent a determining context an
+// integer-literal has type `int` and a floating-point-literal `double`,
+// which is exactly the type [over.ics.rank] then ranks as the identity.
+// Every other adoptable type stays viable but ranks as a conversion, so
+// a sole candidate of another scalar type still wins.
+[[nodiscard]] bool literal_argument_ranks_as_identity(const Expr& arg, const Type& param_type) {
+    if (!literal_argument_adopts_parameter_type(arg, param_type)) return false;
+    const Expr& literal = (arg.kind == ExprKind::Unary && arg.lhs != nullptr) ? *arg.lhs : arg;
+    if (param_type.kind != TypeKind::Named) return false;
+    if (literal.kind == ExprKind::IntegerLiteral) return param_type.name == "int";
+    if (literal.kind == ExprKind::FloatLiteral) return param_type.name == "double";
+    return false;
 }
 
 // ch05/ch06: `?:` yields a *value*, and its two arms have to agree on

@@ -3842,6 +3842,81 @@ void run_cli_extension_tests() {
         std::filesystem::remove_all(root);
     }
 
+    // Constructor selection across a module boundary, checked by the
+    // *symbol* the consumer's own object file references rather than by
+    // accept/reject. Before constructor selection type-checked its
+    // arguments, `C c = d;` against an imported `C(int)` was accepted by
+    // both front-end passes and emitted no constructor call at all -- a
+    // memberwise copy of an `int` into a `C` -- and the binary ran,
+    // exiting 214 instead of 0. There was no wrong mangled name for `ld`
+    // to catch here, which is strictly worse than #498's case: the
+    // linker cannot diagnose a call that was never emitted.
+    //
+    // Deliberately both directions and both spellings, run from the
+    // *cached* interface with the module's own source removed -- the
+    // warm path, where a dropped or mis-serialized parameter type would
+    // silently restore the old behaviour.
+    {
+        std::string case_name = "imported_constructor_selection_is_type_checked";
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::path module_source = root / "ctormod.scpp";
+        std::filesystem::path interface_path = root / "ctormod.scppm";
+        std::filesystem::path archive_path = root / "libctormod.scppa";
+        std::filesystem::path good_source = root / "good.scpp";
+        std::filesystem::path bad_source = root / "bad.scpp";
+        std::filesystem::path exe_path = root / "good_app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module ctormod;\n"
+                        "export class C {\n"
+                        "public:\n"
+                        "    C(int x) : v{x * 2} { return; }\n"
+                        "    virtual ~C() = default;\n"
+                        "    int v;\n"
+                        "};\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+        std::filesystem::remove(module_source);
+        write_text_file(good_source,
+                        "import ctormod;\n"
+                        "int main() {\n"
+                        "    int d = 21;\n"
+                        "    C c = d;\n"
+                        "    return c.v - 42;\n"
+                        "}\n");
+        RunResult good_build =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + good_source.string() + " -o " +
+                                exe_path.string() + " --import ctormod=" + interface_path.string() + " 2>&1");
+        expect(good_build.exit_code == 0,
+               case_name + ": copy-initialization from an int should select the imported C(int), got '" +
+                   good_build.stdout_text + "'");
+        RunResult good_run = run_command_capture(exe_path.string() + " 2>&1");
+        expect(good_run.exit_code == 0,
+               case_name + ": expected the imported constructor to actually run, got exit " +
+                   std::to_string(good_run.exit_code));
+        write_text_file(bad_source,
+                        "import ctormod;\n"
+                        "int main() {\n"
+                        "    double d = 21.5;\n"
+                        "    C c = d;\n"
+                        "    return c.v - 42;\n"
+                        "}\n");
+        RunResult bad_build =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + bad_source.string() + " -o " +
+                                (root / "bad_app").string() + " --import ctormod=" + interface_path.string() + " 2>&1");
+        expect(bad_build.exit_code != 0,
+               case_name + ": a double argument matches no imported constructor and must be rejected");
+        expect(bad_build.stdout_text.find("[over.match.ctor]") != std::string::npos,
+               case_name + ": the rejection should name the rule it failed, got '" + bad_build.stdout_text + "'");
+        std::filesystem::remove_all(root);
+    }
+
     // `= delete` is declaration state that has to survive a cached
     // (warm) build: the consumer below is compiled against the emitted
     // `.scppm` alone, with the module's own source removed, exactly as a

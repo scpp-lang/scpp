@@ -628,7 +628,24 @@ namespace {
             if (constructor_parameter_accepts_argument_directly(arg, fn.params[1].type)) matches.push_back(&fn);
         }
         if (matches.empty()) return nullptr;
-        return matches[0];
+        if (matches.size() == 1) return matches[0];
+        // [over.ics.rank] through the shared algebra -- the same one
+        // resolve_overload_by_type, resolve_constructor_overload_exact,
+        // movecheck's resolve_constructor_signature and the constant
+        // evaluator rank with. This returned `matches[0]` instead: a class
+        // with two converting constructors got whichever one
+        // `program_->functions` happened to list first, and with
+        // [over.match.best] unable to run, a genuine ambiguity between them
+        // could not be reported at all.
+        std::vector<ExprPtr> single_arg;
+        single_arg.push_back(deep_clone_expr(arg));
+        std::vector<std::vector<ArgumentConversion>> conversions;
+        for (const Function* fn : matches) {
+            conversions.push_back(argument_conversions_for(*fn, single_arg, /*param_offset=*/1, /*receiver_expr=*/nullptr));
+        }
+        std::vector<std::size_t> best = best_viable_candidates(conversions);
+        if (best.size() != 1) return nullptr;
+        return matches[best[0]];
     }
 
 

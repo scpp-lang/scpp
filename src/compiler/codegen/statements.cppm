@@ -249,8 +249,29 @@ namespace scpp {
                                 }
                             }
                         } else if (stmt.init) {
+                            // `T c = other;`. Copy-initialization from an
+                            // lvalue *of T* -- and only of T. The type
+                            // check is the point: this branch used to be
+                            // reached for any identifier at all, so
+                            // `class C { C(int); ... }; int d = 21; C c = d;`
+                            // took a C-shaped memberwise copy out of an
+                            // `int`'s storage, or handed that int's address
+                            // to C's copy constructor. It compiled, linked
+                            // and ran, printing whatever bytes happened to
+                            // follow `d` -- with `struct Other {int q, r, s, t;}`
+                            // as the source, `C c = o;` printed o.s. The
+                            // converting constructor the author declared was
+                            // never called, and movecheck had already
+                            // resolved that very constructor for the same
+                            // declaration (dataflow.cppm's
+                            // resolve_converting_constructor_binding), so
+                            // the two passes disagreed about what `C c = d;`
+                            // even means. Anything that is not a copy falls
+                            // through to the general initializer path below,
+                            // which asks [dcl.init] the whole question.
                             if (stmt.type.kind == TypeKind::Named && structs_.contains(stmt.type.name) &&
-                                stmt.init->kind == ExprKind::Identifier) {
+                                stmt.init->kind == ExprKind::Identifier &&
+                                is_bare_same_type_copy_source(*stmt.init, stmt.type)) {
                                 const Expr& source_expr =
                                     *stmt.init;
                                 auto src_result = codegen_lvalue(source_expr);
@@ -561,13 +582,21 @@ namespace scpp {
                     }
                     if (stmt.init) {
                         if (stmt.type.kind == TypeKind::Named && structs_.contains(stmt.type.name) &&
-                            stmt.init->kind == ExprKind::Identifier) {
+                            stmt.init->kind == ExprKind::Identifier &&
+                            is_bare_same_type_copy_source(*stmt.init, stmt.type)) {
                             // spec §6.5: `ClassName y = x;` -- copy
-                            // construction (movecheck has already verified
-                            // `x` is the exact same class type and that the
-                            // class is copy-constructible). Dispatch to the
-                            // user-declared copy constructor if one exists
-                            // (a real function call, so any side effects --
+                            // construction, and only when `x` really is an
+                            // lvalue of that same class type. The comment
+                            // that stood here said movecheck had already
+                            // verified exactly that; it had not, and this
+                            // branch was taken for an identifier of *any*
+                            // type, so `C c = d;` with an `int d` copied
+                            // sizeof(C) bytes out of `d`'s storage, or
+                            // passed `&d` to C's copy constructor. One
+                            // pass trusting a check the other never made.
+                            // Dispatch to the user-declared copy
+                            // constructor if one exists (a real function
+                            // call, so any side effects --
                             // e.g. incrementing a reference count, spec
                             // §6.5's own worked example -- actually run,
                             // unlike a blind byte copy); otherwise the
