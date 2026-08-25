@@ -1,0 +1,27 @@
+// The skipped constructor prologue also skipped the vtable-pointer store,
+// so an object built through a constructor template had a null vptr and a
+// virtual call through a base reference read garbage. Nothing diagnosed it:
+// direct calls on the object itself were devirtualized and appeared to work.
+class B {
+public:
+    virtual ~B() = default;
+    B() = default;
+    virtual int who() { return 1; }
+};
+
+class D : public B {
+public:
+    ~D() override = default;
+    D() = default;
+    template<typename T> D(T x) : k{2} { return; }
+    int who() override { return this->k; }
+    int k = 0;
+};
+
+int main() {
+    double d = 1.5;
+    D o{d};
+    B& r = o;
+    print_int(r.who());
+    return 0;
+}

@@ -199,9 +199,8 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 
 [[nodiscard]] const Function* find_user_declared_dtor(const std::string& class_name, const Program& program) {
     for (const Function& fn : program.functions) {
-        if (!fn.name.ends_with("_delete") || fn.params.size() != 1) continue;
         if (fn.member_owner_class != class_name) continue;
-        if (is_special_member_this_param(fn.params[0].type, class_name)) return &fn;
+        if (is_destructor_function(fn)) return &fn;
     }
     return nullptr;
 }

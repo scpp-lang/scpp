@@ -1,0 +1,21 @@
+// ch06 §6.1(4): every non-static data member must be initialized by each
+// constructor. The rule is enforced against whatever `Function::
+// member_initializers` holds, so it is only as good as the clone that
+// monomorphization produced. The converting-constructor instantiation path
+// cloned the body and left the mem-initializer-list empty, which made this
+// accepting program depend on the *other* half of the same bug (the clone
+// not being recognised as a constructor at all) to escape a spurious
+// "leaves member(s) 'v', 'w' uninitialized" rejection.
+class C {
+public:
+    virtual ~C() = default;
+    template<typename T> C(T x) : v{1}, w{2} { return; }
+    int v;
+    int w;
+};
+
+int main() {
+    double d = 1.5;
+    C c{d};
+    return c.w - 2;
+}

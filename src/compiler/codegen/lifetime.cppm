@@ -74,10 +74,8 @@ namespace scpp {
     llvm::LLVMValueRef Codegen::find_destructor(const std::string& class_name)
 {
         for (const Function& fn : program_->functions) {
-            if (!fn.name.ends_with("_delete") || fn.params.size() != 1) continue;
             if (fn.member_owner_class != class_name) continue;
-            const Type& this_param = fn.params[0].type;
-            if (!is_special_member_this_param(this_param, class_name)) continue;
+            if (!is_destructor_function(fn)) continue;
             return llvm::LLVMGetNamedFunction(module_, overload_names_.at(&fn).c_str());
         }
         return nullptr;
@@ -87,10 +85,8 @@ namespace scpp {
     [[nodiscard]] const Function* Codegen::find_destructor_ast(const std::string& class_name) const
 {
         for (const Function& fn : program_->functions) {
-            if (!fn.name.ends_with("_delete") || fn.params.size() != 1) continue;
             if (fn.member_owner_class != class_name) continue;
-            const Type& this_param = fn.params[0].type;
-            if (!is_special_member_this_param(this_param, class_name)) continue;
+            if (!is_destructor_function(fn)) continue;
             return &fn;
         }
         return nullptr;
@@ -128,10 +124,8 @@ namespace scpp {
     [[nodiscard]] const Function* Codegen::find_user_declared_copy_ctor_ast(const std::string& class_name)
 {
         for (const Function& fn : program_->functions) {
-            if (!fn.name.ends_with("_new") || fn.params.size() != 2) continue;
-            if (fn.member_owner_class != class_name) continue;
-            const Type& this_param = fn.params[0].type;
-            if (!is_special_member_this_param(this_param, class_name)) continue;
+            if (fn.member_owner_class != class_name || fn.params.size() != 2) continue;
+            if (!is_constructor_function(fn)) continue;
             const Type& p = fn.params[1].type;
             if (is_special_member_const_lvalue_self_param(p, class_name)) return &fn;
         }

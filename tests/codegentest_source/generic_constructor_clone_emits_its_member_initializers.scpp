@@ -1,0 +1,17 @@
+// Codegen-level pin for the same defect: the monomorphized clone
+// `C_new.double` must carry the constructor prologue, not an empty body.
+// Before the fix this function contained only the parameter spills and a
+// `ret`, with no store to `v` anywhere in it.
+class C {
+public:
+    virtual ~C() = default;
+    C() = default;
+    template<typename T> C(T x) : v{7} { return; }
+    int v;
+};
+
+int main() {
+    double d = 1.5;
+    C c{d};
+    return c.v;
+}

@@ -1,0 +1,19 @@
+// The other direction of the same predicate. An ordinary method whose own
+// name happens to end in `_new` mangles to `C_bump_new` and takes a `C&`
+// first parameter, so the suffix test classified it as a *constructor*:
+// codegen re-ran the class's default member initializers on entry to it.
+// `c.v` had been assigned 3, and the call returned 7.
+class C {
+public:
+    virtual ~C() = default;
+    C() = default;
+    int bump_new() { return this->v; }
+    int v = 7;
+};
+
+int main() {
+    C c{};
+    c.v = 3;
+    print_int(c.bump_new());
+    return 0;
+}

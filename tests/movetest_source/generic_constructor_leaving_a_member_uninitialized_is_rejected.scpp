@@ -1,0 +1,16 @@
+// The control beside the case above: ch06 §6.1(4) must still reject a
+// constructor template that omits a member, and must keep rejecting it once
+// the instantiated clone carries a real mem-initializer-list.
+class C {
+public:
+    virtual ~C() = default;
+    template<typename T> C(T x) : v{1} { return; }
+    int v;
+    int w;
+};
+
+int main() {
+    double d = 1.5;
+    C c{d};
+    return c.w;
+}

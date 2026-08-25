@@ -3212,7 +3212,7 @@ private:
             std::string display_name{fn.member_owner_class};
             display_name += "::";
             display_name += fn.name.substr(fn.name.rfind('_') + 1);
-            if (fn.name.ends_with("_new")) {
+            if (is_special_member_mangled_name(fn.name, fn.member_owner_class, "_new")) {
                 std::size_t pos = fn.member_owner_class.rfind("::");
                 std::string unqualified{};
                 if (pos == static_cast<std::size_t>(-1)) {
@@ -3223,7 +3223,7 @@ private:
                 display_name = fn.member_owner_class;
                 display_name += "::";
                 display_name += unqualified;
-            } else if (fn.name.ends_with("_delete")) {
+            } else if (is_special_member_mangled_name(fn.name, fn.member_owner_class, "_delete")) {
                 std::size_t pos = fn.member_owner_class.rfind("::");
                 std::string unqualified{};
                 if (pos == static_cast<std::size_t>(-1)) {

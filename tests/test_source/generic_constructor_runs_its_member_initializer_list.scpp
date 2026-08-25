@@ -1,0 +1,31 @@
+// [class.base.init]/9-10 with [temp.inst]/2: instantiating a constructor
+// template instantiates its *mem-initializer-list* too, and a member named
+// there is initialized from that list rather than from its own default
+// member initializer.
+//
+// Monomorphization names the instantiated clone `C_new.double`, and every
+// "is this function a constructor?" test in the compiler asked whether the
+// name *ends with* `_new`. The clone does not, so codegen emitted the
+// constructor body with no base construction, no vtable pointer, no default
+// member initializers and no member-initializer list at all: an accepted
+// program that ran and produced the wrong member value with no diagnostic.
+//
+// `v` is initialized only by the mem-init list and `w` only by its DMI, so
+// this fixture separates "the mem-init list never ran" from "the DMI ran
+// last and overwrote it".
+class C {
+public:
+    virtual ~C() = default;
+    C() = default;
+    template<typename T> C(T x) : v{1} { return; }
+    int v;
+    int w = 9;
+};
+
+int main() {
+    double d = 1.5;
+    C c{d};
+    print_int(c.v);
+    print_int(c.w);
+    return 0;
+}
