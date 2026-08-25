@@ -1,0 +1,18 @@
+// `C a[1]{d}` initializes element 0 from `d`. codegen_class_value_for_boundary
+// ended in an unguarded `return codegen_expr(expr);`, storing a value of any
+// type into class-shaped storage; a `double` produced `v == 0` at runtime.
+import std;
+
+class C {
+public:
+    virtual ~C() = default;
+    C() = default;
+    C(int x) : v{x} { return; }
+    int v = 0;
+};
+
+int main() {
+    double d = 1.5;
+    C a[1]{d};
+    return a[0].v;
+}

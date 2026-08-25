@@ -58,6 +58,18 @@ namespace {
     return false;
 }
 
+}
+
+using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature>>;
+
+// Whether `sig` can be called with `arg_count` arguments, accounting for
+// trailing defaulted parameters and varargs. The one definition: constructor
+// selection here, ordinary-call and method selection in calls.cppm, and
+// monomorphize.cppm's non-template-constructor preference all ask it, so
+// "this overload has the right arity" cannot mean two things at once. It could,
+// and did: this definition sat in an anonymous namespace, invisible outside
+// this partition, so calls.cppm carried two further byte-for-byte copies of it
+// -- one of them likewise anonymous -- linked to this one by nothing at all.
 [[nodiscard]] bool signature_accepts_argument_count(const FunctionSignature& sig, std::size_t arg_count,
                                                     std::size_t param_offset) {
     if (sig.param_types.size() < param_offset) return false;
@@ -70,14 +82,12 @@ namespace {
     if (!sig.has_varargs && arg_count > fixed_param_count) return false;
     return sig.has_varargs || arg_count <= fixed_param_count;
 }
-}
-
-using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature>>;
 
 [[nodiscard]] bool compile_time_dependency_visible_in_body(const FunctionSignature& candidate, const Body& body);
 [[nodiscard]] bool argument_matches_parameter_for_constructor_selection(const Expr& arg, const Type& param_type,
                                                                        const Body& body,
-                                                                       const Signatures& signatures);
+                                                                       const Signatures& signatures,
+                                                                       bool allow_user_defined_conversion = true);
 [[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] bool place_is_read_only(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] bool expr_is_assignable_place(const Expr& expr, const Body& body);
@@ -89,7 +99,7 @@ using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature
 
 
 [[nodiscard]] std::string describe_constructor_candidate(const FunctionSignature& candidate) {
-    std::string result = candidate.member_owner_class + "_new(";
+    std::string result = candidate.member_owner_class + "(";
     for (std::size_t i = 1; i < candidate.param_types.size(); i++) {
         if (i != 1) result += ", ";
         result += describe_type_brief(candidate.param_types[i]);
@@ -105,6 +115,10 @@ using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature
 [[nodiscard]] bool is_field_copy_constructible(const Type& type, const Program& program);
 [[nodiscard]] bool is_field_copy_assignable(const Type& type, const Program& program);
 [[nodiscard]] bool class_has_any_constructor(const std::string& class_name, const Program& program);
+[[nodiscard]] std::optional<std::string> describe_constructor_selection_failure(const std::string& class_name,
+                                                                               const std::vector<ExprPtr>& ctor_args,
+                                                                               const Body& body,
+                                                                               const Signatures& signatures);
 [[nodiscard]] std::string unqualified_template_base_name(std::string_view class_name);
 [[nodiscard]] bool names_direct_base(const std::string& member_name, const ClassDef& def);
 void collect_virtual_interface_bases_in_construction_order(const Program& program, const ClassDef& def,
@@ -876,6 +890,16 @@ struct ConstructedOwner {
         Type target_value = target;
         target_value.is_const_qualified = false;
         conversion.argument_is_rvalue = produces_rvalue_of_type(*ctor_args[i], target_value, body, signatures);
+        // spec §16.2(1): a literal argument *has* the parameter's scalar
+        // type, so the sequence is the identity, not a conversion --
+        // but only for the type §16.2(3) gives it absent a context; see
+        // literal_argument_ranks_as_identity.
+        if (literal_argument_adopts_parameter_type(*ctor_args[i], param_type)) {
+            if (!literal_argument_ranks_as_identity(*ctor_args[i], param_type))
+                conversion.rank = ConversionRank::Conversion;
+            result.push_back(conversion);
+            continue;
+        }
         std::optional<Type> arg_type = infer_expr_type(*ctor_args[i], body, signatures);
         if (!arg_type.has_value()) {
             conversion.unknown = true;
@@ -902,9 +926,6 @@ struct ConstructedOwner {
                (!name.empty() && name.starts_with(class_name + "_new."));
     };
     std::vector<const FunctionSignature*> matches;
-    auto should_trace = [&] {
-        return class_name == "std::thread" && ctor_args.size() == 1;
-    };
     for (const auto& [name, overloads] : signatures) {
         if (!is_constructor_clone_name(name)) continue;
         for (const FunctionSignature& candidate : overloads) {
@@ -921,16 +942,6 @@ struct ConstructedOwner {
         }
     }
     if (matches.empty()) return nullptr;
-    if (should_trace()) {
-        std::cerr << "[ctor-select] class=" << class_name << " arg0="
-                  << (infer_expr_type(*ctor_args[0], body, signatures).has_value()
-                          ? describe_type_brief(*infer_expr_type(*ctor_args[0], body, signatures))
-                          : std::string("<unknown>"))
-                  << " candidates=" << matches.size() << "\n";
-        for (const FunctionSignature* candidate : matches) {
-            std::cerr << "  candidate " << describe_constructor_candidate(*candidate) << "\n";
-        }
-    }
     if (matches.size() == 1) return matches[0];
     // [over.match.best]/2.4: a non-template is better than a template.
     {
@@ -957,13 +968,89 @@ struct ConstructedOwner {
         conversions.push_back(constructor_argument_conversions(*candidate, ctor_args, body, signatures));
     }
     std::vector<std::size_t> best_indices = best_viable_candidates(conversions);
-    if (best_indices.size() != 1) {
-        if (should_trace()) std::cerr << "  no unique best candidate (" << best_indices.size() << " tied)\n";
-        return nullptr;
+    if (best_indices.size() != 1) return nullptr;
+    return matches[best_indices[0]];
+}
+
+// [dcl.init.aggr]: a record that declares any constructor is not an
+// aggregate, so a braced list is a *call* to one -- whether or not an
+// overload accepts it. When resolve_constructor_signature selects nothing,
+// that is the answer, and it has to be said here rather than left to
+// codegen: everything this pass does with a constructor call (each
+// argument's borrow/move effect, the deleted/private/unsafe checks) is
+// predicated on knowing which constructor runs, and silently treating the
+// call as aggregate initialization instead skips all of it. That is what
+// the arity gate concealed -- it always produced *a* signature, so this
+// question was never asked.
+//
+// The two ways selection can fail are distinguished, because they are
+// different rules and the user needs to know which one applies: no viable
+// candidate at all ([over.match.ctor]), or several with none best
+// ([over.match.best]). Only codegen could name the second before; this pass
+// reported both as "can only be initialized via brace-init".
+//
+// Answered only where this pass can answer it: every argument's type
+// inferable, and no generic candidate of that arity still awaiting
+// monomorphization. Where it cannot, saying nothing leaves the answer to
+// codegen, which sees the monomorphized program.
+[[nodiscard]] std::optional<std::string> describe_constructor_selection_failure(const std::string& class_name,
+                                                                               const std::vector<ExprPtr>& ctor_args,
+                                                                               const Body& body,
+                                                                               const Signatures& signatures) {
+    if (body.program == nullptr || ctor_args.empty()) return std::nullopt;
+    if (!class_has_any_constructor(class_name, *body.program)) return std::nullopt;
+    for (const ExprPtr& arg : ctor_args) {
+        if (arg == nullptr || !infer_expr_type(*arg, body, signatures).has_value()) return std::nullopt;
     }
-    const FunctionSignature* winner = matches[best_indices[0]];
-    if (should_trace()) std::cerr << "  winner " << describe_constructor_candidate(*winner) << "\n";
-    return winner;
+    auto is_constructor_clone_name = [&](std::string_view name) {
+        return name == class_name + "_new" || (!name.empty() && name.starts_with(class_name + "_new."));
+    };
+    std::vector<const FunctionSignature*> arity_candidates;
+    std::vector<const FunctionSignature*> viable_candidates;
+    for (const auto& [name, overloads] : signatures) {
+        if (!is_constructor_clone_name(name)) continue;
+        for (const FunctionSignature& candidate : overloads) {
+            if (candidate.member_owner_class != class_name) continue;
+            if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
+            if (!signature_accepts_argument_count(candidate, ctor_args.size(), 1)) continue;
+            if (candidate.is_generic_template) return std::nullopt;
+            arity_candidates.push_back(&candidate);
+            bool viable = true;
+            for (std::size_t i = 0; viable && i < ctor_args.size(); i++) {
+                viable = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
+                                                                             candidate.param_types[i + 1], body,
+                                                                             signatures);
+            }
+            if (viable) viable_candidates.push_back(&candidate);
+        }
+    }
+    if (arity_candidates.empty()) return std::nullopt;
+    if (viable_candidates.size() == 1) return std::nullopt;
+    auto describe_all = [](const std::vector<const FunctionSignature*>& candidates) {
+        std::vector<std::string> described;
+        for (const FunctionSignature* candidate : candidates) {
+            std::string text = describe_constructor_candidate(*candidate);
+            if (std::find(described.begin(), described.end(), text) == described.end()) described.push_back(text);
+        }
+        std::string result;
+        for (const std::string& text : described) result += "\n  candidate: " + text;
+        return result;
+    };
+    if (viable_candidates.size() > 1) {
+        return "ambiguous constructor call for " + std::string(record_keyword(class_name, *body.program)) + " '" +
+               class_name + "': " + std::to_string(viable_candidates.size()) +
+               " constructors match these argument types equally well and none is better than the others "
+               "([over.match.best])" +
+               describe_all(viable_candidates);
+    }
+    std::string message = "no constructor of '" + class_name + "' matches this call ([over.match.ctor]): argument";
+    message += ctor_args.size() == 1 ? " type is " : " types are ";
+    for (std::size_t i = 0; i < ctor_args.size(); i++) {
+        if (i != 0) message += ", ";
+        std::optional<Type> arg_type = infer_expr_type(*ctor_args[i], body, signatures);
+        message += "'" + (arg_type.has_value() ? describe_type_brief(*arg_type) : std::string("?")) + "'";
+    }
+    return message + describe_all(arity_candidates);
 }
 
 [[nodiscard]] std::expected<void, DataflowError> ensure_implicit_default_construction_is_valid(const std::string& class_name, std::string_view current_class,

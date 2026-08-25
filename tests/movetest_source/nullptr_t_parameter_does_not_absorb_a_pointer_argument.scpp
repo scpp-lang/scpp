@@ -1,0 +1,19 @@
+import std;
+// spec §16.4(5): `nullptr_t` "is not a scalar type: it is not named in Table 1".
+// Movecheck's placeholder rule read "not a scalar, not void, not an enum, not a
+// record" as "a monomorphization placeholder" and substituted the argument's own
+// type for it, so `C(nullptr_t)` accepted every pointer argument and tied with
+// `C(int*)`. `std::unique_ptr<T>{raw}` is the real instance.
+class C {
+public:
+    virtual ~C() = default;
+    C() = default;
+    C(nullptr_t null_pointer) : v{0} { return; }
+    C(int* p) : v{1} { return; }
+    int v = 0;
+};
+int main() {
+    int n = 7;
+    C c{&n};
+    return c.v;
+}

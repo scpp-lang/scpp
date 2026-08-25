@@ -3966,7 +3966,7 @@ private:
                 if (candidate.member_owner_class != class_name) continue;
                 if (candidate.is_generic_template) continue;
                 if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-                if (!function_signature_accepts_argument_count(candidate, args.size(), 1)) continue;
+                if (!signature_accepts_argument_count(candidate, args.size(), 1)) continue;
                 bool all_match = true;
                 for (std::size_t i = 0; all_match && i < args.size(); i++) {
                     all_match = argument_matches_parameter_for_constructor_selection(*args[i], candidate.param_types[i + 1],
@@ -4030,7 +4030,7 @@ private:
                 if (candidate.member_owner_class != class_name) continue;
                 if (candidate.is_generic_template) continue;
                 if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-                if (!function_signature_accepts_argument_count(candidate, args.size(), 1)) continue;
+                if (!signature_accepts_argument_count(candidate, args.size(), 1)) continue;
                 bool all_match = true;
                 for (std::size_t i = 0; all_match && i < args.size(); i++) {
                     std::optional<Type> arg_type = infer_expr_type(*args[i], body, signatures_);

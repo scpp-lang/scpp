@@ -1,0 +1,18 @@
+// The §16.2(3) tie-break is not just "accept": it has to pick `C(int)`, the
+// parameter whose type an integer-literal has when no context determines it.
+// Selecting `C(uint32_t)` would compile just as happily and run different code.
+import std;
+
+class C {
+public:
+    virtual ~C() = default;
+    C() = default;
+    C(int x) : v{x} { return; }
+    C(uint32_t x) : v{1} { return; }
+    int v = 0;
+};
+
+int main() {
+    C c{123};
+    return c.v;
+}

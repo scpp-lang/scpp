@@ -1,0 +1,19 @@
+import std;
+// spec §16.2(1): an integer-literal has no type of its own -- it has "the
+// scalar type required by the context", and "the type of the parameter it is
+// an argument for" is one of the listed contexts. So `42` here *is* an
+// int64_t and §16.3(3) is satisfied exactly, with no conversion.
+class C {
+public:
+    virtual ~C() = default;
+    C() = default;
+    C(int64_t x) : v{x} { return; }
+    int64_t v = 0;
+};
+int main() {
+    C c{42};
+    if (c.v != 42) {
+        return 1;
+    }
+    return 0;
+}

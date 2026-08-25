@@ -1433,7 +1433,32 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 return codegen_constructed_class_value(target_type.name, ctor_args, converting_ctor);
             }
         }
-        return codegen_expr(expr);
+        // Nothing above produced a value *of the target type*, so nothing
+        // may be produced at all. This function's entire contract is "give
+        // me a value of `target_type` made from `expr`", and it used to end
+        // by emitting `expr` itself unchanged and storing that -- so an
+        // expression of any type whatsoever was written into class-shaped
+        // storage verbatim: `C a[1]{d}` with a `double d`, or with an
+        // unrelated record, compiled, linked and ran, leaving the element
+        // holding raw source bytes and never calling a constructor. No pass
+        // downstream can catch that; every caller stores the result without
+        // asking what type it has.
+        //
+        // Checked on the emitted value rather than on `expr`'s inferred
+        // type, because the legitimate residual cases here (a dereference,
+        // a reference-returning call, a same-type source the branches above
+        // deliberately declined) are exactly the ones whose scpp type is
+        // awkward to name but whose LLVM type is decisive.
+        auto value_result = codegen_expr(expr);
+        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+        llvm::LLVMValueRef value = std::move(value_result).value();
+        if (value == nullptr || llvm::LLVMTypeOf(value) != llvm_type) {
+            std::vector<ExprPtr> single_arg;
+            single_arg.push_back(deep_clone_expr(expr));
+            return std::unexpected(
+                CodegenError(describe_constructor_resolution_failure(target_type.name, single_arg), expr.loc));
+        }
+        return value;
     }
 
 
