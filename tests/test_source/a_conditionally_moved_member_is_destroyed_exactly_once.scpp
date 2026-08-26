@@ -1,0 +1,29 @@
+// The branch is not taken, so `s.a` is still initialized at teardown and
+// must be destroyed. A codegen moved flag has to be created in the entry
+// block and zeroed there: a sub-place flag is first needed at a move site
+// that may sit inside a branch, so creating it lazily at that site leaves
+// it uninitialized on the paths that skip it.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { std::print("~R{}\n", this.id); }
+};
+
+R make_r(int i) { R r{i}; return r; }
+
+struct S {
+    R a;
+    R b;
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+int main() {
+    S s{1, 2};
+    R t = make_r(0);
+    if (s.b.id > 5) { t = std::move(s.a); }
+    std::print("mid\n");
+    return 0;
+}

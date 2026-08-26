@@ -475,6 +475,27 @@ class AlignmentSpecifier {
     return pointer_to(std::move(element));
 }
 
+// [temp.deduct.call]/2, the whole of it: before deduction the argument
+// type A is transformed against a parameter P that is *not* a reference
+// type -- "If A is a reference type, the type referred to by A is used
+// for type deduction"; an array type is replaced by the pointer the
+// array-to-pointer conversion produces; and "If A is a cv-qualified
+// type, the top-level cv-qualifiers of A's type are ignored for type
+// deduction".
+//
+// Only the array clause was ever implemented, and it was spelled out by
+// hand at five separate deduction sites. Dropping the other two clauses
+// let `f(const P& a)` calling `template<typename U> g(U value)` deduce
+// `U = const P&`, so the callee's *by-value* parameter silently became
+// a read-only borrow of the caller's object -- `std::move(value)` inside
+// it then moved out of a const reference.
+[[nodiscard]] inline Type deduced_type_for_by_value_param(Type type) {
+    if (type.kind == TypeKind::Reference && type.pointee != nullptr) type = Type{*type.pointee};
+    type = decay_array_to_pointer(std::move(type));
+    type.is_const_qualified = false;
+    return type;
+}
+
 // ch06 §6: the canonical internal spelling of `nullptr`'s type. Source
 // may write it either bare (`nullptr_t`) or `std::`-qualified
 // (`std::nullptr_t`, the spelling real C++ exposes) -- the parser
@@ -3092,6 +3113,80 @@ class Program {
 };
 
 using OptionalProgramRef = std::optional<std::reference_wrapper<const Program>>;
+
+// The destructor declared for `record_name` itself, as an index into
+// `program.functions`. The one AST-level answer to "does this record
+// have a destructor of its own": codegen's find_destructor_ast is this,
+// and its find_destructor is this plus the LLVM lookup of the resulting
+// symbol.
+//
+// An index rather than a pointer for find_visible_global_index's reason
+// (above): a returned raw pointer would need a lifetime scpp v0.1
+// cannot infer from two eligible parameters.
+[[nodiscard]] inline std::optional<std::size_t> find_destructor_function_index(const std::string& record_name,
+                                                                              const Program& program) {
+    for (std::size_t i = 0; i < program.functions.size(); i++) {
+        const Function& fn = program.functions[i];
+        if (fn.member_owner_class != record_name) continue;
+        if (!is_destructor_function(fn)) continue;
+        return i;
+    }
+    return std::optional<std::size_t>{};
+}
+
+// Whether destroying an object of this class goes through a destructor
+// *call* -- its own, an ordinary base's, or an interface base's.
+[[nodiscard]] inline bool class_destruction_chain_has_destructor(const std::string& class_name,
+                                                                const Program& program) {
+    if (find_destructor_function_index(class_name, program).has_value()) return true;
+    for (const ClassDef& def : program.classes) {
+        if (def.name != class_name) continue;
+        for (const BaseSpecifier& base : def.base_specifiers) {
+            if (class_destruction_chain_has_destructor(base.base_type.name, program)) return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+[[nodiscard]] inline bool type_needs_teardown(const Type& type, const Program& program);
+
+// Whether destroying an object of this record type emits anything at
+// all: a destructor call, or the subobject-by-subobject teardown a
+// record with owning members needs even without a destructor of its own
+// (spec §6.3 destroys every subobject).
+//
+// The one answer to "is there anything here to destroy". Codegen asks it
+// to decide whether to emit teardown; move checking asks it to decide
+// whether a moved-out subobject has anything that must be skipped. A
+// host type (std::vector, std::string, ...) is not a record scpp knows
+// the layout of and gets no scpp-emitted teardown at all, so it answers
+// false -- which is why moving such a member out needs nothing further.
+[[nodiscard]] inline bool record_needs_teardown(const std::string& record_name, const Program& program) {
+    if (class_destruction_chain_has_destructor(record_name, program)) return true;
+    for (const ClassDef& def : program.classes) {
+        if (def.name != record_name) continue;
+        for (const ClassField& field : def.fields) {
+            if (type_needs_teardown(field.type, program)) return true;
+        }
+        return false;
+    }
+    for (const StructDef& def : program.structs) {
+        if (def.name != record_name) continue;
+        for (const StructField& field : def.fields) {
+            if (type_needs_teardown(field.type, program)) return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+[[nodiscard]] inline bool type_needs_teardown(const Type& type, const Program& program) {
+    if (type.kind == TypeKind::Array) {
+        return type.element != nullptr && type.array_size > 0 && type_needs_teardown(*type.element, program);
+    }
+    return type.kind == TypeKind::Named && record_needs_teardown(type.name, program);
+}
 
 // The single implementation of scpp's namespace-visibility walk for globals:
 // progressively outward through `namespace_path`, then the global namespace,

@@ -101,6 +101,7 @@ namespace scpp {
         llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
 
         locals_.clear();
+        reference_bound_places_.clear();
         scope_stack_.clear();
         std::size_t index = 0;
         for (unsigned i = 0, n = llvm::LLVMCountParams(llvm_fn); i < n; ++i) {
@@ -143,7 +144,7 @@ namespace scpp {
             if (auto r = maybe_emit_parameter_debug_decl(param, slot, static_cast<unsigned>(index)); !r.has_value())
                 return std::unexpected(std::move(r).error());
             if (param.type.kind == TypeKind::Named && find_class_def(param.type.name) != nullptr) {
-                locals_[param_local(param)].moved_flag = create_moved_flag_if_has_destructor(param.type.name);
+                locals_[param_local(param)].set_whole_moved_flag(create_moved_flag_if_has_destructor(param.type.name));
             }
         }
 
@@ -198,6 +199,7 @@ namespace scpp {
         current_loc_ = fn.loc;
         llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
         locals_.clear();
+        reference_bound_places_.clear();
         scope_stack_.clear();
         build_call(get_or_declare_abort(), {});
         llvm::LLVMBuildUnreachable(builder_);
@@ -241,6 +243,7 @@ namespace scpp {
         llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
 
         locals_.clear();
+        reference_bound_places_.clear();
         scope_stack_.clear();
         std::size_t index = 0;
         for (unsigned i = 0, n = llvm::LLVMCountParams(llvm_fn); i < n; ++i) {
@@ -283,7 +286,7 @@ namespace scpp {
             if (auto r = maybe_emit_parameter_debug_decl(param, slot, static_cast<unsigned>(index)); !r.has_value())
                 return std::unexpected(std::move(r).error());
             if (param.type.kind == TypeKind::Named && find_class_def(param.type.name) != nullptr) {
-                locals_[param_local(param)].moved_flag = create_moved_flag_if_has_destructor(param.type.name);
+                locals_[param_local(param)].set_whole_moved_flag(create_moved_flag_if_has_destructor(param.type.name));
             }
         }
 

@@ -158,22 +158,48 @@ private:
 
     [[nodiscard]] static bool is_enum_cast_store_builtin_name(const std::string& name);
 
+    // One runtime "already moved out" bit, for one *place* rooted at a
+    // local (mir.cppm's Place): an extra `i1` slot, initialized false
+    // where the place first becomes trackable, set true by codegen_expr's
+    // Move case, cleared again wherever the place is written back. It is
+    // read only by teardown, so that a moved-out object's destructor is
+    // correctly never invoked for it (spec §6.3(1)).
+    //
+    // `path` empty is the local itself -- the only granularity this
+    // existed at before per-place move tracking, and the same bit it was
+    // then, not a second mechanism beside it.
+    struct MovedFlag {
+        std::vector<Projection> path;
+        llvm::LLVMValueRef flag = nullptr;
+    };
+
     struct LocalSlot {
         llvm::LLVMValueRef alloca;
         Type type;
         bool is_const = false;
         bool is_static_storage = false;
-        // spec §6.4: non-null only for a class-typed local whose own
-        // class has a destructor (see create_moved_flag_if_has_destructor)
-        // -- an extra `i1` slot, initialized false at declaration, set
-        // true by codegen_expr's Move case exactly when this local is
-        // the source of a `std::move(...)`. Consulted only at scope-exit
-        // (see codegen_call_destructor_unless_moved) so a moved-out
-        // instance's destructor is correctly never invoked for it (spec
-        // §6.3/§6.4) -- a class with no destructor at all needs no such
-        // tracking, since there's nothing to conditionally skip; null
-        // for every non-class-typed local for the same reason.
-        llvm::LLVMValueRef moved_flag = nullptr;
+        // spec §6.4: an entry exists only where there is something to
+        // conditionally skip -- a place whose type has a destructor
+        // somewhere in it (see create_moved_flag_if_type_has_destructor).
+        std::vector<MovedFlag> moved_flags{};
+
+        [[nodiscard]] llvm::LLVMValueRef moved_flag_for(const std::vector<Projection>& path) const {
+            for (const MovedFlag& entry : moved_flags) {
+                if (entry.path == path) return entry.flag;
+            }
+            return nullptr;
+        }
+        [[nodiscard]] llvm::LLVMValueRef whole_moved_flag() const { return moved_flag_for({}); }
+        void set_moved_flag(const std::vector<Projection>& path, llvm::LLVMValueRef flag) {
+            for (MovedFlag& entry : moved_flags) {
+                if (entry.path == path) {
+                    entry.flag = flag;
+                    return;
+                }
+            }
+            if (flag != nullptr) moved_flags.push_back(MovedFlag{path, flag});
+        }
+        void set_whole_moved_flag(llvm::LLVMValueRef flag) { set_moved_flag({}, flag); }
     };
 
     struct GlobalSlot {
@@ -232,6 +258,15 @@ private:
     // erased the survivor's along with the shadow's -- silently dropping
     // the outer object's destructor.
     std::unordered_map<LocalId, LocalSlot> locals_;
+    // The place a reference local was bound to at its declaration, so a
+    // place spelled through the reference (`S& r = s; std::move(r.a);`)
+    // names the same object the move checker named -- `s.a`, not `r.a`.
+    // Recorded where codegen already binds the reference; this is not a
+    // second aliasing analysis, it is the binding site remembering what
+    // it bound. Absent for a reference whose initializer has no exact
+    // place (a runtime subscript, a deref), which leaves the
+    // conservative "no flag, so destroy it" answer in place.
+    std::unordered_map<LocalId, Place> reference_bound_places_;
     std::unordered_map<std::string, GlobalSlot> globals_;
     std::unordered_map<std::string, StructInfo> structs_;
     std::unordered_set<std::string> declaring_aggregates_;
@@ -1354,7 +1389,8 @@ private:
     // evaluating the RHS Move expression, so the old-value teardown
     // correctly becomes a no-op exactly as the spec/book require.
     void codegen_destroy_old_class_state_for_move_assign(llvm::LLVMValueRef ptr, const std::string& class_name,
-                                                         llvm::LLVMValueRef moved_flag = nullptr);
+                                                         llvm::LLVMValueRef moved_flag = nullptr,
+                                                         const Place* place = nullptr);
 
     // ---- Type-directed object lifetime -------------------------------
     //
@@ -1399,7 +1435,8 @@ private:
     // Runs the destructor of every subobject of `ptr`, in reverse
     // construction order: array elements back to front, recursing for
     // nested arrays. A no-op when type_has_destructor is false.
-    void emit_storage_destruction(const Type& type, llvm::LLVMValueRef ptr);
+    void emit_storage_destruction(const Type& type, llvm::LLVMValueRef ptr, const Place* place = nullptr);
+    void emit_storage_destruction_unguarded(const Type& type, llvm::LLVMValueRef ptr, const Place* place = nullptr);
 
     // emit_storage_destruction guarded by `!moved_flag` when present --
     // the by-type counterpart of codegen_call_destructor_chain_unless_moved,
@@ -1407,15 +1444,57 @@ private:
     // once around the whole object, not once per array element: an array
     // is moved from as a unit, so all of its elements share the one flag.
     void codegen_destroy_storage_unless_moved(const Type& type, llvm::LLVMValueRef ptr,
-                                              llvm::LLVMValueRef moved_flag = nullptr);
+                                              llvm::LLVMValueRef moved_flag = nullptr,
+                                              const Place* place = nullptr);
 
     // The by-type counterpart of codegen_destroy_old_class_state_for_move_assign,
     // used for member/local teardown where the object may be an array.
     void codegen_destroy_old_state_for_move_assign(const Type& type, llvm::LLVMValueRef ptr,
-                                                   llvm::LLVMValueRef moved_flag = nullptr);
+                                                   llvm::LLVMValueRef moved_flag = nullptr,
+                                                   const Place* place = nullptr);
 
     // The by-type counterpart of create_moved_flag_if_has_destructor.
     llvm::LLVMValueRef create_moved_flag_if_type_has_destructor(const Type& type);
+
+    // ---- Per-place move state ----------------------------------------
+    //
+    // The three entry points below are the whole of codegen's half of
+    // per-place move tracking. `moved_flag_for_place` reads the bit for
+    // one place; `set_place_moved` and `clear_place_moved` write it,
+    // creating the slot on first use. There is exactly one such bit per
+    // place and it lives in the same LocalSlot::moved_flags list the
+    // whole-local flag lives in, so nothing here is a second mechanism
+    // beside the existing one -- a whole local is the place with an
+    // empty projection path.
+    [[nodiscard]] llvm::LLVMValueRef moved_flag_for_place(const Place& place);
+    void set_place_moved(const Place& place, const Type& place_type);
+    void clear_place_moved(const Place& place);
+    void clear_strict_descendant_flags(const Place& place);
+
+    // True when some place strictly under `place` carries a moved bit --
+    // i.e. this object was *partially* moved out and its teardown has to
+    // step over one of its subobjects.
+    [[nodiscard]] bool place_has_moved_descendants(const Place& place);
+
+    // Runs `body` under `if (!moved_flag)`, or unconditionally when the
+    // flag is null. The one spelling of the moved-out teardown guard.
+    void emit_unless_moved(llvm::LLVMValueRef moved_flag, const std::function<void()>& body);
+
+    // Array teardown with one statically known place per element, used
+    // where an element was moved out and the runtime induction variable
+    // of emit_array_element_loop cannot say which.
+    std::expected<void, CodegenError> emit_unrolled_array_teardown(const Type& type, llvm::LLVMValueRef ptr,
+                                                                   const Place& place, bool old_state);
+
+    // The Place `expr` names, resolved through codegen's own local
+    // table. Shares mir.cppm's place_of walk with the move checker so
+    // the two agree on which place an expression is.
+    [[nodiscard]] std::optional<Place> codegen_place_of(const Expr& expr);
+
+    // A fresh `i1` slot whose `false` initialization is emitted in the
+    // *entry* block, so a flag created inside a conditional branch still
+    // dominates every teardown that reads it.
+    llvm::LLVMValueRef create_zeroed_flag_in_entry_block(const std::string& name);
 
     // True when a *subobject* of this type has anything to release when its
     // owner dies -- broader than type_has_destructor, see the definition.

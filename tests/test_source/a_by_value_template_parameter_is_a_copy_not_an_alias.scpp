@@ -1,0 +1,32 @@
+// [temp.deduct.call]/2: for a by-value function parameter, deduction uses
+// the argument type after lvalue-to-rvalue / array-to-pointer conversion
+// and after dropping top-level cv-qualification. Five sites in
+// monomorphize.cppm implemented only the array-to-pointer half, so `U`
+// deduced to `const P&` from a const-lvalue argument and the by-value
+// parameter became a read-only *alias* of the caller's object -- which
+// made mutating it a hard error, and would have made the copy observable
+// at the caller had it not been.
+import std;
+
+struct P {
+    int id = 0;
+};
+
+template<typename T>
+class Box {
+public:
+    virtual ~Box() = default;
+    Box() { return; }
+    template<typename U>
+    Box(U value) { value.id = value.id + 1; this.v = value; return; }
+    T v{};
+};
+
+Box<P> wrap(const P& src) { Box<P> b{src}; return b; }
+
+int main() {
+    P p{7};
+    Box<P> b = wrap(p);
+    std::print("boxed={} caller={}\n", b.v.id, p.id);
+    return 0;
+}

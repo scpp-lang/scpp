@@ -1,0 +1,41 @@
+import std;
+
+struct R {
+    int id = 0;
+    R(int i) : id{i} {}
+    ~R() {}
+};
+
+struct S {
+    R a;
+    R b;
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+struct Inner {
+    R q;
+    Inner(int x) : q{x} {}
+};
+
+struct Outer {
+    Inner i;
+    R z;
+    Outer(int x, int y) : i{x}, z{y} {}
+};
+
+R make_r(int i) { R r{i}; return r; }
+
+// The reborrow write-conflict check was keyed by lender LocalId, so a
+// live reborrow of `this.gs[0]` blocked every write through `this`,
+// including writes to an unrelated member.
+struct G { int v = 0; };
+struct Owner {
+    G gs[2];
+    int f;
+    Owner() : gs{}, f{0} {}
+    int probe() {
+        const G& one = this.gs[0];
+        this.f = 3;
+        return one.v + this.f;
+    }
+};

@@ -1,0 +1,36 @@
+import std;
+
+struct R {
+    int id = 0;
+    R(int i) : id{i} {}
+    ~R() {}
+};
+
+struct S {
+    R a;
+    R b;
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+struct Inner {
+    R q;
+    Inner(int x) : q{x} {}
+};
+
+struct Outer {
+    Inner i;
+    R z;
+    Outer(int x, int y) : i{x}, z{y} {}
+};
+
+R make_r(int i) { R r{i}; return r; }
+
+// A borrow of `s.b` must not block a move of `s.a`: the coarse model
+// keyed borrows by LocalId and rejected this.
+int caller() {
+    S s{1, 2};
+    const R& borrow = s.b;
+    R t = std::move(s.a);
+    s.a = make_r(4);
+    return borrow.id + t.id;
+}

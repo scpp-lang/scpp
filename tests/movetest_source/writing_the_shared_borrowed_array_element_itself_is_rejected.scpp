@@ -3,6 +3,6 @@ int f() {
     arr[0] = 1;
     arr[1] = 2;
     const int& r = arr[0];
-    arr[1] = 99;
+    arr[0] = 99;
     return r;
 }

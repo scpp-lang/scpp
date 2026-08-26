@@ -73,23 +73,18 @@ namespace scpp {
 
     llvm::LLVMValueRef Codegen::find_destructor(const std::string& class_name)
 {
-        for (const Function& fn : program_->functions) {
-            if (fn.member_owner_class != class_name) continue;
-            if (!is_destructor_function(fn)) continue;
-            return llvm::LLVMGetNamedFunction(module_, overload_names_.at(&fn).c_str());
-        }
-        return nullptr;
+        std::optional<std::size_t> index = find_destructor_function_index(class_name, *program_);
+        if (!index.has_value()) return nullptr;
+        const Function* fn = &program_->functions[*index];
+        return llvm::LLVMGetNamedFunction(module_, overload_names_.at(fn).c_str());
     }
 
 
     [[nodiscard]] const Function* Codegen::find_destructor_ast(const std::string& class_name) const
 {
-        for (const Function& fn : program_->functions) {
-            if (fn.member_owner_class != class_name) continue;
-            if (!is_destructor_function(fn)) continue;
-            return &fn;
-        }
-        return nullptr;
+        std::optional<std::size_t> index = find_destructor_function_index(class_name, *program_);
+        if (!index.has_value()) return nullptr;
+        return &program_->functions[*index];
     }
 
 
@@ -332,28 +327,13 @@ namespace scpp {
 
     [[nodiscard]] bool Codegen::record_needs_teardown(const std::string& record_name)
 {
-        if (class_has_destructor_in_chain(record_name)) return true;
-        auto info_it = structs_.find(record_name);
-        if (info_it == structs_.end()) return false;
-        for (const Type& field_type : info_it->second.field_types) {
-            if (type_has_destructor(field_type)) return true;
-        }
-        return false;
+        return scpp::record_needs_teardown(record_name, *program_);
     }
 
 
     [[nodiscard]] bool Codegen::class_has_destructor_in_chain(const std::string& class_name)
 {
-        if (find_destructor(class_name) != nullptr) return true;
-        const ClassDef* def = find_class_def(class_name);
-        if (def == nullptr) return false;
-        if (auto base = def->direct_ordinary_base()) {
-            if (class_has_destructor_in_chain(base->get().base_type.name)) return true;
-        }
-        for (const ClassDef* interface_def : collect_virtual_interface_bases_in_construction_order(*def)) {
-            if (interface_def != nullptr && find_destructor(interface_def->name) != nullptr) return true;
-        }
-        return false;
+        return class_destruction_chain_has_destructor(class_name, *program_);
     }
 
 
@@ -407,9 +387,14 @@ namespace scpp {
 
 
     void Codegen::codegen_destroy_old_class_state_for_move_assign(llvm::LLVMValueRef ptr, const std::string& class_name,
-                                                         llvm::LLVMValueRef moved_flag)
+                                                         llvm::LLVMValueRef moved_flag, const Place* place)
 {
         if (class_has_destructor_in_chain(class_name)) {
+            // The destructor is another function; it cannot be told to
+            // skip one member. The move checker knows that (see
+            // place_teardown_is_emitted_here) and refuses to leave a
+            // subobject under such an object moved out at teardown, so
+            // there is never a descendant flag to honour here.
             codegen_call_destructor_chain_unless_moved(class_name, ptr, moved_flag);
             return;
         }
@@ -417,22 +402,31 @@ namespace scpp {
         if (struct_it == structs_.end()) return;
         const StructInfo& info = struct_it->second;
         (void)get_or_declare_free();
-        for (std::size_t i = 0; i < info.field_types.size(); i++) {
-            const Type& field_type = info.field_types[i];
-            if (!type_needs_subobject_teardown(field_type)) continue;
-            llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, ptr, info.physical_field_index(i),
-                                                         info.field_names[i].c_str());
-            codegen_destroy_old_state_for_move_assign(field_type, field_ptr);
-        }
+        // A record with no destructor of its own is torn down by walking
+        // its fields here, so "this whole object was moved out" has to be
+        // honoured here too -- the destructor-chain branch above is the
+        // only place that used to consume `moved_flag`, which left a
+        // moved-out struct's owning members released anyway.
+        emit_unless_moved(moved_flag, [&, this] {
+            for (std::size_t i = 0; i < info.field_types.size(); i++) {
+                const Type& field_type = info.field_types[i];
+                if (!type_needs_subobject_teardown(field_type)) continue;
+                llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, ptr, info.physical_field_index(i),
+                                                             info.field_names[i].c_str());
+                if (place != nullptr) {
+                    Place field_place = projected_field(*place, info.field_names[i]);
+                    codegen_destroy_old_state_for_move_assign(field_type, field_ptr, /*moved_flag=*/nullptr, &field_place);
+                    continue;
+                }
+                codegen_destroy_old_state_for_move_assign(field_type, field_ptr);
+            }
+        });
     }
 
 
     [[nodiscard]] bool Codegen::type_has_destructor(const Type& type)
 {
-        if (type.kind == TypeKind::Array) {
-            return type.element != nullptr && type.array_size > 0 && type_has_destructor(*type.element);
-        }
-        return type.kind == TypeKind::Named && record_needs_teardown(type.name);
+        return type_needs_teardown(type, *program_);
     }
 
 
@@ -478,10 +472,33 @@ namespace scpp {
     }
 
 
-    void Codegen::emit_storage_destruction(const Type& type, llvm::LLVMValueRef ptr)
+    void Codegen::emit_storage_destruction(const Type& type, llvm::LLVMValueRef ptr, const Place* place)
+{
+        // The guard for `place` itself is emitted here and nowhere else.
+        // Every other teardown entry point funnels through this one, so
+        // consulting the flag in more than one of them produced two
+        // nested branches on the same i1.
+        emit_unless_moved(place != nullptr ? moved_flag_for_place(*place) : nullptr,
+                          [&, this] { emit_storage_destruction_unguarded(type, ptr, place); });
+    }
+
+
+    void Codegen::emit_storage_destruction_unguarded(const Type& type, llvm::LLVMValueRef ptr, const Place* place)
 {
         if (type.kind == TypeKind::Array) {
             if (!type_has_destructor(type)) return;
+            // A moved-out element has to be stepped over, and the runtime
+            // induction variable of emit_array_element_loop cannot be
+            // compared against a projection path. Move state only ever
+            // records constant subscripts (place_of declines the rest),
+            // so where an element actually was moved out the bound is a
+            // compile-time constant and the loop can be unrolled --
+            // giving each element its own place. Every other array keeps
+            // the loop, unchanged.
+            if (place != nullptr && place_has_moved_descendants(*place)) {
+                (void)emit_unrolled_array_teardown(type, ptr, *place, /*old_state=*/false);
+                return;
+            }
             // Reverse of construction order, exactly as for a derived
             // object's base subobjects.
             (void)emit_array_element_loop(type, ptr, /*reverse=*/true, /*begin_index=*/0,
@@ -499,33 +516,36 @@ namespace scpp {
         // makes it declare, so this only ever mattered for a `struct` --
         // and asking about the destructor alone left a struct's
         // record-typed members never destroyed at all.
-        codegen_destroy_old_class_state_for_move_assign(ptr, type.name, /*moved_flag=*/nullptr);
+        codegen_destroy_old_class_state_for_move_assign(ptr, type.name, /*moved_flag=*/nullptr, place);
     }
 
 
-    void Codegen::codegen_destroy_storage_unless_moved(const Type& type, llvm::LLVMValueRef ptr, llvm::LLVMValueRef moved_flag)
+    void Codegen::codegen_destroy_storage_unless_moved(const Type& type, llvm::LLVMValueRef ptr, llvm::LLVMValueRef moved_flag,
+                                                       const Place* place)
 {
         if (!type_has_destructor(type)) return;
+        // An explicitly supplied flag is the caller's own; a place-derived
+        // one belongs to emit_storage_destruction, which consults it.
         if (moved_flag == nullptr) {
-            emit_storage_destruction(type, ptr);
+            emit_storage_destruction(type, ptr, place);
             return;
         }
-        llvm::LLVMValueRef was_moved = llvm::LLVMBuildLoad2(builder_, llvm::LLVMInt1TypeInContext(context_), moved_flag, "wasmoved");
-        llvm::LLVMValueRef current_fn = llvm::LLVMGetBasicBlockParent(llvm::LLVMGetInsertBlock(builder_));
-        llvm::LLVMBasicBlockRef then_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "dtorcall");
-        llvm::LLVMBasicBlockRef merge_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "dtorskip");
-        llvm::LLVMBuildCondBr(builder_, was_moved, merge_bb, then_bb);
-        llvm::LLVMPositionBuilderAtEnd(builder_, then_bb);
-        emit_storage_destruction(type, ptr);
-        llvm::LLVMBuildBr(builder_, merge_bb);
-        llvm::LLVMPositionBuilderAtEnd(builder_, merge_bb);
+        emit_unless_moved(moved_flag, [&, this] { emit_storage_destruction_unguarded(type, ptr, place); });
     }
 
 
-    void Codegen::codegen_destroy_old_state_for_move_assign(const Type& type, llvm::LLVMValueRef ptr, llvm::LLVMValueRef moved_flag)
+    void Codegen::codegen_destroy_old_state_for_move_assign(const Type& type, llvm::LLVMValueRef ptr, llvm::LLVMValueRef moved_flag,
+                                                            const Place* place)
 {
+        if (moved_flag == nullptr && place != nullptr) moved_flag = moved_flag_for_place(*place);
         if (type.kind == TypeKind::Array) {
             if (!type_has_destructor(type)) return;
+            if (place != nullptr && place_has_moved_descendants(*place)) {
+                emit_unless_moved(moved_flag, [&, this] {
+                    (void)emit_unrolled_array_teardown(type, ptr, *place, /*old_state=*/true);
+                });
+                return;
+            }
             (void)emit_array_element_loop(type, ptr, /*reverse=*/true, /*begin_index=*/0,
                                           [&, this](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef) -> std::expected<void, CodegenError> {
                                               codegen_destroy_old_state_for_move_assign(*type.element, element_ptr);
@@ -534,7 +554,7 @@ namespace scpp {
             return;
         }
         if (type.kind != TypeKind::Named) return;
-        codegen_destroy_old_class_state_for_move_assign(ptr, type.name, moved_flag);
+        codegen_destroy_old_class_state_for_move_assign(ptr, type.name, moved_flag, place);
     }
 
 
@@ -544,6 +564,169 @@ namespace scpp {
         llvm::LLVMValueRef flag = create_entry_block_alloca(llvm::LLVMInt1TypeInContext(context_), "movedflag");
         llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, /*SignExtend=*/0), flag);
         return flag;
+    }
+
+
+    llvm::LLVMValueRef Codegen::create_zeroed_flag_in_entry_block(const std::string& name)
+{
+        llvm::LLVMTypeRef i1 = llvm::LLVMInt1TypeInContext(context_);
+        llvm::LLVMValueRef flag = create_entry_block_alloca(i1, name);
+        llvm::LLVMValueRef zero = llvm::LLVMConstInt(i1, 0, /*SignExtend=*/0);
+        llvm::LLVMBasicBlockRef current_block = llvm::LLVMGetInsertBlock(builder_);
+        if (current_block == nullptr) {
+            llvm::LLVMBuildStore(builder_, zero, flag);
+            return flag;
+        }
+        // The `false` has to dominate every teardown that reads the
+        // flag, and a flag for a subobject is created where that
+        // subobject is first moved -- which may be inside a branch. Put
+        // the initialization next to the alloca, in the entry block.
+        llvm::LLVMBasicBlockRef entry = llvm::LLVMGetEntryBasicBlock(llvm::LLVMGetBasicBlockParent(current_block));
+        llvm::LLVMMetadataRef saved_dbg = llvm::LLVMGetCurrentDebugLocation2(builder_);
+        llvm::LLVMValueRef insert_before = llvm::LLVMGetNextInstruction(flag);
+        if (insert_before != nullptr) {
+            llvm::LLVMPositionBuilderBefore(builder_, insert_before);
+        } else {
+            llvm::LLVMPositionBuilderAtEnd(builder_, entry);
+        }
+        llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
+        llvm::LLVMBuildStore(builder_, zero, flag);
+        llvm::LLVMPositionBuilderAtEnd(builder_, current_block);
+        llvm::LLVMSetCurrentDebugLocation2(builder_, saved_dbg);
+        return flag;
+    }
+
+
+    void Codegen::emit_unless_moved(llvm::LLVMValueRef moved_flag, const std::function<void()>& body)
+{
+        if (moved_flag == nullptr) {
+            body();
+            return;
+        }
+        llvm::LLVMValueRef was_moved = llvm::LLVMBuildLoad2(builder_, llvm::LLVMInt1TypeInContext(context_), moved_flag, "wasmoved");
+        llvm::LLVMValueRef current_fn = llvm::LLVMGetBasicBlockParent(llvm::LLVMGetInsertBlock(builder_));
+        llvm::LLVMBasicBlockRef then_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "dtorcall");
+        llvm::LLVMBasicBlockRef merge_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "dtorskip");
+        llvm::LLVMBuildCondBr(builder_, was_moved, merge_bb, then_bb);
+        llvm::LLVMPositionBuilderAtEnd(builder_, then_bb);
+        body();
+        llvm::LLVMBuildBr(builder_, merge_bb);
+        llvm::LLVMPositionBuilderAtEnd(builder_, merge_bb);
+    }
+
+
+    std::expected<void, CodegenError> Codegen::emit_unrolled_array_teardown(const Type& type, llvm::LLVMValueRef ptr,
+                                                                            const Place& place, bool old_state)
+{
+        auto llvm_type_result = to_llvm_type(type);
+        if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
+        llvm::LLVMTypeRef array_llvm_type = std::move(llvm_type_result).value();
+        llvm::LLVMTypeRef i64 = llvm::LLVMInt64TypeInContext(context_);
+        for (std::int64_t i = type.array_size; i > 0; i--) {
+            Place element = projected_index(place, i - 1);
+            llvm::LLVMValueRef element_ptr = build_array_element_gep(
+                array_llvm_type, ptr, llvm::LLVMConstInt(i64, static_cast<unsigned long long>(i - 1), /*SignExtend=*/0));
+            if (old_state) {
+                codegen_destroy_old_state_for_move_assign(*type.element, element_ptr, /*moved_flag=*/nullptr, &element);
+            } else {
+                codegen_destroy_storage_unless_moved(*type.element, element_ptr, /*moved_flag=*/nullptr, &element);
+            }
+        }
+        return {};
+    }
+
+
+    [[nodiscard]] llvm::LLVMValueRef Codegen::moved_flag_for_place(const Place& place)
+{
+        auto it = locals_.find(place.local);
+        if (it == locals_.end()) return nullptr;
+        return it->second.moved_flag_for(place.path);
+    }
+
+
+    [[nodiscard]] bool Codegen::place_has_moved_descendants(const Place& place)
+{
+        auto it = locals_.find(place.local);
+        if (it == locals_.end()) return false;
+        for (const MovedFlag& entry : it->second.moved_flags) {
+            Place candidate{place.local, entry.path};
+            if (candidate.is_strictly_under(place)) return true;
+        }
+        return false;
+    }
+
+
+    void Codegen::set_place_moved(const Place& place, const Type& place_type)
+{
+        // Only a place with something to release needs a bit: the bit
+        // exists solely so teardown can skip it (spec §6.3(1)).
+        if (!type_has_destructor(place_type) && !type_needs_subobject_teardown(place_type)) return;
+        auto it = locals_.find(place.local);
+        if (it == locals_.end()) return;
+        LocalSlot& slot = it->second;
+        llvm::LLVMValueRef flag = slot.moved_flag_for(place.path);
+        if (flag == nullptr) {
+            flag = create_zeroed_flag_in_entry_block("movedflag");
+            slot.set_moved_flag(place.path, flag);
+        }
+        llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 1, /*SignExtend=*/0), flag);
+        // Moving a whole object moves everything under it; a strict
+        // descendant's own bit would otherwise stay behind and guard a
+        // teardown that no longer happens. Mirrors the move checker's
+        // mark_place_moved_out, which erases the same entries.
+        clear_strict_descendant_flags(place);
+    }
+
+
+    void Codegen::clear_place_moved(const Place& place)
+{
+        auto it = locals_.find(place.local);
+        if (it == locals_.end()) return;
+        llvm::LLVMValueRef flag = it->second.moved_flag_for(place.path);
+        if (flag != nullptr) {
+            llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, /*SignExtend=*/0), flag);
+        }
+        clear_strict_descendant_flags(place);
+    }
+
+
+    void Codegen::clear_strict_descendant_flags(const Place& place)
+{
+        auto it = locals_.find(place.local);
+        if (it == locals_.end()) return;
+        llvm::LLVMValueRef zero = llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, /*SignExtend=*/0);
+        for (const MovedFlag& entry : it->second.moved_flags) {
+            Place candidate{place.local, entry.path};
+            if (!candidate.is_strictly_under(place)) continue;
+            if (entry.flag != nullptr) llvm::LLVMBuildStore(builder_, zero, entry.flag);
+        }
+    }
+
+
+    [[nodiscard]] std::optional<Place> Codegen::codegen_place_of(const Expr& expr)
+{
+        std::optional<Place> place = place_of(expr, [this](const Expr& e) -> std::optional<LocalId> {
+            if (!has_resolved_local(e)) return std::optional<LocalId>{};
+            LocalId id = resolved_local_of(e);
+            if (!locals_.contains(id)) return std::optional<LocalId>{};
+            return id;
+        });
+        if (!place.has_value()) return place;
+        // Splice a reference root onto what it was bound to, so the place
+        // names the object rather than the binding. Bounded by the number
+        // of reference locals, which cannot form a cycle: a reference is
+        // bound at its declaration, so its target is always declared
+        // before it.
+        std::size_t hops = 0;
+        while (hops < reference_bound_places_.size() + 1) {
+            auto it = reference_bound_places_.find(place->local);
+            if (it == reference_bound_places_.end()) break;
+            Place spliced = it->second;
+            spliced.path.insert(spliced.path.end(), place->path.begin(), place->path.end());
+            place = std::move(spliced);
+            hops++;
+        }
+        return place;
     }
 
 

@@ -1265,13 +1265,22 @@ void test_rejected_initializer_diagnostic_advises_a_syntax_that_parses() {
               error.value_or(std::string("<no error>")) + "'");
 }
 
-// The same restriction -- `std::move(E)` records move state per named
-// object (spec §6.2(3)), so a member or element has nowhere to record it
-// -- used to surface as three different messages depending on which
-// boundary noticed first, and two of them never mentioned std::move at
-// all. The call-argument one was the worst: it advised "a fresh value
-// such as std::move(x)", which is exactly what the reader wrote.
-void test_move_of_a_member_reports_the_same_reason_at_every_boundary() {
+// spec §6.2(3) places the object designated by an *id-expression* in the
+// moved-out state; §6.2(1) lists *member* storage duration alongside
+// automatic, so a member has always been in the model. The restriction
+// this used to pin -- "std::move currently only supports a plain local
+// variable" -- had no basis in the spec text at all: move state was
+// keyed by LocalId, so there was nowhere to record a member's state,
+// and the representation's limit was reported as a language rule. It is
+// now keyed by *place*, so all three boundaries accept.
+//
+// The property the old test was really after -- one reason, spelled the
+// same way, at every boundary -- is kept, moved onto the forms that
+// genuinely have no place to record state against: a dereference (two
+// pointers may name the same object) and a runtime subscript (which
+// element it names is not known statically). Each names `std::move` and
+// says why.
+void test_move_of_a_member_is_accepted_at_every_boundary() {
     cases_run++;
     const std::string preamble =
         "import std;\n"
@@ -1284,17 +1293,17 @@ void test_move_of_a_member_reports_the_same_reason_at_every_boundary() {
         "void sink(std::vector<int> v) {\n"
         "    return;\n"
         "}\n";
-    const std::string expected = "std::move currently only supports a plain local variable";
 
     std::optional<std::string> as_argument = move_error_message(
         preamble +
         "void caller() {\n"
         "    Box b{};\n"
         "    sink(std::move(b.data));\n"
+        "    b.data = std::vector<int>{};\n"
         "    return;\n"
         "}\n");
-    expect(as_argument.has_value() && as_argument->find(expected) != std::string::npos,
-           "move_of_a_member_reports_the_same_reason_at_every_boundary: argument boundary gave '" +
+    expect(!as_argument.has_value(),
+           "move_of_a_member_is_accepted_at_every_boundary: argument boundary gave '" +
               as_argument.value_or(std::string("<no error>")) + "'");
 
     std::optional<std::string> as_initializer = move_error_message(
@@ -1302,10 +1311,11 @@ void test_move_of_a_member_reports_the_same_reason_at_every_boundary() {
         "void caller() {\n"
         "    Box b{};\n"
         "    std::vector<int> local = std::move(b.data);\n"
+        "    b.data = std::vector<int>{};\n"
         "    return;\n"
         "}\n");
-    expect(as_initializer.has_value() && as_initializer->find(expected) != std::string::npos,
-           "move_of_a_member_reports_the_same_reason_at_every_boundary: initializer boundary gave '" +
+    expect(!as_initializer.has_value(),
+           "move_of_a_member_is_accepted_at_every_boundary: initializer boundary gave '" +
               as_initializer.value_or(std::string("<no error>")) + "'");
 
     std::optional<std::string> as_return = move_error_message(
@@ -1314,9 +1324,120 @@ void test_move_of_a_member_reports_the_same_reason_at_every_boundary() {
         "    Box b{};\n"
         "    return std::move(b.data);\n"
         "}\n");
-    expect(as_return.has_value() && as_return->find(expected) != std::string::npos,
-           "move_of_a_member_reports_the_same_reason_at_every_boundary: return boundary gave '" +
+    expect(!as_return.has_value(),
+           "move_of_a_member_is_accepted_at_every_boundary: return boundary gave '" +
               as_return.value_or(std::string("<no error>")) + "'");
+
+    // Using the member afterwards is what must be rejected, and the
+    // rejection has to name the member, not its whole object.
+    std::optional<std::string> use_after = move_error_message(
+        preamble +
+        "int caller() {\n"
+        "    Box b{};\n"
+        "    std::vector<int> local = std::move(b.data);\n"
+        "    return static_cast<int>(b.data.size());\n"
+        "}\n");
+    expect(use_after.has_value() && use_after->find("b.data") != std::string::npos,
+           "move_of_a_member_is_accepted_at_every_boundary: use after a member move gave '" +
+              use_after.value_or(std::string("<no error>")) + "'");
+}
+
+void test_move_of_an_untrackable_place_reports_the_same_reason_at_every_boundary() {
+    cases_run++;
+    const std::string preamble =
+        "import std;\n"
+        "void sink(int v) {\n"
+        "    return;\n"
+        "}\n";
+
+    std::optional<std::string> deref = move_error_message(
+        preamble +
+        "void caller() {\n"
+        "    int x = 1;\n"
+        "    int* p = &x;\n"
+        "    sink(std::move(*p));\n"
+        "    return;\n"
+        "}\n");
+    expect(deref.has_value() && deref->find("dereference") != std::string::npos,
+           "move_of_an_untrackable_place_reports_the_same_reason_at_every_boundary: deref gave '" +
+              deref.value_or(std::string("<no error>")) + "'");
+
+    std::optional<std::string> subscript = move_error_message(
+        preamble +
+        "void caller(int i) {\n"
+        "    int arr[3]{1, 2, 3};\n"
+        "    sink(std::move(arr[i]));\n"
+        "    return;\n"
+        "}\n");
+    expect(subscript.has_value() && subscript->find("not a literal") != std::string::npos,
+           "move_of_an_untrackable_place_reports_the_same_reason_at_every_boundary: runtime subscript gave '" +
+              subscript.value_or(std::string("<no error>")) + "'");
+}
+
+// Per-place granularity, stated as three claims a coarse per-LocalId
+// model cannot all satisfy at once: moving `s.a` leaves `s.b` usable,
+// poisons `s.a.q` under it, and poisons `s` above it -- and each
+// rejection names the place whose state actually decided it, not the
+// enclosing local. spec §6.2(1) puts members in the state model and
+// §6.2(5) makes the use ill-formed; nothing in §6.2/§6.3 licenses
+// widening either answer to the whole object.
+void test_move_of_a_member_tracks_state_per_place() {
+    cases_run++;
+    const std::string preamble =
+        "import std;\n"
+        "struct Q {\n"
+        "    std::vector<int> data{};\n"
+        "};\n"
+        "struct Inner {\n"
+        "    Q q{};\n"
+        "};\n"
+        "struct Outer {\n"
+        "    Inner i{};\n"
+        "    Q z{};\n"
+        "};\n"
+        "void sink(Q v) {\n"
+        "    return;\n"
+        "}\n"
+        "void sink_inner(Inner v) {\n"
+        "    return;\n"
+        "}\n"
+        "void sink_outer(Outer v) {\n"
+        "    return;\n"
+        "}\n";
+
+    std::optional<std::string> sibling = move_error_message(
+        preamble +
+        "int caller() {\n"
+        "    Outer o{};\n"
+        "    sink(std::move(o.i.q));\n"
+        "    return static_cast<int>(o.z.data.size());\n"
+        "}\n");
+    expect(!sibling.has_value(),
+           "move_of_a_member_tracks_state_per_place: a sibling was poisoned: '" +
+              sibling.value_or(std::string("<no error>")) + "'");
+
+    std::optional<std::string> child = move_error_message(
+        preamble +
+        "int caller() {\n"
+        "    Outer o{};\n"
+        "    sink_inner(std::move(o.i));\n"
+        "    return static_cast<int>(o.i.q.data.size());\n"
+        "}\n");
+    expect(child.has_value() && child->find("'o.i'") != std::string::npos,
+           "move_of_a_member_tracks_state_per_place: use of a child of a moved-out member gave '" +
+              child.value_or(std::string("<no error>")) + "'");
+
+    std::optional<std::string> parent = move_error_message(
+        preamble +
+        "void caller() {\n"
+        "    Outer o{};\n"
+        "    sink(std::move(o.i.q));\n"
+        "    sink_outer(std::move(o));\n"
+        "    return;\n"
+        "}\n");
+    expect(parent.has_value() && parent->find("'o.i.q'") != std::string::npos,
+           "move_of_a_member_tracks_state_per_place: moving the whole object after a member move gave '" +
+              parent.value_or(std::string("<no error>")) + "'");
 }
 
 void test_overload_failure_distinguishes_arity_from_argument_type() {
@@ -3039,7 +3160,9 @@ int main() {
     test_same_type_initializer_still_requires_copy_constructibility();
     test_expected_of_a_smart_pointer_accepts_nullptr();
     test_rejected_initializer_diagnostic_advises_a_syntax_that_parses();
-    test_move_of_a_member_reports_the_same_reason_at_every_boundary();
+    test_move_of_a_member_is_accepted_at_every_boundary();
+    test_move_of_an_untrackable_place_reports_the_same_reason_at_every_boundary();
+    test_move_of_a_member_tracks_state_per_place();
     test_overload_failure_distinguishes_arity_from_argument_type();
     test_overload_failure_names_the_offending_argument_and_types();
     test_std_string_const_reference_mutation_reports_clear_diagnostic();

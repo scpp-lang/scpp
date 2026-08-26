@@ -1,0 +1,34 @@
+import std;
+
+struct R {
+    int id = 0;
+    R(int i) : id{i} {}
+    ~R() {}
+};
+
+struct S {
+    R a;
+    R b;
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+struct Inner {
+    R q;
+    Inner(int x) : q{x} {}
+};
+
+struct Outer {
+    Inner i;
+    R z;
+    Outer(int x, int y) : i{x}, z{y} {}
+};
+
+R make_r(int i) { R r{i}; return r; }
+
+// spec §6.2(4): assignment returns the object to the initialized state.
+int caller() {
+    S s{1, 2};
+    R t = std::move(s.a);
+    s.a = make_r(7);
+    return s.a.id + t.id;
+}

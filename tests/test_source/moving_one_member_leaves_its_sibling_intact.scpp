@@ -1,0 +1,25 @@
+// Per-place granularity in the acceptance direction: moving `s.a` must
+// not poison `s.b`, and `s.b` must still be destroyed.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { std::print("~R{}\n", this.id); }
+};
+
+R make_r(int i) { R r{i}; return r; }
+
+struct S {
+    R a;
+    R b;
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+int main() {
+    S s{1, 2};
+    R t = std::move(s.a);
+    std::print("b={}\n", s.b.id);
+    return 0;
+}

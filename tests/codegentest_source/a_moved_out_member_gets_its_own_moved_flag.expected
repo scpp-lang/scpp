@@ -1,0 +1,2 @@
+sequence: %movedflag1 = alloca i1 | store i1 false, ptr %movedflag1 | store i1 true, ptr %movedflag1 | load i1, ptr %movedflag1 | call void @R_delete
+count_at_least: 3 | call void @R_delete

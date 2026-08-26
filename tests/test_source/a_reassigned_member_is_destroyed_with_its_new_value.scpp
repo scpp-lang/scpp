@@ -1,0 +1,27 @@
+// spec §6.2(4): assigning to a moved-out member returns it to the
+// initialized state, so its *new* value must be destroyed at teardown --
+// exactly once, and the old value exactly once as `t`.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { std::print("~R{}\n", this.id); }
+};
+
+R make_r(int i) { R r{i}; return r; }
+
+struct S {
+    R a;
+    R b;
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+int main() {
+    S s{1, 2};
+    R t = std::move(s.a);
+    s.a = make_r(7);
+    std::print("mid\n");
+    return 0;
+}

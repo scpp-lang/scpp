@@ -1546,7 +1546,10 @@ private:
         }
         globals_resolving_.insert(key);
         std::vector<std::unordered_map<std::string, Binding>> saved_frames = std::move(frames_);
-        frames_.clear();
+        // spec §6.2(4): the move above already left `frames_` moved-out,
+        // so it has to be given a value again before the evaluation
+        // below reads it -- `.clear()` was a *use* of a moved-out object.
+        frames_ = std::vector<std::unordered_map<std::string, Binding>>{};
         // A global's initializer is looked up from the namespace the
         // global itself was declared in, never from wherever the
         // reference that triggered this resolution happened to sit.

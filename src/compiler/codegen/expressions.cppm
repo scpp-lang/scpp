@@ -614,11 +614,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             create_store(moved_value, target.ptr, target.alignment);
             if (auto r = zero_initialize_storage(*moved_src_ptr, target.type, std::nullopt); !r.has_value())
                 return std::unexpected(std::move(r).error());
-            if (args[0]->lhs != nullptr && args[0]->lhs->kind == ExprKind::Identifier) {
-                const LocalSlot* source_local = find_local(*args[0]->lhs);
-                if (source_local != nullptr && source_local->moved_flag != nullptr) {
-                    llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 1, 0),
-                                         source_local->moved_flag);
+            if (args[0]->lhs != nullptr) {
+                if (std::optional<Place> source_place = codegen_place_of(*args[0]->lhs); source_place.has_value()) {
+                    set_place_moved(*source_place, target.type);
                 }
             }
             if (class_has_ordinary_vtable(target.type.name)) {
@@ -2553,16 +2551,21 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
             case ExprKind::Move:
                 return [&, this]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
-                    // The move checker has already verified `expr.lhs` is a
-                    // plain, currently-Initialized unique_ptr or class-typed
-                    // variable. At the IR level a move is: read the old
-                    // value, then null out the source slot -- so even code
-                    // that (incorrectly) bypassed the move checker would
-                    // observe a null pointer rather than an aliased/
-                    // duplicated one. For a class-typed source with a
-                    // destructor, also set its own moved_flag (spec §6.3/
-                    // §6.4: the destructor is never invoked for a moved-out
-                    // object) -- see codegen_call_destructor_unless_moved.
+                    // The move checker has already verified `expr.lhs`
+                    // names a currently-Initialized place. At the IR level
+                    // a move is: read the old value, then null out the
+                    // source storage -- so even code that (incorrectly)
+                    // bypassed the move checker would observe a null
+                    // pointer rather than an aliased/duplicated one. Where
+                    // the source has anything to release, also set that
+                    // *place*'s moved bit (spec §6.3(1): the destructor is
+                    // never invoked for a moved-out object) -- see
+                    // codegen_destroy_storage_unless_moved.
+                    //
+                    // Setting the bit used to be conditional on the source
+                    // being an Identifier, which is why moving a member out
+                    // and letting its owner go out of scope destroyed the
+                    // moved-out member anyway.
                     auto lv_result = codegen_lvalue(*expr.lhs);
                     if (!lv_result.has_value()) return std::unexpected(std::move(lv_result).error());
                     LValue lv = std::move(lv_result).value();
@@ -2571,11 +2574,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     llvm::LLVMTypeRef llvm_type = std::move(llvm_type_result).value();
                     llvm::LLVMValueRef old_value = create_load(llvm_type, lv.ptr, lv.alignment, "movetmp");
                     if (auto r = zero_initialize_storage(lv.ptr, lv.type, lv.alignment); !r.has_value()) return std::unexpected(std::move(r).error());
-                    if (expr.lhs->kind == ExprKind::Identifier) {
-                        const LocalSlot* source_local = find_local(*expr.lhs);
-                        if (source_local != nullptr && source_local->moved_flag != nullptr) {
-                            llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 1, 0), source_local->moved_flag);
-                        }
+                    if (std::optional<Place> source_place = codegen_place_of(*expr.lhs); source_place.has_value()) {
+                        set_place_moved(*source_place, lv.type);
                     }
                     return old_value;
                 }();
@@ -3697,16 +3697,13 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         auto memberwise_result = codegen_memberwise_copy_assign(lv.ptr, src_ptr, lv.type.name);
                         if (!memberwise_result.has_value()) return std::unexpected(std::move(memberwise_result).error());
                     }
-                    if (expr.lhs->kind == ExprKind::Identifier) {
-                        // See the move-assignment path's identical
-                        // comment below for why this reset is needed
-                        // (covers reassigning a previously-moved-out
-                        // variable via a copy this time).
-                        const LocalSlot* target_local = find_local(*expr.lhs);
-                        if (target_local != nullptr && target_local->moved_flag != nullptr) {
-                            llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, 0),
-                                                 target_local->moved_flag);
-                        }
+                    // See the move-assignment path's identical comment
+                    // below for why this reset is needed (covers
+                    // reassigning a previously-moved-out place via a copy
+                    // this time). spec §6.2(4) makes this true of any
+                    // place, not just a whole local.
+                    if (std::optional<Place> target_place = codegen_place_of(*expr.lhs); target_place.has_value()) {
+                        clear_place_moved(*target_place);
                     }
                     return lv.ptr;
                 }
@@ -3742,15 +3739,12 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     // a local class with a destructor, marked moved-out) the
                     // source's slot, exactly like move-construction's own
                     // identical reasoning (codegen_stmt's VarDecl case).
-                    llvm::LLVMValueRef target_moved_flag = nullptr;
-                    if (expr.lhs->kind == ExprKind::Identifier) {
-                        const LocalSlot* target_local = find_local(*expr.lhs);
-                        if (target_local != nullptr) target_moved_flag = target_local->moved_flag;
-                    }
-                    codegen_destroy_old_class_state_for_move_assign(lv.ptr, lv.type.name, target_moved_flag);
+                    std::optional<Place> target_place = codegen_place_of(*expr.lhs);
+                    codegen_destroy_old_state_for_move_assign(lv.type, lv.ptr, /*moved_flag=*/nullptr,
+                                                              target_place.has_value() ? &*target_place : nullptr);
                 }
                 create_store(value, lv.ptr, lv.alignment);
-                if (lv.type.kind == TypeKind::Named && expr.lhs->kind == ExprKind::Identifier) {
+                if (lv.type.kind == TypeKind::Named) {
                     // spec §6.2(4)/§6.4: an assignment always leaves its own
                     // target in the initialized state, holding the newly
                     // assigned value -- including the (real, discovered-and-
@@ -3767,9 +3761,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     // (its moved_flag would otherwise still read true from
                     // that earlier move, despite this assignment giving it a
                     // brand new value).
-                    const LocalSlot* target_local = find_local(*expr.lhs);
-                    if (target_local != nullptr && target_local->moved_flag != nullptr) {
-                        llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, 0), target_local->moved_flag);
+                    if (std::optional<Place> target_place = codegen_place_of(*expr.lhs); target_place.has_value()) {
+                        clear_place_moved(*target_place);
                     }
                 }
                 return value;
@@ -3859,11 +3852,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         return std::unexpected(CodegenError("unhandled compound assignment operator", current_loc_));
                 }
                 create_store(value, lv.ptr, lv.alignment);
-                if (lv.type.kind == TypeKind::Named && expr.lhs->kind == ExprKind::Identifier) {
-                    const LocalSlot* target_local = find_local(*expr.lhs);
-                    if (target_local != nullptr && target_local->moved_flag != nullptr) {
-                        llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, 0),
-                                             target_local->moved_flag);
+                if (lv.type.kind == TypeKind::Named) {
+                    if (std::optional<Place> target_place = codegen_place_of(*expr.lhs); target_place.has_value()) {
+                        clear_place_moved(*target_place);
                     }
                 }
                 return value;

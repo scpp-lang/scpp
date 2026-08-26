@@ -1,0 +1,24 @@
+// Codegen kept move state in one i1 alloca per local -- the same
+// LocalId granularity the move checker used. With per-place move
+// checking but a coarse codegen, `s.a`'s teardown was emitted
+// unconditionally and the moved-out member was destroyed a second time.
+// A place that is moved out gets its own flag, created and zeroed in the
+// entry block (a sub-place flag is first needed at a move site that may
+// sit inside a branch), and the struct-field teardown loop consults it.
+struct R {
+    int id = 0;
+    R() {}
+    ~R() {}
+};
+
+struct S {
+    R a;
+    R b;
+    S() {}
+};
+
+int main() {
+    S s{};
+    R t = std::move(s.a);
+    return 0;
+}
