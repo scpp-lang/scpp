@@ -76,13 +76,11 @@ public:
     reference_wrapper& operator=(const reference_wrapper&) = default;
 
     // Intentionally omits an implicit `operator T&()` until conversion operators are supported.
-    T& get() {
-        [[scpp::unsafe]] {
-            return *this->ptr_;
-        }
-    }
-
-    const T& get() const {
+    // [refwrap.access]: `constexpr T& get() const noexcept;` -- one
+    // accessor, const-qualified, returning a non-const `T&`. A
+    // reference_wrapper is a view; its own constness never reaches the
+    // referent.
+    T& get() const {
         [[scpp::unsafe]] {
             return *this->ptr_;
         }

@@ -1,0 +1,29 @@
+// [dcl.type.cv]/4: in a `const` member function the members of `*this`
+// are const, so a mutable `T&` cannot bind to one. This used to be
+// *accepted* -- the signature-level rule that rejected every `T& f()
+// const` returned early whenever the function carried any
+// `[[scpp::lifetime]]` annotation, so the shape it existed to catch was
+// exactly the shape that bypassed it.
+import std;
+
+class Cell {
+public:
+    virtual ~Cell() = default;
+    Cell() = default;
+    int v = 0;
+    void set(int x) { this.v = x; return; }
+};
+
+class Holder {
+public:
+    virtual ~Holder() = default;
+    Holder() = default;
+    Cell c{};
+    Cell& obj() const [[scpp::lifetime(this)]] { return this.c; }
+};
+
+int main() {
+    Holder h{};
+    h.obj().set(7);
+    return h.c.v;
+}

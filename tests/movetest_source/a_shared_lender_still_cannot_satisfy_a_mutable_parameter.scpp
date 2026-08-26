@@ -1,0 +1,20 @@
+// Control for the other direction. The read-only-argument guard used to
+// sit inside the `else` of the reborrow bookkeeping, so it never ran for
+// an argument that resolved to a tracked lender; a second, lender-keyed
+// copy of the same question stood in for it there. Removing that copy
+// without hoisting the guard would accept this.
+import std;
+
+int inc(int& v) {
+    v = v + 1;
+    return 0;
+}
+
+int f() {
+    int a = 1;
+    const int& r = a;
+    inc(r);
+    return 0;
+}
+
+int main() { return f(); }

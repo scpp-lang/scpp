@@ -1,0 +1,36 @@
+// [refwrap.access]: `constexpr T& get() const noexcept;`. A `const`
+// member function may return a mutable `T&` when that reference is
+// reached through an indirection stored in the object, rather than
+// naming a subobject of it. This used to be rejected from the
+// *signature* alone ("a mutable reference cannot be manufactured from a
+// shared one"), which made every C++ handle type inexpressible.
+import std;
+
+class Cell {
+public:
+    virtual ~Cell() = default;
+    Cell() = default;
+    int v = 0;
+    void set(int x) { this.v = x; return; }
+};
+
+class Handle {
+private:
+    Cell* p_ = nullptr;
+public:
+    virtual ~Handle() = default;
+    Handle() = default;
+    void reset(Cell* p) { this.p_ = p; return; }
+    Cell& obj() const {
+        [[scpp::unsafe]] { return *this.p_; }
+    }
+};
+
+int main() {
+    Cell c{};
+    Handle h{};
+    h.reset(&c);
+    const Handle& hr = h;
+    hr.obj().set(7);
+    return c.v;
+}

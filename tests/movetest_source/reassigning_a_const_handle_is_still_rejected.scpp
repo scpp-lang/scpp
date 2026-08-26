@@ -1,0 +1,22 @@
+// The discriminating control for the whole loosening: the handle's own
+// constness still governs the handle. Writing *through* a const
+// `shared_ptr` binding is fine; writing *to* it is not.
+import std;
+
+class Cell {
+public:
+    virtual ~Cell() = default;
+    Cell() = default;
+    int v = 0;
+};
+
+int rebind(const std::shared_ptr<Cell>& t, std::shared_ptr<Cell> other) {
+    t = other;
+    return t->v;
+}
+
+int main() {
+    std::shared_ptr<Cell> a = std::make_shared<Cell>();
+    std::shared_ptr<Cell> b = std::make_shared<Cell>();
+    return rebind(a, b);
+}

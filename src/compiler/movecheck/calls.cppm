@@ -1988,108 +1988,39 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
 // read-only answer.
 //
 // So this is the union of the two, and both names now denote it.
-// Once a chain crosses a read-only step, everything beyond it stays
-// read-only: a struct field/array element can never itself be a
-// reference or span (ch04.1), so there is no way for a later `.field`/
-// `[index]` step to "regain" mutability -- only a chain that never
-// crosses one at all is mutable.
+//
+// The rule itself now lives in scpp.ast (`place_is_read_only(const
+// Expr&, const ReadOnlyPlaceQuery&)`), because codegen was asking the
+// very same question with its own third copy; this function is just
+// movecheck's name resolution for it. See that function for the rule and
+// for what the two copies disagreed about.
 [[nodiscard]] bool place_is_read_only(const Expr& expr, const Body& body, const Signatures& signatures) {
-    switch (expr.kind) {
-        case ExprKind::Identifier: {
-            if (std::optional<LocalId> local = body.local_of(expr); local.has_value()) {
-                const Type& type = body.type_of(*local);
-                return body.decl(*local).is_const || type.is_const_qualified ||
-                       ((is_reference(type) || is_span(type)) && !type.is_mutable_ref);
-            }
-            if (const GlobalVar* global = find_visible_global_for_expr(expr, body); global != nullptr && global->decl != nullptr) {
-                const Type& type = global->decl->type;
-                return global->decl->is_const || global->decl->is_constexpr || type.is_const_qualified ||
-                       ((is_reference(type) || is_span(type)) && !type.is_mutable_ref);
-            }
-            return false; // unknown name: left to codegen's own check
+    ReadOnlyPlaceQuery query;
+    query.declared_variable =
+        [&](const Expr& name_expr) -> std::optional<std::pair<bool, Type>> {
+        if (std::optional<LocalId> local = body.local_of(name_expr); local.has_value()) {
+            return std::pair<bool, Type>(body.decl(*local).is_const, body.type_of(*local));
         }
-        case ExprKind::Member:
-        case ExprKind::Subscript: {
-            // Most projections inherit writeability from their base (a
-            // field of a const object, an element of a const/span<const>
-            // view, ...), but some expressions themselves *are* a
-            // read-only reference-like view even when the base object is
-            // otherwise mutable -- most notably lambda capture fields that
-            // preserve an outer `const T&`. Check the projection's own
-            // declared view type first so `this.capture = ...` is rejected
-            // when the field denotes a shared borrow/span, then fall back
-            // to the base-place const-reachability rule for ordinary value
-            // fields.
-            if (expr.kind == ExprKind::Member && body.program != nullptr) {
-                std::optional<Type> base = infer_expr_type(*expr.lhs, body, signatures);
-                const Type* base_named = base.has_value() ? &*base : nullptr;
-                if (base_named != nullptr && base_named->kind == TypeKind::Reference && base_named->pointee != nullptr) {
-                    base_named = base_named->pointee.get();
-                }
-                if (base_named != nullptr && base_named->kind == TypeKind::Named) {
-                    if (base_named->is_const_qualified) return true;
-                    if (const ClassDef* def = find_class_def(*body.program, base_named->name)) {
-                        for (const ClassField& field : def->fields) {
-                            if (field.name == expr.name) {
-                                if ((is_reference(field.type) || is_span(field.type)) && !field.type.is_mutable_ref) return true;
-                                if (field.type.is_const_qualified) return true;
-                                break;
-                            }
-                        }
-                    }
-                    if (const StructDef* def = find_struct_def(*body.program, base_named->name)) {
-                        for (const StructField& field : def->fields) {
-                            if (field.name == expr.name) {
-                                if ((is_reference(field.type) || is_span(field.type)) && !field.type.is_mutable_ref) return true;
-                                if (field.type.is_const_qualified) return true;
-                                break;
-                            }
-                        }
-                    }
-                }
-            } else if (expr.kind == ExprKind::Subscript) {
-                std::optional<Type> base = infer_expr_type(*expr.lhs, body, signatures);
-                const Type* effective = base.has_value() ? &*base : nullptr;
-                if (effective != nullptr && effective->kind == TypeKind::Reference && effective->pointee != nullptr) {
-                    effective = effective->pointee.get();
-                }
-                if (effective != nullptr && effective->kind == TypeKind::Span && !effective->is_mutable_ref) return true;
-                if (effective != nullptr && effective->kind == TypeKind::Pointer && !effective->is_mutable_pointee) return true;
-                if (effective != nullptr && effective->is_const_qualified) return true;
-            }
-            return place_is_read_only(*expr.lhs, body, signatures);
+        if (const GlobalVar* global = find_visible_global_for_expr(name_expr, body);
+            global != nullptr && global->decl != nullptr) {
+            return std::pair<bool, Type>(global->decl->is_const || global->decl->is_constexpr, global->decl->type);
         }
-        case ExprKind::Unary: {
-            if (is_explicit_star_this(expr)) return place_is_read_only(*expr.lhs, body, signatures);
-            if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
-                return place_is_read_only(*expr.lhs, body, signatures);
-            }
-            if (expr.unary_op != UnaryOp::Deref) return false;
-            std::optional<Type> operand_type = infer_expr_type(*expr.lhs, body, signatures);
-            if (!operand_type.has_value()) return false;
-            if (operand_type->kind == TypeKind::Pointer) return !operand_type->is_mutable_pointee;
-            if (operand_type->kind == TypeKind::Reference) return !operand_type->is_mutable_ref;
-            return false;
-        }
-        case ExprKind::Call: {
-            // The call's *own* declared return type is authoritative --
-            // it doesn't matter whether the elided argument behind it was
-            // itself mutable or read-only-reachable: a signature that
-            // promises `const T&` back hands back a read-only view
-            // regardless (exactly like a plain `const T&`-typed
-            // Identifier above), and a signature promising `T&` could
-            // only have been called successfully with a mutable-
-            // reachable argument in the first place (apply_reference_
-            // argument already enforces that at the call site).
-            CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
-            const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
-            if (sig == nullptr) return false;
-            if (is_reference(sig->return_type) || is_span(sig->return_type)) return !sig->return_type.is_mutable_ref;
-            return sig->return_type.is_const_qualified;
-        }
-        default:
-            return false;
-    }
+        return std::nullopt;
+    };
+    query.inferred_type = [&](const Expr& sub) { return infer_expr_type(sub, body, signatures); };
+    query.call_return_type = [&](const Expr& call) -> std::optional<Type> {
+        CalleeSignature callee = resolve_callee_signature(call, body, signatures);
+        const FunctionSignature* sig = resolve_overload(call, callee, body, signatures);
+        if (sig == nullptr) return std::nullopt;
+        return sig->return_type;
+    };
+    query.class_def = [&](const std::string& name) -> const ClassDef* {
+        return body.program != nullptr ? find_class_def(*body.program, name) : nullptr;
+    };
+    query.struct_def = [&](const std::string& name) -> const StructDef* {
+        return body.program != nullptr ? find_struct_def(*body.program, name) : nullptr;
+    };
+    return place_is_read_only(expr, query);
 }
 
 // The same question under the name the assignment path asks it by.

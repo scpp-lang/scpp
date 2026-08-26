@@ -1,0 +1,26 @@
+// [util.smartptr.shared.obs]: `T& operator*() const`, `T* operator->()
+// const`, `element_type* get() const` -- all const-qualified, all
+// returning a *non-const* pointee. A `const shared_ptr<T>&` freezes the
+// handle, never the object it points at; std::shared_ptr is not
+// std::propagate_const.
+import std;
+
+class Cell {
+public:
+    virtual ~Cell() = default;
+    Cell() = default;
+    int v = 0;
+    void set(int x) { this.v = x; return; }
+    int get_v() const { return this.v; }
+};
+
+int take(const std::shared_ptr<Cell>& t) {
+    t->set(7);
+    (*t).set(t->get_v() + 1);
+    return t->get_v();
+}
+
+int main() {
+    std::shared_ptr<Cell> p = std::make_shared<Cell>();
+    return take(p);
+}

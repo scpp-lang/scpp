@@ -694,6 +694,147 @@ template <typename VisitFn>
     return Result{};
 }
 
+// [dcl.type.cv]/4 + spec ch05 §5.7 / §6.2(10): "is the object this
+// expression designates reachable only read-only?" -- i.e. may a write,
+// a mutable `T&`/`std::span<T>` binding, a `T*`, or a non-`const` member
+// call be formed through this place?
+//
+// There were two of these, movecheck's `place_is_read_only` (which
+// #492 had already unified out of two *within* movecheck) and
+// `Codegen::is_read_only_place`, and they had drifted again in four
+// places: only movecheck knew a `constexpr` global is read-only, that
+// `*this` is the receiver itself, and that a `const`-qualified or
+// `std::span<const T>` *return type* is read-only; only codegen knew
+// that a `const`-element array's element is. Worse, codegen's Member
+// case *returned* the field's own view-ness instead of falling through
+// to the base, so `h.field = 1` through a `const Holder& h` read back
+// writable there while movecheck rejected it -- the two passes
+// disagreeing about the same place. So there is now exactly one of it,
+// living here (neither pass can import the other's partitions), with
+// each pass supplying only its own name-resolution.
+//
+// The rule it implements is that const propagates to *subobjects* and
+// stops at *indirections*. `c.field`, `c.arr[i]` and `*this` are parts
+// of `c`, so a `const` `c` freezes them. A pointee, a span element, and
+// anything reached through a member function's declared return type are
+// separate objects reached *through* `c`, so `c`'s own qualification
+// says nothing about them: `T* const` is not `const T*`, `const
+// std::span<T>&` is not `std::span<const T>`, and a `const`-qualified
+// accessor returning `T&` hands back a mutable `T&` -- which is exactly
+// how every standard handle type is specified
+// ([util.smartptr.shared.obs], [unique.ptr.single.observers],
+// [refwrap.access], [span.elem]). Nothing here matches on a type *name*;
+// `shared_ptr` is not special, it is merely the commonest spelling of
+// "accessor returning a non-const reference".
+struct ReadOnlyPlaceQuery {
+    // For an Identifier: the named entity's own `const`/`constexpr`-ness
+    // and its declared type, or nullopt when this pass cannot resolve the
+    // name (left to the other pass's own check).
+    std::function<std::optional<std::pair<bool, Type>>(const Expr&)> declared_variable;
+    // Any expression's type as this pass infers it.
+    std::function<std::optional<Type>(const Expr&)> inferred_type;
+    // A Call's *declared return type*. Authoritative on its own: a
+    // signature promising `const T&` back hands back a read-only view
+    // however mutable the receiver was, and one promising `T&` could only
+    // have been called at all with a mutably-reachable argument (the
+    // call-argument guard enforces that separately).
+    std::function<std::optional<Type>(const Expr&)> call_return_type;
+    std::function<const ClassDef*(const std::string&)> class_def;
+    std::function<const StructDef*(const std::string&)> struct_def;
+};
+
+[[nodiscard]] inline bool type_is_read_only_view(const Type& type) {
+    return type.is_const_qualified ||
+           ((type.kind == TypeKind::Reference || type.kind == TypeKind::Span) && !type.is_mutable_ref);
+}
+
+[[nodiscard]] inline bool place_is_read_only(const Expr& expr, const ReadOnlyPlaceQuery& query) {
+    switch (expr.kind) {
+        case ExprKind::Identifier: {
+            if (!query.declared_variable) return false;
+            std::optional<std::pair<bool, Type>> declared = query.declared_variable(expr);
+            if (!declared.has_value()) return false; // unknown name: left to the other pass's own check
+            return declared->first || type_is_read_only_view(declared->second);
+        }
+        case ExprKind::Member:
+        case ExprKind::Subscript: {
+            if (expr.lhs == nullptr) return false;
+            std::optional<Type> base = query.inferred_type ? query.inferred_type(*expr.lhs) : std::nullopt;
+            const Type* effective = base.has_value() ? &*base : nullptr;
+            if (effective != nullptr && effective->kind == TypeKind::Reference && effective->pointee != nullptr) {
+                effective = effective->pointee.get();
+            }
+            if (effective != nullptr) {
+                // An indirection ends the propagation, and answers on its
+                // own: whatever it took to *reach* the pointer/span, what
+                // is on the far side of it is qualified by the pointee/
+                // element type and by nothing else.
+                if (effective->kind == TypeKind::Pointer) return !effective->is_mutable_pointee;
+                if (effective->kind == TypeKind::Span) return !effective->is_mutable_ref;
+                // From here down every step is a subobject of the base.
+                if (effective->is_const_qualified) return true;
+                if (expr.kind == ExprKind::Subscript && effective->kind == TypeKind::Array &&
+                    effective->element != nullptr && effective->element->is_const_qualified) {
+                    return true;
+                }
+                if (expr.kind == ExprKind::Member && effective->kind == TypeKind::Named) {
+                    // A field's own declared type decides first: a `const`
+                    // field, or one that is itself a shared borrow (most
+                    // notably a lambda capture field preserving an outer
+                    // `const T&`), is read-only however mutable the object
+                    // holding it is. Otherwise fall through to the base.
+                    if (const ClassDef* def = query.class_def ? query.class_def(effective->name) : nullptr;
+                        def != nullptr) {
+                        for (const ClassField& field : def->fields) {
+                            if (field.name != expr.name) continue;
+                            if (type_is_read_only_view(field.type)) return true;
+                            break;
+                        }
+                    }
+                    if (const StructDef* def = query.struct_def ? query.struct_def(effective->name) : nullptr;
+                        def != nullptr) {
+                        for (const StructField& field : def->fields) {
+                            if (field.name != expr.name) continue;
+                            if (type_is_read_only_view(field.type)) return true;
+                            break;
+                        }
+                    }
+                }
+            }
+            return place_is_read_only(*expr.lhs, query);
+        }
+        case ExprKind::Unary: {
+            if (expr.lhs == nullptr) return false;
+            if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
+                return place_is_read_only(*expr.lhs, query);
+            }
+            if (expr.unary_op != UnaryOp::Deref) return false;
+            // ch05 §5.9: `*this` is just an explicit spelling of the
+            // receiver object, not an indirection to somewhere else.
+            if (expr.lhs->kind == ExprKind::Identifier && expr.lhs->name == "this") {
+                return place_is_read_only(*expr.lhs, query);
+            }
+            std::optional<Type> operand = query.inferred_type ? query.inferred_type(*expr.lhs) : std::nullopt;
+            if (!operand.has_value()) return false;
+            if (operand->kind == TypeKind::Pointer) return !operand->is_mutable_pointee;
+            if (operand->kind == TypeKind::Reference) return !operand->is_mutable_ref;
+            return false;
+        }
+        case ExprKind::Call: {
+            std::optional<Type> returned = query.call_return_type ? query.call_return_type(expr) : std::nullopt;
+            if (!returned.has_value()) return false;
+            if (returned->kind == TypeKind::Reference || returned->kind == TypeKind::Span) {
+                return !returned->is_mutable_ref;
+            }
+            return returned->is_const_qualified;
+        }
+        default:
+            return false;
+    }
+}
+
+
+
 } // namespace scpp
 
 namespace scpp {

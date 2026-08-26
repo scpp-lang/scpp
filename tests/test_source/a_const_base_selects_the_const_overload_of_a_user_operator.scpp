@@ -1,0 +1,26 @@
+import std;
+
+struct Hot { int v = 111; };
+struct Cold { int v = 222; };
+
+// A user type with both a mutable and a shared `operator*`: which one is
+// selected must follow whether the *receiver place* is read-only, not merely
+// whether the receiver expression's own type spells `const T&`.
+struct Box {
+    Hot h;
+    Cold c;
+    Hot& operator*() { return this.h; }
+    const Cold& operator*() const { return this.c; }
+};
+
+struct Holder { Box b; };
+
+int read_through_const_base(const Holder& hh) { return (*hh.b).v; }
+int read_through_mutable_base(Holder& hh) { return (*hh.b).v; }
+
+int main() {
+    Holder hh{};
+    std::print("{}\n", read_through_const_base(hh));
+    std::print("{}\n", read_through_mutable_base(hh));
+    return 0;
+}

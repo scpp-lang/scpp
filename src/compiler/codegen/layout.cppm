@@ -655,13 +655,16 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
         // also takes -- see movecheck's resolve_elided_param_index for
         // the full rationale (this is its structural codegen-side
         // counterpart, kept in sync).
+        // The "mutable reference from a `const` receiver / a `const T&`
+        // parameter" rejections that used to live here and in movecheck's
+        // resolve_elided_param_index are gone from both -- see that
+        // function for why they were unsound (bypassed by any
+        // `[[scpp::lifetime]]`) as well as wrong ([dcl.type.cv]/4 stops
+        // at subobjects, and every C++ handle accessor is `const`-
+        // qualified returning a non-const `T&`/`T*`). The real rule is
+        // asked of the returned *expression* by movecheck's
+        // place_is_read_only.
         if (!fn.params.empty() && fn.params[0].name == "this" && fn.params[0].type.kind == TypeKind::Reference) {
-            if (fn.return_type.is_mutable_ref && !fn.params[0].type.is_mutable_ref) {
-                return std::unexpected(CodegenError("function '" + fn.name +
-                                    "' returns a mutable reference ('T&') but its 'this' is a read-only "
-                                    "('const') receiver",
-                    current_loc_));
-            }
             return {};
         }
         const Param* found = nullptr;
@@ -684,12 +687,6 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
             return std::unexpected(CodegenError("function '" + fn.name +
                                 "' returns a reference but has no reference parameter to infer its lifetime "
                                 "from (spec ch05.3)",
-                current_loc_));
-        }
-        if (fn.return_type.is_mutable_ref && !found->type.is_mutable_ref) {
-            return std::unexpected(CodegenError("function '" + fn.name +
-                                "' returns a mutable reference ('T&') but its sole reference parameter '" +
-                                found->name + "' is a shared reference ('const T&')",
                 current_loc_));
         }
         return {};

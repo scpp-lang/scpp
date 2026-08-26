@@ -1,0 +1,17 @@
+// [span.elem]: `constexpr reference operator[](size_type) const;` with
+// `reference = element_type&`. Element mutability is carried by
+// `span<T>` vs `span<const T>`, never by the constness of the binding
+// that holds the span -- exactly the distinction spec 02 6.2(7) itself
+// draws when it names both types separately.
+import std;
+
+int write_first(const std::span<int>& s) {
+    s[0] = 7;
+    return s[0];
+}
+
+int main() {
+    int a[2]{1, 2};
+    std::span<int> view = a;
+    return write_first(view);
+}

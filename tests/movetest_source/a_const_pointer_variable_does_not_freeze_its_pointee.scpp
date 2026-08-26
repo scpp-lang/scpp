@@ -1,0 +1,36 @@
+// `T* const` is not `const T*`. The pointer variable is read-only; the
+// object it points at is not. The same holds for a pointer *member*
+// reached through a const object -- the member is const, the pointee is
+// not.
+import std;
+
+class Cell {
+public:
+    virtual ~Cell() = default;
+    Cell() = default;
+    int v = 0;
+    void set(int x) { this.v = x; return; }
+};
+
+class Holder {
+public:
+    virtual ~Holder() = default;
+    Holder() = default;
+    Cell* p = nullptr;
+};
+
+int through_const_holder(const Holder& h) {
+    [[scpp::unsafe]] {
+        h.p->set(7);
+        return h.p->v;
+    }
+}
+
+int main() {
+    Cell c{};
+    Cell* const cp = &c;
+    [[scpp::unsafe]] { cp->set(3); }
+    Holder h{};
+    h.p = &c;
+    return through_const_holder(h);
+}

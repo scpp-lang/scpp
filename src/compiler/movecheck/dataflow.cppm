@@ -1238,21 +1238,22 @@ namespace scpp {
     // field-access rewrite (rewrite_captured_identifiers_as_field_access)
     // -- see validate_deref_operand's own comment for why a Member operand
     // has no separate move/borrow state to check beyond its type.
-    bool is_member_of_identifier =
-        expr.lhs->kind == ExprKind::Member &&
-        (expr.lhs->lhs->kind == ExprKind::Identifier || is_explicit_star_this(*expr.lhs->lhs));
-    if (!is_plain_identifier && !is_member_of_identifier) {
-        if (report_errors) {
-            return std::unexpected(DataflowError("dereference ('*') currently only supports a plain local raw/function pointer "
-                                 "variable, '*this', or a captured field of one ('this.field') (not a subscript "
-                                 "or other expression)",
-                state.current_loc));
-        }
-        return {};
-    }
+    // Every other operand shape -- a call result (`p.get()->m()`), a
+    // subscript, a parenthesized expression -- used to be rejected here
+    // outright ("dereference ('*') currently only supports a plain local
+    // raw/function pointer variable, '*this', or a captured field of one
+    // ('this.field')"). That was a pass enumerating the operand shapes it
+    // had been taught rather than deciding anything: nothing below needs
+    // an Identifier except the per-local borrow bookkeeping, which
+    // already opts out for any non-Identifier operand, and
+    // validate_deref_expr -- the function that actually enforces
+    // §5.1(5.1)/§7.1(4) -- had already grown its own explicit
+    // `ExprKind::Call` arm for precisely this shape. So the type-level
+    // and unsafe-context rules were fully in place and unreachable behind
+    // a shape test.
     if (!report_errors) return {}; // purely diagnostic: doesn't move p or change any tracked state
     if (auto _r = validate_deref_expr(expr, state, body, signatures); !_r.has_value()) return std::unexpected(std::move(_r).error());
-    if (!is_plain_identifier) return {}; // no separate borrow-tracking key for a field -- see the comment above
+    if (!is_plain_identifier) return {}; // no separate borrow-tracking key -- see the comment above
     std::optional<LocalId> pointer_local = body.local_of(*expr.lhs);
     if (!pointer_local.has_value()) return {};
     const std::string& name = expr.lhs->name;
@@ -1326,6 +1327,43 @@ namespace scpp {
 
     bool is_mutable = param_type.is_mutable_ref;
 
+    // spec ch05 §5.7 / §6.2(9)-(10): a `T&` parameter may only be
+    // satisfied by a place that is itself reachable mutably. Asked here,
+    // once, of the argument *expression* -- the place actually being
+    // borrowed -- and before the reborrow bookkeeping below, because it
+    // is a property of the argument and not of how the borrow happens to
+    // be accounted for.
+    //
+    // It used to live inside the `else` of that bookkeeping, so it was
+    // skipped entirely whenever the argument resolved to a tracked
+    // reborrow lender; validate_reborrow_lender's own copy of the
+    // question -- keyed on the *lender local's* declared type rather than
+    // on the argument -- stood in for it there. Two answers to one
+    // question in two positions, and the lender-keyed one is wrong
+    // exactly when the borrow crosses an indirection: `bump(*handle)`
+    // with `handle` a `const std::shared_ptr<Cell>&` borrows the
+    // *pointee*, whose mutability is `operator*`'s declared return type,
+    // not the handle's.
+    if (is_mutable && is_read_only_reachable(arg, body, signatures)) {
+        // format_roots answers "which *local* does this borrow reach?",
+        // and a const global reaches none -- so this used to print
+        // "cannot pass <unknown> by mutable reference", naming nothing the
+        // reader could act on. The argument expression is right here;
+        // describe it, and say where its constness comes from.
+        std::string subject = roots.empty() ? describe_assignment_place(arg) : format_roots(body, roots);
+        if (roots.empty()) subject = subject.empty() ? std::string("this argument") : "'" + subject + "'";
+        std::string message{"cannot pass "};
+        message += subject;
+        message += " by mutable reference: it is only reachable through a read-only (const) reference";
+        std::string const_source = describe_const_source(arg, body, signatures);
+        if (!const_source.empty()) {
+            message += " (";
+            message += const_source;
+            message += ")";
+        }
+        return std::unexpected(DataflowError(message, state.current_loc));
+    }
+
     // Passing an *already-bound* local reference variable directly (`f(r)`
     // where `r` is itself `T& r = ...;`/`const T& r = ...;`) is a
     // reborrow, not a fresh independent borrow: `r` already holds the one
@@ -1333,12 +1371,8 @@ namespace scpp {
     // other attempt to borrow `root` while `r` is alive is already
     // rejected by apply_reference_binding/this same function's
     // persistent-conflict check below), so temporarily re-lending that
-    // same access to a callee can't create a new conflict. Only the
-    // mutability has to be checked, which validate_reborrow_lender does:
-    // a shared (`const T&`) reference can't satisfy a `T&` parameter
-    // (that would manufacture a mutable alias out of a shared one), but
-    // a mutable reference may always be lent out as either mutable or
-    // shared, and a shared one as shared.
+    // same access to a callee can't create a new conflict. What remains
+    // to check here is exclusivity only.
     std::optional<LocalId> lender = resolve_reborrow_lender(arg, body, signatures);
     bool tracked_reborrow = reborrow_is_tracked_against_lender(lender, body);
     if (tracked_reborrow) {
@@ -1347,36 +1381,8 @@ namespace scpp {
         }
     } else {
         // The general case: `arg` doesn't reach a locally-bound
-        // reference/span lender at all (that case is handled above), so
-        // it may instead be a `.field`/`[index]` projection rooted at an
-        // owned local, or a plain *parameter* (never entered into
-        // `ref_targets`, since a
-        // parameter is never processed through BindReference -- see
-        // apply_reference_binding) whose own declared type is `const T&`/
-        // `std::span<const T>`, or a chain that dereferences a `const T*`
-        // -- any of which must likewise reject manufacturing a mutable
-        // reference out of a read-only one (spec ch05 §5.7's "projection
-        // chain's const-reachability").
-        if (is_mutable && is_read_only_reachable(arg, body, signatures)) {
-            // format_roots answers "which *local* does this borrow
-            // reach?", and a const global reaches none -- so this used to
-            // print "cannot pass <unknown> by mutable reference", naming
-            // nothing the reader could act on. The argument expression is
-            // right here; describe it, and say where its constness comes
-            // from.
-            std::string subject = roots.empty() ? describe_assignment_place(arg) : format_roots(body, roots);
-            if (roots.empty()) subject = subject.empty() ? std::string("this argument") : "'" + subject + "'";
-            std::string message{"cannot pass "};
-            message += subject;
-            message += " by mutable reference: it is only reachable through a read-only (const) reference";
-            std::string const_source = describe_const_source(arg, body, signatures);
-            if (!const_source.empty()) {
-                message += " (";
-                message += const_source;
-                message += ")";
-            }
-            return std::unexpected(DataflowError(message, state.current_loc));
-        }
+        // reference/span lender at all, so the borrow is asserted
+        // directly against the root place it reaches.
         for (LocalId root : roots) {
             auto persistent_it = state.borrows.find(root);
             bool persistent_conflict =
@@ -3932,6 +3938,30 @@ struct ConvertingConstructorBinding {
                                                        /*report_errors=*/true);
                 !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
+            }
+            // [dcl.init.ref]/5 + [dcl.type.cv]/4: a mutable `T&` (or
+            // `std::span<T>`) may only be bound to a place that is itself
+            // reachable mutably. This is the same guard already applied to
+            // `int& r = <expr>;` (check_ref_decl below) and to a
+            // mutable-reference call argument (apply_reference_argument),
+            // asked of the same single predicate -- and it is where the
+            // question belongs. It used to be answered from the *signature*
+            // instead, by resolve_elided_param_index / Codegen::
+            // validate_reference_return_elision, which rejected every
+            // `T& f() const` and every `T& f(const U&)` on sight: not a
+            // rule C++ has, and not even a sound approximation of one,
+            // since both returned early for a function carrying any
+            // `[[scpp::lifetime]]` annotation. The raw-pointer form of this
+            // check has always been done here, on the expression, by
+            // check_raw_pointer_assignment just above.
+            if ((is_reference(fn.return_type) || is_span(fn.return_type)) && fn.return_type.is_mutable_ref &&
+                place_is_read_only(*term.return_value, body, signatures)) {
+                std::string message{"cannot return a mutable "};
+                message += is_span(fn.return_type) ? "span" : "reference";
+                message += " from function '";
+                message += fn.name;
+                message += "': the returned place is only reachable through a read-only ('const') binding";
+                return std::unexpected(DataflowError(message, term.loc));
             }
             if (is_pointer_return_lifetime_source_type(fn.return_type)) {
                 bool null_pointer_return =
