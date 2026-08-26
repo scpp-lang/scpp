@@ -1,0 +1,11 @@
+// A literal subscript names a place, so a borrow of `arr[0]` is not a
+// hold on `arr[1]`.
+// Was: writing_array_element_while_another_element_shared_borrowed_is_rejected.
+int f() {
+    int arr[3];
+    arr[0] = 1;
+    arr[1] = 2;
+    const int& r = arr[0];
+    arr[1] = 99;
+    return r;
+}

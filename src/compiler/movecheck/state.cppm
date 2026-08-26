@@ -15,7 +15,15 @@ enum class LocalState { Bottom, Initialized, MovedOut, Conflict };
 // so one's state can never be read or clobbered as the other's -- and an
 // inner shadow's ScopeExit can no longer reset the outer local it hides.
 // Diagnostics recover the source spelling with Body::name_of.
-using StateMap = std::unordered_map<LocalId, LocalState>;
+//
+// Move state specifically is keyed one step finer: by *place* (mir.cppm)
+// -- the same declaration identity plus a projection path naming a
+// subobject of it. A whole local is the empty path, so every key that
+// used to be a bare LocalId still exists unchanged; what is new is that
+// `s.a` and `s.b` are now two keys instead of one, which is what lets
+// spec §6.2's states apply to an object "of member storage duration"
+// (§6.2(1)) at all. There is exactly one move-state map, and this is it.
+using StateMap = std::unordered_map<Place, LocalState, PlaceHash>;
 using RootSet = std::vector<LocalId>;
 
 struct BorrowState {
@@ -32,6 +40,20 @@ struct RefTarget {
     // Set only when this reference was tracked by suspending a
     // mutable-reborrow lender rather than by incrementing root borrows.
     std::optional<LocalId> lender;
+    // The place this binding was bound to, when it names one --
+    // `roots` records which whole locals the borrow is *accounted*
+    // against (deliberately coarse: a borrow of `s.a` conflicts with a
+    // borrow of `s`), which is a different question from which object
+    // the name now denotes. `S& r = s;` makes `r.a` and `s.a` the same
+    // object, and move state has to agree about that or moving through
+    // one alias would leave the other reading as still-initialized.
+    std::optional<Place> bound_place;
+    // False when bound_place merely *contains* the object bound (a
+    // non-constant subscript: `S& r = arr[i];` records `arr`). Such a
+    // place is enough to prove two accesses disjoint, but not to record
+    // an ownership-state transition against -- marking `arr` moved-out
+    // because `r` was moved would skip destroying every other element.
+    bool bound_place_is_exact = false;
     // Whether *this* binding itself was mutable, captured once at bind
     // time (see apply_reference_binding). Now that local_decls is keyed
     // by declaration this could equally be re-derived at release time --
@@ -139,12 +161,30 @@ ClosureCaptureBorrowMap join_closure_capture_borrows(const ClosureCaptureBorrowM
 DataflowState join_states(const DataflowState& a, const DataflowState& b);
 
 [[nodiscard]] std::string describe_bad_state(const std::string& name, LocalState state);
-RootSet canonicalize_roots(RootSet roots);
-[[nodiscard]] RootSet single_root(LocalId root);
+RootSet canonicalize_roots(RootSet roots);[[nodiscard]] RootSet single_root(LocalId root);
 RootSet union_roots(RootSet lhs, const RootSet& rhs);
 [[nodiscard]] std::string format_root(const Body& body, LocalId root);
 [[nodiscard]] std::string format_roots(const Body& body, const RootSet& roots);
 [[nodiscard]] LocalState lookup(const StateMap& state, LocalId local);
+// The state `place` is in, accounting for every object that contains it.
+[[nodiscard]] LocalState lookup(const StateMap& state, const Place& place);
+// The place whose recorded entry gives `place` its state under lookup --
+// `place` itself when it has its own entry, otherwise the containing
+// object that was moved out. A diagnostic has to name what the program
+// actually did: `Box b = std::move(a); a.v` moved `a`, not `a.v`.
+[[nodiscard]] Place state_source_place(const StateMap& state, const Place& place);
+// The lowest-pathed subobject of `place` that is not initialized, if
+// any -- what makes `place` itself only *partially* owned, so that
+// consuming it whole (spec §6.2(5)/(6)) has to be rejected.
+[[nodiscard]] std::optional<Place> find_moved_subobject(const StateMap& state, const Place& place);
+// spec §6.2(4): reinitializes `place` and everything it contains.
+void reinitialize_place(StateMap& state, const Place& place);
+// spec §6.2(3): places `place` -- and, by §6.4(5)'s memberwise move,
+// everything it contains -- in the moved-out state.
+void mark_place_moved_out(StateMap& state, const Place& place);
+// Drops `place` and everything it contains from tracking entirely (its
+// storage duration has ended -- MirStatementKind::ScopeExit).
+void forget_place_tree(StateMap& state, const Place& place);
 [[nodiscard]] RootSet program_lifetime_root();
 [[nodiscard]] bool is_program_lifetime_root(LocalId root);
 
@@ -176,11 +216,24 @@ LocalState join(LocalState a, LocalState b) {
 
 // Joins two per-block state snapshots (e.g. the OUT states of two
 // predecessors flowing into a shared successor block).
+//
+// A key missing from one side is *not* Bottom there: a place's state is
+// derived from the objects containing it (see lookup), so `s.a` absent
+// from a branch that never touched it is Initialized there, by way of
+// `s`. Joining against Bottom instead would make "moved on one path
+// only" read back as plainly moved-out on both -- the wrong answer in
+// the safe direction for the use check, but the wrong answer in the
+// *unsafe* direction for anything that asks whether a place still needs
+// destroying.
 StateMap join_maps(const StateMap& a, const StateMap& b) {
     StateMap result = a;
-    for (const auto& [name, state] : b) {
-        auto it = result.find(name);
-        result[name] = it == result.end() ? state : join(it->second, state);
+    for (const auto& [place, state] : b) {
+        auto it = result.find(place);
+        result[place] = it == result.end() ? join(lookup(a, place), state) : join(it->second, state);
+    }
+    for (const auto& [place, state] : a) {
+        if (b.contains(place)) continue;
+        result[place] = join(state, lookup(b, place));
     }
     return result;
 }
@@ -351,9 +404,73 @@ RootSet union_roots(RootSet lhs, const RootSet& rhs) {
     }
     return joined;
 }
+[[nodiscard]] LocalState lookup(const StateMap& state, const Place& place) {
+    // A place inherits the worst state of any object that contains it:
+    // once `o.i` is moved out, `o.i.q` has been moved out with it (spec
+    // §6.4(5) memberwise-moves every subobject), and there is no
+    // separate entry recording that. Walking outward rather than
+    // eagerly writing an entry per descendant is what keeps the number
+    // of keys proportional to what the program actually names.
+    Place current = place;
+    LocalState result = LocalState::Bottom;
+    while (true) {
+        auto it = state.find(current);
+        if (it != state.end()) {
+            if (it->second != LocalState::Initialized) return it->second;
+            if (result == LocalState::Bottom) result = LocalState::Initialized;
+        }
+        if (current.is_whole_local()) break;
+        current = current.parent();
+    }
+    return result;
+}
+
+[[nodiscard]] Place state_source_place(const StateMap& state, const Place& place) {
+    Place current = place;
+    while (true) {
+        auto it = state.find(current);
+        if (it != state.end() && it->second != LocalState::Initialized) return current;
+        if (current.is_whole_local()) return place;
+        current = current.parent();
+    }
+}
 [[nodiscard]] LocalState lookup(const StateMap& state, LocalId local) {
-    auto it = state.find(local);
-    return it == state.end() ? LocalState::Bottom : it->second;
+    return lookup(state, whole_local_place(local));
+}
+
+[[nodiscard]] std::optional<Place> find_moved_subobject(const StateMap& state, const Place& place) {
+    std::optional<Place> found;
+    for (const auto& [key, value] : state) {
+        if (value == LocalState::Initialized || value == LocalState::Bottom) continue;
+        if (!key.is_strictly_under(place)) continue;
+        // Deterministic across runs: an unordered_map's iteration order
+        // is not, and a diagnostic that names a different member on
+        // different runs is not a diagnostic anyone can act on.
+        if (!found.has_value() || key.path < found->path) found = key;
+    }
+    return found;
+}
+
+void reinitialize_place(StateMap& state, const Place& place) {
+    // Writing a whole object reinitializes everything it contains (spec
+    // §6.2(4)): the stale MovedOut entry on `s.a` must not outlive
+    // `s = ...`, or the next read of `s.a` would report a move that the
+    // assignment already undid.
+    std::erase_if(state, [&](const auto& entry) { return entry.first.is_strictly_under(place); });
+    state[place] = LocalState::Initialized;
+}
+
+void mark_place_moved_out(StateMap& state, const Place& place) {
+    // Descendant entries are dropped rather than each set MovedOut:
+    // lookup already derives a subobject's state from what contains it,
+    // so keeping them would be a second copy of the same fact -- and a
+    // stale one the moment the place is reinitialized.
+    std::erase_if(state, [&](const auto& entry) { return entry.first.is_strictly_under(place); });
+    state[place] = LocalState::MovedOut;
+}
+
+void forget_place_tree(StateMap& state, const Place& place) {
+    std::erase_if(state, [&](const auto& entry) { return entry.first.is_at_or_under(place); });
 }
 
 } // namespace scpp

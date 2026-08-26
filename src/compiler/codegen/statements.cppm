@@ -360,7 +360,7 @@ namespace scpp {
                         locals_[declared_local_of(stmt)] = LocalSlot{storage, stmt.type};
                         locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
                         locals_[declared_local_of(stmt)].is_static_storage = true;
-                        locals_[declared_local_of(stmt)].moved_flag = moved_flag;
+                        locals_[declared_local_of(stmt)].set_whole_moved_flag(moved_flag);
                         if (!scope_stack_.empty()) {
                             scope_stack_.back().push_back(declared_local_of(stmt));
                         }
@@ -422,6 +422,12 @@ namespace scpp {
                         llvm::LLVMBuildStore(builder_, referent_addr, slot);
                         locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
                         locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
+                        // Remember what this reference was bound to, so a
+                        // place spelled through it names the referent
+                        // (see codegen_place_of).
+                        if (std::optional<Place> bound = codegen_place_of(*stmt.init); bound.has_value()) {
+                            reference_bound_places_[declared_local_of(stmt)] = std::move(*bound);
+                        }
                         if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                         if (!scope_stack_.empty()) {
                             scope_stack_.back().push_back(declared_local_of(stmt));
@@ -507,7 +513,7 @@ namespace scpp {
                         if (auto r = zero_initialize_storage(slot, stmt.type, declared_alignment); !r.has_value()) return std::unexpected(std::move(r).error());
                         locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
                         locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
-                        locals_[declared_local_of(stmt)].moved_flag = create_moved_flag_if_type_has_destructor(stmt.type);
+                        locals_[declared_local_of(stmt)].set_whole_moved_flag(create_moved_flag_if_type_has_destructor(stmt.type));
                         if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                         if (!scope_stack_.empty()) {
                             scope_stack_.back().push_back(declared_local_of(stmt));
@@ -613,7 +619,7 @@ namespace scpp {
                             }
                             locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
                             locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
-                            locals_[declared_local_of(stmt)].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
+                            locals_[declared_local_of(stmt)].set_whole_moved_flag(create_moved_flag_if_has_destructor(stmt.type.name));
                             if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                             if (!scope_stack_.empty()) {
                                 scope_stack_.back().push_back(declared_local_of(stmt));
@@ -628,7 +634,7 @@ namespace scpp {
                                 return std::unexpected(std::move(r).error());
                             locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
                             locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
-                            locals_[declared_local_of(stmt)].moved_flag = create_moved_flag_if_has_destructor(stmt.type.name);
+                            locals_[declared_local_of(stmt)].set_whole_moved_flag(create_moved_flag_if_has_destructor(stmt.type.name));
                             if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value())
                                 return std::unexpected(std::move(r).error());
                             if (!scope_stack_.empty()) scope_stack_.back().push_back(declared_local_of(stmt));
@@ -675,7 +681,7 @@ namespace scpp {
                     }
                     locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
                     locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
-                    locals_[declared_local_of(stmt)].moved_flag = create_moved_flag_if_type_has_destructor(stmt.type);
+                    locals_[declared_local_of(stmt)].set_whole_moved_flag(create_moved_flag_if_type_has_destructor(stmt.type));
                     if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                     if (!scope_stack_.empty()) {
                         scope_stack_.back().push_back(declared_local_of(stmt));
@@ -1012,8 +1018,9 @@ namespace scpp {
                 auto slot_it = locals_.find(param_local(*it));
                 if (slot_it == locals_.end()) continue;
                 if (slot_it->second.is_static_storage) continue;
+                Place root = whole_local_place(param_local(*it));
                 codegen_destroy_storage_unless_moved(slot_it->second.type, slot_it->second.alloca,
-                                                     slot_it->second.moved_flag);
+                                                     /*moved_flag=*/nullptr, &root);
             }
         }
 
@@ -1057,8 +1064,9 @@ namespace scpp {
                 auto slot_it = locals_.find(*it);
                 if (slot_it == locals_.end()) continue;
                 if (slot_it->second.is_static_storage) continue;
+                Place root = whole_local_place(*it);
                 codegen_destroy_storage_unless_moved(slot_it->second.type, slot_it->second.alloca,
-                                                     slot_it->second.moved_flag);
+                                                     /*moved_flag=*/nullptr, &root);
             }
         }
         // By declaration, not by name: an inner scope that shadows an
@@ -1079,8 +1087,9 @@ namespace scpp {
                 auto slot_it = locals_.find(*it);
                 if (slot_it == locals_.end()) continue;
                 if (slot_it->second.is_static_storage) continue;
+                Place root = whole_local_place(*it);
                 codegen_destroy_storage_unless_moved(slot_it->second.type, slot_it->second.alloca,
-                                                     slot_it->second.moved_flag);
+                                                     /*moved_flag=*/nullptr, &root);
             }
         }
     }

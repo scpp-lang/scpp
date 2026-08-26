@@ -2735,9 +2735,8 @@ private:
         comparable.is_exported = declared.is_exported;
         comparable.generic_method_owner_id = declared.generic_method_owner_id;
 
-        std::vector<Param>& comparable_params_ref = comparable.params;
-        std::vector<Param> user_params = std::move(comparable_params_ref);
-        comparable.params.clear();
+        std::vector<Param> user_params = std::move(comparable.params);
+        comparable.params = std::vector<Param>{};
         std::size_t declared_user_offset = 0;
         if (parsed.kind == OutOfLineMemberKind::Constructor || parsed.kind == OutOfLineMemberKind::Destructor ||
             !declared.is_static) {
@@ -7777,10 +7776,10 @@ private:
             }
             if (def.thread_movable_override || def.thread_shareable_override) {
             }
-            ExprPtr& movable_expr_ref = class_attrs.thread_movable_if_movable_expr;
-            def.thread_movable_if_movable_expr = std::move(movable_expr_ref);
-            ExprPtr& shareable_expr_ref = class_attrs.thread_movable_if_shareable_expr;
-            def.thread_movable_if_shareable_expr = std::move(shareable_expr_ref);
+            def.thread_movable_if_movable_expr = std::move(class_attrs.thread_movable_if_movable_expr);
+            class_attrs.thread_movable_if_movable_expr = nullptr;
+            def.thread_movable_if_shareable_expr = std::move(class_attrs.thread_movable_if_shareable_expr);
+            class_attrs.thread_movable_if_shareable_expr = nullptr;
         }
         def.namespace_path = namespace_stack_;
         def.is_exported = is_exported;
@@ -7940,10 +7939,10 @@ private:
                                  _msg_6506));
                 }
             }
-            ExprPtr& movable_expr_ref = class_attrs.thread_movable_if_movable_expr;
-            def.thread_movable_if_movable_expr = std::move(movable_expr_ref);
-            ExprPtr& shareable_expr_ref = class_attrs.thread_movable_if_shareable_expr;
-            def.thread_movable_if_shareable_expr = std::move(shareable_expr_ref);
+            def.thread_movable_if_movable_expr = std::move(class_attrs.thread_movable_if_movable_expr);
+            class_attrs.thread_movable_if_movable_expr = nullptr;
+            def.thread_movable_if_shareable_expr = std::move(class_attrs.thread_movable_if_shareable_expr);
+            class_attrs.thread_movable_if_shareable_expr = nullptr;
         }
         def.namespace_path = namespace_stack_;
         def.is_exported = is_exported || exported_forward_class_exists(program, qualified_class_name);

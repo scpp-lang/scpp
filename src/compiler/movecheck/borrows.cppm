@@ -21,7 +21,10 @@ std::optional<LocalId> resolve_reborrow_lender(const Expr& expr, const Body& bod
 [[nodiscard]] std::expected<void, DataflowError> validate_reborrow_lender(LocalId lender, bool child_is_mutable,
                               const DataflowState& state, const Body& body, bool report_errors);
 [[nodiscard]] std::expected<void, DataflowError> validate_reborrow_lender_write(LocalId lender, const DataflowState& state,
-                                    const Body& body, bool report_errors);
+                                    const Body& body, bool report_errors,
+                                    const std::optional<Place>& written = std::nullopt);
+[[nodiscard]] bool reborrow_of_lender_observes_place(LocalId lender, const std::optional<Place>& written,
+                                                     const DataflowState& state);
 void release_reference_borrow(LocalId local, DataflowState& state, const Body& body);
 void release_closure_capture_borrows(LocalId local, DataflowState& state);
 std::vector<std::size_t> successors(const Terminator& term);
@@ -236,10 +239,49 @@ std::expected<void, DataflowError> validate_reborrow_lender(LocalId lender, bool
     return {};
 }
 
+// Which *place* each live reborrow of `lender` was derived from, so a
+// write can be told apart from the reborrow it cannot possibly disturb.
+// `const G& one = this->gs_[0];` suspends `this`, and every write
+// through `this` -- including `this->f_ = ...`, a different member
+// entirely -- was then rejected. The suspension counter alone cannot
+// answer this: it says a reborrow exists, not what it reaches.
+//
+// Answered from ref_targets/closure_capture_borrows, which are the live
+// holders the suspension counts, so no second record of the same fact
+// is introduced. Conservative wherever the answer is not exact: an
+// unattributable holder, a holder whose place was never tracked, or a
+// write to no identifiable place all mean "may alias".
+[[nodiscard]] bool reborrow_of_lender_observes_place(LocalId lender, const std::optional<Place>& written,
+                                                     const DataflowState& state) {
+    if (!local_is_suspended_for_reborrow(lender, state)) return false;
+    if (!written.has_value()) return true;
+    auto suspension_it = state.suspended_reborrows.find(lender);
+    if (suspension_it == state.suspended_reborrows.end()) return false;
+    int live_holds = suspension_it->second.shared_count + (suspension_it->second.mutable_suspended ? 1 : 0);
+    int attributed = 0;
+    bool overlaps = false;
+    for (const auto& [ref_local, target] : state.ref_targets) {
+        if (!target.is_reborrow() || *target.lender != lender) continue;
+        attributed++;
+        if (!target.bound_place.has_value()) return true;
+        if (target.bound_place->is_at_or_under(*written) || written->is_at_or_under(*target.bound_place)) overlaps = true;
+    }
+    for (const auto& [closure_local, captures] : state.closure_capture_borrows) {
+        for (const ClosureCaptureBorrow& capture_borrow : captures) {
+            // A capture records no place at all, so it can never be
+            // ruled out.
+            if (capture_borrow.lender.has_value() && *capture_borrow.lender == lender) return true;
+        }
+    }
+    if (attributed != live_holds) return true;
+    return overlaps;
+}
+
 std::expected<void, DataflowError> validate_reborrow_lender_write(LocalId lender, const DataflowState& state,
-                                                                 const Body& body, bool report_errors) {
+                                                                 const Body& body, bool report_errors,
+                                                                 const std::optional<Place>& written) {
     if (!report_errors) return {};
-    if (local_is_suspended_for_reborrow(lender, state)) {
+    if (reborrow_of_lender_observes_place(lender, written, state)) {
         return std::unexpected(DataflowError("cannot write through '" + body.name_of(lender) +
                                  "' while a nested reborrow derived from it is still live",
             state.current_loc));

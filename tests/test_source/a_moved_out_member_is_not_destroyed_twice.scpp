@@ -1,0 +1,34 @@
+// spec §6.3(1): an object in the moved-out state has no destructor
+// invoked for it at the end of its storage duration. Move state was
+// keyed by LocalId in *both* implementations of it -- the move checker's
+// StateMap and codegen's one-i1-alloca-per-local moved flag -- so a
+// moved-out member had nowhere to record its state. With per-place move
+// checking but a still-coarse codegen, this program printed a spurious
+// trailing `~R1`: `s.a`'s value was destroyed once as `t` and again as
+// `s.a`.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { std::print("~R{}\n", this.id); }
+};
+
+R make_r(int i) { R r{i}; return r; }
+
+struct S {
+    R a;
+    R b;
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+int main() {
+    S s{1, 2};
+    {
+        R t = std::move(s.a);
+        std::print("inner\n");
+    }
+    std::print("outer\n");
+    return 0;
+}

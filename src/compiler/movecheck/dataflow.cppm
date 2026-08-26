@@ -29,6 +29,12 @@ namespace scpp {
                                                                 const DataflowState& state,
                                                                 const Signatures& signatures);
 [[nodiscard]] std::string describe_assignment_place(const Expr& place);
+[[nodiscard]] std::optional<Place> tracked_place_of(const Expr& expr, const DataflowState& state, const Body& body,
+                                                   std::vector<LocalId>* traversed_references = nullptr,
+                                                   PlacePrecision precision = PlacePrecision::Exact);
+[[nodiscard]] bool write_is_blocked_by_a_borrow(LocalId root, const std::optional<Place>& written,
+                                                const DataflowState& state,
+                                                const std::vector<LocalId>& written_through);
 [[nodiscard]] std::expected<void, DataflowError> check_value_binding_conversions(const Type& target_type,
                                                                                 const Expr& value, const Body& body,
                                                                                 const Signatures& signatures,
@@ -237,15 +243,17 @@ namespace scpp {
     if (!write_roots_result.has_value()) return std::unexpected(std::move(write_roots_result).error());
     RootSet write_roots = std::move(write_roots_result).value();
     if (std::optional<LocalId> lender = resolve_reborrow_lender(*expr.lhs, body, signatures); lender.has_value()) {
-        if (auto _r = validate_reborrow_lender_write(*lender, state, body, report_errors); !_r.has_value()) {
+        if (auto _r = validate_reborrow_lender_write(*lender, state, body, report_errors,
+                                                     tracked_place_of(*expr.lhs, state, body, nullptr,
+                                                                      PlacePrecision::Enclosing));
+            !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
     }
     if (!write_is_licensed_by_mutable_reborrow_lender(*expr.lhs, state, body, signatures)) {
+        std::optional<Place> written = tracked_place_of(*expr.lhs, state, body, nullptr, PlacePrecision::Enclosing);
         for (LocalId root : write_roots) {
-            auto borrow_it = state.borrows.find(root);
-            if (borrow_it != state.borrows.end() &&
-                (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
+            if (write_is_blocked_by_a_borrow(root, written, state, {})) {
                 return std::unexpected(DataflowError("cannot apply '" +
                                         std::string(expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PostInc ? "++" : "--") +
                                         "' to this place: " + format_root(body, root) + " is currently borrowed",
@@ -254,7 +262,7 @@ namespace scpp {
         }
     }
     if (std::optional<LocalId> target = body.local_of(*expr.lhs); target.has_value()) {
-        state.locals[*target] = LocalState::Initialized;
+        reinitialize_place(state.locals, whole_local_place(*target));
     }
     return {};
 }
@@ -359,7 +367,10 @@ namespace scpp {
                                                      state.current_loc));
     }
     if (std::optional<LocalId> lender = resolve_reborrow_lender(*expr.lhs, body, signatures); lender.has_value()) {
-        if (auto _r = validate_reborrow_lender_write(*lender, state, body, report_errors); !_r.has_value()) {
+        if (auto _r = validate_reborrow_lender_write(*lender, state, body, report_errors,
+                                                     tracked_place_of(*expr.lhs, state, body, nullptr,
+                                                                      PlacePrecision::Enclosing));
+            !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
     }
@@ -373,17 +384,16 @@ namespace scpp {
         write_roots = std::move(write_roots_result).value();
     }
     if (!write_through_mutable_reborrow) {
+        std::optional<Place> written = tracked_place_of(*expr.lhs, state, body, nullptr, PlacePrecision::Enclosing);
         for (LocalId root : write_roots) {
-            auto borrow_it = state.borrows.find(root);
-            if (borrow_it != state.borrows.end() &&
-                (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
+            if (write_is_blocked_by_a_borrow(root, written, state, {})) {
                 return std::unexpected(DataflowError("cannot assign to this place: " + format_root(body, root) +
                                                          " is currently borrowed", state.current_loc));
             }
         }
     }
     if (std::optional<LocalId> target = body.local_of(*expr.lhs); target.has_value()) {
-        state.locals[*target] = LocalState::Initialized;
+        reinitialize_place(state.locals, whole_local_place(*target));
     }
     return {};
 }
@@ -494,9 +504,220 @@ namespace scpp {
     return field_it->second;
 }
 
-// The declared type of the place an assignment writes to, for any place
-// shape the language allows on the left of `=`.
+// Maps a reference/span local onto the place it is currently bound to,
+// so that every alias of one object resolves to one move-state key.
+// Handed to mir.cppm's place_of, which knows the syntax of a place but
+// nothing about bindings.
+[[nodiscard]] auto place_root_resolver(const DataflowState& state, std::vector<LocalId>* traversed = nullptr) {
+    return [&state, traversed](LocalId local) -> std::optional<Place> {
+        auto it = state.ref_targets.find(local);
+        if (it == state.ref_targets.end()) return std::nullopt;
+        if (!it->second.bound_place.has_value() || !it->second.bound_place_is_exact) return std::nullopt;
+        if (traversed != nullptr) traversed->push_back(local);
+        return it->second.bound_place;
+    };
+}
+
+// The place `expr` names, with references resolved to what they are
+// bound to. nullopt when `expr` names no statically identifiable
+// storage -- see explain_untrackable_place for why.
+[[nodiscard]] std::optional<Place> tracked_place_of(const Expr& expr, const DataflowState& state, const Body& body,
+                                                   std::vector<LocalId>* traversed_references,
+                                                   PlacePrecision precision) {
+    return place_of(expr, body, place_root_resolver(state, traversed_references), precision);
+}
+
+// Whether a live borrow can observe a write to `written` (an assignment,
+// a `++`/`--`, or a move taking the object out of it).
 //
+// This is the single answer to "does a live borrow conflict with this
+// write?". It had four implementations: three copies of a `for (root :
+// write_roots) if (state.borrows[root])` loop -- in `++`/`--`, in
+// assignment, and in the assignment case of the expression walker -- and
+// the move check. `state.borrows` is keyed by root local, one
+// granularity coarser than a place, so all three said "`p` is borrowed"
+// when only `p.x` was, and rejected a write to `p.y`. §6.2(7) makes a
+// borrow an alias of "the same underlying object", so a borrow of `p.x`
+// is not a hold on `p.y`.
+//
+// The reference through which the write is *made* (`T& r = s.a; ...
+// std::move(r);`) is the write itself, not a bystander observing it, so
+// `written_through` exempts it. The precise answer is only available
+// when every live hold on this root is attributable to a reference whose
+// bound place is known -- address-of borrows and closure captures also
+// increment the same counters without a RefTarget, so when the counts do
+// not add up, or when the written place cannot be resolved at all, the
+// conservative whole-root answer stands.
+[[nodiscard]] bool write_is_blocked_by_a_borrow(LocalId root, const std::optional<Place>& written,
+                                                const DataflowState& state,
+                                                const std::vector<LocalId>& written_through) {
+    auto borrow_it = state.borrows.find(root);
+    if (borrow_it == state.borrows.end()) return false;
+    const BorrowState& hold = borrow_it->second;
+    if (!hold.mutable_borrow && hold.shared_count <= 0) return false;
+    if (!written.has_value() || written->local != root) return true;
+
+    int attributable_shared = 0;
+    bool attributable_mutable = false;
+    bool overlaps = false;
+    for (const auto& [ref_local, target] : state.ref_targets) {
+        if (target.is_reborrow()) continue;
+        if (std::ranges::find(target.roots, root) == target.roots.end()) continue;
+        if (target.is_mutable) {
+            attributable_mutable = true;
+        } else {
+            attributable_shared++;
+        }
+        if (std::ranges::find(written_through, ref_local) != written_through.end()) continue;
+        if (!target.bound_place.has_value()) {
+            overlaps = true;
+            continue;
+        }
+        if (target.bound_place->is_at_or_under(*written) || written->is_at_or_under(*target.bound_place)) overlaps = true;
+    }
+    bool fully_attributed = attributable_shared == hold.shared_count && attributable_mutable == hold.mutable_borrow;
+    if (!fully_attributed) return true;
+    return overlaps;
+}
+
+// A field's declared type, following base classes: class_field_types is
+// built per *declaring* record (see build_class_field_types), so an
+// inherited member is not an entry of the derived record's own map.
+[[nodiscard]] const Type* find_record_field_type(const std::string& record_name, const std::string& field_name,
+                                                 const DataflowState& state, const Body& body) {
+    if (state.class_field_types == nullptr) return nullptr;
+    auto record_it = state.class_field_types->find(record_name);
+    if (record_it != state.class_field_types->end()) {
+        auto field_it = record_it->second.find(field_name);
+        if (field_it != record_it->second.end()) return &field_it->second;
+    }
+    if (body.program == nullptr) return nullptr;
+    for (const ClassDef& def : body.program->classes) {
+        if (def.name != record_name) continue;
+        if (auto base = def.direct_ordinary_base()) {
+            return find_record_field_type(base->get().base_type.name, field_name, state, body);
+        }
+        return nullptr;
+    }
+    return nullptr;
+}
+
+// The declared type of `place`, walking its projection path from the
+// root local's own declared type.
+[[nodiscard]] std::optional<Type> place_type(const Place& place, const DataflowState& state, const Body& body) {
+    if (!body.is_valid_local(place.local)) return std::nullopt;
+    Type current = body.type_of(place.local);
+    for (const Projection& step : place.path) {
+        if (current.kind == TypeKind::Reference || current.kind == TypeKind::Pointer) {
+            if (current.pointee == nullptr) return std::nullopt;
+            current = *current.pointee;
+        }
+        if (step.is_index) {
+            if (current.kind != TypeKind::Array || current.element == nullptr) return std::nullopt;
+            current = *current.element;
+            continue;
+        }
+        if (current.kind != TypeKind::Named) return std::nullopt;
+        const Type* field_type = find_record_field_type(current.name, step.field, state, body);
+        if (field_type == nullptr) return std::nullopt;
+        current = *field_type;
+    }
+    return current;
+}
+
+// Whether this function itself emits the teardown of the object that
+// directly contains `place`, and of every object containing *that*, so
+// that a per-place "already moved out" flag it records is still in
+// scope where the destruction happens.
+//
+// It is not whenever some containing object's destruction goes through
+// a destructor *call*: the member teardown then runs inside the callee,
+// which has no access to the caller's flags and no parameter to carry
+// them (spec §6.2's closing note leaves subobject state at destruction
+// unspecified, so there is no clause licensing a hidden per-member drop
+// flag in the object's own layout either). Such a place has to be put
+// back before the object it belongs to is destroyed -- which is exactly
+// what the code that motivated per-place tracking already does.
+[[nodiscard]] bool place_teardown_is_emitted_here(const Place& place, const DataflowState& state, const Body& body) {
+    if (place.is_whole_local()) return true;
+    if (body.program == nullptr) return false;
+    // `this`, a reference or a raw pointer roots the place in storage
+    // some other function owns and destroys.
+    const Type& root_type = body.type_of(place.local);
+    if (root_type.kind == TypeKind::Reference || root_type.kind == TypeKind::Pointer ||
+        root_type.kind == TypeKind::Span) {
+        return false;
+    }
+    if (std::optional<LocalId> self = body.this_local(); self.has_value() && place.local == *self) return false;
+    if (body.decl(place.local).is_static_lifetime) return false;
+    for (Place ancestor = place.parent();; ancestor = ancestor.parent()) {
+        std::optional<Type> ancestor_type = place_type(ancestor, state, body);
+        if (!ancestor_type.has_value()) return false;
+        if (ancestor_type->kind == TypeKind::Named &&
+            class_destruction_chain_has_destructor(ancestor_type->name, *body.program)) {
+            return false;
+        }
+        if (ancestor.is_whole_local()) break;
+    }
+    return true;
+}
+
+// spec §6.3(1): an object in the moved-out state is not destroyed. For a
+// subobject that is enough only where the code emitting the teardown can
+// be told to skip it (see place_teardown_is_emitted_here); where it
+// cannot -- because the containing object outlives this function, or is
+// destroyed by a destructor call whose body cannot see this function's
+// bookkeeping -- the program has to reinitialize it before that point.
+// This reports the exits that reach one still moved out, which is the
+// program point where the omission first has a consequence.
+[[nodiscard]] std::expected<void, DataflowError> check_moved_subobjects_were_restored(
+    const DataflowState& state, const Body& body, const std::optional<LocalId>& scope_root,
+    std::string_view when) {
+    std::optional<Place> worst;
+    for (const auto& [place, place_state] : state.locals) {
+        if (place.is_whole_local()) continue;
+        if (place_state == LocalState::Initialized || place_state == LocalState::Bottom) continue;
+        if (scope_root.has_value() ? place.local != *scope_root : false) continue;
+        // Nothing is emitted to destroy this place in the first place
+        // (a scalar, or a host type scpp does not own the layout of), so
+        // there is nothing for the teardown to have to skip.
+        std::optional<Type> moved_type = place_type(place, state, body);
+        if (!moved_type.has_value() || !type_needs_teardown(*moved_type, *body.program)) continue;
+        // Only a *partial* move is a problem: if what contains this
+        // place was itself moved out (or is moved out on some incoming
+        // path), the containing object is not destroyed either (spec
+        // §6.3(1)), so there is nothing for its teardown to skip.
+        if (lookup(state.locals, place.parent()) != LocalState::Initialized) continue;
+        if (place_teardown_is_emitted_here(place, state, body)) continue;
+        // Deterministic choice, for the same reason find_moved_subobject
+        // sorts: an unordered_map's iteration order is not stable.
+        if (!worst.has_value() || (place.local < worst->local) ||
+            (place.local == worst->local && place.path < worst->path)) {
+            worst = place;
+        }
+    }
+    if (!worst.has_value()) return {};
+    std::string name = body.describe_place(*worst);
+    std::string message;
+    message += "'";
+    message += name;
+    message += "' was moved out and is still moved out ";
+    message += when;
+    message += "; the object it belongs to is destroyed elsewhere, which cannot be told to skip a "
+               "moved-out subobject (spec §6.3(1)) -- assign to '";
+    message += name;
+    message += "' before this point";
+    // A ScopeExit statement carries no location of its own (mir.cppm's
+    // pop_scope), so state.current_loc here is the last statement's, or
+    // nothing at all. The declaration of the object being destroyed is
+    // always available and is the thing the message is about.
+    SourceLocation loc = state.current_loc;
+    if (loc.line == 0 && body.is_valid_local(worst->local)) loc = body.decl(worst->local).decl_loc;
+    return std::unexpected(DataflowError(message, loc));
+}
+
+// The declared type of the place an assignment writes to, for any place
+// shape the language allows on the left of `=`.//
 // Every conversion rule an assignment has to obey (scalar, raw pointer,
 // function pointer, `nullptr`, enum) is a question about *this* type,
 // and is therefore the same question no matter how the place was
@@ -1283,26 +1504,6 @@ struct ConvertingConstructorBinding {
     return binding;
 }
 
-// Why a class-typed boundary cannot accept `source`, when the reason is
-// more specific than "this isn't a fresh value".
-//
-// `std::move(E)` is only a move when `E` is an *id-expression* (spec
-// §6.2(3)); move state is recorded per named object, so a member,
-// element, or other projection has nowhere to record it and is rejected
-// (apply_expr's own ExprKind::Move case says exactly that). But three of
-// the four class-value boundaries never got that far: they tested
-// `produces_rvalue_of_type` first, which quietly answers "no" for
-// `std::move(obj.field)`, and reported the generic
-// "...requires ... a fresh value such as std::move(x)" instead -- a
-// message that advises precisely what the reader already wrote. Give the
-// real reason wherever the boundary is the first to notice.
-[[nodiscard]] std::optional<std::string> explain_unusable_class_value_source(const Expr& source) {
-    if (source.kind != ExprKind::Move || source.lhs == nullptr) return std::nullopt;
-    if (source.lhs->kind == ExprKind::Identifier) return std::nullopt;
-    return std::string("std::move currently only supports a plain local variable "
-                       "(not a member, subscript, or other expression)");
-}
-
 // Checks every argument of a Call expression against its callee's
 // signature (if known), exactly the same way regardless of context --
 // shared by apply_expr's own Call case (a call used as a plain
@@ -1572,9 +1773,6 @@ struct ConvertingConstructorBinding {
             }
             if (report_errors && class_value_param && !copyable_lvalue_source && !freely_copyable_value_source &&
                 !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures) && converting_ctor == nullptr) {
-                if (std::optional<std::string> why = explain_unusable_class_value_source(arg); why.has_value()) {
-                    return std::unexpected(DataflowError(*why, state.current_loc));
-                }
                 return std::unexpected(DataflowError("passing " +
                                      std::string(record_keyword(sig->param_types[param_index].name, *body.program)) +
                                      " '" + sig->param_types[param_index].name +
@@ -1905,9 +2103,6 @@ struct ConvertingConstructorBinding {
             }
             if (report_errors && class_value_param && !copyable_lvalue_source && !freely_copyable_value_source &&
                 !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures) && converting_ctor == nullptr) {
-                if (std::optional<std::string> why = explain_unusable_class_value_source(arg); why.has_value()) {
-                    return std::unexpected(DataflowError(*why, state.current_loc));
-                }
                 return std::unexpected(DataflowError("passing " +
                                      std::string(record_keyword(sig->param_types[param_index].name, *body.program)) +
                                      " '" + sig->param_types[param_index].name +
@@ -2088,46 +2283,72 @@ struct ConvertingConstructorBinding {
         }
 
         case ExprKind::Move: {
-            if (expr.lhs->kind != ExprKind::Identifier) {
-                if (report_errors) {
-                    return std::unexpected(DataflowError("std::move currently only supports a plain local variable "
-                                         "(not a member, subscript, or other expression)",
-                        state.current_loc));
-                }
-                return {};
-            }
-            const std::string& name = expr.lhs->name;
             // spec §6.2(3): `std::move(E)` is a syntactic ownership-state
-            // transition on any named object `E`, not just on class types.
-            // The same named-object rule already covers an rvalue-
-            // reference local/parameter (`Inner&& i`, ch03/ch05 §5.11):
-            // `i` itself is still a name, and moving from it marks that
-            // local/parameter moved-out exactly like any other local name.
-            std::optional<LocalId> moved = body.local_of(*expr.lhs);
+            // transition on the object `E` designates, not just on class
+            // types, and §6.2(1) puts objects "of automatic, static,
+            // thread, or member storage duration" in the two-state model
+            // -- member storage included. `E` is any expression naming a
+            // place: a local, a member of it however deeply nested, a
+            // member of the current object, an element at a literal
+            // index, or any of those reached through a reference
+            // binding. What it may *not* be is an expression that names
+            // no identifiable object, because then there is nowhere to
+            // record the state transition; explain_untrackable_place
+            // says which of those it was rather than listing the forms
+            // that would have worked.
+            std::vector<LocalId> moved_through;
+            std::optional<Place> moved = tracked_place_of(*expr.lhs, state, body, &moved_through);
             if (!moved.has_value()) {
-                if (find_visible_global_for_name(name, expr.lhs->explicit_global_qualification, body) != nullptr) {
+                if (expr.lhs->kind == ExprKind::Identifier &&
+                    find_visible_global_for_name(expr.lhs->name, expr.lhs->explicit_global_qualification, body) !=
+                        nullptr) {
                     return {};
                 }
                 if (report_errors) {
-                    return std::unexpected(DataflowError("unknown variable '" + name + "'",
+                    if (expr.lhs->kind == ExprKind::Identifier) {
+                        return std::unexpected(DataflowError("unknown variable '" + expr.lhs->name + "'",
+                            state.current_loc));
+                    }
+                    return std::unexpected(DataflowError("cannot move from " + explain_untrackable_place(*expr.lhs),
                         state.current_loc));
                 }
                 return {};
             }
+            std::string name = body.describe_place(*moved);
             LocalState current = lookup(state.locals, *moved);
             if (report_errors && current != LocalState::Initialized) {
                 return std::unexpected(DataflowError(describe_bad_state(name, current),
                     state.current_loc));
             }
             if (report_errors) {
-                auto borrow_it = state.borrows.find(*moved);
-                if (borrow_it != state.borrows.end() &&
-                    (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
+                // No read-only check here, deliberately. §6.2(3) attaches
+                // the state transition to the *syntactic form*
+                // `std::move(E)` and conditions it on nothing else; it
+                // says nothing about `E` being read-only, and the
+                // ordinary C++ meaning of `std::move` on a `const`
+                // lvalue -- a value-preserving cast to `const T&&`, used
+                // to select a `const&&`-qualified overload -- is
+                // well-formed. libs/std's
+                // `__move_only_function_invoke_const_rvalue` has no other
+                // spelling for that. Whether §6.2(3) is meant to apply to
+                // a `const` object at all is a gap in the spec, not a
+                // licence to reject here.
+                //
+                // Consuming an object consumes everything it contains,
+                // so a subobject that is already gone makes the whole
+                // one unusable (spec §6.2(5)/(6) applied to the
+                // memberwise move §6.4(5) would perform).
+                if (std::optional<Place> gone = find_moved_subobject(state.locals, *moved); gone.has_value()) {
+                    return std::unexpected(DataflowError("cannot move '" + name + "': its member '" +
+                                         body.describe_place(*gone) + "' has already been moved out",
+                        state.current_loc));
+                }
+                if (write_is_blocked_by_a_borrow(moved->local, *moved, state, moved_through)) {
                     return std::unexpected(DataflowError("cannot move '" + name + "' while it is borrowed",
                         state.current_loc));
                 }
             }
-            state.locals[*moved] = LocalState::MovedOut;
+            mark_place_moved_out(state.locals, *moved);
             if (report_errors && !is_move_target_context) {
                 return std::unexpected(DataflowError("std::move(" + name + ") must be used to initialize, assign into, return, "
                                                             "pass, or capture a value",
@@ -2469,8 +2690,18 @@ struct ConvertingConstructorBinding {
                     // The assignment target is never a "read": whatever
                     // its previous state, assigning any value returns it
                     // to Initialized (spec ch05.1).
-                    state.locals[*target] = LocalState::Initialized;
+                    reinitialize_place(state.locals, whole_local_place(*target));
                 } else if (expr.lhs->kind != ExprKind::Identifier) {
+                    // Same rule one projection down (spec §6.2(4)): a
+                    // write to `s.a` reinitializes `s.a`, so it must
+                    // happen *before* the base is walked -- the walk
+                    // reads the target as a place, and a moved-out one
+                    // would be rejected as a use of what this very
+                    // statement is putting back.
+                    if (std::optional<Place> target_place = tracked_place_of(*expr.lhs, state, body);
+                        target_place.has_value()) {
+                        reinitialize_place(state.locals, *target_place);
+                    }
                     // e.g. `p.x = 1;` or `arr[i] = 1;`: the base
                     // object/index are evaluated (as addresses / an
                     // index value), not read as "the assignment target",
@@ -2485,7 +2716,10 @@ struct ConvertingConstructorBinding {
                         }
                         if (std::optional<LocalId> lender = resolve_reborrow_lender(*expr.lhs, body, signatures);
                             lender.has_value()) {
-                            if (auto _r = validate_reborrow_lender_write(*lender, state, body, report_errors); !_r.has_value()) {
+                            if (auto _r = validate_reborrow_lender_write(*lender, state, body, report_errors,
+                                                                         tracked_place_of(*expr.lhs, state, body, nullptr,
+                                                                      PlacePrecision::Enclosing));
+                                !_r.has_value()) {
                                 return std::unexpected(std::move(_r).error());
                             }
                         }
@@ -2500,10 +2734,10 @@ struct ConvertingConstructorBinding {
                             write_roots = std::move(write_roots_result).value();
                         }
                         if (!write_through_mutable_reborrow) {
+                            std::optional<Place> written =
+                                tracked_place_of(*expr.lhs, state, body, nullptr, PlacePrecision::Enclosing);
                             for (LocalId root : write_roots) {
-                                auto borrow_it = state.borrows.find(root);
-                                if (borrow_it != state.borrows.end() &&
-                                    (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
+                                if (write_is_blocked_by_a_borrow(root, written, state, {})) {
                                     return std::unexpected(DataflowError("cannot assign to this place: " + format_root(body, root) +
                                                             " is currently borrowed",
                                                         state.current_loc));
@@ -2583,6 +2817,22 @@ struct ConvertingConstructorBinding {
             return check_call_arguments(expr, state, body, signatures, report_errors);
 
         case ExprKind::Member: {
+            // spec §6.2(5)/(6): reading a member is a use of *that*
+            // object. Asked before the base is walked, because the base
+            // -- `s` in `s.a` -- is not itself being read as a value and
+            // may legitimately be only partially owned; asking about the
+            // whole root instead is what made moving one member poison
+            // every sibling.
+            if (report_errors) {
+                if (std::optional<Place> place = tracked_place_of(expr, state, body); place.has_value()) {
+                    LocalState place_state = lookup(state.locals, *place);
+                    if (place_state != LocalState::Initialized && place_state != LocalState::Bottom) {
+                        Place named = state_source_place(state.locals, *place);
+                        return std::unexpected(DataflowError(describe_bad_state(body.describe_place(named), place_state),
+                            state.current_loc));
+                    }
+                }
+            }
             if (auto _r = apply_expr(*expr.lhs, false, state, body, signatures, report_errors); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
@@ -2641,6 +2891,16 @@ struct ConvertingConstructorBinding {
         }
 
         case ExprKind::Subscript:
+            if (report_errors) {
+                if (std::optional<Place> place = tracked_place_of(expr, state, body); place.has_value()) {
+                    LocalState place_state = lookup(state.locals, *place);
+                    if (place_state != LocalState::Initialized && place_state != LocalState::Bottom) {
+                        Place named = state_source_place(state.locals, *place);
+                        return std::unexpected(DataflowError(describe_bad_state(body.describe_place(named), place_state),
+                            state.current_loc));
+                    }
+                }
+            }
             if (auto _r = apply_expr(*expr.lhs, false, state, body, signatures, report_errors); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
@@ -2718,7 +2978,7 @@ struct ConvertingConstructorBinding {
                                  "' must be initialized (bound to a variable) at declaration",
                 state.current_loc));
         }
-        state.locals[stmt.local] = LocalState::Initialized;
+        reinitialize_place(state.locals, whole_local_place(stmt.local));
         return {};
     }
 
@@ -2740,7 +3000,7 @@ struct ConvertingConstructorBinding {
                    report_errors); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
-        state.locals[stmt.local] = LocalState::Initialized;
+        reinitialize_place(state.locals, whole_local_place(stmt.local));
         return {};
     }
 
@@ -2832,7 +3092,7 @@ struct ConvertingConstructorBinding {
         // rejected by the upcoming reporting pass; just leave `stmt.local`
         // itself readable so this (discarded) silent fixed-point
         // iteration has *some* defined state to continue from.
-        state.locals[stmt.local] = LocalState::Initialized;
+        reinitialize_place(state.locals, whole_local_place(stmt.local));
         return {};
     }
 
@@ -2869,10 +3129,16 @@ struct ConvertingConstructorBinding {
     } else {
         state.suspended_reborrows[*lender].shared_count++;
     }
+    std::optional<Place> exact_bound =
+        stmt.expr != nullptr ? tracked_place_of(*stmt.expr, state, body) : std::nullopt;
+    std::optional<Place> containing_bound =
+        stmt.expr != nullptr ? tracked_place_of(*stmt.expr, state, body, nullptr, PlacePrecision::Enclosing)
+                             : std::nullopt;
     state.ref_targets[stmt.local] =
-        RefTarget{roots, uses_lender_suspension ? lender : std::optional<LocalId>{}, is_mutable};
+        RefTarget{roots, uses_lender_suspension ? lender : std::optional<LocalId>{},
+                  containing_bound.has_value() ? containing_bound : exact_bound, exact_bound.has_value(), is_mutable};
     state.local_lifetime_sources[stmt.local] = roots;
-    state.locals[stmt.local] = LocalState::Initialized;
+    reinitialize_place(state.locals, whole_local_place(stmt.local));
     return {};
 }
 
@@ -3075,7 +3341,7 @@ struct ConvertingConstructorBinding {
             // scpp has no "uninitialized" state (see the LocalState
             // comment above): a bare declaration always zero-initializes,
             // so it's always Initialized from this point on.
-            state.locals[stmt.local] = LocalState::Initialized;
+            reinitialize_place(state.locals, whole_local_place(stmt.local));
             if (stmt.ctor_args != nullptr && stmt.type.is_reference_wrapper_lifetime_source && stmt.ctor_args->size() == 1) {
                 state.local_lifetime_sources[stmt.local] =
                     resolve_lifetime_source_roots(*(*stmt.ctor_args)[0], state, body, signatures, report_errors);
@@ -3120,7 +3386,7 @@ struct ConvertingConstructorBinding {
             // parameter (whose qualifier lives nowhere else) was freely
             // assignable: `int f(const int v) { v = 6; return v; }`
             // compiled and returned 6.
-            bool target_is_reassignment = (stmt.has_local && state.locals.contains(stmt.local)) || !stmt.has_local;
+            bool target_is_reassignment = (stmt.has_local && state.locals.contains(whole_local_place(stmt.local))) || !stmt.has_local;
             if (report_errors && stmt.target != nullptr && target_is_reassignment &&
                 place_is_read_only(*stmt.target, body, signatures)) {
                 return std::unexpected(read_only_write_error(*stmt.target, body, signatures, "=", state.current_loc));
@@ -3244,7 +3510,7 @@ struct ConvertingConstructorBinding {
                 // member) falls through to the unconditional "no copy
                 // semantics" rejection just below, unchanged.
                 bool is_move_assignment = produces_rvalue_of_type(*stmt.expr, (*local_type), body, signatures);
-                if (is_move_assignment && state.locals.contains(stmt.local)) {
+                if (is_move_assignment && state.locals.contains(whole_local_place(stmt.local))) {
                     if (report_errors) {
                         bool has_reference_member = false;
                         if (state.class_field_types != nullptr) {
@@ -3279,7 +3545,7 @@ struct ConvertingConstructorBinding {
                     if (auto _r = apply_expr(*stmt.expr, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
-                    state.locals[stmt.local] = LocalState::Initialized;
+                    reinitialize_place(state.locals, whole_local_place(stmt.local));
                     return {};
                 }
                 // spec §6.5(3): `y = x;` (a bare, non-move reassignment)
@@ -3300,7 +3566,7 @@ struct ConvertingConstructorBinding {
                     is_freely_copyable_class_value_source(*stmt.expr, (*local_type), body, signatures);
                 if ((is_bare_same_type_copy_source(*stmt.expr, (*local_type), body, signatures) ||
                      freely_copyable_assign_source) &&
-                    state.locals.contains(stmt.local)) {
+                    state.locals.contains(whole_local_place(stmt.local))) {
                     if (report_errors) {
                         if (!freely_copyable_assign_source &&
                             (state.classes_with_copy_assign == nullptr ||
@@ -3326,10 +3592,10 @@ struct ConvertingConstructorBinding {
                                signatures, report_errors); !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
-                    state.locals[stmt.local] = LocalState::Initialized;
+                    reinitialize_place(state.locals, whole_local_place(stmt.local));
                     return {};
                 }
-                if (report_errors && state.locals.contains(stmt.local)) {
+                if (report_errors && state.locals.contains(whole_local_place(stmt.local))) {
                     return std::unexpected(DataflowError(
                         std::string(record_keyword((*local_type).name, *body.program)) + " '" +
                                          (*local_type).name + "'-typed variable '" + target_name +
@@ -3385,7 +3651,7 @@ struct ConvertingConstructorBinding {
                                    report_errors); !_r.has_value()) {
                             return std::unexpected(std::move(_r).error());
                         }
-                        state.locals[stmt.local] = LocalState::Initialized;
+                        reinitialize_place(state.locals, whole_local_place(stmt.local));
                         return {};
                     }
                     // spec §6.5: `ClassName y = x;` (a bare, non-move,
@@ -3425,7 +3691,7 @@ struct ConvertingConstructorBinding {
                             !_r.has_value()) {
                             return std::unexpected(std::move(_r).error());
                         }
-                        state.locals[stmt.local] = LocalState::Initialized;
+                        reinitialize_place(state.locals, whole_local_place(stmt.local));
                         return {};
                     }
                     if (report_errors) {
@@ -3433,19 +3699,6 @@ struct ConvertingConstructorBinding {
                             is_freely_copyable_class_value_source(*stmt.expr, (*local_type), body, signatures);
                         if (!is_bare_same_type_copy_source(*stmt.expr, (*local_type), body, signatures) &&
                             !freely_copyable_init_source) {
-                            // The advice here used to name "constructor-
-                            // call syntax ('T v(args);')" -- a spelling
-                            // parse_variable_declaration categorically
-                            // rejects ("parenthesized direct-initialization
-                            // is not allowed for object declarations; use
-                            // brace-init instead"), so a reader who
-                            // followed this message landed straight on
-                            // that one. Name the syntax the language
-                            // actually has.
-                            if (std::optional<std::string> why = explain_unusable_class_value_source(*stmt.expr);
-                                why.has_value()) {
-                                return std::unexpected(DataflowError(*why, state.current_loc));
-                            }
                             // [dcl.init]/16.6: the source is neither a copy
                             // nor a move of the same type, so this is a call
                             // to a converting constructor and failed as one.
@@ -3486,7 +3739,7 @@ struct ConvertingConstructorBinding {
                         return std::unexpected(std::move(_r).error());
                     }
                 }
-                state.locals[stmt.local] = LocalState::Initialized;
+                reinitialize_place(state.locals, whole_local_place(stmt.local));
                 return {};
             }
 
@@ -3510,7 +3763,7 @@ struct ConvertingConstructorBinding {
                         state.current_loc));
                 }
             }
-            state.locals[stmt.local] = LocalState::Initialized;
+            reinitialize_place(state.locals, whole_local_place(stmt.local));
             if (is_pointer((*local_type))) {
                 state.local_lifetime_sources[stmt.local] =
                     resolve_lifetime_source_roots(*stmt.expr, state, body, signatures, report_errors);
@@ -3572,12 +3825,19 @@ struct ConvertingConstructorBinding {
             // borrowed local at scope exit" can't arise here either.
             release_reference_borrow(stmt.local, state, body);
             release_closure_capture_borrows(stmt.local, state);
+            if (report_errors) {
+                if (auto _r = check_moved_subobjects_were_restored(state, body, stmt.local,
+                                                                   "where its scope ends");
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
             // `stmt.local` just went out of lexical scope: forget its
             // tracked state entirely. Erasing is equivalent to setting
             // it to Bottom (lookup() treats a missing key as Bottom) and
             // keeps the map from growing with entries the rest of the
             // analysis no longer cares about.
-            state.locals.erase(stmt.local);
+            forget_place_tree(state.locals, whole_local_place(stmt.local));
             state.local_lifetime_sources.erase(stmt.local);
             return {};
         }
@@ -3613,6 +3873,11 @@ struct ConvertingConstructorBinding {
             }
             return apply_expr(*term.condition, false, state, body, signatures, /*report_errors=*/true);
         case TerminatorKind::Return: {
+            if (auto _r = check_moved_subobjects_were_restored(state, body, std::nullopt,
+                                                               "where '" + fn.name + "' returns");
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
             if (term.return_value == nullptr) return {};
             // spec §16.3(1.4). The one position where a `void` operand
             // is legal rather than forbidden: [basic.types.general]
@@ -3912,9 +4177,6 @@ struct ConvertingConstructorBinding {
             if (return_is_class_value && !implicit_move_source && !freely_copyable_return_source &&
                 !produces_rvalue_of_type(*term.return_value, fn.return_type, body, signatures) &&
                 return_converting_ctor == nullptr) {
-                if (std::optional<std::string> why = explain_unusable_class_value_source(*term.return_value); why.has_value()) {
-                    return std::unexpected(DataflowError(*why, state.current_loc));
-                }
                 return std::unexpected(DataflowError("returning class '" + fn.return_type.name +
                                      "' by value requires either an implicitly copyable same-type source or "
                                      "a fresh value such as std::move(x) or a call returning by value",
@@ -4170,7 +4432,7 @@ struct SwitchCaseKey {
     for (std::size_t param_index = 0; param_index < fn.params.size(); ++param_index) {
         const Param& param = fn.params[param_index];
         LocalId param_local = static_cast<LocalId>(param_index);
-        entry_state.locals[param_local] = LocalState::Initialized;
+        reinitialize_place(entry_state.locals, whole_local_place(param_local));
         if (param.lifetime.present()) entry_state.parameter_lifetimes[param.name] = param.lifetime;
         if (is_pointer_return_lifetime_source_type(param.type) || is_reference(param.type)) {
             entry_state.local_lifetime_sources[param_local] = single_root(param_local);

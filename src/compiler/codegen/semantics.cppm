@@ -163,18 +163,14 @@ namespace {
                 return resolve_function_designator_type(expr);
             }
 
-            case ExprKind::Move: {
-                if (expr.lhs->kind != ExprKind::Identifier) return std::nullopt;
-                const LocalSlot* local = find_local(*expr.lhs);
-                if (local == nullptr) {
-                    if (const GlobalSlot* global =
-                            find_visible_global_slot(expr.lhs->name, expr.lhs->explicit_global_qualification)) {
-                        return global->type;
-                    }
-                    return std::nullopt;
-                }
-                return std::optional<Type>(local->type);
-            }
+            case ExprKind::Move:
+                // `std::move(E)` designates the object `E` does, so its
+                // type is `E`'s -- see movecheck's matching Move arm in
+                // calls.cppm, which asked the same question and had
+                // drifted to a *different* list of accepted operand
+                // shapes (this one never grew the `.back()`/subscript
+                // entries that one did, and neither ever grew `.field`).
+                return infer_lvalue_type(*expr.lhs);
 
             case ExprKind::New: {
                 Type result;

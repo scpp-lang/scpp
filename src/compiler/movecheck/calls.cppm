@@ -2451,39 +2451,23 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             return std::nullopt;
         }
 
-        case ExprKind::Move: {
-            // std::move doesn't change the static type -- still whatever
-            // std::unique_ptr<T> the moved-from local was declared as.
-            if (expr.lhs->kind == ExprKind::Identifier) {
-                const Type* moved_type = body.type_if_local(*expr.lhs);
-                if (moved_type == nullptr) {
-                    if (const GlobalVar* global = find_visible_global_for_expr(*expr.lhs, body);
-                        global != nullptr && global->decl != nullptr) {
-                        return global->decl->type;
-                    }
-                    return std::nullopt;
-                }
-                return std::optional<Type>(*moved_type);
-            }
-            // std::move(v.back())/std::move(v.front()) (relocating a
-            // container element elsewhere, e.g. `std::string x =
-            // std::move(segments.back());`) -- the moved-from expression
-            // isn't a bare identifier here, but this Call case's own
-            // .back()/.front() special-case (just below) already resolves
-            // the exact element type, unwrapped from any reference, which
-            // is exactly as valid a moved-from type as an identifier's.
-            if (expr.lhs->kind == ExprKind::Call) return infer_expr_type(*expr.lhs, body, signatures);
-            // std::move(program.functions[i]) (relocating a container
-            // element accessed by index rather than through a named
-            // reference first, e.g. reconcile_ordinary_forward_
-            // declarations' early-return path) -- Subscript's own
-            // handling (just below in this same function) already
-            // resolves the exact element type via infer_vector_element_
-            // type, exactly as valid a moved-from type as an identifier's
-            // or the .back()/.front() Call case just above.
-            if (expr.lhs->kind == ExprKind::Subscript) return infer_expr_type(*expr.lhs, body, signatures);
-            return std::nullopt;
-        }
+        case ExprKind::Move:
+            // std::move doesn't change the static type: `std::move(E)`
+            // designates the very object `E` does, so its type is `E`'s
+            // own -- for any place expression `E`, not a list of the
+            // shapes that happened to be needed.
+            //
+            // It was that list: a bare identifier, then `.back()`/
+            // `.front()`, then a subscript, each added when a caller hit
+            // the nullopt. `E.field` was never on it, so
+            // `std::move(s.ps)` had no type, produces_rvalue_of_type
+            // answered "not a fresh value", and all four class-value
+            // boundaries rejected it -- behind a bespoke message
+            // ("std::move currently only supports a plain local
+            // variable") that reported the missing shape list as if it
+            // were the language rule. spec §6.2(3) names no such
+            // restriction; see apply_expr's ExprKind::Move case.
+            return infer_expr_lvalue_type(*expr.lhs, body, signatures);
 
         case ExprKind::New: {
             Type result;

@@ -1,0 +1,14 @@
+// spec §6.2(7): a borrow aliases "the same underlying object", so `r`
+// is a hold on `p.x`, not on `p`. The borrow-conflict check was keyed by
+// root local -- one granularity coarser than a place -- so it read `p`
+// as borrowed and rejected a write to the disjoint field `p.y`.
+// Was: writing_field_while_another_field_shared_borrowed_is_rejected.
+struct Point { int x; int y; };
+int f() {
+    Point p{};
+    p.x = 1;
+    p.y = 2;
+    const int& r = p.x;
+    p.y = 99;
+    return r;
+}

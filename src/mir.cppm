@@ -118,13 +118,101 @@ struct LocalDecl {
     bool is_borrow_holding_closure = false;
 };
 
-// A place is a storage location a MIR statement can read from or write to.
-// For this iteration, places are whole local variables only (no field/
-// index projections): struct and array locals are always fully
-// zero-initialized at declaration (see codegen's zero-init handling), so
-// sub-object initialization tracking isn't needed for soundness yet.
+// One step of a place's projection path: `.field` or `[constant]`.
+//
+// Only these two forms are *identities*. A `[i]` with a non-constant
+// index does not name a statically-known element, and a `*p` through a
+// raw pointer does not name a statically-known object at all (two
+// pointers may alias), so neither can be a projection step -- see
+// place_of, which declines to build a Place for them rather than
+// building an approximate one that would silently under-report.
+struct Projection {
+    bool is_index = false;         // false: `.field`; true: `[index]`
+    std::string field;             // `.field`
+    std::int64_t index = 0;        // `[index]`
+
+    bool operator==(const Projection&) const = default;
+    // Only for deterministic ordering (unordered_map iteration order is
+    // not stable, and several diagnostics pick "the lowest" place so the
+    // message does not depend on hash order).
+    auto operator<=>(const Projection&) const = default;
+};
+
+// A place is a storage location a MIR statement can read from or write
+// to: a root local (Body::local_decls) plus a projection path naming a
+// subobject of it. The empty path is the whole local, which is what the
+// move checker used to be able to talk about *at all* -- every map key
+// that used to be a bare LocalId is now that local's empty-path Place,
+// so this is the same model with the projections filled in, not a
+// second one beside it.
+//
+// spec §6.2(1) puts objects "of automatic, static, thread, or member
+// storage duration" in exactly one of the two ownership states, and
+// §6.2(3) transitions "an object designated by an id-expression". A
+// member named inside its own class is an id-expression, so member
+// storage was always in the model; only the key was too coarse to
+// record it.
 struct Place {
     LocalId local{};
+    std::vector<Projection> path;
+
+    bool operator==(const Place&) const = default;
+
+    [[nodiscard]] bool is_whole_local() const { return path.empty(); }
+
+    // Whether `this` is `other` itself or a subobject of it -- the
+    // relation moving a place uses to poison what it contains
+    // (`o.i` moved out takes `o.i.q` with it).
+    [[nodiscard]] bool is_at_or_under(const Place& other) const {
+        if (local != other.local) return false;
+        if (path.size() < other.path.size()) return false;
+        for (std::size_t i = 0; i < other.path.size(); i++) {
+            if (!(path[i] == other.path[i])) return false;
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool is_strictly_under(const Place& other) const {
+        return path.size() > other.path.size() && is_at_or_under(other);
+    }
+
+    // This place with its last projection step removed. Precondition:
+    // !is_whole_local().
+    [[nodiscard]] Place parent() const {
+        Place result = *this;
+        result.path.pop_back();
+        return result;
+    }
+};
+
+[[nodiscard]] inline Place whole_local_place(LocalId local) { return Place{local, {}}; }
+
+[[nodiscard]] inline Place projected_field(Place base, std::string field) {
+    base.path.push_back(Projection{/*is_index=*/false, std::move(field), 0});
+    return base;
+}
+
+[[nodiscard]] inline Place projected_index(Place base, std::int64_t index) {
+    base.path.push_back(Projection{/*is_index=*/true, {}, index});
+    return base;
+}
+
+// Deliberately a named hasher rather than a std::hash specialization:
+// `Place` is exported from a named module, and a specialization of a
+// std template for such a type is only found where the specialization
+// itself is reachable -- a footgun that silently degrades to the primary
+// template being ill-formed at some importer. A hasher passed explicitly
+// to every map cannot be missed.
+struct PlaceHash {
+    [[nodiscard]] std::size_t operator()(const Place& place) const {
+        std::size_t h = std::hash<std::size_t>{}(local_index(place.local));
+        for (const Projection& step : place.path) {
+            std::size_t step_hash = step.is_index ? std::hash<std::int64_t>{}(step.index)
+                                                  : std::hash<std::string>{}(step.field);
+            h ^= step_hash + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        }
+        return h;
+    }
 };
 
 enum class MirStatementKind {
@@ -397,7 +485,71 @@ struct Body {
         if (local_decls.empty() || local_decls[0].source_name != "this") return std::nullopt;
         return static_cast<LocalId>(0);
     }
+
+    // How to spell `place` in a diagnostic. Never prints a LocalId: the
+    // root's own source spelling, then the projection steps as written
+    // (`s.a.b`, `arr[0]`). A member of the implicit object parameter is
+    // spelled the way the source most likely wrote it -- `frames_`, not
+    // `this.frames_` -- because that is the name the reader has to find.
+    [[nodiscard]] std::string describe_place(const Place& place) const {
+        std::string result;
+        std::size_t first_step = 0;
+        std::optional<LocalId> self = this_local();
+        if (self.has_value() && place.local == *self && !place.path.empty() && !place.path[0].is_index) {
+            result = place.path[0].field;
+            first_step = 1;
+        } else {
+            result = is_valid_local(place.local) ? name_of(place.local) : std::string("<unknown>");
+        }
+        for (std::size_t i = first_step; i < place.path.size(); i++) {
+            if (place.path[i].is_index) {
+                result += "[";
+                result += std::to_string(place.path[i].index);
+                result += "]";
+            } else {
+                result += ".";
+                result += place.path[i].field;
+            }
+        }
+        return result;
+    }
 };
+
+// Why `expr` does not name a place the move checker can record state
+// for. Empty when it does. See place_of.
+[[nodiscard]] std::string explain_untrackable_place(const Expr& expr);
+
+// The place `expr` names, or nullopt when it names no statically
+// identifiable storage at all (a temporary, a call result, a global, a
+// non-constant subscript, a raw-pointer dereference). `resolve_root`
+// maps a reference/span local to the place it is bound to, so
+// `r.a` where `r` is `S& r = s;` is the same place as `s.a`; passing a
+// null resolver keeps the projection rooted at the reference local
+// itself, which is what a caller that does not track bindings wants.
+// How exactly a place has to be identified.
+//
+//  - Exact: the answer names *this* object and nothing else, which is
+//    what recording an ownership-state transition against it requires.
+//    `arr[i]` for a non-constant `i` has no exact answer.
+//  - Enclosing: the answer names a place that *contains* the object,
+//    which is all an aliasing question needs -- `arr[i]` answers `arr`.
+//    Never used to write state, only to prove two places disjoint.
+enum class PlacePrecision { Exact, Enclosing };
+
+[[nodiscard]] std::optional<Place> place_of(
+    const Expr& expr, const Body& body,
+    const std::function<std::optional<Place>(LocalId)>& resolve_root = {},
+    PlacePrecision precision = PlacePrecision::Exact);
+
+// The same walk for a caller that has no Body -- codegen resolves an
+// identifier to a local through its own slot table, not through
+// Body::local_of, and must reach the *same* Place for the same
+// expression or its teardown would consult a flag the move checker
+// never set.
+[[nodiscard]] std::optional<Place> place_of(
+    const Expr& expr, const std::function<std::optional<LocalId>(const Expr&)>& local_of,
+    const std::function<std::optional<Place>(LocalId)>& resolve_root = {},
+    PlacePrecision precision = PlacePrecision::Exact);
 
 // Assigns every local declaration in `fn` its identity, and binds every
 // identifier use in `fn`'s body to the declaration it refers to under
@@ -1273,7 +1425,6 @@ void resolve_locals(Function& fn) {
     LocalResolver resolver{fn.params, fn.body.get()};
     resolver.run(&fn.member_initializers);
 }
-
 void resolve_program_locals(Program& program) {
     for (Function& fn : program.functions) resolve_locals(fn);
 }
@@ -1294,6 +1445,93 @@ Body build_mir(const Function& fn) {
     body.function_namespace_path = namespace_path;
     body.function_source_path = source_path;
     return body;
+}
+
+namespace {
+
+// The constant value of a subscript index, when it has one. Only a
+// literal is accepted here on purpose: anything that needs evaluating
+// (a named constant, a constant-folded expression) is the constant
+// evaluator's job, and movecheck runs before it -- accepting a *maybe*
+// constant index would produce a place that is right only sometimes,
+// which is exactly the under-reporting a bare LocalId key used to do.
+[[nodiscard]] std::optional<std::int64_t> constant_subscript_index(const Expr& index) {
+    if (index.kind == ExprKind::IntegerLiteral || index.kind == ExprKind::CharLiteral) return index.int_value;
+    return std::nullopt;
+}
+
+} // namespace
+
+[[nodiscard]] std::string explain_untrackable_place(const Expr& expr) {
+    switch (expr.kind) {
+        case ExprKind::Subscript:
+            if (!constant_subscript_index(*expr.rhs).has_value()) {
+                return "a subscript whose index is not a literal: which element it names is not "
+                       "known until the program runs, so its ownership state cannot be tracked";
+            }
+            return explain_untrackable_place(*expr.lhs);
+        case ExprKind::Unary:
+            if (expr.unary_op == UnaryOp::Deref) {
+                return "a dereference: two pointers may name the same object, so what '*' names "
+                       "cannot be identified statically";
+            }
+            return "an operator result, which names no object";
+        case ExprKind::Member:
+            return explain_untrackable_place(*expr.lhs);
+        case ExprKind::Call:
+            return "a call result, which is a temporary with no name to record state against";
+        case ExprKind::Identifier:
+            return "a name that does not resolve to a local variable, parameter, or member of "
+                   "the current object";
+        default:
+            return "an expression that names no object";
+    }
+}
+
+[[nodiscard]] std::optional<Place> place_of(const Expr& expr, const Body& body,
+                                            const std::function<std::optional<Place>(LocalId)>& resolve_root,
+                                            PlacePrecision precision) {
+    return place_of(
+        expr, [&body](const Expr& e) { return body.local_of(e); }, resolve_root, precision);
+}
+
+[[nodiscard]] std::optional<Place> place_of(const Expr& expr,
+                                            const std::function<std::optional<LocalId>(const Expr&)>& local_of,
+                                            const std::function<std::optional<Place>(LocalId)>& resolve_root,
+                                            PlacePrecision precision) {
+    if (expr.explicit_global_qualification) return std::nullopt;
+    switch (expr.kind) {
+        case ExprKind::Identifier: {
+            std::optional<LocalId> local = local_of(expr);
+            if (!local.has_value()) return std::nullopt;
+            if (resolve_root) {
+                if (std::optional<Place> bound = resolve_root(*local); bound.has_value()) return bound;
+            }
+            return whole_local_place(*local);
+        }
+        case ExprKind::Member: {
+            if (expr.lhs == nullptr) return std::nullopt;
+            std::optional<Place> base = place_of(*expr.lhs, local_of, resolve_root, precision);
+            if (!base.has_value()) return std::nullopt;
+            return projected_field(std::move(*base), expr.name);
+        }
+        case ExprKind::Subscript: {
+            if (expr.lhs == nullptr || expr.rhs == nullptr) return std::nullopt;
+            std::optional<Place> base = place_of(*expr.lhs, local_of, resolve_root, precision);
+            if (!base.has_value()) return std::nullopt;
+            std::optional<std::int64_t> index = constant_subscript_index(*expr.rhs);
+            if (!index.has_value()) {
+                // Which element is unknown; the array itself still
+                // contains it, and that is enough to prove disjointness
+                // from anything outside the array.
+                if (precision == PlacePrecision::Enclosing) return base;
+                return std::nullopt;
+            }
+            return projected_index(std::move(*base), *index);
+        }
+        default:
+            return std::nullopt;
+    }
 }
 
 } // namespace scpp

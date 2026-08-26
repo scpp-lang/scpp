@@ -4287,7 +4287,7 @@ private:
                         // an array type, the pointer produced by the array-to-pointer
                         // conversion is used in place of A -- `f("abcd")` against
                         // `f(T)` deduces `T = const char*`, not `T = const char[5]`.
-                        if (param_type.kind != TypeKind::Reference) concrete = decay_array_to_pointer(concrete);
+                        if (param_type.kind != TypeKind::Reference) concrete = deduced_type_for_by_value_param(std::move(concrete));
                         if (underlying.kind == TypeKind::Named && variadic_generic_type_names_.contains(underlying.name)) {
                             Expr fake_call;
                             fake_call.loc = loc;
@@ -4710,7 +4710,7 @@ private:
                                         ? forwarding_reference_deduced_type(*expr.args[arg_cursor], *arg_type, body)
                                         : (arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type);
                     // [temp.deduct.call]/2 array-to-pointer, as above.
-                    if (pack_param_type.kind != TypeKind::Reference) concrete = decay_array_to_pointer(concrete);
+                    if (pack_param_type.kind != TypeKind::Reference) concrete = deduced_type_for_by_value_param(std::move(concrete));
                     if (pack_type_name.has_value() && !direct_pack) {
                         std::unordered_map<std::string, Type> arg_type_bindings;
                         std::unordered_map<std::string, int> arg_value_bindings;
@@ -4746,7 +4746,7 @@ private:
                                 ? forwarding_reference_deduced_type(*expr.args[arg_cursor], *arg_type, body)
                                 : (arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type);
             // [temp.deduct.call]/2 array-to-pointer, as above.
-            if (param_type.kind != TypeKind::Reference) concrete = decay_array_to_pointer(concrete);
+            if (param_type.kind != TypeKind::Reference) concrete = deduced_type_for_by_value_param(std::move(concrete));
             if (underlying.kind == TypeKind::Named && variadic_generic_type_names_.contains(underlying.name)) {
                 if (argument_type_can_participate_in_variadic_base_deduction(*expr_copy, arg_cursor, underlying.name,
                                                                              body)) {
@@ -5371,7 +5371,7 @@ private:
                                         ? forwarding_reference_deduced_type(*expr.args[arg_cursor], *arg_type, body)
                                         : (arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type);
                     // [temp.deduct.call]/2 array-to-pointer, as above.
-                    if (pack_param_type.kind != TypeKind::Reference) concrete = decay_array_to_pointer(concrete);
+                    if (pack_param_type.kind != TypeKind::Reference) concrete = deduced_type_for_by_value_param(std::move(concrete));
                     if (pack_type_name.has_value() && !direct_pack) {
                         std::unordered_map<std::string, Type> arg_type_bindings;
                         std::unordered_map<std::string, int> arg_value_bindings;
@@ -5421,7 +5421,7 @@ private:
                                     ? forwarding_reference_deduced_type(*expr.args[arg_cursor], *arg_type, body)
                                     : (arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type);
                 // [temp.deduct.call]/2 array-to-pointer, as above.
-                if (param_type.kind != TypeKind::Reference) concrete = decay_array_to_pointer(concrete);
+                if (param_type.kind != TypeKind::Reference) concrete = deduced_type_for_by_value_param(std::move(concrete));
                 if (underlying.kind == TypeKind::Named && variadic_generic_type_names_.contains(underlying.name)) {
                     // Case A: a base-class-deduction pattern (e.g.
                     // "TupleImpl<I, Head, Tail...>& t").

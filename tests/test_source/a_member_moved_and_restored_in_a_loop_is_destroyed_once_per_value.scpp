@@ -1,0 +1,32 @@
+// Move state must merge correctly across a loop back-edge: the member is
+// moved out and reinitialized on every iteration, so every value it ever
+// holds is destroyed exactly once.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { std::print("~R{}\n", this.id); }
+};
+
+R make_r(int i) { R r{i}; return r; }
+
+struct S {
+    R a;
+    R b;
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+int main() {
+    S s{1, 2};
+    R t = make_r(0);
+    int n = 0;
+    while (n < 2) {
+        t = std::move(s.a);
+        s.a = make_r(5);
+        n = n + 1;
+    }
+    std::print("t={}\n", t.id);
+    return 0;
+}

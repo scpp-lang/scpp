@@ -1,0 +1,25 @@
+// [temp.deduct.call]/2: for a by-value function parameter, deduction
+// uses the argument type after array-to-pointer decay *and* after
+// removing reference-ness and top-level cv-qualification. Five sites in
+// monomorphize.cppm implemented only the array-to-pointer half, so `U`
+// deduced to `const P&` here and the by-value parameter `value` became a
+// read-only reference -- which the per-place read-only check on
+// `std::move` then rejected. This is the shape libs/std's
+// `expected(U value)` has.
+import std;
+
+struct P {
+    int id = 0;
+};
+
+template<typename T>
+class Box {
+public:
+    virtual ~Box() = default;
+    Box() { return; }
+    template<typename U>
+    Box(U value) { this->v = std::move(value); return; }
+    T v{};
+};
+
+Box<P> wrap(const P& src) { return Box<P>{src}; }

@@ -1,0 +1,22 @@
+// spec §6.2(3) attaches the moved-out transition to the syntactic form
+// `std::move(E)` "regardless of whether or how the expression's result
+// is subsequently used", and conditions it on nothing else -- in
+// particular not on `E` being writable. The ordinary C++ meaning of
+// `std::move` on a `const` lvalue is a value-preserving cast to
+// `const T&&`, which is well-formed and is the only way to select a
+// `const&&`-qualified overload; libs/std's
+// `__move_only_function_invoke_const_rvalue` depends on it. Per-place
+// tracking makes the member form reachable for the first time, so both
+// the member and the plain-local control are pinned here.
+struct RO {
+    const int a;
+    int b;
+    RO(int x, int y) : a{x}, b{y} {}
+};
+int f() {
+    RO s{1, 2};
+    int t = std::move(s.a);
+    const int x = 3;
+    int u = std::move(x);
+    return t + u;
+}
