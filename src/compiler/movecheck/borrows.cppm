@@ -216,12 +216,23 @@ std::optional<LocalId> resolve_reborrow_lender(const Expr& expr, const Body& bod
 std::expected<void, DataflowError> validate_reborrow_lender(LocalId lender, bool child_is_mutable, const DataflowState& state,
                               const Body& body, bool report_errors) {
     if (!report_errors) return {};
-    const Type& lender_type = body.type_of(lender);
-    if (child_is_mutable && !lender_type.is_mutable_ref) {
-        return std::unexpected(DataflowError("cannot reborrow '" + body.name_of(lender) + "' as mutable: it is itself only a shared (const) "
-                            "reference/view",
-            state.current_loc));
-    }
+    // The "is it mutable enough?" half of spec §6.2(9) is deliberately
+    // *not* asked here, and `child_is_mutable` is only carried for the
+    // exclusivity question below. It used to be asked here, of the
+    // lender local's own declared type -- a fourth answer to the
+    // question `place_is_read_only` answers -- and keying it on the
+    // *lender* rather than on the *source place* is exactly the case
+    // that predicate exists to get right. `Cell& r = *t;` with `t` a
+    // `const std::shared_ptr<Cell>&` resolves `t` as the lender (the
+    // reborrow bookkeeping tracks the handle, correctly and
+    // conservatively), but the place being borrowed is the *pointee*,
+    // whose mutability comes from `operator*`'s declared return type,
+    // not from `t`. Both call sites of this function already ask
+    // `place_is_read_only`/`is_read_only_reachable` about the source
+    // expression immediately afterwards -- check_ref_decl for
+    // `T& r = <expr>;` and apply_reference_argument for a `T&`
+    // argument -- so the rule is still enforced, once, on the right
+    // thing.
     // A new *mutable* reborrow needs exclusivity against every other
     // reborrow, shared or mutable alike -- but a new *shared* reborrow
     // only conflicts with an already-outstanding *mutable* one (any

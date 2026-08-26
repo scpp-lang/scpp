@@ -1,0 +1,24 @@
+// The parameter half of the same rule: a `T&` return derived from a
+// `const U&` parameter is well-formed whenever it crosses an
+// indirection. `T& operator*(const unique_ptr<T>&)` is the canonical
+// spelling; nothing about `const U&` says the object on the far side of
+// U's pointer is const.
+import std;
+
+class Cell {
+public:
+    virtual ~Cell() = default;
+    Cell() = default;
+    int v = 0;
+    void set(int x) { this.v = x; return; }
+};
+
+Cell& pointee(const std::unique_ptr<Cell>& p) {
+    return *p;
+}
+
+int main() {
+    std::unique_ptr<Cell> p = std::make_unique<Cell>();
+    pointee(p).set(7);
+    return p->v;
+}

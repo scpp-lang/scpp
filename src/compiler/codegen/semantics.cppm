@@ -299,7 +299,13 @@ namespace {
                             operand->kind == TypeKind::Reference && operand->pointee ? *operand->pointee : *operand;
                         if (underlying.kind == TypeKind::Named) {
                             std::vector<ExprPtr> no_args;
-                            bool receiver_is_mutable = !(operand->kind == TypeKind::Reference && !operand->is_mutable_ref);
+                            // Asked of the one predicate, like the two
+                            // other receiver-mutability sites: a
+                            // hand-rolled "is it a shared reference?" here
+                            // saw only the operand's *own* reference-ness,
+                            // never a `const`-qualified value, a `const`
+                            // global, or a projection off a const base.
+                            bool receiver_is_mutable = !is_read_only_place(*expr.lhs);
                             if (const Function* callee =
                                     resolve_overload_by_type(underlying.name + "_operator_deref", no_args, 1,
                                                          receiver_is_mutable, expr.lhs.get())) {
@@ -825,96 +831,32 @@ namespace {
     }
 
 
-    // "May a mutable `T&`/`T*` be obtained from this place?", answered
-    // the same way movecheck's place_is_read_only answers it. The two
-    // are a single question asked by two passes, and they had drifted:
-    // this one saw only *local* constness, so a `const` global, a
-    // `const` data member reached through a mutable object, a
-    // `span<const T>`/`const T*` element and a `const`-qualified
-    // by-value parameter all read back as writable. Overload resolution
-    // now asks it as a viability question ([over.ics.ref]), so a
-    // divergence here is a `f(int&)` selected for a constant and a
-    // `x = 99` written through it -- which is exactly what
-    // `const int g = 3; f(g);` used to do.
+    // "May a mutable `T&`/`T*` be obtained from this place?" -- codegen's
+    // name resolution for the single rule in scpp.ast, which movecheck's
+    // place_is_read_only also asks. It used to be a second copy of the
+    // rule, and had drifted from movecheck's in four places (see the ast
+    // function's own comment). Overload resolution asks it as a viability
+    // question ([over.ics.ref]), so a divergence here is an `f(int&)`
+    // selected for a constant and a `x = 99` written through it.
     bool Codegen::is_read_only_place(const Expr& expr)
 {
-        auto type_is_read_only_view = [](const Type& type) {
-            return type.is_const_qualified ||
-                   ((type.kind == TypeKind::Reference || type.kind == TypeKind::Span) && !type.is_mutable_ref);
+        ReadOnlyPlaceQuery query;
+        query.declared_variable = [&](const Expr& name_expr) -> std::optional<std::pair<bool, Type>> {
+            if (const LocalSlot* local = find_local(name_expr); local != nullptr) {
+                return std::pair<bool, Type>(local->is_const, local->type);
+            }
+            if (const GlobalSlot* global = find_visible_global_slot(name_expr.name, name_expr.explicit_global_qualification);
+                global != nullptr) {
+                return std::pair<bool, Type>(global->is_const, global->type);
+            }
+            return std::nullopt;
         };
-        switch (expr.kind) {
-            case ExprKind::Identifier: {
-                if (const LocalSlot* local = find_local(expr); local != nullptr) {
-                    return local->is_const || type_is_read_only_view(local->type);
-                }
-                if (const GlobalSlot* global = find_visible_global_slot(expr.name, expr.explicit_global_qualification);
-                    global != nullptr) {
-                    return global->is_const || type_is_read_only_view(global->type);
-                }
-                return false;
-            }
-            case ExprKind::Member: {
-                // A projection's own declared type decides first: a
-                // `const` field, or a field that is itself a shared
-                // borrow, is read-only however mutable the object
-                // holding it is.
-                if (std::optional<Type> base = infer_type(*expr.lhs); base.has_value()) {
-                    const Type* base_type = &*base;
-                    if (base_type->kind == TypeKind::Reference && base_type->pointee != nullptr) {
-                        base_type = base_type->pointee.get();
-                    }
-                    if (base_type->kind == TypeKind::Named) {
-                        if (base_type->is_const_qualified) return true;
-                        if (const ClassDef* def = find_class_def(base_type->name); def != nullptr) {
-                            for (const ClassField& field : def->fields) {
-                                if (field.name == expr.name) return type_is_read_only_view(field.type);
-                            }
-                        }
-                        if (const StructDef* def = find_struct_def(base_type->name); def != nullptr) {
-                            for (const StructField& field : def->fields) {
-                                if (field.name == expr.name) return type_is_read_only_view(field.type);
-                            }
-                        }
-                    }
-                }
-                return is_read_only_place(*expr.lhs);
-            }
-            case ExprKind::Subscript: {
-                if (std::optional<Type> base = infer_type(*expr.lhs); base.has_value()) {
-                    const Type* base_type = &*base;
-                    if (base_type->kind == TypeKind::Reference && base_type->pointee != nullptr) {
-                        base_type = base_type->pointee.get();
-                    }
-                    if (base_type->kind == TypeKind::Span && !base_type->is_mutable_ref) return true;
-                    if (base_type->kind == TypeKind::Pointer && !base_type->is_mutable_pointee) return true;
-                    if (base_type->is_const_qualified) return true;
-                    if (base_type->kind == TypeKind::Array && base_type->element != nullptr &&
-                        base_type->element->is_const_qualified) {
-                        return true;
-                    }
-                }
-                return is_read_only_place(*expr.lhs);
-            }
-            case ExprKind::Unary: {
-                if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
-                    return is_read_only_place(*expr.lhs);
-                }
-                if (expr.unary_op != UnaryOp::Deref) return false;
-                std::optional<Type> operand = infer_type(*expr.lhs);
-                if (!operand.has_value()) return false;
-                if (operand->kind == TypeKind::Pointer) return !operand->is_mutable_pointee;
-                if (operand->kind == TypeKind::Reference) return !operand->is_mutable_ref;
-                return false;
-            }
-            case ExprKind::Call: {
-                std::optional<Type> t = infer_type(expr);
-                return t.has_value() && t->kind == TypeKind::Reference && !t->is_mutable_ref;
-            }
-            default:
-                return false;
-        }
+        query.inferred_type = [&](const Expr& sub) { return infer_type(sub); };
+        query.call_return_type = [&](const Expr& call) { return infer_type(call); };
+        query.class_def = [&](const std::string& name) { return find_class_def(name); };
+        query.struct_def = [&](const std::string& name) { return find_struct_def(name); };
+        return place_is_read_only(expr, query);
     }
-
 
     bool Codegen::receiver_matches_method_qualifier(const Expr& receiver_expr, const Function& fn)
 {

@@ -1,0 +1,25 @@
+// `p.get()->m()` -- a Deref whose operand is a call result. This was
+// rejected by an operand-shape enumeration in the move checker
+// ("dereference ('*') currently only supports a plain local raw/function
+// pointer variable, '*this', or a captured field of one"), even though
+// the function that actually enforces the raw-pointer rules had already
+// grown an explicit arm for a Call operand.
+import std;
+
+class Cell {
+public:
+    virtual ~Cell() = default;
+    Cell() = default;
+    int v = 0;
+    void set(int x) { this.v = x; return; }
+};
+
+int take(const std::shared_ptr<Cell>& t) {
+    [[scpp::unsafe]] { t.get()->set(7); }
+    return t->v;
+}
+
+int main() {
+    std::shared_ptr<Cell> p = std::make_shared<Cell>();
+    return take(p);
+}

@@ -1206,13 +1206,39 @@ struct ConstructedOwner {
     // signature-level inference (never verified against what the body
     // actually returns), just extended to cover this one additional,
     // well-understood shape.
+    // Deliberately *only* answers "which parameter does the returned
+    // reference borrow its lifetime from?". It used to also reject
+    // `T& f() const` outright ("a mutable reference cannot be
+    // manufactured from a shared one"), and that was two defects at once:
+    //
+    //  - it is not true. [class.mfct.non-static]/3 makes the implicit
+    //    object parameter `const C&`, and [dcl.type.cv]/4 confines that
+    //    cv-qualification to `*this` and its *subobjects*. A `T&` derived
+    //    from a pointer *stored in* a const object is reached through an
+    //    indirection, not a subobject, and is not const. That is exactly
+    //    how every C++ handle type is declared -- `[refwrap.access]`
+    //    `constexpr T& get() const noexcept;`,
+    //    `[util.smartptr.shared.obs]` `T& operator*() const noexcept;`,
+    //    `[unique.ptr.single.observers]` `pointer operator->() const
+    //    noexcept;` -- so this rule made the standard library
+    //    inexpressible, and `libs/std` had to compensate by declaring a
+    //    second, `const`-qualified `const T&` overload beside each one,
+    //    turning every `shared_ptr`/`unique_ptr`/`reference_wrapper` into
+    //    a `propagate_const`, which no C++ smart pointer is;
+    //  - and it was unsound anyway, because the whole function returns
+    //    early when `fn.return_lifetime.present()`, so writing
+    //    `[[scpp::lifetime(this)]]` -- an annotation about lifetime, not
+    //    about constness -- bypassed it. `int& bad() const
+    //    [[scpp::lifetime(this)]] { return this.inner; }` compiled and
+    //    handed out a mutable reference into a const object.
+    //
+    // A signature can't answer it: whether a returned reference is a
+    // subobject of `*this` or something reached through an indirection is
+    // a property of the *returned expression*. It is now asked there, of
+    // `place_is_read_only` -- the one predicate for "is this place
+    // reachable only read-only?" -- next to the identical guard already
+    // applied to `int& r = <expr>;` and to a mutable-reference argument.
     if (!fn.params.empty() && fn.params[0].name == "this" && is_reference(fn.params[0].type)) {
-        if (fn.return_type.is_mutable_ref && !fn.params[0].type.is_mutable_ref) {
-            return std::unexpected(DataflowError("function '" + fn.name +
-                                 "' returns a mutable reference ('T&') but its 'this' is a read-only ('const') "
-                                 "receiver; a mutable reference cannot be manufactured from a shared one",
-                fn.loc));
-        }
         return std::optional<std::size_t>(0);
     }
 
@@ -1243,14 +1269,6 @@ struct ConstructedOwner {
             "function '" + fn.name +
             "' returns a reference but has no reference parameter to infer its lifetime from (spec ch05.3) -- "
             "refactor to take a single reference parameter, or return by value/std::unique_ptr instead",
-            fn.loc));
-    }
-    if (fn.return_type.is_mutable_ref && !fn.params[*found].type.is_mutable_ref) {
-        return std::unexpected(DataflowError("function '" + fn.name +
-                             "' returns a mutable reference ('T&') but its sole reference parameter '" +
-                             fn.params[*found].name +
-                             "' is a shared reference ('const T&'); a mutable reference cannot be manufactured "
-                             "from a shared one",
             fn.loc));
     }
     return found;

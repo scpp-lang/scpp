@@ -77,31 +77,25 @@ public:
         return;
     }
 
-    T& operator*() {
+    // [unique.ptr.single.observers]/[util.smartptr.shared.obs]: there is
+    // exactly one `operator*`, and it is const-qualified returning a
+    // *non-const* `T&`. A smart pointer is not `propagate_const`: the
+    // handle's constness governs the handle (rebinding, reset), never the
+    // pointee, which is a separate object reached through an indirection.
+    // Declaring a second, const-qualified overload returning `const T&`
+    // made every `const unique_ptr<T>&`/`const shared_ptr<T>&` behave as
+    // `propagate_const`, which no C++ smart pointer does.
+    T& operator*() const {
         [[scpp::unsafe]] {
             return *this->ptr_;
         }
     }
 
-    const T& operator*() const {
-        [[scpp::unsafe]] {
-            return *this->ptr_;
-        }
-    }
-
-    T* operator->() [[scpp::lifetime(self)]] {
+    T* operator->() const [[scpp::lifetime(self)]] {
         return this->ptr_;
     }
 
-    const T* operator->() const [[scpp::lifetime(self)]] {
-        return this->ptr_;
-    }
-
-    T* get() [[scpp::lifetime(this)]] {
-        return this->ptr_;
-    }
-
-    const T* get() const [[scpp::lifetime(this)]] {
+    T* get() const [[scpp::lifetime(this)]] {
         return this->ptr_;
     }
 
@@ -314,31 +308,25 @@ public:
         return;
     }
 
-    T& operator*() {
+    // [unique.ptr.single.observers]/[util.smartptr.shared.obs]: there is
+    // exactly one `operator*`, and it is const-qualified returning a
+    // *non-const* `T&`. A smart pointer is not `propagate_const`: the
+    // handle's constness governs the handle (rebinding, reset), never the
+    // pointee, which is a separate object reached through an indirection.
+    // Declaring a second, const-qualified overload returning `const T&`
+    // made every `const unique_ptr<T>&`/`const shared_ptr<T>&` behave as
+    // `propagate_const`, which no C++ smart pointer does.
+    T& operator*() const {
         [[scpp::unsafe]] {
             return *this->ptr_;
         }
     }
 
-    const T& operator*() const {
-        [[scpp::unsafe]] {
-            return *this->ptr_;
-        }
-    }
-
-    T* operator->() [[scpp::lifetime(self)]] {
+    T* operator->() const [[scpp::lifetime(self)]] {
         return this->ptr_;
     }
 
-    const T* operator->() const [[scpp::lifetime(self)]] {
-        return this->ptr_;
-    }
-
-    T* get() {
-        return this->ptr_;
-    }
-
-    const T* get() const {
+    T* get() const {
         return this->ptr_;
     }
 
