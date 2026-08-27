@@ -1,0 +1,23 @@
+// The control for the fall-off-the-end exit: `s.a` is moved out and then
+// restored to id 9, so the check passes and `~R9` -- not `~R0` -- runs at
+// `s`'s teardown.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { std::print("~R{}\n", this.id); }
+};
+
+R mk(int i) { R r{}; r.id = i; return r; }
+
+struct S {
+    R a;
+    R b;
+    S() : a{0}, b{0} {}
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+void take(S& s) { R t = std::move(s.a); s.a = mk(9); std::print("in-take\n"); }
+int main() { S s{1, 2}; take(s); std::print("mid\n"); return 0; }

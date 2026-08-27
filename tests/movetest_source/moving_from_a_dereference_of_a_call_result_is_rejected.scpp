@@ -1,0 +1,29 @@
+// The boundary, stated as a rule about the program rather than about the
+// implementation: ch02 6.2(3) needs an object that both occurrences of an
+// expression are guaranteed to agree on, and a call result is a fresh
+// value each time it is evaluated, so `get()->a` names no fixed object.
+// Bind the pointer to a variable first and move through that.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { return; }
+};
+
+R mk(int i) { R r{}; r.id = i; return r; }
+
+struct S {
+    R a;
+    R b;
+    S() : a{0}, b{0} {}
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+S global_s{1, 2};
+S* global_p = &global_s;
+S* get() { return global_p; }
+int main() {
+    [[scpp::unsafe]] { R t = std::move(get()->a); return t.id; }
+}

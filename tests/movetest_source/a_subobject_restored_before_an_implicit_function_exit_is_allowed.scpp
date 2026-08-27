@@ -1,0 +1,22 @@
+// The control for the case above: the same fall-off-the-end exit, with
+// `s.a` assigned before it, must still be accepted.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { return; }
+};
+
+R mk(int i) { R r{}; r.id = i; return r; }
+
+struct S {
+    R a;
+    R b;
+    S() : a{0}, b{0} {}
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+void take(S& s) { R t = std::move(s.a); s.a = mk(9); }
+int main() { S s{1, 2}; take(s); return 0; }

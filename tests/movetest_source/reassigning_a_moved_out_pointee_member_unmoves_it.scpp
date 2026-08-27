@@ -1,0 +1,28 @@
+// ch02 6.2(4): assigning to a moved-out object returns it to the
+// initialized state. That applies to a place reached through an
+// indirection exactly as it does to a local.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { return; }
+};
+
+R mk(int i) { R r{}; r.id = i; return r; }
+
+struct S {
+    R a;
+    R b;
+    S() : a{0}, b{0} {}
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+int main() {
+    std::unique_ptr<S> u = std::make_unique<S>();
+    u->a.id = 1;
+    R t = std::move(u->a);
+    u->a = mk(7);
+    return u->a.id;
+}

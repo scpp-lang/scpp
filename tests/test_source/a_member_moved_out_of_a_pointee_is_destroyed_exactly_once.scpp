@@ -1,0 +1,29 @@
+// ch02 6.3(1): "If the object is in the moved-out state, no destructor is
+// invoked for it." `s.a` (id 1) is moved into `t`, which dies at the end
+// of the unsafe block; at `s`'s own teardown only `s.b` (id 2) may be
+// destroyed. The `~R0` between them is `t`'s *source* slot: the move
+// zeroes it, so the id reads back as 0.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { std::print("~R{}\n", this.id); }
+};
+
+R mk(int i) { R r{}; r.id = i; return r; }
+
+struct S {
+    R a;
+    R b;
+    S() : a{0}, b{0} {}
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+int main() {
+    S s{1, 2};
+    S* p = &s;
+    [[scpp::unsafe]] { R t = std::move(p->a); std::print("mid\n"); }
+    return 0;
+}

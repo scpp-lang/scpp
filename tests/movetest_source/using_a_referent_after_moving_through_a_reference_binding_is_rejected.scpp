@@ -1,0 +1,30 @@
+// `r` binds to the place `u->a`, so `std::move(r)` moves out of that
+// place and the later read of `u->a` is a use of a moved-out object
+// (ch02 6.2(6)). Before the reference write-through knew about places
+// reached by indirection, this compiled and silently read the zeroed
+// storage back as 0.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { return; }
+};
+
+R mk(int i) { R r{}; r.id = i; return r; }
+
+struct S {
+    R a;
+    R b;
+    S() : a{0}, b{0} {}
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+int main() {
+    std::unique_ptr<S> u = std::make_unique<S>();
+    u->a.id = 1;
+    R& r = u->a;
+    R t = std::move(r);
+    return u->a.id;
+}

@@ -2762,8 +2762,17 @@ private:
         declared.loc = parsed.fn.loc;
         StmtPtr& parsed_body_ref = parsed.fn.body;
         declared.body = std::move(parsed_body_ref);
+        // `parsed` is destroyed through ~Function, which cannot be told
+        // to skip a moved-out member (spec §6.3(1)), so the moved-from
+        // body is put back as an empty one. Nothing checked this before
+        // only because the check ran at `return` statements and this
+        // function falls off the end of its body.
+        StmtPtr no_body{};
+        parsed.fn.body = std::move(no_body);
         std::vector<MemberInitializer>& parsed_member_initializers_ref = parsed.fn.member_initializers;
         declared.member_initializers = std::move(parsed_member_initializers_ref);
+        std::vector<MemberInitializer> no_member_initializers{};
+        parsed.fn.member_initializers = std::move(no_member_initializers);
         if (parsed.fn.is_defaulted) declared.is_defaulted = true;
         if (parsed.fn.is_deleted) declared.is_deleted = true;
         declared.expects_out_of_line_definition = false;

@@ -1,0 +1,25 @@
+// ch02 6.3(1) requires a destructor for every still-initialized
+// subobject at the end of its lifetime, and `s.a` is not restored. A
+// `void` function that falls off the end has no `return` statement, so
+// its exit block carried no terminator at all and the moved-subobject
+// check simply never ran there.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { return; }
+};
+
+R mk(int i) { R r{}; r.id = i; return r; }
+
+struct S {
+    R a;
+    R b;
+    S() : a{0}, b{0} {}
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+void take(S& s) { R t = std::move(s.a); }
+int main() { S s{1, 2}; take(s); return 0; }

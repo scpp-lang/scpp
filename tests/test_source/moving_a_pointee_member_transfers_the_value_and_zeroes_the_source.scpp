@@ -1,0 +1,32 @@
+// A move out of a place reached through an indirection is a real
+// transfer, not a copy: the destination holds 55 and the source storage
+// is zeroed.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { std::print("~R{}\n", this.id); }
+};
+
+R mk(int i) { R r{}; r.id = i; return r; }
+
+struct S {
+    R a;
+    R b;
+    S() : a{0}, b{0} {}
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+struct W { int v = 0; W() {} W(int i) : v{i} {} };
+W mkw(int i) { W w{}; w.v = i; return w; }
+struct WS { W w; WS() : w{0} {} };
+int main() {
+    std::unique_ptr<WS> u = std::make_unique<WS>();
+    u->w.v = 55;
+    W t = std::move(u->w);
+    u->w = mkw(0);
+    std::print("t={} src={}\n", t.v, u->w.v);
+    return 0;
+}

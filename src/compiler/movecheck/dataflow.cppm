@@ -59,6 +59,9 @@ namespace scpp {
                                                                                      const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
                          const Signatures& signatures);
+[[nodiscard]] std::expected<void, DataflowError> validate_place_indirections(const Expr& expr, const DataflowState& state,
+                                                                             const Body& body,
+                                                                             const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> validate_subscript_expr(const Expr& expr, const DataflowState& state, const Body& body,
                              const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> apply_deref(const Expr& expr, const DataflowState& state, const Body& body, const Signatures& signatures,
@@ -612,7 +615,30 @@ namespace scpp {
             if (current.pointee == nullptr) return std::nullopt;
             current = *current.pointee;
         }
+        if (step.is_deref) {
+            // A `Named` receiver here is a class whose `operator*`/
+            // `operator->` was selected; its pointee type needs the
+            // signature table, which this walk deliberately does not
+            // reach into -- every caller that matters for such a place
+            // stops before asking (see place_requires_restore_before_
+            // teardown), so declining is not a silent skip.
+            if (current.kind == TypeKind::Span) {
+                if (current.element == nullptr) return std::nullopt;
+                current = *current.element;
+                continue;
+            }
+            return std::nullopt;
+        }
         if (step.is_index) {
+            // A span is a borrowed range: `s[i]` names an element of
+            // storage some other object owns, and place_type is asked
+            // about it by the §6.3(1) restore check. Failing here used
+            // to make that check skip every span element silently.
+            if (current.kind == TypeKind::Span) {
+                if (current.element == nullptr) return std::nullopt;
+                current = *current.element;
+                continue;
+            }
             if (current.kind != TypeKind::Array || current.element == nullptr) return std::nullopt;
             current = *current.element;
             continue;
@@ -650,6 +676,7 @@ namespace scpp {
     }
     if (std::optional<LocalId> self = body.this_local(); self.has_value() && place.local == *self) return false;
     if (body.decl(place.local).is_static_lifetime) return false;
+    if (place_goes_through_deref(place)) return false;
     for (Place ancestor = place.parent();; ancestor = ancestor.parent()) {
         std::optional<Type> ancestor_type = place_type(ancestor, state, body);
         if (!ancestor_type.has_value()) return false;
@@ -660,6 +687,38 @@ namespace scpp {
         if (ancestor.is_whole_local()) break;
     }
     return true;
+}
+
+// Whether §6.3(1) obliges the program to put `place` back before the
+// exit, given that this function's teardown cannot be told to skip it.
+//
+// It does not, across a dereference. §6.3(1) conditions on the object
+// being "in the moved-out state (6.2)", and §6.2(1) puts only objects
+// "of automatic, static, thread, or member storage duration" into the
+// two states at all. The object a pointer designates has whichever
+// storage duration its creator gave it -- dynamic, for anything reached
+// through `unique_ptr`, `shared_ptr` or a *new-expression* -- and
+// dynamic storage duration is not in that enumeration, so the pointee
+// is never in the moved-out state and §6.3(1)'s "no destructor is
+// invoked" has no object to speak about. Its destructor runs by the
+// ordinary C++ rule ([class.dtor], [expr.delete]) on storage the move
+// has already zeroed, exactly once.
+//
+// The state recorded against the deref place is still what makes a use
+// of it after the move ill-formed (§6.2(6)); what does not follow is a
+// restore obligation, and demanding one would make a move out of an
+// object about to be deleted inexpressible.
+//
+// [This leaves a residual the spec does not resolve: a pointer into
+// *automatic* storage names an object that is in the model, and a
+// destructor with observable effects then runs on the zeroed subobject.
+// §6.2 states no rule identifying `*p` with the object `p` was taken
+// from, and §5.1 already puts raw-pointer dereference behind an unsafe
+// context; the gap is §6.2's, not this predicate's.]
+[[nodiscard]] bool place_requires_restore_before_teardown(const Place& place, const DataflowState& state,
+                                                          const Body& body) {
+    if (place_goes_through_deref(place)) return false;
+    return !place_teardown_is_emitted_here(place, state, body);
 }
 
 // spec §6.3(1): an object in the moved-out state is not destroyed. For a
@@ -688,7 +747,7 @@ namespace scpp {
         // path), the containing object is not destroyed either (spec
         // §6.3(1)), so there is nothing for its teardown to skip.
         if (lookup(state.locals, place.parent()) != LocalState::Initialized) continue;
-        if (place_teardown_is_emitted_here(place, state, body)) continue;
+        if (!place_requires_restore_before_teardown(place, state, body)) continue;
         // Deterministic choice, for the same reason find_moved_subobject
         // sorts: an unordered_map's iteration order is not stable.
         if (!worst.has_value() || (place.local < worst->local) ||
@@ -1159,16 +1218,19 @@ namespace scpp {
                              "': requires '[[scpp::unsafe]] { }' (spec ch01 §1.3/ch02)",
             state.current_loc));
     }
-    if (operand.kind == ExprKind::Member || operand.kind == ExprKind::Call || expr.implicit_arrow_deref) {
-        // No separate per-field state for a Member (see above), and no
-        // "local variable" move/borrow state at all for a Call's freshly-
-        // returned pointer/reference -- its callee name lives in the same
-        // Expr::name field an Identifier's variable name would, but it
-        // isn't a tracked local, so looking it up in state.locals below
-        // would (incorrectly) report it as "out of scope" instead of just
-        // relying on the type-only checks already done above.
-        return {};
-    }
+    // Only an *identifier* operand names a local whose move/borrow state
+    // there is anything to look up. Everything else -- a Member (no
+    // separate per-field state), a Call's freshly-returned pointer, a
+    // nested `*` in `**pp`, a subscript -- has only the type-level and
+    // unsafe-context rules already applied above, and `Expr::name` is
+    // either empty or holds something that is not a variable name at
+    // all (a callee, a field). Listing the shapes that opt *out* left
+    // every unlisted one falling into the lookup below and being
+    // reported as "use of variable '' that is out of scope here": a
+    // message naming no variable, about a variable that was never
+    // involved. The question is "is there a local to consult?", so ask
+    // that.
+    if (operand.kind != ExprKind::Identifier || expr.implicit_arrow_deref) return {};
     std::optional<LocalId> operand_local = body.local_of(operand);
     if (!operand_local.has_value() &&
         find_visible_global_for_name(operand.name, operand.explicit_global_qualification, body) != nullptr) {
@@ -1180,6 +1242,41 @@ namespace scpp {
             state.current_loc));
     }
     return {};
+}
+
+// Every dereference on the way to a place, validated for its own sake.
+//
+// `std::move(E)` resolves E to a place and returns without walking it,
+// so no other arm of this checker ever visits the `*` inside E. That
+// was invisible while a dereference could not be part of a place at
+// all: E was rejected outright. Now that it can, the rule §5.1(5.1) and
+// §7.1(4) state about `*` -- a raw-pointer dereference is licensed only
+// inside `[[scpp::unsafe]] { }` -- has to be applied here, because it is
+// a rule about the dereference wherever it occurs, not about what the
+// surrounding expression does with the object.
+[[nodiscard]] std::expected<void, DataflowError> validate_place_indirections(const Expr& expr, const DataflowState& state,
+                                                                             const Body& body,
+                                                                             const Signatures& signatures) {
+    switch (expr.kind) {
+        case ExprKind::Member:
+        case ExprKind::Subscript:
+            if (expr.lhs == nullptr) return {};
+            return validate_place_indirections(*expr.lhs, state, body, signatures);
+        case ExprKind::Call:
+            // `*h`/`h->m` on a class type: the selected operator's own
+            // receiver is the next step inwards.
+            if (expr.lhs == nullptr || (expr.name != "operator_deref" && expr.name != "operator_arrow")) return {};
+            return validate_place_indirections(*expr.lhs, state, body, signatures);
+        case ExprKind::Unary: {
+            if (expr.unary_op != UnaryOp::Deref || expr.lhs == nullptr) return {};
+            if (auto _r = validate_place_indirections(*expr.lhs, state, body, signatures); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            return validate_deref_expr(expr, state, body, signatures);
+        }
+        default:
+            return {};
+    }
 }
 
 // The subscript counterpart of validate_deref_expr, and deliberately a
@@ -2320,6 +2417,11 @@ struct ConvertingConstructorBinding {
                 }
                 return {};
             }
+            if (report_errors) {
+                if (auto _r = validate_place_indirections(*expr.lhs, state, body, signatures); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
             std::string name = body.describe_place(*moved);
             LocalState current = lookup(state.locals, *moved);
             if (report_errors && current != LocalState::Initialized) {
@@ -2692,22 +2794,29 @@ struct ConvertingConstructorBinding {
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
-                if (std::optional<LocalId> target = body.local_of(*expr.lhs); target.has_value()) {
-                    // The assignment target is never a "read": whatever
-                    // its previous state, assigning any value returns it
-                    // to Initialized (spec ch05.1).
-                    reinitialize_place(state.locals, whole_local_place(*target));
-                } else if (expr.lhs->kind != ExprKind::Identifier) {
-                    // Same rule one projection down (spec §6.2(4)): a
-                    // write to `s.a` reinitializes `s.a`, so it must
-                    // happen *before* the base is walked -- the walk
-                    // reads the target as a place, and a moved-out one
-                    // would be rejected as a use of what this very
-                    // statement is putting back.
-                    if (std::optional<Place> target_place = tracked_place_of(*expr.lhs, state, body);
-                        target_place.has_value()) {
-                        reinitialize_place(state.locals, *target_place);
-                    }
+                // The assignment target is never a "read": whatever its
+                // previous state, assigning any value returns it to
+                // Initialized (spec §6.2(4)). It must happen *before*
+                // the base is walked -- the walk reads the target as a
+                // place, and a moved-out one would be rejected as a use
+                // of what this very statement is putting back.
+                //
+                // Which *place* that is, not which local: `r = v;` where
+                // `r` is a reference bound to `o.in.p` reinitializes
+                // `o.in.p`, since §6.2(4) speaks of the object assigned
+                // to and a reference is not one. Asking body.local_of
+                // here (and tracked_place_of only for the shapes that
+                // are not a bare identifier) reinitialized the *binding*
+                // instead, leaving the referent reading as still
+                // moved-out -- so a moved-out member could not be put
+                // back through the alias the program already held, which
+                // is exactly what §6.3(1)'s "assign to it before this
+                // point" tells the user to do.
+                if (std::optional<Place> target_place = tracked_place_of(*expr.lhs, state, body);
+                    target_place.has_value()) {
+                    reinitialize_place(state.locals, *target_place);
+                }
+                if (expr.lhs->kind != ExprKind::Identifier) {
                     // e.g. `p.x = 1;` or `arr[i] = 1;`: the base
                     // object/index are evaluated (as addresses / an
                     // index value), not read as "the assignment target",
@@ -3174,6 +3283,13 @@ struct ConvertingConstructorBinding {
             return std::unexpected(DataflowError(describe_bad_state(body.name_of(stmt.local), current),
                 state.current_loc));
         }
+    }
+    // spec §6.2(4): the assignment reinitializes the object written to,
+    // which through a reference is the *referent*. Recording it against
+    // the binding alone (BindReference already does that) left the
+    // referent moved-out forever.
+    if (std::optional<Place> written = place_root_resolver(state)(stmt.local); written.has_value()) {
+        reinitialize_place(state.locals, *written);
     }
     return apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body,
                signatures, report_errors);
