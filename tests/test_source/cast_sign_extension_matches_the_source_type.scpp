@@ -1,0 +1,14 @@
+// spec ch16 §16.3(2): "Every such conversion is well-formed. The
+// resulting value is that specified by [conv.integral] ...". The value
+// therefore follows the *source* type's signedness: char(200) is -56 and
+// widens by sign extension, while uint8_t(200) is 200 and widens by zero
+// extension. A rule that answers only "is this legal?" cannot see the
+// difference; these two lines can.
+import std;
+
+int main() {
+    int from_signed = static_cast<int>(static_cast<char>(200));
+    int from_unsigned = static_cast<int>(static_cast<uint8_t>(200));
+    std::print("{} {}\n", from_signed, from_unsigned);
+    return 0;
+}

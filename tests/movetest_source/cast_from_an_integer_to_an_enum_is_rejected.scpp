@@ -1,0 +1,10 @@
+// The control for cast_from_an_enum_to_a_wider_integer_is_allowed: spec
+// ch14 §14.1(3) keeps the reverse direction ill-formed, because an
+// arbitrary integer need name no enumerator -- scpp::enum_cast reports
+// that case instead.
+enum class E : int { A, B };
+
+int main() {
+    E e = static_cast<E>(1);
+    return 0;
+}

@@ -3401,6 +3401,25 @@ public:
     return value.is_unsigned;
 }
 
+// ---------------------------------------------------------------------
+// Explicit type conversion: `static_cast<T>(e)` and `(T)e`.
+//
+// One rule, asked from both passes that need it. Movecheck
+// (movecheck/dataflow.cppm's ExprKind::Cast case) and codegen
+// (codegen/expressions.cppm's ExprKind::Cast case) each used to carry
+// their own copy of this decision, written as a closed enumeration of
+// (source-kind, target-kind) shapes with a catch-all that told the user
+// "a cast is only supported between ... in this version" -- the
+// implementation describing itself rather than stating a rule about the
+// program. The two copies had drifted (codegen accepted an enum source
+// against any scalar-or-enum target; movecheck accepted an enum source
+// only against a target types_equal to its underlying type), and the
+// catch-all swallowed four separate outcomes the spec states
+// individually: §16.3(5) scalar/pointer, §16.4(5) nullptr_t, §14.1(2)
+// enum-to-arithmetic, and "the operand's type is not known here", which
+// is not a property of the cast at all.
+// ---------------------------------------------------------------------
+
 struct TargetLayoutInfo {
     std::uint64_t pointer_size_bytes = static_cast<std::uint64_t>(sizeof(void*));
     std::uint64_t pointer_align_bytes = static_cast<std::uint64_t>(alignof(void*));
@@ -3491,6 +3510,40 @@ public:
     }
     ScalarValueRange range{-two_to_the(bits - 1), two_to_the(bits - 1) - 1};
     return std::optional<ScalarValueRange>{range};
+}
+
+// [conv.integral]/2-3: the value an integer conversion produces. An
+// explicit conversion between two integer types is not an assignment and
+// never overflows -- the result is the unique value congruent to the
+// source modulo 2**N, where N is the destination's width. `char c =
+// 200;` is ill-formed (200 does not spell a `char`), but
+// `static_cast<char>(200)` is well-formed and is -56.
+//
+// The modulus is taken with `/` and `*` rather than `%` because this
+// file is self-hosted and SCPP26 has no remainder operator, exactly as
+// `two_to_the` above is a doubling loop for want of a shift.
+[[nodiscard]] inline std::int64_t scalar_converted_integer_value(std::int64_t value, std::string_view target_name, int pointer_bit_width) {
+    std::optional<ScalarTypeInfo> info = scalar_type_info(target_name);
+    if (!info.has_value()) return value;
+    const ScalarTypeInfo& scalar = *info;
+    // [conv.bool]/1: zero is false, every other value is true.
+    if (scalar.category == ScalarCategory::Bool) {
+        std::int64_t one = 1;
+        std::int64_t zero = 0;
+        return value != zero ? one : zero;
+    }
+    if (scalar.category == ScalarCategory::Floating) return value;
+    int bits = scalar_bit_width(target_name, pointer_bit_width);
+    // A 64-bit destination holds every std::int64_t already, and the
+    // 64-bit unsigned types are carried in an std::int64_t throughout
+    // this compiler, so there is nothing to wrap.
+    if (bits <= 0 || bits >= 64) return value;
+    std::int64_t modulus = two_to_the(bits);
+    std::int64_t remainder = value - (value / modulus) * modulus;
+    if (remainder < 0) remainder = remainder + modulus;
+    if (scalar.is_unsigned) return remainder;
+    if (remainder > two_to_the(bits - 1) - 1) return remainder - modulus;
+    return remainder;
 }
 
 // ch06 §6: does the untyped integer literal `value` name a value of
@@ -4032,6 +4085,238 @@ public:
         case TypeKind::FunctionPointer: return describe_type_brief_function(type);
     }
     return "<type>";
+}
+
+// The one "does this name an enumeration, and which one" lookup.
+// Returns an index rather than a pointer for the same reason
+// find_visible_global_index above does: an index needs no lifetime
+// annotation, so the one implementation stays usable from every caller.
+// movecheck/types.cppm's find_enum_def and codegen/layout.cppm's
+// Codegen::find_enum_def -- which were two identical copies of this loop
+// -- both forward here.
+[[nodiscard]] inline std::optional<std::size_t> find_enum_definition_index(const Program& program, const std::string& name) {
+    for (std::size_t i = 0; i < program.enums.size(); i++) {
+        if (program.enums[i].name == name) return std::optional<std::size_t>{i};
+    }
+    return std::optional<std::size_t>{};
+}
+
+// Where an enumerator lives: which enumeration, and which enumerator of
+// it. An index pair rather than a pointer, for the same reason
+// find_enum_definition_index above returns one.
+//
+// This is the one "which enumeration declares this enumerator" lookup.
+// There were four: movecheck/types.cppm's find_enum_variant,
+// codegen/layout.cppm's Codegen::find_enum_variant, and
+// constexpression.cppm's find_enum_for_variant -- and the constant
+// evaluator's copy was reachable only from type *inference*, so
+// `static_cast<std::int64_t>(E::B)` could be given a type and then not
+// evaluated: "identifier 'E::B' is not available".
+struct EnumVariantIndex {
+    std::size_t enum_index = 0;
+    std::size_t variant_index = 0;
+};
+
+[[nodiscard]] inline std::optional<EnumVariantIndex> find_enum_variant_index(const Program& program, const std::string& variant_name) {
+    for (std::size_t enum_index = 0; enum_index < program.enums.size(); enum_index++) {
+        const EnumDef& def = program.enums[enum_index];
+        for (std::size_t variant_index = 0; variant_index < def.variants.size(); variant_index++) {
+            if (def.variants[variant_index].name == variant_name) {
+                EnumVariantIndex found{enum_index, variant_index};
+                return std::optional<EnumVariantIndex>{found};
+            }
+        }
+    }
+    return std::optional<EnumVariantIndex>{};
+}
+
+// Is `derived` the same class as `base`, or does it reach it through its
+// base-specifiers? Answers the "convertible to the other by an implicit
+// conversion this document permits" half of spec §1(5.2) for the
+// derived-to-base direction, which is what keeps an ordinary upcast off
+// the unsafe gate.
+[[nodiscard]] inline bool class_reaches_base(const Program& program, const std::string& derived, const std::string& base,
+                                             int depth = 0) {
+    if (derived == base) return true;
+    if (depth > kMaxNestingDepth) return false;
+    for (const ClassDef& def : program.classes) {
+        if (def.name != derived) continue;
+        for (const BaseSpecifier& specifier : def.base_specifiers) {
+            if (class_reaches_base(program, specifier.base_type.name, base, depth + 1)) return true;
+        }
+    }
+    return false;
+}
+
+// A pointer conversion the language already performs implicitly, so
+// spec §1(5.2) ("...neither of which is convertible to the other by an
+// implicit conversion this document permits") does not gate it.
+[[nodiscard]] inline bool pointer_conversion_is_implicit(const Type& source, const Type& target, const Program& program) {
+    if (source.kind != TypeKind::Pointer || target.kind != TypeKind::Pointer) return false;
+    if (source.pointee == nullptr || target.pointee == nullptr) return false;
+    // Adding const is implicit; removing it never is.
+    if (!source.is_mutable_pointee && target.is_mutable_pointee) return false;
+    const Type& source_pointee = literal_adoption_target(*source.pointee);
+    const Type& target_pointee = literal_adoption_target(*target.pointee);
+    if (types_equal(source_pointee, target_pointee)) return true;
+    if (target_pointee.kind == TypeKind::Named && target_pointee.name == "void") return true;
+    if (source_pointee.kind == TypeKind::Named && target_pointee.kind == TypeKind::Named) {
+        return class_reaches_base(program, source_pointee.name, target_pointee.name);
+    }
+    return false;
+}
+
+// Would this conversion reach a mutable handle through a read-only one?
+// [expr.static.cast] never casts away constness -- that is
+// [expr.const.cast]'s job, and SCPP26 has no `const_cast`.
+[[nodiscard]] inline bool cast_removes_const(const Type& source, const Type& target) {
+    if (source.kind == TypeKind::Pointer && target.kind == TypeKind::Pointer) {
+        return !source.is_mutable_pointee && target.is_mutable_pointee;
+    }
+    if (source.kind == TypeKind::Reference && target.kind == TypeKind::Reference) {
+        return !source.is_mutable_ref && target.is_mutable_ref;
+    }
+    return false;
+}
+
+enum class CastKind {
+    // The operand's type is not known at the point of the question. Not
+    // this rule's business: whatever made the operand untypeable has its
+    // own diagnostic, and reporting the cast instead hides it.
+    OperandTypeUnknown,
+    // §16.3(2): between two scalar types. The value is [conv.integral]'s,
+    // [conv.double]'s, [conv.fpint]'s or [conv.bool]'s.
+    ScalarConversion,
+    // §14.1(1)-(2): from an enumeration type to an arithmetic or
+    // enumeration type, exactly where C++26 allows it.
+    EnumConversion,
+    // Between pointer types, where an implicit conversion already
+    // permits it (§1(5.2) leaves this ungated).
+    PointerConversion,
+    // §1(5.2): between two pointer types no implicit conversion relates
+    // -- a gated operation, well-formed only in an unsafe context.
+    UnsafePointerConversion,
+    // §16.5(1): from `nullptr_t` to a pointer type.
+    NullPointerConversion,
+};
+
+// `source` is the operand's type, or nullopt when the operand has no
+// inferable type; `target` is the cast's written type. A reference-typed
+// operand names the same place as its referent (`std::string_view::at`
+// returns `const char&`, which is exactly as castable as `char`), so the
+// reference is stripped here rather than at each caller.
+//
+// CastKind::UnsafePointerConversion is a well-formed classification, not
+// an error: whether the program is in an unsafe context is not a property
+// of the two types, so spec §1(6)'s gate is applied by the one caller
+// that tracks unsafe depth (movecheck), and codegen reads the same kind
+// purely to decide how to lower.
+[[nodiscard]] inline std::expected<CastKind, std::string> classify_explicit_cast(const std::optional<Type>& source_type, const Type& target,
+                                                                                 const Program& program) {
+    if (!source_type.has_value()) return CastKind::OperandTypeUnknown;
+    const Type& source = literal_adoption_target(*source_type);
+    const std::string source_name = describe_type_brief(source);
+    const std::string target_name = describe_type_brief(target);
+    std::string_view source_spelled_name{source.name};
+    std::string_view target_spelled_name{target.name};
+    const bool source_is_null_type = source.kind == TypeKind::Named && (source.name == "nullptr_t" || source.name == "std::nullptr_t");
+    const bool target_is_null_type = target.kind == TypeKind::Named && (target.name == "nullptr_t" || target.name == "std::nullptr_t");
+    const bool source_is_scalar = source.kind == TypeKind::Named && is_scalar_type_name(source_spelled_name);
+    const bool target_is_scalar = target.kind == TypeKind::Named && is_scalar_type_name(target_spelled_name);
+    const bool source_is_enum = source.kind == TypeKind::Named && find_enum_definition_index(program, source.name).has_value();
+    const bool target_is_enum = target.kind == TypeKind::Named && find_enum_definition_index(program, target.name).has_value();
+    const bool source_is_pointerish = source.kind == TypeKind::Pointer || source.kind == TypeKind::FunctionPointer;
+    const bool target_is_pointerish = target.kind == TypeKind::Pointer || target.kind == TypeKind::FunctionPointer;
+
+    // §16.5(1)-(2) and §16.4(5): `nullptr_t` converts to a pointer type
+    // and to itself, and to nothing else.
+    if (source_is_null_type || target_is_null_type) {
+        if (source_is_null_type && (target_is_pointerish || target_is_null_type)) return CastKind::NullPointerConversion;
+        if (source_is_null_type && target_is_scalar) {
+            std::string message{"cannot cast 'nullptr' to the scalar type '"};
+            message += target_name;
+            message += "': 'nullptr_t' is not a scalar type, and no conversion between 'nullptr_t' and a scalar type exists ";
+            message += "(spec ch16 §16.4(5), §16.5(2))";
+            return std::unexpected(message);
+        }
+        std::string message{"cannot cast '"};
+        message += source_name;
+        message += "' to '";
+        message += target_name;
+        message += "': 'nullptr_t' converts only to a pointer type, a function pointer type or 'nullptr_t' itself, and no ";
+        message += "conversion to 'nullptr_t' exists (spec ch16 §16.5(1)-(2))";
+        return std::unexpected(message);
+    }
+
+    // §16.3(5): no conversion, implicit or explicit, between a scalar
+    // type and a pointer type or a function pointer type.
+    if ((source_is_scalar && target_is_pointerish) || (source_is_pointerish && target_is_scalar)) {
+        std::string message{"cannot cast '"};
+        message += source_name;
+        message += "' to '";
+        message += target_name;
+        message += "': SCPP26 has no conversion, implicit or explicit, between a scalar type and a pointer type ";
+        message += "(spec ch16 §16.3(5))";
+        if (target.kind == TypeKind::Named && target.name == "bool") {
+            message += "; compare against 'nullptr' instead, as in 'p != nullptr'";
+        }
+        return std::unexpected(message);
+    }
+
+    // §16.3(2): every conversion between two scalar types is well-formed.
+    if (source_is_scalar && target_is_scalar) return CastKind::ScalarConversion;
+
+    // §14.1(3)-(5): an integer value reaches an enumeration only through
+    // scpp::enum_cast, which checks it against the declared enumerators.
+    if (source_is_scalar && target_is_enum) {
+        std::string message{"cannot cast a value of scalar type '"};
+        message += source_name;
+        message += "' to enum class '";
+        message += target_name;
+        message += "': an integer reaches an enumeration only through 'scpp::enum_cast<";
+        message += target_name;
+        message += ">(value)', which reports a value that names no enumerator (spec ch14 §14.1(3)-(4))";
+        return std::unexpected(message);
+    }
+
+    // §14.1(1)-(2): [expr.static.cast] applies unchanged to an
+    // enumeration source, which C++26 converts to any arithmetic type
+    // and to any enumeration type.
+    if (source_is_enum && (target_is_scalar || target_is_enum)) return CastKind::EnumConversion;
+
+    if (source.kind == TypeKind::Pointer && target.kind == TypeKind::Pointer) {
+        if (cast_removes_const(source, target)) {
+            std::string message{"cannot cast '"};
+            message += source_name;
+            message += "' to '";
+            message += target_name;
+            message += "': a cast never casts away constness, and SCPP26 has no 'const_cast'; obtain the pointer from a ";
+            message += "mutable object instead ([expr.static.cast]/11)";
+            return std::unexpected(message);
+        }
+        if (pointer_conversion_is_implicit(source, target, program)) return CastKind::PointerConversion;
+        return CastKind::UnsafePointerConversion;
+    }
+
+    if (target.kind == TypeKind::Reference || source.kind == TypeKind::Reference) {
+        std::string message{"cannot cast '"};
+        message += source_name;
+        message += "' to '";
+        message += target_name;
+        message += "': a cast to a reference type is supported only where the referent type is the operand's own type ";
+        message += "([expr.static.cast]/2-3)";
+        return std::unexpected(message);
+    }
+
+    std::string message{"cannot cast '"};
+    message += source_name;
+    message += "' to '";
+    message += target_name;
+    message += "': no conversion between these two types exists. SCPP26 converts between two scalar types (spec ch16 ";
+    message += "§16.3(2)), from an enumeration type to an arithmetic or enumeration type (spec ch14 §14.1(2)), and between ";
+    message += "two pointer types (spec ch01 §1(5.2)); a conversion involving a class or struct type is spelled as a ";
+    message += "constructor call or a named member function";
+    return std::unexpected(message);
 }
 
 // [dcl.init.aggr]/4.2 -> [dcl.init.string]: this initializer-clause is a

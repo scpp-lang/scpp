@@ -116,56 +116,56 @@ public:
     }
 };
 
+// The erased pointee is carried as `const void*`, not `void*`. A
+// `shared_ptr<const std::string>` holds a `const std::string*`, and
+// widening that to `void*` casts away constness -- which no cast does
+// ([expr.static.cast]/11) and which SCPP26 has no `const_cast` to spell.
+// Only the reference count and destruction need the erased pointer, and
+// destroying a `const T` is well-formed ([expr.delete]/2), so `const
+// void*` carries everything the handle actually uses. The typed pointer
+// each shared_ptr<T> hands out is its own `ptr_` field, which never
+// passes through the erasure and so never needs unerasing.
 template<typename T>
-void __shared_ptr_detail_destroy(void* erased) {
+void __shared_ptr_detail_destroy(const void* erased) {
     [[scpp::unsafe]] {
-        T* typed = static_cast<T*>(erased);
+        const T* typed = static_cast<const T*>(erased);
         delete typed;
     }
     return;
 }
 
 template<typename T>
-void* __shared_ptr_detail_erase(T* ptr) {
-    [[scpp::unsafe]] {
-        return static_cast<void*>(ptr);
-    }
-}
-
-template<typename T>
-T* __shared_ptr_detail_unerase(void* erased) {
-    [[scpp::unsafe]] {
-        return static_cast<T*>(erased);
-    }
+const void* __shared_ptr_detail_erase(T* ptr) {
+    return static_cast<const void*>(ptr);
 }
 
 class __shared_handle {
 private:
     void* control_{};
-    void (*destroy_)(void*){};
+    void (*destroy_)(const void*){};
 
     void release_current() {
         void* empty_control{};
         if (this->control_ == empty_control) return;
         bool destroy_pointee = std::__shared_ptr_count_release(this->control_);
-        void (*empty_destroy)(void*){};
+        void (*empty_destroy)(const void*){};
         this->control_ = empty_control;
         if (destroy_pointee && this->destroy_ != empty_destroy) {
             this->destroy_(this->ptr_);
         }
-        void* empty_ptr{};
+        const void* empty_ptr{};
         this->ptr_ = empty_ptr;
         this->destroy_ = empty_destroy;
         return;
     }
 
 public:
-    void* ptr_{};
+    const void* ptr_{};
 
     __shared_handle() { return; }
 
-    __shared_handle(void* ptr, void (*destroy)(void*)) {
-        void* empty_ptr{};
+    __shared_handle(const void* ptr, void (*destroy)(const void*)) {
+        const void* empty_ptr{};
         void* empty_control{};
         this->ptr_ = ptr;
         this->destroy_ = destroy;
@@ -228,8 +228,8 @@ public:
         return;
     }
 
-    void reset(void* ptr, void (*destroy)(void*)) {
-        void* empty_ptr{};
+    void reset(const void* ptr, void (*destroy)(const void*)) {
+        const void* empty_ptr{};
         void* empty_control{};
         this->release_current();
         this->ptr_ = ptr;
@@ -285,21 +285,20 @@ public:
     shared_ptr(const shared_ptr<T>& other) {
         __shared_handle copied = other.__copy_handle();
         this->handle_.copy_from(copied);
-        this->ptr_ = std::__shared_ptr_detail_unerase<T>(this->handle_.ptr_);
+        this->ptr_ = other.get();
         return;
     }
 
     void operator=(const shared_ptr<T>& other) {
-        // Derived from the handle this object now owns, exactly as the
-        // copy constructor just above does, rather than from
-        // `other.get()`. `other` is a const reference, so `.get()`
-        // selects the `const T*` overload, and storing that into a `T*`
-        // field silently dropped const -- accepted only because an
-        // assignment to a *field* was reaching none of the conversion
-        // checks a plain local's assignment gets.
+        // The typed pointer comes from `other.get()`, which already has
+        // this specialization's own `T*` type, rather than from the
+        // erased handle: the handle carries a `const void*` (widening a
+        // `shared_ptr<const T>`'s pointee to `void*` would cast away
+        // constness), and the reverse cast would put the constness back
+        // only by laundering it.
         __shared_handle copied = other.__copy_handle();
         this->handle_.copy_from(copied);
-        this->ptr_ = std::__shared_ptr_detail_unerase<T>(this->handle_.ptr_);
+        this->ptr_ = other.get();
         return;
     }
 

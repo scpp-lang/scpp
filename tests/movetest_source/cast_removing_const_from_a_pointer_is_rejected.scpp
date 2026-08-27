@@ -1,0 +1,14 @@
+// [expr.static.cast]/11: a cast never casts away constness, and SCPP26
+// has no `const_cast`. This was accepted before -- inside
+// `[[scpp::unsafe]] { }` the pointer-to-pointer arm asked only whether
+// both sides were raw pointers -- which let a read-only place be written
+// through the laundered handle.
+int main() {
+    const int x = 9;
+    const int* cp = &x;
+    [[scpp::unsafe]] {
+        int* mp = static_cast<int*>(cp);
+        *mp = 1;
+    }
+    return 0;
+}

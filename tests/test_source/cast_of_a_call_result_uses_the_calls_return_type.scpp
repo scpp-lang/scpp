@@ -1,0 +1,14 @@
+// The probe's own shape. `at` returns `const char&`; the cast rule used
+// to enumerate operand *shapes* rather than ask for the operand's type,
+// so a call result -- and a reference -- fell off the end of the
+// enumeration and were reported as "a cast is only supported between two
+// builtin scalar types", though both sides already were scalars.
+import std;
+
+int main() {
+    std::string s{"ABC"};
+    int first = static_cast<int>(s.at(0));
+    int last = static_cast<int>(s.at(2));
+    std::print("{} {}\n", first, last);
+    return 0;
+}

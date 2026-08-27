@@ -1,0 +1,30 @@
+// A wrong answer here is a wrong *value*, not a wrong verdict: if the
+// derived-to-base cast produced a base subobject by slicing rather than
+// a handle to the same object, `id()` would answer 1. Both spellings of
+// the conversion -- implicit and static_cast -- must reach D::id.
+import std;
+
+class B {
+public:
+    virtual ~B() = default;
+    virtual int id() const { return 1; }
+};
+
+class D : public B {
+public:
+    ~D() override = default;
+    int id() const override { return 2; }
+};
+
+int describe(const B& base) { return base.id(); }
+
+int main() {
+    D d{};
+    D* pd = &d;
+    B* implicit_conversion = pd;
+    B* explicit_conversion = static_cast<B*>(pd);
+    [[scpp::unsafe]] {
+        std::print("{} {}\n", describe(*implicit_conversion), describe(*explicit_conversion));
+    }
+    return 0;
+}

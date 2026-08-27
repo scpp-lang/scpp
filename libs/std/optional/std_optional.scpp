@@ -93,7 +93,7 @@ public:
     const T& value() const {
         if (!this->has_value_) std::abort();
         [[scpp::unsafe]] {
-            return ((T*)&this->storage_)[0];
+            return ((const T*)&this->storage_)[0];
         }
     }
 
@@ -105,7 +105,7 @@ public:
 
     const T& operator*() const {
         [[scpp::unsafe]] {
-            return ((T*)&this->storage_)[0];
+            return ((const T*)&this->storage_)[0];
         }
     }
 
@@ -117,7 +117,7 @@ public:
 
     const T* operator->() const [[scpp::lifetime(self)]] {
         [[scpp::unsafe]] {
-            return (T*)&this->storage_;
+            return (const T*)&this->storage_;
         }
     }
 

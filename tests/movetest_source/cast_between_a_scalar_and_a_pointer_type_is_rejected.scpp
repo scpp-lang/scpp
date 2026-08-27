@@ -1,0 +1,11 @@
+// spec ch16 §16.3(5): SCPP26 has no conversion, implicit or explicit,
+// between a scalar type and a pointer type -- not even inside an unsafe
+// context, which gates pointer-to-pointer conversions only.
+int main() {
+    int x = 9;
+    int* ip = &x;
+    [[scpp::unsafe]] {
+        size_t bits = static_cast<size_t>(ip);
+    }
+    return 0;
+}

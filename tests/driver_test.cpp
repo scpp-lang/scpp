@@ -5031,8 +5031,11 @@ void run_cli_extension_tests() {
                         "    template<typename T>\n"
                         "    void* hidden_copy(const void* erased) {\n"
                         "        [[scpp::unsafe]] {\n"
-                        "            T* raw = static_cast<T*>(erased);\n"
-                        "            const T* typed = raw;\n"
+                        // Was `T* raw = static_cast<T*>(erased); const T* typed = raw;`
+                        // -- a cast that laundered the const away, which the
+                        // pointer-to-pointer arm used to accept because it asked
+                        // only whether both sides were raw pointers.
+                        "            const T* typed = static_cast<const T*>(erased);\n"
                         "            const T& source = *typed;\n"
                         "            return static_cast<void*>(new T(source));\n"
                         "        }\n"

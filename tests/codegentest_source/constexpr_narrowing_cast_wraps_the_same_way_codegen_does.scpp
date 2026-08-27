@@ -1,0 +1,13 @@
+// Replaces constexpr_char_out_of_range_is_rejected. That case's own
+// comment recorded the real defect -- "constexpr said 200, the same cast
+// at runtime said -56" -- but repaired it by making the evaluator
+// *reject* the cast, so the two implementations still disagreed: one
+// answered -56 and the other answered "constexpr integer overflow".
+// spec ch16 §16.3(2) says every scalar-to-scalar conversion is
+// well-formed and takes the value [conv.integral] gives it, so the
+// evaluator must fold to -56 too.
+constexpr char narrow() { return static_cast<char>(200); }
+int main() {
+    constexpr char c = narrow();
+    return static_cast<int>(c);
+}
