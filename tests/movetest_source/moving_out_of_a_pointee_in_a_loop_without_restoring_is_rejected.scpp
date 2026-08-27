@@ -1,0 +1,27 @@
+// The loop back edge merges the moved-out state from the first iteration
+// into the entry of the second, so the second `std::move` would be a use
+// of a moved-out object (ch02 6.2(6)).
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { return; }
+};
+
+R mk(int i) { R r{}; r.id = i; return r; }
+
+struct S {
+    R a;
+    R b;
+    S() : a{0}, b{0} {}
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+int main() {
+    std::unique_ptr<S> u = std::make_unique<S>();
+    u->a.id = 1;
+    for (int i = 0; i < 2; i = i + 1) { R t = std::move(u->a); }
+    return 0;
+}

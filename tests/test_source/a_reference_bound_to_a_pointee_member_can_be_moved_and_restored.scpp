@@ -1,0 +1,30 @@
+// Writing through a reference reinitializes the place the reference is
+// bound to (ch02 6.2(4)), including when that place is reached through an
+// indirection: after `r = mk(3)`, `u->a` reads 3 and is live again.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { std::print("~R{}\n", this.id); }
+};
+
+R mk(int i) { R r{}; r.id = i; return r; }
+
+struct S {
+    R a;
+    R b;
+    S() : a{0}, b{0} {}
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+int main() {
+    std::unique_ptr<S> u = std::make_unique<S>();
+    u->a.id = 1;
+    R& r = u->a;
+    R t = std::move(r);
+    r = mk(3);
+    std::print("back={}\n", u->a.id);
+    return 0;
+}

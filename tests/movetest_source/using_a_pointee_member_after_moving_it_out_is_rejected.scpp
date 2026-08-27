@@ -1,0 +1,28 @@
+// ch02 6.2(6): a use of a moved-out object is ill-formed. Accepting the
+// move is only sound if the resulting state is recorded against the place
+// `u->a`, so the same place spelled the same way stays moved out on every
+// path -- here both arms of the `if` move it.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { return; }
+};
+
+R mk(int i) { R r{}; r.id = i; return r; }
+
+struct S {
+    R a;
+    R b;
+    S() : a{0}, b{0} {}
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+int main() {
+    std::unique_ptr<S> u = std::make_unique<S>();
+    u->a.id = 1;
+    if (u->b.id > 0) { R t = std::move(u->a); } else { R t2 = std::move(u->a); }
+    return u->a.id;
+}

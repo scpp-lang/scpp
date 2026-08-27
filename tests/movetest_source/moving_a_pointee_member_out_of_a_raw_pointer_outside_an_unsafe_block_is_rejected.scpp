@@ -1,0 +1,29 @@
+// ch01 1.1/ch05 5.1(5.1): indirection through a raw pointer is gated on
+// `[[scpp::unsafe]]`. The blanket "cannot move from a dereference"
+// rejection used to fire first and hide this check, so the rule that
+// actually governs the program was never the one reported -- a spurious
+// rejection concealing the real one.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { return; }
+};
+
+R mk(int i) { R r{}; r.id = i; return r; }
+
+struct S {
+    R a;
+    R b;
+    S() : a{0}, b{0} {}
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+int main() {
+    S s{1, 2};
+    S* p = &s;
+    R t = std::move(p->a);
+    return t.id;
+}

@@ -118,16 +118,28 @@ struct LocalDecl {
     bool is_borrow_holding_closure = false;
 };
 
-// One step of a place's projection path: `.field` or `[constant]`.
+// One step of a place's projection path: `.field`, `[constant]`, or a
+// dereference `*`.
 //
-// Only these two forms are *identities*. A `[i]` with a non-constant
-// index does not name a statically-known element, and a `*p` through a
-// raw pointer does not name a statically-known object at all (two
-// pointers may alias), so neither can be a projection step -- see
-// place_of, which declines to build a Place for them rather than
-// building an approximate one that would silently under-report.
+// A `[i]` with a non-constant index does not name a statically-known
+// element, so it is still not a projection step -- see place_of, which
+// declines to build a Place for it rather than building an approximate
+// one that would silently under-report.
+//
+// A dereference *is* one. `*p` names the object `p` currently points to,
+// and the expression that produced the pointer is what identifies it, in
+// exactly the way a field name identifies a member: two occurrences of
+// `*p` with no intervening write to `p` name the same object. That two
+// *different* pointers may also name it is an aliasing question, and it
+// is the same question two `T&` parameters already pose -- spec §6.2
+// states no aliasing rule for either, and answers exclusivity for the
+// bindings it does govern with the reborrow rules of §6.2(7)-(10) rather
+// than with a points-to analysis. Declining to build a place here
+// therefore bought no soundness; it only removed `*p` and `p->m` from
+// the two-state model entirely.
 struct Projection {
     bool is_index = false;         // false: `.field`; true: `[index]`
+    bool is_deref = false;         // `*`; `field`/`index` unused
     std::string field;             // `.field`
     std::int64_t index = 0;        // `[index]`
 
@@ -188,13 +200,31 @@ struct Place {
 [[nodiscard]] inline Place whole_local_place(LocalId local) { return Place{local, {}}; }
 
 [[nodiscard]] inline Place projected_field(Place base, std::string field) {
-    base.path.push_back(Projection{/*is_index=*/false, std::move(field), 0});
+    base.path.push_back(Projection{/*is_index=*/false, /*is_deref=*/false, std::move(field), 0});
     return base;
 }
 
 [[nodiscard]] inline Place projected_index(Place base, std::int64_t index) {
-    base.path.push_back(Projection{/*is_index=*/true, {}, index});
+    base.path.push_back(Projection{/*is_index=*/true, /*is_deref=*/false, {}, index});
     return base;
+}
+
+[[nodiscard]] inline Place projected_deref(Place base) {
+    base.path.push_back(Projection{/*is_index=*/false, /*is_deref=*/true, {}, 0});
+    return base;
+}
+
+// Whether reaching `place` goes through a dereference. The object such a
+// place names is the one a *pointer* designated, which is not storage
+// this function declares: spec §6.2(1) puts objects "of automatic,
+// static, thread, or member storage duration" in the two-state model,
+// and which of those -- if any -- a pointee has is a property of
+// whoever created it, not of the dereference.
+[[nodiscard]] inline bool place_goes_through_deref(const Place& place) {
+    for (const Projection& step : place.path) {
+        if (step.is_deref) return true;
+    }
+    return false;
 }
 
 // Deliberately a named hasher rather than a std::hash specialization:
@@ -207,8 +237,9 @@ struct PlaceHash {
     [[nodiscard]] std::size_t operator()(const Place& place) const {
         std::size_t h = std::hash<std::size_t>{}(local_index(place.local));
         for (const Projection& step : place.path) {
-            std::size_t step_hash = step.is_index ? std::hash<std::int64_t>{}(step.index)
-                                                  : std::hash<std::string>{}(step.field);
+            std::size_t step_hash = step.is_deref  ? 0x9e3779b9ULL
+                                    : step.is_index ? std::hash<std::int64_t>{}(step.index)
+                                                    : std::hash<std::string>{}(step.field);
             h ^= step_hash + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
         }
         return h;
@@ -495,22 +526,38 @@ struct Body {
         std::string result;
         std::size_t first_step = 0;
         std::optional<LocalId> self = this_local();
-        if (self.has_value() && place.local == *self && !place.path.empty() && !place.path[0].is_index) {
+        if (self.has_value() && place.local == *self && !place.path.empty() && !place.path[0].is_index &&
+            !place.path[0].is_deref) {
             result = place.path[0].field;
             first_step = 1;
         } else {
             result = is_valid_local(place.local) ? name_of(place.local) : std::string("<unknown>");
         }
+        // A dereference is spelled by what follows it: `p->m` when a
+        // field does, `(*p)[i]` when an element does, plain `*p` when
+        // nothing does. Rendering it as a step of its own would print
+        // places the user cannot type back.
+        bool pending_deref = false;
         for (std::size_t i = first_step; i < place.path.size(); i++) {
+            if (place.path[i].is_deref) {
+                pending_deref = true;
+                continue;
+            }
             if (place.path[i].is_index) {
+                if (pending_deref) {
+                    result = "(*" + result + ")";
+                    pending_deref = false;
+                }
                 result += "[";
                 result += std::to_string(place.path[i].index);
                 result += "]";
             } else {
-                result += ".";
+                result += pending_deref ? "->" : ".";
+                pending_deref = false;
                 result += place.path[i].field;
             }
         }
+        if (pending_deref) result = "*" + result;
         return result;
     }
 };
@@ -1124,6 +1171,7 @@ public:
         current_block_ = new_block();
         lower_member_initializers();
         lower_stmt(*body_.owned_body);
+        close_implicit_function_exit();
         insert_drops_before_returns();
         return std::move(body_);
     }
@@ -1540,6 +1588,23 @@ private:
     // every one ever declared. Harmless for now: Drop has no dataflow
     // effect (see apply_statement in movecheck.cppm), so a marker for an
     // already-out-of-scope local is simply never acted on by anything.
+    // A function that falls off the end of its body returns there just
+    // as surely as one that spells `return;`, and every check keyed on
+    // TerminatorKind::Return -- §6.3(1)'s "was this put back before the
+    // object it belongs to is destroyed", and the unique_ptr drops
+    // below -- reaches that exit only if it carries the terminator.
+    // Without it the last block ended in TerminatorKind::None, which
+    // check_terminator answers with `return {}`: the exit existed in the
+    // CFG and was walked, and nothing was asked about it.
+    void close_implicit_function_exit() {
+        if (current().terminator.kind != TerminatorKind::None) return;
+        Terminator term;
+        term.kind = TerminatorKind::Return;
+        term.return_value = nullptr;
+        term.loc = fn_.body != nullptr ? fn_.body->loc : fn_.loc;
+        current().terminator = std::move(term);
+    }
+
     void insert_drops_before_returns() {
         std::vector<LocalId> unique_ptr_locals;
         for (std::size_t i = 0; i < body_.local_decls.size(); i++) {
@@ -1601,6 +1666,15 @@ namespace {
     return std::nullopt;
 }
 
+// `*h` on a class type is rewritten to a call to the selected
+// `operator*` (`operator_deref`), and one `h->m` step to a call to
+// `operator->` (`operator_arrow`) wrapped in the implicit `*` that
+// completes it. Both name the object the receiver points to, so both
+// are part of the *place*, not opaque call results.
+[[nodiscard]] bool is_indirection_operator_call(const Expr& expr) {
+    return expr.kind == ExprKind::Call && (expr.name == "operator_deref" || expr.name == "operator_arrow");
+}
+
 } // namespace
 
 [[nodiscard]] std::string explain_untrackable_place(const Expr& expr) {
@@ -1612,14 +1686,19 @@ namespace {
             }
             return explain_untrackable_place(*expr.lhs);
         case ExprKind::Unary:
-            if (expr.unary_op == UnaryOp::Deref) {
-                return "a dereference: two pointers may name the same object, so what '*' names "
-                       "cannot be identified statically";
+            if (expr.unary_op == UnaryOp::Deref && expr.lhs != nullptr) {
+                return "a dereference of " + explain_untrackable_place(*expr.lhs);
             }
             return "an operator result, which names no object";
         case ExprKind::Member:
             return explain_untrackable_place(*expr.lhs);
         case ExprKind::Call:
+            // `*h` and `h->m` on a class type arrive as a call to the
+            // selected operator; the place is identified by the receiver
+            // (see place_of), so report why *that* is not one.
+            if (is_indirection_operator_call(expr) && expr.lhs != nullptr) {
+                return explain_untrackable_place(*expr.lhs);
+            }
             return "a call result, which is a temporary with no name to record state against";
         case ExprKind::Identifier:
             return "a name that does not resolve to a local variable, parameter, or member of "
@@ -1669,6 +1748,22 @@ namespace {
                 return std::nullopt;
             }
             return projected_index(std::move(*base), *index);
+        }
+        case ExprKind::Unary: {
+            if (expr.unary_op != UnaryOp::Deref || expr.lhs == nullptr) return std::nullopt;
+            std::optional<Place> base = place_of(*expr.lhs, local_of, resolve_root, precision);
+            if (!base.has_value()) return std::nullopt;
+            return projected_deref(std::move(*base));
+        }
+        case ExprKind::Call: {
+            if (!is_indirection_operator_call(expr) || expr.lhs == nullptr) return std::nullopt;
+            std::optional<Place> base = place_of(*expr.lhs, local_of, resolve_root, precision);
+            if (!base.has_value()) return std::nullopt;
+            // `operator->` yields the *pointer*; the implicit `*` that
+            // monomorphize wraps it in supplies the Deref step, so one
+            // `->` still contributes exactly one.
+            if (expr.name == "operator_arrow") return base;
+            return projected_deref(std::move(*base));
         }
         default:
             return std::nullopt;

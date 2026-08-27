@@ -1,0 +1,33 @@
+// Two places are the same only if their roots and paths are the same, so
+// moving `p->a` says nothing about `q->a`. This is the discriminating
+// cell for aliasing: a wrong answer here shows up as a wrong *value*
+// (`other=0`), not as a wrong verdict.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { std::print("~R{}\n", this.id); }
+};
+
+R mk(int i) { R r{}; r.id = i; return r; }
+
+struct S {
+    R a;
+    R b;
+    S() : a{0}, b{0} {}
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+int main() {
+    S s1{1, 2};
+    S s2{3, 4};
+    S* p = &s1;
+    S* q = &s2;
+    [[scpp::unsafe]] {
+        R t = std::move(p->a);
+        std::print("other={}\n", q->a.id);
+    }
+    return 0;
+}

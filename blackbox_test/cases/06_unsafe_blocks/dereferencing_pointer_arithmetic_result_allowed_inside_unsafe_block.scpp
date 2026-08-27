@@ -1,0 +1,13 @@
+import std;
+// ch05 §5.5/ch01 §1.1 list "indirection through, or pointer arithmetic
+// on, a value of pointer type" together as one gated operation, so
+// `*(p + 0)` (dereferencing the result of pointer arithmetic) is legal
+// inside `[[scpp::unsafe]] { }`, exactly like bare `*p`. Neither clause
+// restricts the operand of `*` to a plain local variable.
+int main() {
+    int x = 5;
+    int* p = &x;
+    [[scpp::unsafe]] {
+        return *(p + 0);
+    }
+}

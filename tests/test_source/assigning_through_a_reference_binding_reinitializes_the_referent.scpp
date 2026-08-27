@@ -1,0 +1,35 @@
+// The assignment arm used to ask `local_of` for an identifier target and
+// `tracked_place_of` for everything else -- two paths answering "which
+// object is being written?" differently -- so assigning through a
+// reference binding never cleared the referent's moved-out state and the
+// still-initialized check at function exit reported a restored member as
+// moved out.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { std::print("~R{}\n", this.id); }
+};
+
+R mk(int i) { R r{}; r.id = i; return r; }
+
+struct S {
+    R a;
+    R b;
+    S() : a{0}, b{0} {}
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+class Inner { public: std::unique_ptr<int> p; Inner() : p{} { return; } virtual ~Inner() = default; };
+class Outer { public: Inner in; Outer() : in{} { return; } virtual ~Outer() = default; };
+void viaref(Outer o) {
+    std::unique_ptr<int>& r = o.in.p;
+    std::unique_ptr<int> q = std::move(r);
+    std::unique_ptr<int> e{};
+    r = std::move(e);
+    std::print("viaref\n");
+    return;
+}
+int main() { Outer a{}; viaref(std::move(a)); return 0; }
