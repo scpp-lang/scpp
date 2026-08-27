@@ -1,9 +1,0 @@
-// Constant evaluation bounds `char` at -128..127, like its signed 8-bit
-// sibling int8_t -- it used to use 0..255, which made it the one place
-// that would produce a char value the rest of the compiler cannot
-// represent (constexpr said 200, the same cast at runtime said -56).
-constexpr char narrow() { return static_cast<char>(200); }
-int main() {
-    constexpr char c = narrow();
-    return static_cast<int>(c);
-}

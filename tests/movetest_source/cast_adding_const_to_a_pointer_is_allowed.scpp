@@ -1,0 +1,10 @@
+// The control for cast_removing_const_from_a_pointer_is_rejected: the
+// same cast in the direction that adds const is an implicit conversion
+// the language already performs, so spec ch01 §1(5.2) does not gate it
+// and it needs no `[[scpp::unsafe]]` block either.
+int main() {
+    int x = 9;
+    int* mp = &x;
+    const int* cp = static_cast<const int*>(mp);
+    return 0;
+}

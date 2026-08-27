@@ -1,0 +1,10 @@
+// spec ch14 §14.1(1)-(2): [expr.static.cast] applies unchanged to an
+// enumeration source, which C++26 converts to any arithmetic type -- not
+// only to the enumeration's own underlying type, which is all the old
+// rule accepted.
+enum class E : int { A, B };
+
+int main() {
+    int64_t wide = static_cast<int64_t>(E::B);
+    return 0;
+}

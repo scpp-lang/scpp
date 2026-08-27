@@ -2465,14 +2465,14 @@ struct ConvertingConstructorBinding {
             return {};
         }
 
-        // `static_cast<T>(expr)`/`(T)expr` (ch06 §6): visits the operand
-        // for its own move/borrow bookkeeping exactly like any other
-        // sub-expression (never itself a move-target-context -- a cast
-        // reads its operand's value, it doesn't take ownership of it),
-        // then validates the (source, target) pair is actually a legal
-        // conversion in this version: scalar-to-scalar (always) or
-        // raw-pointer-to-raw-pointer only inside an unsafe context
-        // (spec §5.1(5.2)).
+        // `static_cast<T>(expr)`/`(T)expr` (ch06 §16.3(2)): visits the
+        // operand for its own move/borrow bookkeeping exactly like any
+        // other sub-expression (never itself a move-target-context -- a
+        // cast reads its operand's value, it doesn't take ownership of
+        // it), then asks scpp::diagnose_explicit_cast whether the
+        // (source, target) pair is a conversion the language provides.
+        // That rule lives in scpp.ast because codegen must answer the
+        // same question; this case used to carry its own copy of it.
         case ExprKind::Cast: {
             if (auto _r = apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures, report_errors); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
@@ -2485,53 +2485,25 @@ struct ConvertingConstructorBinding {
                                             "pointer representations",
                                         state.current_loc));
                 }
-                // A reference-returning call/field (e.g. `std::string_view::
-                // at`'s `const char&`) is just as castable as the plain value
-                // it refers to -- unwrap via binary_operand_type (the same
-                // helper every binary-operator check in this file already
-                // uses) so the checks below see the referent's own type,
-                // not "is a Reference" itself.
-                const Type* source_operand = source_type.has_value() ? &binary_operand_type(*source_type) : nullptr;
-                bool scalar_source = source_operand != nullptr && source_operand->kind == TypeKind::Named &&
-                                     is_scalar_type_name(source_operand->name);
-                bool scalar_target = expr.type.kind == TypeKind::Named && is_scalar_type_name(expr.type.name);
-                if (scalar_source && scalar_target) return {};
-
-                bool integral_source = source_operand != nullptr && source_operand->kind == TypeKind::Named &&
-                                       is_integral_scalar_type_name(source_operand->name);
-                bool target_is_enum = is_enum_type(expr.type, body.program);
-                if (integral_source && target_is_enum) {
-                    return std::unexpected(DataflowError("cannot cast an integer value to enum class '" + expr.type.name +
-                                            "'; use scpp::enum_cast<" + expr.type.name + ">(value) instead",
-                                        state.current_loc));
+                std::expected<CastKind, std::string> diagnosis = classify_explicit_cast(source_type, expr.type, *body.program);
+                if (!diagnosis.has_value()) {
+                    return std::unexpected(DataflowError(std::move(diagnosis).error(), state.current_loc));
                 }
-
-                const Type* source_enum_underlying =
-                    source_operand != nullptr && source_operand->kind == TypeKind::Named ? enum_underlying_type(*source_operand, body.program)
-                                                                                    : nullptr;
-                if (source_operand != nullptr && source_enum_underlying != nullptr && expr.type.kind == TypeKind::Named &&
-                    types_equal(*source_enum_underlying, expr.type)) {
-                    return {};
-                }
-
-                bool raw_pointer_source = source_operand != nullptr && source_operand->kind == TypeKind::Pointer;
-                bool raw_pointer_target = expr.type.kind == TypeKind::Pointer;
-                if (raw_pointer_source && raw_pointer_target) {
-                    if (state.unsafe_depth == 0) {
-                        return std::unexpected(DataflowError("cannot cast between raw pointer types outside '[[scpp::unsafe]] { }' "
-                                                "(spec §5.1(5.2))",
-                                            state.current_loc));
-                    }
-                    return {};
-                }
-
-                {
+                if (*diagnosis == CastKind::UnsafePointerConversion && state.unsafe_depth == 0) {
                     return std::unexpected(DataflowError(
-                        "a cast is only supported between two builtin scalar types, from an enum class to its "
-                        "underlying integer type, or between two raw pointer types inside '[[scpp::unsafe]] { }', in "
-                        "this version",
+                        "cannot cast '" + describe_type_brief(binary_operand_type(*source_type)) + "' to '" + describe_type_brief(expr.type) +
+                            "': a conversion between two pointer types that no implicit conversion relates is a gated "
+                            "operation; write it inside '[[scpp::unsafe]] { }' (spec ch01 §1(5.2), §1(6))",
                         state.current_loc));
                 }
+                // CastKind::OperandTypeUnknown: whatever left the operand
+                // untypeable here -- an unresolved call, a generic still
+                // awaiting substitution -- has its own diagnostic in a
+                // later pass (codegen's "call to unknown function ...").
+                // Reporting the cast instead would hide it, which is how
+                // `static_cast<std::int8_t>(s.at(0))` came to be reported
+                // as an unsupported cast when the real cause was that
+                // std::string had no at().
             }
             return {};
         }

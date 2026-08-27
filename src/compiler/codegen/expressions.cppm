@@ -2258,14 +2258,28 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
             case ExprKind::Cast:
                 return [&, this]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
-                    // ch06 §6 / spec §5.1(5.2): `static_cast<T>(expr)`/`(T)expr`
-                    // converts either between scalar types, or between raw
-                    // pointer types (movecheck already enforces the latter's
-                    // unsafe-context requirement). With llvm::LLVM opaque pointers,
-                    // every raw pointer lowers to the same `ptr` type, so a
-                    // pointer-to-pointer cast is a codegen no-op.
+                    // ch06 §16.3(2) / ch14 §14.1 / spec §1(5.2):
+                    // `static_cast<T>(expr)`/`(T)expr`. Which conversions
+                    // exist is scpp::classify_explicit_cast's single answer
+                    // (movecheck's dataflow.cppm Cast case asks the same
+                    // function, and applies §1(6)'s unsafe gate, which is
+                    // not a property of the two types); this case only
+                    // lowers the kind it reports. With llvm::LLVM opaque
+                    // pointers every pointer lowers to the same `ptr` type,
+                    // so every pointer-to-pointer kind is a codegen no-op.
                     std::optional<Type> source_type = infer_type(*expr.lhs);
                     if (!source_type.has_value()) {
+                        // Whatever left the operand untypeable -- a call
+                        // to a function that does not exist, a subscript
+                        // of a class with no subscript operator -- has its
+                        // own diagnostic. Lowering the operand produces
+                        // it. Reporting the cast instead is what made
+                        // `static_cast<std::int8_t>(s.at(0))` read as an
+                        // unsupported cast when the cause was that
+                        // std::string had no at().
+                        if (auto operand_result = codegen_expr(*expr.lhs); !operand_result.has_value()) {
+                            return std::unexpected(std::move(operand_result).error());
+                        }
                         return std::unexpected(CodegenError("cast operand has no inferable type", current_loc_));
                     }
                     if (is_interface_representation_type(*source_type) || is_interface_representation_type(expr.type)) {
@@ -2280,31 +2294,25 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     // not "is a Reference" itself (movecheck's dataflow.cppm
                     // Cast case unwraps identically, for the same reason).
                     const Type& source_operand = binary_operand_type(*source_type);
-                    if (source_operand.kind == TypeKind::Pointer && expr.type.kind == TypeKind::Pointer) {
-                        return codegen_value_for_target(*expr.lhs, source_operand);
+                    std::expected<CastKind, std::string> diagnosis = classify_explicit_cast(source_type, expr.type, *program_);
+                    if (!diagnosis.has_value()) {
+                        return std::unexpected(CodegenError(std::move(diagnosis).error(), current_loc_));
                     }
-                    if (source_operand.kind != TypeKind::Named || expr.type.kind != TypeKind::Named) {
-                        return std::unexpected(CodegenError("cast is only supported between scalar types or raw pointer types in this version",
-                                           current_loc_));
+                    switch (*diagnosis) {
+                        case CastKind::PointerConversion:
+                        case CastKind::UnsafePointerConversion:
+                        case CastKind::NullPointerConversion:
+                            return codegen_value_for_target(*expr.lhs, source_operand);
+                        case CastKind::ScalarConversion:
+                        case CastKind::EnumConversion: {
+                            auto operand_result = codegen_value_for_target(*expr.lhs, source_operand);
+                            if (!operand_result.has_value()) return std::unexpected(std::move(operand_result).error());
+                            return codegen_scalar_cast(std::move(operand_result).value(), source_operand, expr.type);
+                        }
+                        case CastKind::OperandTypeUnknown:
+                            break;
                     }
-                    if (is_integral_scalar_type_name(source_operand.name) && find_enum_def(program_, expr.type.name) != nullptr) {
-                        return std::unexpected(CodegenError("cannot cast an integer value to enum class '" + expr.type.name +
-                                               "'; use scpp::enum_cast<" + expr.type.name + ">(value) instead",
-                                           current_loc_));
-                    }
-                    bool source_is_scalar_or_enum =
-                        is_scalar_type_name(source_operand.name) || find_enum_def(program_, source_operand.name) != nullptr;
-                    bool target_is_scalar_or_enum =
-                        is_scalar_type_name(expr.type.name) || find_enum_def(program_, expr.type.name) != nullptr;
-                    if (!source_is_scalar_or_enum || !target_is_scalar_or_enum) {
-                        return std::unexpected(CodegenError(
-                            "cast is only supported between builtin scalar types or between an enum class and its "
-                            "underlying integer type in this version",
-                            current_loc_));
-                    }
-                    auto operand_result = codegen_value_for_target(*expr.lhs, source_operand);
-                    if (!operand_result.has_value()) return std::unexpected(std::move(operand_result).error());
-                    return codegen_scalar_cast(std::move(operand_result).value(), source_operand, expr.type);
+                    return std::unexpected(CodegenError("cast operand has no inferable type", current_loc_));
                 }();
 
             case ExprKind::Identifier:

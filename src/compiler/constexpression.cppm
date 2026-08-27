@@ -1569,7 +1569,14 @@ private:
         return value;
     }
 
+    // An enumeration's value is an integer of its underlying type
+    // ([dcl.enum]/8), so an enum-typed cell answers this question too.
+    // switch_match_key used to be a second answer to it, reading
+    // `cell->data.int_value` itself for exactly the enum case this
+    // rejected -- so `switch` could read an enumerator's value while
+    // `static_cast<std::int64_t>(E::B)` could not.
     [[nodiscard]] std::expected<std::int64_t, ConstexprError> as_integer(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
+        if (is_enum_like(cell->type)) return cell->data.int_value;
         if (!is_integer_like(cell->type)) {
             return std::unexpected(ConstexprError(loc, "expected an integer-like constexpr value"));
         }
@@ -1612,8 +1619,7 @@ private:
     }
 
     [[nodiscard]] std::expected<std::int64_t, ConstexprError> switch_match_key(const std::shared_ptr<Cell>& cell, const SourceLocation& loc) {
-        if (is_integer_like(cell->type)) return as_integer(cell, loc);
-        if (is_enum_like(cell->type)) return cell->data.int_value;
+        if (is_integer_like(cell->type) || is_enum_like(cell->type)) return as_integer(cell, loc);
         return std::unexpected(ConstexprError(loc, "switch requires an integral or enum constexpr value"));
     }
 
@@ -2999,26 +3005,48 @@ private:
             return make_bool_cell(result.value());
         }
         if (is_integer_like(target_type)) {
-            std::int64_t value{};
+            auto result = std::make_shared<Cell>();
+            result->type = target_type;
             if (is_floating_like(operand->type)) {
+                // [conv.fpint]/1: the fractional part is discarded, and a
+                // truncated value the destination cannot represent is
+                // undefined -- which in a constant expression is
+                // ill-formed, not a wrapped value.
                 auto double_result = as_double(operand, loc);
                 if (!double_result.has_value()) return std::unexpected(std::move(double_result).error());
                 if (!float_value_is_integral_representable(double_result.value())) {
                     return std::unexpected(ConstexprError(loc, "constexpr integer overflow"));
                 }
-                value = static_cast<std::int64_t>(double_result.value());
-            } else {
-                auto integer_result = as_integer(operand, loc);
-                if (!integer_result.has_value()) return std::unexpected(std::move(integer_result).error());
-                value = integer_result.value();
+                std::int64_t truncated = static_cast<std::int64_t>(double_result.value());
+                if (auto assign_result = checked_assign_integer(result, truncated, loc); !assign_result.has_value()) {
+                    return std::unexpected(std::move(assign_result).error());
+                }
+                return result;
             }
-            auto result = std::make_shared<Cell>();
-            result->type = target_type;
-            auto assign_result = checked_assign_integer(result, value, loc);
-            if (!assign_result.has_value()) return std::unexpected(std::move(assign_result).error());
+            auto integer_result = as_integer(operand, loc);
+            if (!integer_result.has_value()) return std::unexpected(std::move(integer_result).error());
+            // [conv.integral]/2-3: an integer conversion never overflows;
+            // the result is the value congruent modulo 2**N. This is the
+            // one place a scalar cast differs from an assignment, and
+            // running it through checked_assign_integer -- which enforces
+            // the *assignment* rule -- is what made the constant
+            // evaluator reject `static_cast<char>(200)` as an overflow
+            // while codegen produced -56 for the same expression.
+            result->data.set_integer(
+                scalar_converted_integer_value(integer_result.value(), std::string_view{target_type.name}, host_pointer_bit_width()));
             return result;
         }
-        return std::unexpected(ConstexprError(loc, "constant evaluation of static_cast supports scalar target types only"));
+        // ch14 §14.1(1)-(2): an enumeration target holds the value of its
+        // underlying type, reached the same way a scalar target is.
+        if (is_enum_like(target_type)) {
+            auto integer_result = as_integer(operand, loc);
+            if (!integer_result.has_value()) return std::unexpected(std::move(integer_result).error());
+            auto result = std::make_shared<Cell>();
+            result->type = target_type;
+            result->data.set_integer(integer_result.value());
+            return result;
+        }
+        return std::unexpected(ConstexprError(loc, "constant evaluation of a cast supports scalar and enumeration target types only"));
     }
 
     // A double outside int64_t's range (or a NaN) has no int64_t value
@@ -3553,15 +3581,29 @@ private:
         return call_with_expr_args(callee_ref->get(), expr.args, expr.loc);
     }
 
+    // Forwards to scpp::find_enum_variant_index (scpp.ast), the one
+    // enumerator-by-name lookup, which movecheck and codegen also ask.
     [[nodiscard]] std::optional<std::reference_wrapper<const EnumDef>> find_enum_for_variant(const std::string& variant_name) const {
-        for (const EnumDef& def : program_.enums) {
-            for (const EnumVariant& variant : def.variants) {
-                if (variant.name == variant_name) {
-                    return std::optional<std::reference_wrapper<const EnumDef>>{std::reference_wrapper<const EnumDef>{def}};
-                }
-            }
-        }
-        return {};
+        std::optional<EnumVariantIndex> found = find_enum_variant_index(program_, variant_name);
+        if (!found.has_value()) return {};
+        const EnumDef& def = program_.enums[found->enum_index];
+        return std::optional<std::reference_wrapper<const EnumDef>>{std::reference_wrapper<const EnumDef>{def}};
+    }
+
+    // The enumerator's *value*, which the constant evaluator previously
+    // had no way to reach: find_enum_for_variant above was consulted only
+    // from type inference, so `static_cast<std::int64_t>(E::B)` in a
+    // constant expression was given the type `E` and then reported as
+    // "identifier 'E::B' is not available". Codegen has always folded the
+    // same expression -- two layers, one question, two answers.
+    [[nodiscard]] std::shared_ptr<Cell> enumerator_cell(const std::string& variant_name) const {
+        std::optional<EnumVariantIndex> found = find_enum_variant_index(program_, variant_name);
+        if (!found.has_value()) return nullptr;
+        const EnumDef& def = program_.enums[found->enum_index];
+        auto cell = std::make_shared<Cell>();
+        cell->type = named_type(def.name);
+        cell->data.set_integer(def.variants[found->variant_index].value);
+        return cell;
     }
 
     [[nodiscard]] std::optional<Type> infer_unevaluated_expr_type(const Expr& expr) {
@@ -3866,8 +3908,12 @@ private:
             case ExprKind::Identifier:
                 return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                     auto binding_result = lookup_binding(expr.name, expr.loc, expr.explicit_global_qualification);
-                    if (!binding_result.has_value()) return std::unexpected(std::move(binding_result).error());
-                    return clone_cell(binding_result.value().cell);
+                    if (binding_result.has_value()) return clone_cell(binding_result.value().cell);
+                    // An enumerator names a value, not a binding
+                    // ([dcl.enum]/1), and infer_unevaluated_expr_type
+                    // already falls back this way for the same reason.
+                    if (std::shared_ptr<Cell> enumerator = enumerator_cell(expr.name); enumerator != nullptr) return enumerator;
+                    return std::unexpected(std::move(binding_result).error());
                 }();
             case ExprKind::Conditional:
                 return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
@@ -3919,7 +3965,19 @@ private:
             }();
             case ExprKind::Cast:
                 return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
-                    auto operand_result = evaluate_expr_in_context(*expr.lhs, &expr.type);
+                    // The operand is evaluated with no type context. ch06
+                    // §16.2(1) lists exactly the contexts that give a
+                    // literal its type -- the entity it initializes, the
+                    // parameter it is an argument for, the return type it
+                    // is returned from, the other operand of a binary
+                    // operator or arm of a conditional -- and a cast
+                    // operand is in none of them; §16.2(3) therefore makes
+                    // it `int`. Handing it `expr.type` also gave literals
+                    // types §16.2(2) forbids outright (`bool` and `char`),
+                    // so `static_cast<char>(200)` was read as the `char`
+                    // literal 200 and rejected as an overflow rather than
+                    // converted to -56.
+                    auto operand_result = evaluate_expr(*expr.lhs);
                     if (!operand_result.has_value()) return std::unexpected(std::move(operand_result).error());
                     return cast_value(expr.type, operand_result.value(), expr.loc);
                 }();

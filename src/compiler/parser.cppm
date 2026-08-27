@@ -231,7 +231,13 @@ using PartitionResolver = std::function<std::expected<Program, ParseError>(const
 }
 
 [[nodiscard]] bool is_cast_type_start_keyword(TokenKind kind) {
-    return kind == TokenKind::KwUnsigned || kind == TokenKind::KwNullptrT ||
+    // `const` starts a *type*, never an expression, so accepting it here
+    // costs the speculative `(T)expr` lookahead nothing -- and without it
+    // `(const T*)p`, which [expr.cast] spells exactly that way and which
+    // ch06 leaves unmodified, could not be written at all: only the
+    // const-*removing* direction parsed, which is the one direction
+    // classify_explicit_cast rejects.
+    return kind == TokenKind::KwConst || kind == TokenKind::KwUnsigned || kind == TokenKind::KwNullptrT ||
            !builtin_scalar_keyword_type_name(kind).empty();
 }
 

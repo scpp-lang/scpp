@@ -1,0 +1,24 @@
+// spec ch01 §1(5.2) gates an explicit conversion between two pointer
+// types "neither of which is convertible to the other by an implicit
+// conversion this document permits". A derived-to-base pointer
+// conversion is exactly such an implicit conversion, so it is not gated
+// -- writing `B* pb = pd;` has always been accepted here, and spelling
+// the same conversion with static_cast must be too.
+class B {
+public:
+    virtual ~B() = default;
+    virtual int id() const { return 1; }
+};
+
+class D : public B {
+public:
+    ~D() override = default;
+    int id() const override { return 2; }
+};
+
+int main() {
+    D d{};
+    D* pd = &d;
+    B* pb = static_cast<B*>(pd);
+    return 0;
+}

@@ -143,6 +143,21 @@ public:
         }
     }
 
+    // [string.access]: the checked element accessor, calling std::abort()
+    // where real C++ throws std::out_of_range -- matching
+    // std::string_view::at and std::vector::at in this same library.
+    // It returns `const char&` only: this class hands out its bytes
+    // through the C wrapper's `c_str()`, whose buffer is invalidated by
+    // the next append(), so a mutable reference into it would be a handle
+    // SCPP26 cannot check. (`operator[]` is absent because SCPP26 has no
+    // syntax to declare a subscript operator.)
+    const char& at(size_t index) const {
+        if (index >= this->length()) std::abort();
+        [[scpp::unsafe]] {
+            return this->c_str()[index];
+        }
+    }
+
     // std::string::clear(): empties this string's content in place,
     // reusing the existing new/delete C-wrapper pair rather than adding a
     // new one -- equivalent to `*this = string()` but without going

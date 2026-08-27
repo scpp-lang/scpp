@@ -16,8 +16,7 @@ void __move_only_function_destroy(void* erased) {
 template<typename F>
 void* __function_copy(const void* erased) {
     [[scpp::unsafe]] {
-        F* raw = static_cast<F*>(erased);
-        const F* typed = raw;
+        const F* typed = static_cast<const F*>(erased);
         const F& source = *typed;
         return static_cast<void*>(new F(source));
     }
@@ -34,8 +33,7 @@ R __move_only_function_invoke(void* erased, Args... args) {
 template<typename F, typename R, typename... Args>
 R __move_only_function_invoke_const(const void* erased, Args... args) {
     [[scpp::unsafe]] {
-        F* raw = static_cast<F*>(erased);
-        const F* typed = raw;
+        const F* typed = static_cast<const F*>(erased);
         return typed->call(args...);
     }
 }
@@ -52,8 +50,7 @@ R __move_only_function_invoke_rvalue(void* erased, Args... args) {
 template<typename F, typename R, typename... Args>
 R __move_only_function_invoke_const_rvalue(const void* erased, Args... args) {
     [[scpp::unsafe]] {
-        F* raw = static_cast<F*>(erased);
-        const F* typed = raw;
+        const F* typed = static_cast<const F*>(erased);
         const F& callable = *typed;
         return std::move(callable).call(args...);
     }

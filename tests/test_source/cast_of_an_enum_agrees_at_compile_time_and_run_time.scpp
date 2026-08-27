@@ -1,0 +1,15 @@
+// spec ch14 §14.1(2) permits enum -> integer; the evaluator could not do
+// it at all, because its identifier lookup never consulted the
+// enumerators, so `E::B` was "not available" in a constant expression
+// while the very same expression compiled at run time.
+import std;
+
+enum class E : int { A, B, C };
+
+int main() {
+    constexpr int folded = static_cast<int>(E::C);
+    E value = E::C;
+    int at_run_time = static_cast<int>(value);
+    std::print("{} {}\n", folded, at_run_time);
+    return 0;
+}

@@ -1,0 +1,9 @@
+// The other side of spec ch01 §1(5.2): `int*` and `char*` are related by
+// no implicit conversion, so the explicit conversion is a gated
+// operation and §1(6) makes it ill-formed outside an unsafe context.
+int main() {
+    int x = 9;
+    int* ip = &x;
+    char* cp = static_cast<char*>(ip);
+    return 0;
+}

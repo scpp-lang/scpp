@@ -1,0 +1,20 @@
+// The constant evaluator is a second implementation of the conversion,
+// so it can disagree with codegen about the *number* rather than about
+// the verdict. It used to: it applied a range check and reported
+// "constexpr integer overflow" where [conv.integral]/3 requires the
+// modular result. Each row folds a cast and performs the same cast at
+// run time; the two columns of each pair must agree.
+import std;
+
+int main() {
+    constexpr int narrowed = static_cast<int>(static_cast<char>(200));
+    constexpr int wrapped = static_cast<int>(static_cast<int8_t>(300));
+    constexpr int truncated = static_cast<int>(static_cast<int16_t>(70000));
+    char rc = static_cast<char>(200);
+    int8_t r8 = static_cast<int8_t>(300);
+    int16_t r16 = static_cast<int16_t>(70000);
+    std::print("{} {}\n", narrowed, static_cast<int>(rc));
+    std::print("{} {}\n", wrapped, static_cast<int>(r8));
+    std::print("{} {}\n", truncated, static_cast<int>(r16));
+    return 0;
+}

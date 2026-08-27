@@ -48,29 +48,28 @@ unsigned pointer_abi_alignment_for_as(llvm::LLVMModuleRef module, unsigned addre
 }
 
 
+// Forwards to scpp::find_enum_definition_index (scpp.ast), the one
+// enum-by-name lookup -- this function and movecheck/types.cppm's
+// find_enum_def each used to carry their own identical copy of the loop.
 [[nodiscard]] const EnumDef* Codegen::find_enum_def(const Program* program, const std::string& name)
 {
     if (program == nullptr) return nullptr;
-    for (const EnumDef& def : program->enums) {
-        if (def.name == name) return &def;
-    }
-    return nullptr;
+    std::optional<std::size_t> index = scpp::find_enum_definition_index(*program, name);
+    return index.has_value() ? &program->enums[*index] : nullptr;
 }
 
 
+// Forwards to scpp::find_enum_variant_index (scpp.ast), the one
+// enumerator-by-name lookup.
 [[nodiscard]] const EnumVariant* Codegen::find_enum_variant(const Program* program, const std::string& name,
                                                    const EnumDef** owning_enum)
 {
     if (program == nullptr) return nullptr;
-    for (const EnumDef& def : program->enums) {
-        for (const EnumVariant& variant : def.variants) {
-            if (variant.name == name) {
-                if (owning_enum != nullptr) *owning_enum = &def;
-                return &variant;
-            }
-        }
-    }
-    return nullptr;
+    std::optional<EnumVariantIndex> found = scpp::find_enum_variant_index(*program, name);
+    if (!found.has_value()) return nullptr;
+    const EnumDef& def = program->enums[found->enum_index];
+    if (owning_enum != nullptr) *owning_enum = &def;
+    return &def.variants[found->variant_index];
 }
 
 

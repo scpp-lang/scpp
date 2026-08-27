@@ -1,0 +1,15 @@
+// Replaces raw_pointer_cast_requires_unsafe, which asserted that this
+// exact program was an error. It was a fossil: spec ch01 §1(5.2) gates
+// an explicit conversion between two pointer types "neither of which is
+// convertible to the other by an implicit conversion this document
+// permits", and `void* implicit = ip;` on the line above has always been
+// accepted -- so the cast spelling of the very same conversion cannot be
+// the gated one. The old rule asked only "are both sides raw pointers?",
+// which rejected this while accepting a cast that removed const.
+int main() {
+    int x = 7;
+    int* ip = &x;
+    void* implicit = ip;
+    void* erased = static_cast<void*>(ip);
+    return 0;
+}
