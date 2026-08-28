@@ -1,0 +1,20 @@
+// Two queries used to be answered by *emitting* the receiver and looking
+// at what came back -- "is this a span's `size`" and "is this a
+// function-pointer field" -- and both then fell through to a path that
+// emitted the same receiver again. For a plain variable that was dead IR;
+// for a call it ran the call twice, constructing two objects where the
+// program says one.
+import std;
+
+class T { public: T(int v) : x{v} { std::print("+T{}\n", v); return; }
+    virtual ~T() { std::print("~T{}\n", this->x); return; }
+    T operator+(const T& o) const { T r{this->x + o.x}; return r; }
+    int get() const { return this->x; } int x; };
+T mk(int v) { T r{v}; return r; }
+
+int main() {
+    std::print("field {}\n", mk(1).x);
+    std::print("method {}\n", mk(2).get());
+    std::print("operator {}\n", (mk(3) + mk(4)).get());
+    return 0;
+}

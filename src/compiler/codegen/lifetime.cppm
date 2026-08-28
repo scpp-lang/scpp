@@ -25,6 +25,20 @@ namespace scpp {
 
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::codegen_materialize_const_reference_source(const Expr& expr, const Type& target_type)
 {
+        auto materialized = materialize_const_reference_source_storage(expr, target_type);
+        if (!materialized.has_value()) return materialized;
+        // [class.temporary]/4. A `const T&` is a borrow the callee cannot
+        // move out of, so this temporary's owner is unambiguously the
+        // full-expression that created it. (The `T&&` spelling above is
+        // the opposite case and is deliberately left alone -- see
+        // register_full_expression_temporary's comment.)
+        register_full_expression_temporary(target_type, *materialized);
+        return materialized;
+    }
+
+
+    [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::materialize_const_reference_source_storage(const Expr& expr, const Type& target_type)
+{
         // A braced list has no value to load and store: it initializes
         // the temporary in place, which is what makes `f({1, 2})` work
         // for a `const S&` parameter. Handled before the rvalue path
@@ -408,13 +422,22 @@ namespace scpp {
         // only place that used to consume `moved_flag`, which left a
         // moved-out struct's owning members released anyway.
         emit_unless_moved(moved_flag, [&, this] {
-            for (std::size_t i = 0; i < info.field_types.size(); i++) {
-                const Type& field_type = info.field_types[i];
+            // [class.dtor]/12: members are destroyed in the reverse order
+            // of their declaration. emit_class_member_teardown -- the same
+            // walk for a record that *does* declare a destructor -- has
+            // always gone backwards, and so does the array-element loop in
+            // emit_storage_destruction_unguarded ("reverse of construction
+            // order"). This loop ran forwards, so which order a record's
+            // members were released in depended on whether the record
+            // happened to declare a destructor: `struct` got declaration
+            // order, `class` got reverse.
+            for (std::size_t i = info.field_types.size(); i > 0; --i) {
+                const Type& field_type = info.field_types[i - 1];
                 if (!type_needs_subobject_teardown(field_type)) continue;
-                llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, ptr, info.physical_field_index(i),
-                                                             info.field_names[i].c_str());
+                llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, ptr, info.physical_field_index(i - 1),
+                                                             info.field_names[i - 1].c_str());
                 if (place != nullptr) {
-                    Place field_place = projected_field(*place, info.field_names[i]);
+                    Place field_place = projected_field(*place, info.field_names[i - 1]);
                     codegen_destroy_old_state_for_move_assign(field_type, field_ptr, /*moved_flag=*/nullptr, &field_place);
                     continue;
                 }

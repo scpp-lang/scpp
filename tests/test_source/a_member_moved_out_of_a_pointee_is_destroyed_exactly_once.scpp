@@ -1,8 +1,9 @@
 // ch02 6.3(1): "If the object is in the moved-out state, no destructor is
 // invoked for it." `s.a` (id 1) is moved into `t`, which dies at the end
 // of the unsafe block; at `s`'s own teardown only `s.b` (id 2) may be
-// destroyed. The `~R0` between them is `t`'s *source* slot: the move
-// zeroes it, so the id reads back as 0.
+// destroyed. The trailing `~R0` is `t`'s *source* slot: the move zeroes
+// it, so the id reads back as 0, and it comes last because members are
+// destroyed in reverse declaration order ([class.dtor]/12).
 import std;
 
 struct R {

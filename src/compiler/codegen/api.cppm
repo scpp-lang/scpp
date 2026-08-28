@@ -292,6 +292,31 @@ private:
     // of any pushed scope; they live for the whole function and are only
     // freed at Return, same as before.
     std::vector<std::vector<LocalId>> scope_stack_;
+    // A materialized temporary awaiting teardown: the storage, its type,
+    // and -- when it was created inside a branch of its own full-
+    // expression -- the i1 flag recording whether it was in fact created.
+    // `locals_before` is the number of locals already declared in the
+    // owning block scope at creation time, used only by the scope-
+    // extended variant to destroy it at exactly its own point in that
+    // scope's reverse-of-construction order.
+    struct PendingTemporary {
+        Type type;
+        llvm::LLVMValueRef ptr = nullptr;
+        llvm::LLVMValueRef live_flag = nullptr;
+        std::size_t locals_before = 0;
+    };
+    // One entry per open full-expression; nested because a full-
+    // expression's own evaluation can open another (a default argument,
+    // an immediately-invoked lambda body).
+    std::vector<std::vector<PendingTemporary>> full_expression_temporaries_;
+    // The basic block each open full-expression started in. A temporary
+    // created in that same block is reached whenever the full-expression
+    // is, so it needs no liveness flag; one created in any other block
+    // was reached conditionally and does.
+    std::vector<llvm::LLVMBasicBlockRef> full_expression_start_blocks_;
+    // Parallel to scope_stack_: the lifetime-extended temporaries bound
+    // to reference variables declared in each open block scope.
+    std::vector<std::vector<PendingTemporary>> scope_temporaries_;
     struct ControlFlowFrame {
         std::optional<llvm::LLVMBasicBlockRef> continue_block;
         llvm::LLVMBasicBlockRef end_block;
@@ -896,6 +921,8 @@ private:
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_materialize_rvalue_reference_source(const Expr& expr);
 
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_materialize_const_reference_source(const Expr& expr, const Type& target_type);
+
+    [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> materialize_const_reference_source_storage(const Expr& expr, const Type& target_type);
 
     [[nodiscard]] std::expected<void, CodegenError> codegen_copy_construct_class(llvm::LLVMValueRef dest_ptr, llvm::LLVMValueRef src_ptr, const std::string& class_name);
 
@@ -1684,6 +1711,102 @@ private:
     // parameters (see emit_function_exit_cleanup's own comment) -- they are
     // never pushed onto scope_stack_, only onto locals_.
     void emit_scope_cleanup_to_depth(std::size_t target_depth);
+
+    // [class.temporary]/4: "Temporary objects are destroyed as the last
+    // step in evaluating the full-expression that (lexically) contains
+    // the point where they were created." Spec §6.3's note is explicit
+    // that this document "does not modify *when* an object's storage
+    // duration ends", so the plain C++ rule governs and this is the only
+    // place it is implemented. A class prvalue that no declaration takes
+    // ownership of -- a discarded call result, the operand a `const T&`
+    // parameter binds to, the intermediate of `a + b + c`, the receiver
+    // of `make().m()` -- is materialized into scratch storage by codegen;
+    // before this existed nothing ever ran its destructor, so every such
+    // temporary leaked whatever it owned (a `std::string` temporary in a
+    // loop exhausted the heap).
+    //
+    // push_full_expression/pop_full_expression bracket each full-
+    // expression (spec/[intro.execution]: a statement's expression, a
+    // declaration's initializer, a `return` operand, a control-flow
+    // condition). register_full_expression_temporary records one
+    // materialized temporary against the innermost open full-expression;
+    // pop emits teardown for all of them in reverse creation order, the
+    // "reverse of construction order" rule every other teardown path here
+    // already follows.
+    void push_full_expression();
+
+    void pop_full_expression();
+
+    // Abandons the innermost full-expression frame without emitting
+    // anything, for the paths where codegen is already failing and the
+    // current block may be half-built.
+    void drop_full_expression();
+
+    // Scope guard so every exit from a statement's codegen -- including
+    // each of the ~10 early error returns in the VarDecl and Return cases
+    // -- leaves the frame stack balanced. `pop()` is the success path,
+    // which emits the teardown; the destructor is the failure path, which
+    // does not.
+    struct FullExpressionFrame {
+        Codegen* codegen;
+        bool popped = false;
+        explicit FullExpressionFrame(Codegen* owner) : codegen(owner) { codegen->push_full_expression(); }
+        FullExpressionFrame(const FullExpressionFrame&) = delete;
+        FullExpressionFrame& operator=(const FullExpressionFrame&) = delete;
+        void pop() {
+            codegen->pop_full_expression();
+            popped = true;
+        }
+        ~FullExpressionFrame() {
+            if (!popped) codegen->drop_full_expression();
+        }
+    };
+
+    // Destroys the value of a discarded expression statement when it is a
+    // class prvalue nobody took ownership of. `value` is the aggregate
+    // codegen_expr produced; a class object is only destructible through
+    // its address, so it is stored back into scratch storage first.
+    [[nodiscard]] std::expected<void, CodegenError> destroy_discarded_class_value(const Expr& expr, llvm::LLVMValueRef value);
+
+    // Records `ptr` (storage holding a freshly materialized prvalue of
+    // `type`) for destruction at the end of the innermost open full-
+    // expression. A no-op for a type that needs no teardown, and a no-op
+    // when no full-expression is open (a constructor's member
+    // initializer list, a global initializer) -- those emit into contexts
+    // that have no statement to attach to, and are reported rather than
+    // silently half-handled.
+    //
+    // Only ever called for storage nothing else can take ownership of.
+    // A temporary bound to a `T&&` parameter is deliberately *not*
+    // registered: `T&&` exists precisely so the callee may move out of it
+    // (proven by construction: `void steal(R&& r) { R own = std::move(r); }`
+    // is accepted and destroys the value inside the callee), and the
+    // caller has no way to know whether it did -- destroying it here
+    // would be a double free rather than a fixed leak.
+    void register_full_expression_temporary(const Type& type, llvm::LLVMValueRef ptr);
+
+    // A temporary bound to a reference *variable* outlives its full-
+    // expression: spec §6.2(11) contemplates exactly this materialization,
+    // and [class.temporary]/6 extends its lifetime to that of the
+    // reference. Registered against the enclosing block scope instead, so
+    // pop_scope()/emit_scope_cleanup_to_depth destroy it in the same
+    // reverse-declaration order as any named local.
+    void register_scope_extended_temporary(const Type& type, llvm::LLVMValueRef ptr);
+
+    // Destroys one recorded temporary, consulting its liveness flag when
+    // it has one. Shared by both the full-expression and the scope-
+    // extended paths so "how a temporary is torn down" has exactly one
+    // implementation.
+    void emit_pending_temporary_teardown(const PendingTemporary& pending);
+
+    void emit_scope_temporaries_teardown(const std::vector<PendingTemporary>& pending, std::size_t locals_before);
+
+    // The single reverse-of-construction walk over one block scope's
+    // locals *and* its lifetime-extended temporaries, shared by
+    // pop_scope and emit_scope_cleanup_to_depth -- which previously held
+    // two copies of the same loop.
+    void emit_one_scope_cleanup(const std::vector<LocalId>& declared,
+                                const std::vector<PendingTemporary>& temporaries);
 
     llvm::LLVMValueRef get_or_declare_malloc();
 

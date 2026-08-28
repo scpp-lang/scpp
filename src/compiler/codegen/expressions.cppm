@@ -267,14 +267,30 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     return CallResult{build_call(std::move(dispatch_fn_type_result).value(), target_ptr, args), callee};
                 }
             }
-            auto base_result = codegen_lvalue(*expr.lhs);
-            if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
-            LValue base = std::move(base_result).value();
-            if (base.type.kind == TypeKind::Named && structs_.contains(base.type.name)) {
-                const StructInfo& info = structs_.at(base.type.name);
+            // Deliberately a *type* query, not an emitted one: this asks
+            // whether `expr.name` names a function-pointer field of the
+            // receiver, and the previous spelling answered it by running
+            // codegen_lvalue on the receiver and inspecting the result --
+            // then fell through to the ordinary method path below, which
+            // runs codegen_lvalue on the same receiver a second time. For
+            // a receiver that is a place that was invisible; for a
+            // receiver that is a *call* (`mk(7) + mk(8)`, `a + b + c`'s
+            // own intermediate) it evaluated the call twice, constructing
+            // two objects where the source says one.
+            const Type* receiver_named_or_null =
+                receiver_type.has_value()
+                    ? (receiver_type->kind == TypeKind::Reference && receiver_type->pointee ? &*receiver_type->pointee
+                                                                                            : &*receiver_type)
+                    : nullptr;
+            if (receiver_named_or_null != nullptr && receiver_named_or_null->kind == TypeKind::Named &&
+                structs_.contains(receiver_named_or_null->name)) {
+                const StructInfo& info = structs_.at(receiver_named_or_null->name);
                 std::optional<std::size_t> field_index_opt = info.find_field_index(expr.name);
                 if (field_index_opt.has_value() &&
                     info.field_types[*field_index_opt].kind == TypeKind::FunctionPointer) {
+                    auto base_result = codegen_lvalue(*expr.lhs);
+                    if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
+                    LValue base = std::move(base_result).value();
                     const Type& member_type = info.field_types[*field_index_opt];
                     llvm::LLVMValueRef field_ptr = info.is_union
                                                  ? llvm::LLVMBuildBitCast(builder_, base.ptr,
@@ -2349,16 +2365,30 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     // has to be handled here instead, before falling back to
                     // the ordinary lvalue-then-load pattern used for a real
                     // struct field.
-                    auto base_result = codegen_lvalue(*expr.lhs);
-                    if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
-                    LValue base = std::move(base_result).value();
-                    if (base.type.kind == TypeKind::Span && expr.name == "size") {
+                    auto base_type = infer_type(*expr.lhs);
+                    const Type* base_underlying =
+                        base_type.has_value() && base_type->kind == TypeKind::Reference && base_type->pointee
+                            ? &*base_type->pointee
+                            : (base_type.has_value() ? &*base_type : nullptr);
+                    if (base_underlying != nullptr && base_underlying->kind == TypeKind::Span && expr.name == "size") {
+                        auto base_result = codegen_lvalue(*expr.lhs);
+                        if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
+                        LValue base = std::move(base_result).value();
                         auto base_llvm_type_result = to_llvm_type(base.type);
                         if (!base_llvm_type_result.has_value()) return std::unexpected(std::move(base_llvm_type_result).error());
                         llvm::LLVMValueRef size_ptr = llvm::LLVMBuildStructGEP2(builder_, std::move(base_llvm_type_result).value(), base.ptr, 1, "sizeptr");
                         llvm::LLVMValueRef size64 = llvm::LLVMBuildLoad2(builder_, llvm::LLVMInt64TypeInContext(context_), size_ptr, "size64");
                         return llvm::LLVMBuildTrunc(builder_, size64, llvm::LLVMInt32TypeInContext(context_), "size");
                     }
+                    // Deliberately *not* codegen_lvalue on the base above:
+                    // the span-`size` question is a question about the
+                    // base's *type*, and answering it by emitting the base
+                    // and looking at what came back generated the base
+                    // twice for every ordinary field access -- harmless
+                    // dead IR for a plain variable, but a second call (and
+                    // a second constructed object, and a second of every
+                    // side effect) for `make().x`. A query must not emit;
+                    // infer_type answers it without emitting.
                     auto lv_result = codegen_lvalue(expr);
                     if (!lv_result.has_value()) return std::unexpected(std::move(lv_result).error());
                     return load_value(std::move(lv_result).value());
@@ -2795,9 +2825,17 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 llvm::LLVMPositionBuilderAtEnd(builder_, merge_bb);
                 return {};
             }
-            if (class_has_destructor_in_chain(pointee.name)) {
-                codegen_call_destructor_chain_unless_moved(pointee.name, ptr, nullptr);
-            }
+            // Not class_has_destructor_in_chain: that answers "does this
+            // record or a base declare a destructor", which is only half
+            // of "does this record need tearing down" -- a struct need
+            // declare no destructor at all and still own resources
+            // through its members (spec §6.3 destroys every subobject).
+            // The storage path learned that distinction already
+            // (emit_storage_destruction_unguarded's own comment); the
+            // heap path kept the old hand-spelled guard, so
+            // `delete p` on a struct whose members own anything released
+            // nothing whatsoever.
+            emit_storage_destruction(pointee, ptr, /*place=*/nullptr);
         }
         build_call(get_or_declare_free(), {ptr});
         return {};
@@ -2821,11 +2859,10 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 return {};
             }
         }
-        if (expr.type.kind == TypeKind::Named) {
-            if (class_has_destructor_in_chain(expr.type.name)) {
-                codegen_call_destructor_chain_unless_moved(expr.type.name, ptr, nullptr);
-            }
-        }
+        // Same shared teardown entry point as the delete-expression above
+        // and as every scope-exit path: `p->~S()` on a struct with no
+        // destructor of its own still has to release what its members own.
+        emit_storage_destruction(expr.type, ptr, /*place=*/nullptr);
         return {};
     }
 
@@ -3438,6 +3475,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     }
                     llvm::LLVMValueRef temp = create_entry_block_alloca(llvm::LLVMTypeOf(result.value), "calllvaluetmp");
                     llvm::LLVMBuildStore(builder_, result.value, temp);
+                    // [class.temporary]/4: `make().m()` materializes the
+                    // receiver here and nothing else ever owns it.
+                    register_full_expression_temporary(*result_type, temp);
                     return LValue{temp, *result_type, alignment_for_type(*result_type)};
                 }();
 
@@ -3532,6 +3572,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         llvm::LLVMValueRef temp =
                             create_entry_block_alloca(llvm::LLVMTypeOf(value), "operatorlvaluetmp");
                         llvm::LLVMBuildStore(builder_, value, temp);
+                        register_full_expression_temporary(*result_type, temp);
                         return LValue{temp, *result_type, alignment_for_type(*result_type)};
                     }
                     if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
@@ -3670,6 +3711,10 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     }
                     llvm::LLVMValueRef temp = create_entry_block_alloca(llvm::LLVMTypeOf(value), "operatorlvaluetmp");
                     llvm::LLVMBuildStore(builder_, value, temp);
+                    // The intermediate of `a + b + c`: `a + b` is a prvalue
+                    // materialized only to serve as the second `+`'s
+                    // receiver, so it dies with the full-expression.
+                    register_full_expression_temporary(*result_type, temp);
                     return LValue{temp, *result_type, alignment_for_type(*result_type)};
                 }();
 

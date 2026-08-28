@@ -1,6 +1,8 @@
 // Writing through a reference reinitializes the place the reference is
 // bound to (ch02 6.2(4)), including when that place is reached through an
-// indirection: after `r = mk(3)`, `u->a` reads 3 and is live again.
+// indirection: after `r = mk(3)`, `u->a` reads 3 and is live again -- and
+// `~R3` therefore runs when the unique_ptr releases its pointee, after
+// `~R0` for the sibling member (reverse declaration order).
 import std;
 
 struct R {
