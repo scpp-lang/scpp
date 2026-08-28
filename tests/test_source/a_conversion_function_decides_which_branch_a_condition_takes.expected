@@ -1,0 +1,7 @@
+0
+if 1
+not 2
+and 2
+or 1
+copyinit true
+cast false

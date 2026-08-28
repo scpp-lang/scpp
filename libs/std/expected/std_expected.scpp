@@ -78,6 +78,13 @@ public:
         return this->has_value_;
     }
 
+    // [optional.observe]/[expected.object.obs]: `explicit operator
+    // bool() const noexcept` is `has_value()`. `explicit`, so
+    // `bool b = o;` remains ill-formed ([over.match.copy]/1).
+    explicit operator bool() const {
+        return this->has_value_;
+    }
+
     T& value() {
         if (!this->has_value_) {
             std::abort();
@@ -179,6 +186,13 @@ public:
     }
 
     bool has_value() const {
+        return this->has_value_;
+    }
+
+    // [optional.observe]/[expected.object.obs]: `explicit operator
+    // bool() const noexcept` is `has_value()`. `explicit`, so
+    // `bool b = o;` remains ill-formed ([over.match.copy]/1).
+    explicit operator bool() const {
         return this->has_value_;
     }
 

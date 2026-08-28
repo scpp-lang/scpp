@@ -1,0 +1,31 @@
+// The constant evaluator is a separate implementation of every rule.
+// [over.match.oper]/2 dispatch was added to its *binary* arm and not to
+// its unary one, so `!h` for a class `h` declaring `operator!` went
+// straight to as_bool and folded to "expected a boolean constexpr
+// value", while the very same expression at run time called
+// `Handle::operator!`. A fold and a run disagreeing is a wrong answer at
+// compile time.
+//
+// This case uses only `operator!`, which the front end already parsed
+// before conversion functions existed -- so it fails pre-fix at the
+// constant evaluator itself rather than at a parse gate, and prints both
+// answers instead of merely asserting a verdict.
+import std;
+
+struct Handle {
+    int v;
+    constexpr bool operator!() const { return this->v == 0; }
+};
+
+constexpr bool folded() {
+    Handle h{0};
+    return !h;
+}
+
+int main() {
+    constexpr bool folded_answer = folded();
+    Handle runtime_handle{0};
+    std::print("folded {}\n", folded_answer);
+    std::print("runtime {}\n", !runtime_handle);
+    return 0;
+}

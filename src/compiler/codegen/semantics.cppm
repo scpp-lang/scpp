@@ -816,6 +816,12 @@ namespace {
                 find_single_argument_converting_constructor(param_type.name, arg) != nullptr) {
                 return true;
             }
+            // [over.ics.user]'s other half, the same one movecheck's
+            // argument_matches_parameter applies: the *argument* has
+            // class type and reaches the parameter through a conversion
+            // function. Copy-initialization ([over.match.copy]/1), so
+            // only the non-explicit ones.
+            if (conversion_function_call_for(arg, param_type, /*allow_explicit=*/false) != nullptr) return true;
             return false;
         }
         if (is_named_record_type(param_type)) {
@@ -1242,6 +1248,17 @@ namespace {
             std::optional<Type> actual = infer_type(*args[type_mismatch.argument_index]);
             std::string actual_text =
                 actual.has_value() ? "'" + describe_type_brief(*actual) + "'" : "a different type";
+            // [over.match.copy]/1 excluded the one conversion that would
+            // have made this argument viable -- worded exactly as
+            // movecheck's own describe_call_resolution_failure words it.
+            if (conversion_function_call_for(mismatched_arg, type_mismatch.expected_param_type,
+                                             /*allow_explicit=*/true) != nullptr) {
+                return "no overload of '" + display_name + "' matches these argument types: argument " +
+                       std::to_string(type_mismatch.argument_index + 1) + ": " +
+                       explicit_only_conversion_function_message(
+                           describe_type_brief(*actual), describe_type_brief(type_mismatch.expected_param_type)) +
+                       (candidates.size() > 1 ? candidate_list() : std::string());
+            }
             return "no overload of '" + display_name + "' matches these argument types: argument " +
                    std::to_string(type_mismatch.argument_index + 1) + " is " + actual_text + ", but '" +
                    describe_signature(*type_mismatch_fn) + "' expects '" +

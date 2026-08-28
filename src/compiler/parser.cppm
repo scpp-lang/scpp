@@ -762,6 +762,26 @@ private:
         return operator_id_token_count(peek_at(1).kind, peek_at(2).kind);
     }
 
+    // [class.conv.fct]/1: `operator` followed by a *conversion-type-id*
+    // rather than by an *operator-function-id*. The two are told apart
+    // by the token right after `operator`, which is exactly what
+    // operator_id_token_count already decides -- so a conversion
+    // function is "an `operator` declaration that names no operator",
+    // and adding a token to the operator table can never silently turn
+    // a conversion function into an operator function or the reverse.
+    [[nodiscard]] bool starts_conversion_function_id() const {
+        return check(TokenKind::Identifier) && std::string(peek().text.data(), peek().text.size()) == "operator" &&
+               member_operator_id_token_count() == 0;
+    }
+
+    // The two converting entities `explicit` may appertain to
+    // ([dcl.fct.spec]/2): a constructor and a conversion function.
+    [[nodiscard]] bool is_explicit_eligible_member_declaration(const std::string& owner_name) const {
+        if (starts_conversion_function_id()) return true;
+        return check(TokenKind::Identifier) && std::string(peek().text.data(), peek().text.size()) == owner_name &&
+               peek_at(1).kind == TokenKind::LParen;
+    }
+
     [[nodiscard]] std::string spelled_member_operator_id(TokenKind first, TokenKind second) const {
         if (first == TokenKind::LBracket && second == TokenKind::RBracket) return std::string("[]");
         if (first == TokenKind::LParen && second == TokenKind::RParen) return std::string("()");
@@ -2802,6 +2822,7 @@ private:
         comparable.return_lifetime = parsed.fn.return_lifetime;
         comparable.is_defaulted = parsed.fn.is_defaulted;
         comparable.is_deleted = parsed.fn.is_deleted;
+        comparable.is_explicit = parsed.fn.is_explicit;
         comparable.params = parsed.fn.params;
         comparable.name = declared.name;
         comparable.member_owner_class = declared.member_owner_class;
@@ -4591,6 +4612,7 @@ private:
         clone.is_pure = fn.is_pure;
         clone.is_defaulted = fn.is_defaulted;
         clone.is_deleted = fn.is_deleted;
+        clone.is_explicit = fn.is_explicit;
         clone.expects_out_of_line_definition = false;
         clone.forwards_to = fn.forwards_to;
         clone.namespace_path = fn.namespace_path;
@@ -8390,10 +8412,10 @@ private:
             if (member_is_virtual && !allow_virtual_members) {
                 return std::unexpected(ParseError(member_loc.line, member_loc.column, std::string(virtual_member_error.data(), virtual_member_error.size())));
             }
-            if (member_is_explicit && !(check(TokenKind::Identifier) && std::string(peek().text.data(), peek().text.size()) == owner_name &&
-                                        peek_at(1).kind == TokenKind::LParen)) {
+            if (member_is_explicit && !is_explicit_eligible_member_declaration(owner_name)) {
                 return std::unexpected(ParseError(member_loc.line, member_loc.column,
-                                 "'explicit' is only allowed directly before a constructor declaration"));
+                                 "'explicit' is only allowed on a constructor or a conversion function declaration "
+                                 "([dcl.fct.spec]/2)"));
             }
             if (check(TokenKind::KwStruct) || check(TokenKind::KwClass) || check(TokenKind::KwEnum) ||
                 check(TokenKind::KwUnion)) {
@@ -8510,6 +8532,7 @@ private:
                 fn.member_owner_class = qualified_owner_name;
                 fn.access = current_access;
                 fn.is_virtual = member_is_virtual;
+                fn.is_explicit = member_is_explicit;
                 fn.return_type.kind = TypeKind::Named;
                 fn.return_type.name = "void";
                 fn.name = synthesized_member_owner_name;
@@ -8563,6 +8586,83 @@ private:
                 finish_member_fn(fn, is_exported, generic_method_owner_id);
                 program.functions.push_back(std::move(fn));
                 if (member_is_template) leave_member_template_context(member_template_params, saved_function_template_params);
+                continue;
+            }
+
+            // [class.conv.fct]/1: a conversion function `operator T()`
+            // is spelled with no return type at all -- its name *is* the
+            // destination type. Recognized before parse_type() below,
+            // which is what used to reach `operator bool()` and report
+            // "expected a type name": the operator-function branch after
+            // it only ever sees a declaration that already had a return
+            // type in front of `operator`, so a conversion function had
+            // no branch of its own anywhere.
+            if (starts_conversion_function_id()) {
+                if (auto _rv = reject_alignment_specifiers(member_alignments, "a conversion function declaration");
+                    !_rv.has_value()) {
+                    return std::unexpected(std::move(_rv).error());
+                }
+                advance(); // 'operator'
+                auto conversion_type_result = parse_type();
+                if (!conversion_type_result.has_value()) {
+                    return std::unexpected(std::move(conversion_type_result).error());
+                }
+                Type conversion_type = std::move(conversion_type_result).value();
+                Function fn{};
+
+                fn.loc = member_loc;
+                fn.is_unsafe = member_requested_unsafe;
+                fn.is_nodiscard = member_requested_nodiscard;
+                fn.nodiscard_reason = member_nodiscard_reason;
+                fn.eval_mode = member_eval_mode;
+                fn.member_owner_class = qualified_owner_name;
+                fn.access = current_access;
+                fn.is_virtual = member_is_virtual;
+                fn.is_explicit = member_is_explicit;
+                auto fn_params_result = parse_param_list(/*allow_unnamed_single_parameter=*/false);
+                if (!fn_params_result.has_value()) return std::unexpected(std::move(fn_params_result).error());
+                fn.params = std::move(fn_params_result).value();
+                // [class.conv.fct]/1: "shall specify no parameters" --
+                // and it is a non-static member, so there is no static
+                // spelling of it either.
+                if (!fn.params.empty()) {
+                    std::string _msg_conversion_params{"a conversion function 'operator "};
+                    _msg_conversion_params += describe_type_brief(conversion_type);
+                    _msg_conversion_params += "' shall specify no parameters ([class.conv.fct]/1)";
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column, _msg_conversion_params));
+                }
+                if (member_is_static) {
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                     "a conversion function cannot be declared static ([class.conv.fct]/1)"));
+                }
+                if (member_is_template) {
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                     "a conversion function cannot currently be a member template"));
+                }
+                if (auto _rv = parse_function_trailing_attributes(fn, "a conversion function declarator");
+                    !_rv.has_value()) {
+                    return std::unexpected(std::move(_rv).error());
+                }
+                bool conversion_is_const = match(TokenKind::KwConst);
+                fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
+                // The destination type is the conversion function's
+                // return type ([class.conv.fct]/1), so every pass that
+                // already asks a call for its return type learns what
+                // this conversion yields without a second field.
+                fn.return_type = conversion_type;
+                fn.name = synthesized_member_owner_name;
+                fn.name += "_";
+                fn.name += conversion_function_method_name(conversion_type);
+                fn.params = prepend_this_param(fn.params, qualified_owner_name, conversion_is_const);
+                fn.is_override = match(TokenKind::KwOverride);
+                auto fn_requires_result = parse_optional_method_requires_clause(template_params);
+                if (!fn_requires_result.has_value()) return std::unexpected(std::move(fn_requires_result).error());
+                fn.method_requires_concept = std::move(fn_requires_result).value();
+                auto fn_body_result = parse_member_function_suffix(fn);
+                if (!fn_body_result.has_value()) return std::unexpected(std::move(fn_body_result).error());
+                fn.body = std::move(fn_body_result).value();
+                finish_member_fn(fn, is_exported, generic_method_owner_id);
+                program.functions.push_back(std::move(fn));
                 continue;
             }
 

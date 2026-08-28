@@ -1,16 +1,29 @@
-// ch06 scalar table / PR #392: `&&`/`||` require both operands to
-// already be `bool` -- scpp has no implicit conversion to `bool`, so a
-// class-typed right operand like `flag && someSharedPtr` must be
-// rejected. Before PR #392, `codegen_short_circuit` fed its right
-// operand straight into an i8 PHI without the bool check its left
-// operand already goes through, so this silently emitted invalid LLVM
-// IR instead of failing to compile; it now produces the ordinary
-// "expected a 'bool' value" diagnostic at the operand.
+// PR #392: `codegen_short_circuit` fed its right operand straight into
+// an i8 PHI without the bool check its left operand already goes
+// through, so a non-bool right operand silently emitted invalid LLVM IR
+// instead of failing to compile.
+//
+// The operand used to be a `std::shared_ptr<int>`, on the grounds that
+// "scpp has no implicit conversion to `bool`". That is the [conv.bool]
+// *standard* conversion, which spec §16.3(4) does remove -- but
+// [expr.log.and]/1 contextually converts each operand to `bool`, and
+// for an operand of class type that is a call to a conversion function
+// ([class.conv.fct], [over.match.conv]), which no clause of the spec
+// modifies. `std::shared_ptr` declares `explicit operator bool`
+// ([util.smartptr.shared.obs]/8), so `flag && shared` is well-formed --
+// clang++-22 -std=c++26 accepts it and so does scpp now. `Opaque`
+// declares no conversion function at all, which is what makes this
+// operand genuinely unusable as a condition and keeps the check PR #392
+// added under test.
 import std;
+
+struct Opaque {
+    int v;
+};
 
 int main() {
     bool flag = true;
-    std::shared_ptr<int> shared = std::make_shared<int>(4);
-    bool result = flag && shared;
+    Opaque opaque{4};
+    bool result = flag && opaque;
     return result ? 0 : 1;
 }

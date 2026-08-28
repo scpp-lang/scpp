@@ -2095,6 +2095,15 @@ class Function {
     // Special-member functions only: whether the declaration is defaulted
     // (`= default`).
     bool is_defaulted = false;
+    // [class.conv.ctor]/2 and [class.conv.fct]/2: whether the
+    // declaration was spelled `explicit`. Meaningful for a constructor
+    // and for a conversion function, the two converting entities: an
+    // explicit one is considered by direct-initialization
+    // ([over.match.ctor], [over.match.conv]) and not by
+    // copy-initialization. Parsed but never stored before, which made
+    // `explicit` on a constructor a no-op the language accepted and
+    // then ignored.
+    bool is_explicit = false;
     // Whether the declaration is a deleted definition (`= delete`,
     // [dcl.fct.def.delete]/1). A deleted function is declared and takes
     // part in overload resolution exactly like any other; naming it in a
@@ -2507,6 +2516,98 @@ class Function {
     return std::string{};
 }
 
+// [class.conv.fct]/1: a conversion function is a member named by a
+// *conversion-type-id* rather than by an identifier. Every member in
+// this language is registered under one flat `<class>_<method>` key, so
+// the destination type has to be encoded into that method name -- this
+// is the one place that decides how, so the parser that declares one and
+// each of the three passes that look one up all agree on the key without
+// any of them re-deriving it.
+//
+// The encoding is identifier-shaped for the common case (`bool` ->
+// `operator_convert_bool`) and merely deterministic for the rest; a
+// class name already carries `::` and `.` in these keys, so nothing here
+// needs to avoid them.
+[[nodiscard]] inline std::string conversion_type_key(const Type& type) {
+    std::string result{""};
+    if (type.is_const_qualified) result += "const_";
+    switch (type.kind) {
+        case TypeKind::Named: {
+            result += type.name;
+            for (std::size_t i = 0; i < type.template_args.size(); i++) {
+                result += ".";
+                result += conversion_type_key(type.template_args[i]);
+            }
+            return result;
+        }
+        case TypeKind::Pointer: {
+            if (type.pointee == nullptr) return result + "?";
+            result += conversion_type_key(*type.pointee);
+            result += type.is_mutable_pointee ? "_ptr" : "_cptr";
+            return result;
+        }
+        case TypeKind::Reference: {
+            if (type.pointee == nullptr) return result + "?";
+            result += conversion_type_key(*type.pointee);
+            if (type.is_rvalue_ref) {
+                result += "_rref";
+            } else if (type.is_mutable_ref) {
+                result += "_ref";
+            } else {
+                result += "_cref";
+            }
+            return result;
+        }
+        case TypeKind::Span: {
+            if (type.element == nullptr) return result + "?";
+            result += conversion_type_key(*type.element);
+            result += type.is_mutable_ref ? "_span" : "_cspan";
+            return result;
+        }
+        case TypeKind::Array: {
+            if (type.element == nullptr) return result + "?";
+            result += conversion_type_key(*type.element);
+            result += "_arr";
+            result += std::to_string(type.array_size);
+            return result;
+        }
+        case TypeKind::Function:
+        case TypeKind::FunctionPointer: {
+            if (type.function_return == nullptr) {
+                result += "void";
+            } else {
+                result += conversion_type_key(*type.function_return);
+            }
+            result += type.kind == TypeKind::Function ? "_fntype" : "_fnptr";
+            for (std::size_t i = 0; i < type.function_params.size(); i++) {
+                result += ".";
+                result += conversion_type_key(type.function_params[i]);
+            }
+            return result;
+        }
+    }
+    return result + "?";
+}
+
+[[nodiscard]] inline std::string conversion_function_method_prefix() { return std::string{"operator_convert_"}; }
+
+[[nodiscard]] inline std::string conversion_function_method_name(const Type& destination) {
+    std::string method = conversion_function_method_prefix();
+    method += conversion_type_key(destination);
+    return method;
+}
+
+// The member key a class's conversion function to `destination` is
+// registered under -- `<class>_operator_convert_<type>`. Shared so that
+// typechecking, codegen and the constant evaluator cannot look in three
+// slightly different places.
+[[nodiscard]] inline std::string conversion_function_key(const std::string& class_name, const Type& destination) {
+    std::string key = class_name;
+    key += "_";
+    key += conversion_function_method_name(destination);
+    return key;
+}
+
 [[nodiscard]] inline std::string binary_operator_spelling(BinaryOp op) {
     switch (op) {
         case BinaryOp::Add: return std::string{"+"};
@@ -2583,6 +2684,27 @@ class Function {
 }
 
 [[nodiscard]] inline std::string operator_function_display_spelling(const std::string& function_name) {
+    // Checked before the operator@ tables: a conversion function's key
+    // ends in the destination type's own spelling, which the suffix
+    // tables below would happily misread if that type were ever named
+    // after one of them.
+    std::string convert_marker{"_"};
+    convert_marker += conversion_function_method_prefix();
+    std::string_view name_view{function_name};
+    std::string_view marker_view{convert_marker};
+    if (name_view.size() > marker_view.size()) {
+        std::size_t start = name_view.size() - marker_view.size();
+        for (;;) {
+            if (name_view.substr(start, marker_view.size()) == marker_view) {
+                std::string spelled{"operator "};
+                std::string_view tail = name_view.substr(start + marker_view.size());
+                spelled += std::string(tail.data(), tail.size());
+                return spelled;
+            }
+            if (start == 0) break;
+            start--;
+        }
+    }
     for (int index = 0; index < 17; index++) {
         BinaryOp op = binary_operator_at_index(index);
         std::string method{"_"};
@@ -2714,6 +2836,104 @@ class Function {
     message += "::operator";
     message += spelled_operator;
     message += "'";
+    return message;
+}
+
+// The destination of every contextual conversion to `bool`. Named once
+// so no pass can look a conversion function up under a differently
+// spelled `bool`.
+[[nodiscard]] inline Type contextual_bool_type() { return named_type(std::string{"bool"}); }
+
+// [conv.general]/4: an `if`/`while`/`for` condition, a conditional
+// expression's condition, the operand of `!` and each operand of
+// `&&`/`||` are contextually converted to `bool`. §16.3(4) removes the
+// [conv.bool] standard conversion, so a scalar or ordinary pointer
+// operand must already *be* a `bool`; a class operand is unaffected by
+// that clause and reaches `bool` the way C++26 says it does, through a
+// conversion function ([class.conv.fct], [over.match.conv]).
+//
+// `alternative_operator` names the operator function that would give the
+// expression its own meaning instead, where the position has one
+// ([over.match.oper]/2) -- empty for a plain condition, which has none.
+// Both routes are named because naming only one describes a fix the
+// other diagnostic would then reject.
+[[nodiscard]] inline std::string no_contextual_bool_conversion_message(const std::string& type_name,
+                                                                       const std::string& position_description,
+                                                                       const std::string& alternative_operator) {
+    std::string message{"no conversion to 'bool' for '"};
+    message += type_name;
+    message += "': ";
+    message += position_description;
+    message += " is contextually converted to 'bool' ([conv.general]/4), and for an operand of class type that is a "
+               "call to a conversion function ([class.conv.fct], [over.match.conv]) -- declare '";
+    message += type_name;
+    message += "::operator bool'";
+    if (alternative_operator.size() > 0) {
+        message += ", or declare '";
+        message += type_name;
+        message += "::operator";
+        message += alternative_operator;
+        message += "' to give the operator its own meaning ([over.match.oper]/2)";
+    }
+    message += " (looked for '";
+    message += conversion_function_method_name(contextual_bool_type());
+    message += "')";
+    return message;
+}
+
+// [over.match.copy]/1 with [class.conv.fct]/2: copy-initialization
+// considers only the non-explicit conversion functions. Reached when the
+// class does declare one and it is `explicit`, so that the diagnostic
+// says which rule excluded it rather than "no conversion exists".
+[[nodiscard]] inline std::string explicit_only_conversion_function_message(const std::string& source_type_name,
+                                                                           const std::string& destination_type_name) {
+    std::string message{"'"};
+    message += source_type_name;
+    message += "::operator ";
+    message += destination_type_name;
+    message += "' is 'explicit', so copy-initialization does not consider it ([over.match.copy]/1, "
+               "[class.conv.fct]/2); write 'static_cast<";
+    message += destination_type_name;
+    message += ">(...)' to request the conversion explicitly";
+    return message;
+}
+
+// [over.match.conv]/1: the source has class type and the destination
+// does not, and the class declares no conversion function to it. Named
+// separately from the scalar-to-scalar message because a class is not a
+// scalar and `static_cast` would be refused for the very same reason,
+// so suggesting one would name a fix the next diagnostic forbids.
+[[nodiscard]] inline std::string no_user_defined_conversion_message(const std::string& source_type_name,
+                                                                    const std::string& destination_type_name) {
+    std::string message{"no conversion from '"};
+    message += source_type_name;
+    message += "' to '";
+    message += destination_type_name;
+    message += "': a value of class type reaches another type only through a conversion function the class declares "
+               "([class.conv.fct], [over.match.conv]) or through a constructor of the destination type "
+               "([class.conv.ctor]); declare '";
+    message += source_type_name;
+    message += "::operator ";
+    message += destination_type_name;
+    message += "'";
+    return message;
+}
+
+// [over.match.conv]/1 selected nothing even though the class declares a
+// conversion function to the destination: the candidate exists but is
+// not viable for *this* operand -- most often a non-const conversion
+// function reached through a const object ([over.match.funcs]/5).
+[[nodiscard]] inline std::string unusable_conversion_function_message(const std::string& operand_type_name,
+                                                                      const std::string& class_type_name,
+                                                                      const std::string& destination_type_name) {
+    std::string message{"'"};
+    message += class_type_name;
+    message += "::operator ";
+    message += destination_type_name;
+    message += "' is declared, but no candidate is viable for an operand of type '";
+    message += operand_type_name;
+    message += "' ([over.match.funcs]/5): a conversion function called on a const object shall itself be "
+               "const-qualified";
     return message;
 }
 
@@ -3052,6 +3272,7 @@ inline Function::Function(const Function& other)
       is_override{other.is_override},
       is_pure{other.is_pure},
       is_defaulted{other.is_defaulted},
+      is_explicit{other.is_explicit},
       is_deleted{other.is_deleted},
       expects_out_of_line_definition{other.expects_out_of_line_definition},
       forwards_to{other.forwards_to},
@@ -4446,7 +4667,28 @@ enum class CastKind {
     UnsafePointerConversion,
     // §16.5(1): from `nullptr_t` to a pointer type.
     NullPointerConversion,
+    // [expr.static.cast]/4 with [over.match.conv]: the source has class
+    // type and declares a conversion function to the destination. A
+    // `static_cast` direct-initializes, so an `explicit` one applies
+    // here.
+    UserDefinedConversion,
 };
+
+// [over.match.conv]/1: the conversion function `source_name::operator
+// destination`, or null. `Program::functions` is the only declaration
+// list available at this layer, and the key is ast.cppm's own, so this
+// finds exactly what the passes that emit the call will find.
+[[nodiscard]] inline std::optional<std::size_t> find_conversion_function_index(const Program& program,
+                                                                               const std::string& source_name,
+                                                                               const Type& destination) {
+    std::string key = conversion_function_key(source_name, destination);
+    for (std::size_t i = 0; i < program.functions.size(); i++) {
+        if (program.functions[i].name == key && program.functions[i].params.size() == 1) {
+            return std::optional<std::size_t>{i};
+        }
+    }
+    return std::optional<std::size_t>{};
+}
 
 // `source` is the operand's type, or nullopt when the operand has no
 // inferable type; `target` is the cast's written type. A reference-typed
@@ -4476,6 +4718,16 @@ enum class CastKind {
     const bool source_is_pointerish = source.kind == TypeKind::Pointer || source.kind == TypeKind::FunctionPointer;
     const bool target_is_pointerish = target.kind == TypeKind::Pointer || target.kind == TypeKind::FunctionPointer;
 
+    // [expr.static.cast]/4: `static_cast<T>(e)` direct-initializes an
+    // invented `T t(e)`, which considers `e`'s conversion functions
+    // including the `explicit` ones. Asked before the scalar rules
+    // below: §16.3 governs conversions *between scalar types*, and a
+    // class source is not one, so falling through to them reported "no
+    // conversion between these two types exists" for a class that
+    // declared exactly the conversion asked for.
+    if (source.kind == TypeKind::Named && find_conversion_function_index(program, source.name, target).has_value()) {
+        return CastKind::UserDefinedConversion;
+    }
     // §16.5(1)-(2) and §16.4(5): `nullptr_t` converts to a pointer type
     // and to itself, and to nothing else.
     if (source_is_null_type || target_is_null_type) {
@@ -4562,8 +4814,9 @@ enum class CastKind {
     message += target_name;
     message += "': no conversion between these two types exists. SCPP26 converts between two scalar types (spec ch16 ";
     message += "§16.3(2)), from an enumeration type to an arithmetic or enumeration type (spec ch14 §14.1(2)), and between ";
-    message += "two pointer types (spec ch01 §1(5.2)); a conversion involving a class or struct type is spelled as a ";
-    message += "constructor call or a named member function";
+    message += "two pointer types (spec ch01 §1(5.2)), and from a class type through a conversion function it declares ";
+    message += "([class.conv.fct], [over.match.conv]); a conversion involving a class or struct type is otherwise ";
+    message += "spelled as a constructor call or a named member function";
     return std::unexpected(message);
 }
 

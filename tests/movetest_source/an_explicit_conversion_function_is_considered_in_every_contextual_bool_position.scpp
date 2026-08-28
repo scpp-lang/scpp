@@ -1,0 +1,26 @@
+// The other half of the discriminator: [conv.general]/4 is defined by
+// `bool t(e);`, i.e. direct-initialization, so `explicit` is considered
+// in every one of these positions -- and `static_cast<bool>`
+// ([expr.static.cast]/4) and `bool b{h}` ([dcl.init.list]/3.9) are
+// direct-initialization too.
+import std;
+
+struct Handle {
+    int v;
+    explicit operator bool() const { return this->v != 0; }
+};
+
+int main() {
+    Handle h{1};
+    if (h) { }
+    while (h) { break; }
+    for (int i = 0; h; i = i + 1) { break; }
+    int arm = h ? 1 : 0;
+    if (!h) { }
+    if (h && true) { }
+    if (h || false) { }
+    bool direct{h};
+    bool cast_result = static_cast<bool>(h);
+    if (direct && cast_result) { return arm - 1; }
+    return 1;
+}

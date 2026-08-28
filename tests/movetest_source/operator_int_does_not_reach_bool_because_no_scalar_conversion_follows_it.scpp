@@ -1,0 +1,19 @@
+// spec §16.3(1)/(4): a conversion function to `int` cannot serve a
+// `bool` context, because [over.ics.user]'s second standard conversion
+// sequence would have to be `int`-to-`bool` and §16.3(1) provides no
+// implicit conversion between two distinct scalar types. clang accepts
+// this program; SCPP26 rejects it, by §16.3, and that is the deviation
+// -- not a gap in the conversion mechanism, which the sibling
+// `operator bool` case exercises in the same positions.
+import std;
+
+struct Handle {
+    int v;
+    operator int() const { return this->v; }
+};
+
+int main() {
+    Handle h{1};
+    if (h) { return 0; }
+    return 1;
+}

@@ -1010,6 +1010,27 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         if (args.size() != 1) {
             return std::unexpected(CodegenError("brace-initialization of this member requires exactly one expression", current_loc_));
         }
+        // [dcl.init.list]/3.9: for a destination that is not a class
+        // type and a single initializer-clause, direct-list-initialization
+        // *direct*-initializes -- so `bool b{h}` considers an `explicit`
+        // conversion function where `bool b = h;` does not. Answered here
+        // because this is the only place that still knows the
+        // initialization was written with braces; everything below is
+        // shared with copy-initialization.
+        if (ExprPtr conversion_call = conversion_function_call_for(*args[0], target.type, /*allow_explicit=*/true);
+            conversion_call != nullptr) {
+            auto value_result = codegen_expr(*conversion_call);
+            if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+            llvm::LLVMValueRef value = std::move(value_result).value();
+            auto expected_type_result = to_llvm_type(target.type);
+            if (!expected_type_result.has_value()) return std::unexpected(std::move(expected_type_result).error());
+            if (auto r = check_store_type(value, std::move(expected_type_result).value(), "member initializer");
+                !r.has_value()) {
+                return std::unexpected(std::move(r).error());
+            }
+            create_store(value, target.ptr, target.alignment);
+            return {};
+        }
         return initialize_storage_from_expr(target, *args[0]);
     }
 
@@ -1434,6 +1455,15 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 return codegen_constructed_class_value(target_type.name, ctor_args, converting_ctor);
             }
         }
+        // [over.match.copy]/1: the source may also be a class that
+        // declares a conversion function to the target class type.
+        // Asked after the converting-constructor route above and never
+        // combined with it: [over.best.ics]/4 allows one user-defined
+        // conversion in a sequence, not two.
+        if (ExprPtr conversion_call = conversion_function_call_for(expr, target_type, /*allow_explicit=*/false);
+            conversion_call != nullptr) {
+            return codegen_expr(*conversion_call);
+        }
         // Nothing above produced a value *of the target type*, so nothing
         // may be produced at all. This function's entire contract is "give
         // me a value of `target_type` made from `expr`", and it used to end
@@ -1567,7 +1597,40 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             return i1_to_bool(llvm::LLVMBuildICmp(builder_, llvm::LLVMIntNE,
                 object_ptr, llvm::LLVMConstPointerNull(llvm::LLVMPointerTypeInContext(context_, 0)), "ifacenotnull"));
         }
+        // [conv.general]/4 with [over.match.conv]: a class operand
+        // reaches `bool` through a conversion function. Built once, as
+        // one call node, and emitted once -- `expr` itself is never also
+        // emitted, so the conversion function runs exactly as many times
+        // as the condition is evaluated.
+        if (ExprPtr conversion_call = conversion_function_call_for(expr, contextual_bool_type(),
+                                                                   /*allow_explicit=*/true);
+            conversion_call != nullptr) {
+            return codegen_expr(*conversion_call);
+        }
         return codegen_expr(expr);
+    }
+
+
+    // [over.match.conv]/1: the call `e.operator T()` when `e` has class
+    // type and that class declares a conversion function to `T`, or null
+    // when it does not. The candidate is found by name through
+    // ast.cppm's one key, which is how typechecking found it too -- a
+    // second, independent search here is exactly what would let codegen
+    // emit a call typechecking never saw.
+    [[nodiscard]] ExprPtr Codegen::conversion_function_call_for(const Expr& expr, const Type& destination,
+                                                               bool allow_explicit)
+{
+        std::optional<Type> expr_type = infer_type(expr);
+        if (!expr_type.has_value()) return nullptr;
+        const Type& operand = expr_type->kind == TypeKind::Reference && expr_type->pointee != nullptr
+                                  ? *expr_type->pointee
+                                  : *expr_type;
+        if (operand.kind != TypeKind::Named) return nullptr;
+        if (!is_named_record_type(operand)) return nullptr;
+        const Function* conversion = find_function_def(conversion_function_key(operand.name, destination));
+        if (conversion == nullptr) return nullptr;
+        if (conversion->is_explicit && !allow_explicit) return nullptr;
+        return make_unary_operator_call_expr(expr, conversion_function_method_name(destination), expr.loc);
     }
 
 
@@ -1749,9 +1812,10 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 {
         if (!(llvm::LLVMGetTypeKind(llvm::LLVMTypeOf(v)) == llvm::LLVMIntegerTypeKind && llvm::LLVMGetIntTypeWidth(llvm::LLVMTypeOf(v)) == 8)) {
             return std::unexpected(CodegenError(
-                "expected a 'bool' value here (e.g. an if/while condition, or an '&&'/'||' operand); "
-                "scpp requires an explicit cast for any scalar-to-bool conversion, unlike real C++ "
-                "(spec ch06)",
+                "expected a 'bool' value here (e.g. an if/while condition, or an '&&'/'||' operand): "
+                "spec ch16 §16.3(4) applies no conversion to obtain a 'bool', so a scalar operand must already "
+                "have type 'bool' -- write an explicit 'static_cast<bool>(...)' for a scalar, or declare "
+                "'operator bool' for a class type ([class.conv.fct])",
                 current_loc_));
         }
         return {};
@@ -1965,6 +2029,44 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         if (target_type.kind == TypeKind::Span) {
             return codegen_span_value_for_target(expr, target_type);
         }
+        // [over.match.copy]/1 with [over.ics.user]: an expression of
+        // class type reaches a non-class destination through a
+        // conversion function the class declares. This is
+        // copy-initialization -- every caller of this function is an
+        // initializer, an assignment, an argument or a `return` -- so
+        // only the non-explicit ones are considered ([class.conv.fct]/2);
+        // `static_cast<T>` has its own direct-initializing path.
+        if (ExprPtr conversion_call = conversion_function_call_for(expr, target_type, /*allow_explicit=*/false);
+            conversion_call != nullptr) {
+            return codegen_expr(*conversion_call);
+        }
+        // The same lookup allowing `explicit`: when that is the only
+        // candidate, the reason is [over.match.copy]/1, not "no
+        // conversion exists". check_store_type's own message would
+        // otherwise describe a scalar-to-scalar conversion for a source
+        // that is not a scalar at all, and name a `static_cast` without
+        // saying why the plain spelling was refused.
+        if (conversion_function_call_for(expr, target_type, /*allow_explicit=*/true) != nullptr) {
+            std::optional<Type> source_type = infer_type(expr);
+            std::string source_name =
+                source_type.has_value() ? describe_type_brief(binary_operand_type(*source_type)) : std::string("?");
+            return std::unexpected(CodegenError(
+                explicit_only_conversion_function_message(source_name, describe_type_brief(target_type)), expr.loc));
+        }
+        // A class source with no conversion function at all. Reported
+        // here rather than left to check_store_type, whose message
+        // describes a conversion between two *scalar* types and would
+        // suggest a `static_cast` the cast rules reject for the same
+        // reason -- naming a fix the next diagnostic forbids.
+        if (std::optional<Type> source_type = infer_type(expr); source_type.has_value()) {
+            const Type& source_operand = binary_operand_type(*source_type);
+            if (source_operand.kind == TypeKind::Named && is_named_record_type(source_operand)) {
+                return std::unexpected(CodegenError(
+                    no_user_defined_conversion_message(describe_type_brief(source_operand),
+                                                       describe_type_brief(target_type)),
+                    expr.loc));
+            }
+        }
         return codegen_expr(expr);
     }
 
@@ -1974,7 +2076,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         if (llvm::LLVMTypeOf(value) != expected) {
             return std::unexpected(CodegenError("type mismatch initializing/assigning " + what +
                                 ": scpp has no implicit conversion between distinct scalar types (e.g. "
-                                "bool/char/int are all distinct, spec ch06) -- use an explicit "
+                                "bool/char/int are all distinct, spec ch16 §16.3(1)) -- use an explicit "
                                 "'static_cast<T>(...)' if the conversion is intended",
                 current_loc_));
         }
@@ -2032,7 +2134,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                                 declared +
                                 ", and the returned expression has a different type; scpp has no implicit "
                                 "conversion between distinct types (e.g. int and std::int64_t are distinct, "
-                                "spec ch06) -- use an explicit 'static_cast<T>(...)' if the conversion is intended",
+                                "spec ch16 §16.3(1)) -- use an explicit 'static_cast<T>(...)' if the conversion is "
+                                "intended",
             loc));
     }
 
@@ -2311,6 +2414,20 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                             auto operand_result = codegen_value_for_target(*expr.lhs, source_operand);
                             if (!operand_result.has_value()) return std::unexpected(std::move(operand_result).error());
                             return codegen_scalar_cast(std::move(operand_result).value(), source_operand, expr.type);
+                        }
+                        case CastKind::UserDefinedConversion: {
+                            // [expr.static.cast]/4 direct-initializes,
+                            // so an `explicit` conversion function is
+                            // exactly what this spelling reaches. The
+                            // call node is built once and emitted once:
+                            // `expr.lhs` is never separately emitted, so
+                            // the conversion function runs once.
+                            ExprPtr conversion_call = conversion_function_call_for(*expr.lhs, expr.type,
+                                                                                   /*allow_explicit=*/true);
+                            if (conversion_call == nullptr) {
+                                return std::unexpected(CodegenError("cast operand has no conversion function", current_loc_));
+                            }
+                            return codegen_expr(*conversion_call);
                         }
                         case CastKind::OperandTypeUnknown:
                             break;
@@ -3886,6 +4003,24 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         if (selected == nullptr) {
             std::string lhs_display = lhs_named != nullptr ? describe_type_brief(*lhs_named) : std::string("?");
             std::string rhs_display = rhs_named != nullptr ? describe_type_brief(*rhs_named) : std::string("?");
+            // [expr.log.and]/1, [expr.log.or]/1: both operands are
+            // contextually converted to `bool`, so no `operator&&` is
+            // not the end of the rule either -- the same fall-through
+            // `!` gets above, and to the same one converter.
+            if (expr.binary_op == BinaryOp::And || expr.binary_op == BinaryOp::Or) {
+                bool lhs_converts = !lhs_is_record || conversion_function_call_for(*expr.lhs, contextual_bool_type(),
+                                                                                  /*allow_explicit=*/true) != nullptr;
+                bool rhs_converts = !rhs_is_record || conversion_function_call_for(*expr.rhs, contextual_bool_type(),
+                                                                                  /*allow_explicit=*/true) != nullptr;
+                if (lhs_converts && rhs_converts) return std::optional<llvm::LLVMValueRef>{};
+                std::string spelled = binary_operator_spelling(expr.binary_op);
+                std::string position{"each operand of '"};
+                position += spelled;
+                position += "'";
+                return std::unexpected(CodegenError(
+                    no_contextual_bool_conversion_message(lhs_converts ? rhs_display : lhs_display, position, spelled),
+                    current_loc_));
+            }
             return std::unexpected(CodegenError(
                 no_operator_function_message(binary_operator_spelling(expr.binary_op), lhs_display, rhs_display,
                                              binary_operator_method_name(expr.binary_op), lhs_is_record),
@@ -3969,6 +4104,21 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         std::string key;
         const Function* selected = resolve_unary_operator_function(expr, &key);
         if (selected == nullptr) {
+            // [expr.unary.op]/9: `!`'s operand is contextually converted
+            // to `bool`, so no `operator!` is not the end of the rule --
+            // fall through to the built-in lowering, whose operand goes
+            // through codegen_contextual_bool_value, the one place that
+            // knows how to convert a class operand.
+            if (expr.unary_op == UnaryOp::Not) {
+                if (conversion_function_call_for(*expr.lhs, contextual_bool_type(), /*allow_explicit=*/true) !=
+                    nullptr) {
+                    return std::optional<llvm::LLVMValueRef>{};
+                }
+                return std::unexpected(CodegenError(
+                    no_contextual_bool_conversion_message(describe_type_brief(*operand), "the operand of '!'",
+                                                          std::string{"!"}),
+                    current_loc_));
+            }
             return std::unexpected(CodegenError(
                 no_unary_operator_function_message(unary_operator_spelling(expr.unary_op), describe_type_brief(*operand)),
                 current_loc_));

@@ -1139,6 +1139,12 @@ private:
 
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_contextual_bool_value(const Expr& expr);
 
+    // [over.match.conv]/1: `e.operator T()` when `e`'s class declares a
+    // conversion function to `T`, or null when it does not.
+    // `allow_explicit` is direct-initialization's answer and
+    // copy-initialization's is false ([over.match.copy]/1).
+    [[nodiscard]] ExprPtr conversion_function_call_for(const Expr& expr, const Type& destination, bool allow_explicit);
+
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_contextual_bool_i1(const Expr& expr);
 
     [[nodiscard]] std::expected<std::vector<llvm::LLVMValueRef>, CodegenError> codegen_call_args(const std::vector<ExprPtr>& args, const Function* callee_def,

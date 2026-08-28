@@ -1354,6 +1354,7 @@ private:
             clone.is_pure = method_tmpl.is_pure;
             clone.is_defaulted = method_tmpl.is_defaulted;
             clone.is_deleted = method_tmpl.is_deleted;
+            clone.is_explicit = method_tmpl.is_explicit;
             clone.access = method_tmpl.access;
             clone.return_type = instantiate_type_pattern(method_tmpl.return_type, type_replacements, pack_replacements);
             {
@@ -2977,6 +2978,7 @@ private:
                 clone.is_pure = method_tmpl.is_pure;
                 clone.is_defaulted = method_tmpl.is_defaulted;
                 clone.is_deleted = method_tmpl.is_deleted;
+                clone.is_explicit = method_tmpl.is_explicit;
                 clone.access = method_tmpl.access;
                 clone.return_type = instantiate_type_pattern(method_tmpl.return_type, class_selection.bindings.type_replacements,
                                                              class_selection.bindings.type_pack_replacements);
@@ -3179,6 +3181,7 @@ private:
                 clone.is_pure = method_tmpl.is_pure;
                 clone.is_defaulted = method_tmpl.is_defaulted;
                 clone.is_deleted = method_tmpl.is_deleted;
+                clone.is_explicit = method_tmpl.is_explicit;
                 clone.access = method_tmpl.access;
                 clone.return_type = method_tmpl.return_type;
                 clone.return_lifetime = method_tmpl.return_lifetime;

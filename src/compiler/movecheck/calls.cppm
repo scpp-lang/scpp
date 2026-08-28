@@ -209,6 +209,32 @@ struct SelectedOperator {
                                                                const Body& body, const Signatures& signatures);
 [[nodiscard]] SelectedOperator resolve_unary_operator_call(const Expr& expr, const std::optional<Type>& operand_type,
                                                            const Body& body, const Signatures& signatures);
+// [over.match.conv]/1: the conversion function of `operand`'s class that
+// yields `destination`. `allow_explicit` is direct-initialization's
+// answer ([dcl.init]/16.6, [expr.static.cast]/4) and copy-initialization's
+// is false ([over.match.copy]/1).
+//
+// SCPP26 needs no ranking over a candidate *set* here the way C++26 does:
+// [over.ics.user]'s second standard conversion sequence would be the only
+// thing that could relate a conversion function's return type to a
+// different destination, and §16.3(1)/(3) leave the identity conversion as
+// the only one between scalar types. So exactly one conversion function
+// can ever apply -- the one whose return type is the destination -- and
+// looking it up by name is the whole of [over.match.conv] here.
+[[nodiscard]] SelectedOperator resolve_conversion_function_call(const Expr& operand,
+                                                               const std::optional<Type>& operand_type,
+                                                               const Type& destination, bool allow_explicit,
+                                                               const Body& body, const Signatures& signatures);
+// The same lookup, answering only "does this class declare a conversion
+// function to `destination` that copy-initialization is not allowed to
+// use?" -- so a diagnostic can say `explicit` rather than "no conversion".
+[[nodiscard]] bool has_explicit_only_conversion_function(const std::optional<Type>& operand_type,
+                                                         const Type& destination, const Body& body,
+                                                         const Signatures& signatures);
+[[nodiscard]] const FunctionSignature* find_conversion_function_signature(const std::optional<Type>& operand_type,
+                                                                          const Type& destination, const Body& body,
+                                                                          const Signatures& signatures,
+                                                                          std::string& key_out);
 [[nodiscard]] bool operand_type_needs_an_operator_function(const Type& type, const Body& body);
 [[nodiscard]] Type function_pointer_type_from_signature(const FunctionSignature& sig);
 [[nodiscard]] bool same_function_pointer_shape_ignoring_unsafe(const Type& a, const Type& b);
@@ -865,6 +891,17 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
             find_single_argument_converting_constructor_signature(param_type, arg, body, signatures) != nullptr) {
             return true;
         }
+        // [over.ics.user]'s other half: the *argument* has class type
+        // and reaches the parameter through a conversion function it
+        // declares. Guarded by the same `allow_user_defined_conversion`
+        // as the converting-constructor route above, so [over.best.ics]/4
+        // keeps holding -- neither may chain onto the other.
+        if (allow_user_defined_conversion) {
+            std::string key;
+            const FunctionSignature* conversion =
+                find_conversion_function_signature(arg_type, param_type, body, signatures, key);
+            if (conversion != nullptr && !conversion->is_explicit) return true;
+        }
         return false;
     }
     if (require_usable_class_value_source && is_named_record_type(param_type, body)) {
@@ -1116,6 +1153,18 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
                        (candidates.size() > 1 ? candidate_list : std::string());
             }
             std::optional<Type> actual = infer_expr_type(*call_expr.args[i], body, signatures);
+            // [over.match.copy]/1 excluded the one conversion that
+            // would have made this argument viable. Saying so is not the
+            // same as saying no conversion exists, and the §16.3(3)
+            // message below describes a *scalar* argument, which this
+            // one is not.
+            if (has_explicit_only_conversion_function(actual, param_type, body, signatures)) {
+                return "no overload of '" + display_name + "' matches these argument types: argument " +
+                       std::to_string(i + 1) + ": " +
+                       explicit_only_conversion_function_message(describe_type_brief(*actual),
+                                                                 describe_type_brief(param_type)) +
+                       (candidates.size() > 1 ? candidate_list : std::string());
+            }
             return "no overload of '" + display_name + "' matches these argument types: argument " +
                    std::to_string(i + 1) + " is " +
                    (actual.has_value() ? "'" + describe_type_brief(*actual) + "'" : "a different type") + ", but '" +
@@ -1503,6 +1552,56 @@ void collect_operator_lookup_keys(const std::string& method_name, const std::opt
     return selected;
 }
 
+// [over.match.conv]/1: see the declaration in this file's forward
+// declarations for why a name lookup is the whole of the rule here.
+[[nodiscard]] const FunctionSignature* find_conversion_function_signature(const std::optional<Type>& operand_type,
+                                                                          const Type& destination, const Body& body,
+                                                                          const Signatures& signatures,
+                                                                          std::string& key_out) {
+    if (!operand_type.has_value()) return nullptr;
+    const Type& operand = operator_operand_type(*operand_type);
+    if (operand.kind != TypeKind::Named) return nullptr;
+    if (!is_named_record_type(operand, body)) return nullptr;
+    key_out = conversion_function_key(operand.name, destination);
+    auto it = signatures.find(key_out);
+    if (it == signatures.end()) return nullptr;
+    for (const FunctionSignature& candidate : it->second) {
+        if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
+        if (candidate.param_types.size() != 1) continue;
+        return &candidate;
+    }
+    return nullptr;
+}
+
+[[nodiscard]] SelectedOperator resolve_conversion_function_call(const Expr& operand,
+                                                               const std::optional<Type>& operand_type,
+                                                               const Type& destination, bool allow_explicit,
+                                                               const Body& body, const Signatures& signatures) {
+    SelectedOperator selected{};
+    std::string key;
+    const FunctionSignature* candidate =
+        find_conversion_function_signature(operand_type, destination, body, signatures, key);
+    if (candidate == nullptr) return selected;
+    if (candidate->is_explicit && !allow_explicit) return selected;
+    ExprPtr call = make_unary_operator_call_expr(operand, conversion_function_method_name(destination), operand.loc);
+    CalleeSignature callee{key, 1, std::nullopt};
+    if (const FunctionSignature* sig = resolve_overload(*call, callee, body, signatures); sig != nullptr) {
+        selected.signature = sig;
+        selected.call = std::move(call);
+        selected.param_offset = 1;
+        selected.method_name = std::move(key);
+    }
+    return selected;
+}
+
+[[nodiscard]] bool has_explicit_only_conversion_function(const std::optional<Type>& operand_type,
+                                                         const Type& destination, const Body& body,
+                                                         const Signatures& signatures) {
+    std::string key;
+    const FunctionSignature* candidate =
+        find_conversion_function_signature(operand_type, destination, body, signatures, key);
+    return candidate != nullptr && candidate->is_explicit;
+}
 
 // [over.sub]: `a[i]` with a class operand is `a.operator[](i)`. The
 // declaration syntax exists, so the call has to resolve as well --
@@ -1795,7 +1894,8 @@ std::expected<void, DataflowError> check_nullptr_assignment(const Type& target_t
                                              describe_type_brief(target_type) +
                                              "' from 'nullptr': 'nullptr_t' converts only to a pointer type, to a "
                                              "function pointer type, or to a class type declaring a constructor that "
-                                             "takes it -- never to 'bool' and never to an integer type (spec ch06 §6)",
+                                             "takes it -- never to 'bool' and never to an integer type (spec ch16 "
+                                             "§16.4(5), §16.5(1)-(2))",
                                          loc));
 }
 
@@ -2683,6 +2783,21 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
                     // matches this call ... argument type is 'V'" -- a
                     // consequence of the lie, not the defect.
                     if (operand.has_value() && operand_type_needs_an_operator_function(*operand, body)) {
+                        // [expr.unary.op]/9: `!`'s operand is
+                        // contextually converted to `bool` first, so a
+                        // class operand that declares `operator bool`
+                        // has a built-in candidate after all, and the
+                        // expression's type is `bool` -- reporting "no
+                        // type" for it made `!h ? a : b` say the
+                        // conditional needed a `bool` condition when the
+                        // `!` already produced one.
+                        if (expr.unary_op == UnaryOp::Not) {
+                            std::string key;
+                            if (find_conversion_function_signature(operand, named_type("bool"), body, signatures,
+                                                                   key) != nullptr) {
+                                return named_type("bool");
+                            }
+                        }
                         return std::nullopt;
                     }
                     if (expr.unary_op == UnaryOp::Not) return named_type("bool");
