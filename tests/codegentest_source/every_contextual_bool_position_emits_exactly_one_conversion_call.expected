@@ -1,0 +1,2 @@
+contains: define i8 @Counter_operator_convert_bool(ptr %this)
+count_at_least: 7 | call i8 @Counter_operator_convert_bool(

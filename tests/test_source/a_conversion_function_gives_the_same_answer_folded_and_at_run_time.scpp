@@ -1,0 +1,51 @@
+// The constant evaluator is a 17th implementation of the language and
+// had none of [over.match.conv]: `static_cast<bool>(h)` and `bool b =
+// h;` both reached as_bool/copy_into with a class cell and failed
+// ("expected a boolean constexpr value", "constexpr assignment requires
+// exactly matching types") while the identical expressions ran fine at
+// run time. Every line below prints the folded answer beside the
+// run-time one, so a divergence is a wrong value rather than a
+// still-passing verdict.
+import std;
+
+struct Handle {
+    int v;
+    constexpr operator bool() const { return this->v != 0; }
+};
+
+struct Gate {
+    int v;
+    constexpr explicit operator bool() const { return this->v != 0; }
+};
+
+constexpr bool folded_copy_init() {
+    Handle h{0};
+    bool b = h;
+    return b;
+}
+
+constexpr bool folded_cast() {
+    Gate g{4};
+    return static_cast<bool>(g);
+}
+
+constexpr int folded_condition() {
+    Gate g{0};
+    if (g) { return 1; }
+    while (g) { return 2; }
+    return g ? 3 : 4;
+}
+
+int main() {
+    constexpr bool copy_init = folded_copy_init();
+    constexpr bool cast_result = folded_cast();
+    constexpr int condition = folded_condition();
+    Handle runtime_handle{0};
+    Gate runtime_gate{4};
+    Gate runtime_zero{0};
+    bool runtime_copy_init = runtime_handle;
+    std::print("copyinit {} {}\n", copy_init, runtime_copy_init);
+    std::print("cast {} {}\n", cast_result, static_cast<bool>(runtime_gate));
+    std::print("condition {} {}\n", condition, runtime_zero ? 3 : 4);
+    return 0;
+}

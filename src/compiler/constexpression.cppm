@@ -955,6 +955,8 @@ private:
     const char* stack_base_ = nullptr;
     int string_storage_counter_ = 0;
     std::vector<std::unordered_map<std::string, Binding>> frames_{};
+    // See context_conversion_call.
+    std::string pending_conversion_rejection_{};
     std::unordered_map<std::string, std::vector<std::size_t>> functions_by_name_{};
     std::unordered_map<std::string, std::size_t> classes_by_name_{};
     std::unordered_map<std::string, std::size_t> structs_by_name_{};
@@ -3543,6 +3545,27 @@ private:
         }
         std::string lhs_display = lhs_class != nullptr ? describe_type_brief(*lhs_class) : std::string("?");
         std::string rhs_display = rhs_class != nullptr ? describe_type_brief(*rhs_class) : std::string("?");
+        // [expr.log.and]/1, [expr.log.or]/1: both operands are
+        // contextually converted to `bool`, so no `operator&&` leaves
+        // the built-in candidate, whose operands go through
+        // evaluate_contextual_bool -- the same fall-through codegen and
+        // typechecking take.
+        if (expr.binary_op == BinaryOp::And || expr.binary_op == BinaryOp::Or) {
+            bool lhs_converts = lhs_class == nullptr || conversion_function_call_for(*expr.lhs, *lhs_class,
+                                                                                    contextual_bool_type(),
+                                                                                    /*allow_explicit=*/true) != nullptr;
+            bool rhs_converts = rhs_class == nullptr || conversion_function_call_for(*expr.rhs, *rhs_class,
+                                                                                    contextual_bool_type(),
+                                                                                    /*allow_explicit=*/true) != nullptr;
+            if (lhs_converts && rhs_converts) return std::nullopt;
+            std::string spelled = binary_operator_spelling(expr.binary_op);
+            std::string position{"each operand of '"};
+            position += spelled;
+            position += "'";
+            return std::unexpected(ConstexprError(
+                expr.loc, no_contextual_bool_conversion_message(lhs_converts ? rhs_display : lhs_display, position,
+                                                                spelled)));
+        }
         return std::unexpected(ConstexprError(
             expr.loc, no_operator_function_message(binary_operator_spelling(expr.binary_op), lhs_display, rhs_display,
                                                    method_name, lhs_class != nullptr)));
@@ -3560,6 +3583,84 @@ private:
             return nullptr;
         }
         return &storage;
+    }
+
+    // [over.match.oper]/2 for a unary operator, the counterpart of
+    // evaluate_binary_operator_function above. The binary half got its
+    // dispatch and the unary half did not, so `!h` for a class `h`
+    // declaring `operator!` folded to "expected a boolean constexpr
+    // value" while the same expression at run time called the operator
+    // -- a fold and a run disagreeing, which is a wrong answer at
+    // compile time.
+    [[nodiscard]] std::optional<std::expected<std::shared_ptr<Cell>, ConstexprError>>
+    evaluate_unary_operator_function(const Expr& expr) {
+        if (expr.lhs == nullptr) return std::nullopt;
+        Type operand_storage{};
+        const Type* operand_class = operator_operand_class_type(*expr.lhs, operand_storage);
+        if (operand_class == nullptr) return std::nullopt;
+        std::string method_name = unary_operator_method_name(expr.unary_op);
+        if (!method_name.empty() && functions_by_name_.contains(operand_class->name + "_" + method_name)) {
+            ExprPtr call = make_unary_operator_call_expr(*expr.lhs, method_name, expr.loc);
+            return evaluate_expr(*call);
+        }
+        // [expr.unary.op]/9: `!`'s operand is contextually converted to
+        // `bool`, so a conversion function is the other half of the rule.
+        if (expr.unary_op == UnaryOp::Not) {
+            if (ExprPtr conversion_call =
+                    conversion_function_call_for(*expr.lhs, *operand_class, contextual_bool_type(),
+                                                 /*allow_explicit=*/true);
+                conversion_call != nullptr) {
+                auto converted = evaluate_expr(*conversion_call);
+                if (!converted.has_value()) return std::unexpected(std::move(converted).error());
+                auto bool_result = as_bool(converted.value(), expr.loc);
+                if (!bool_result.has_value()) return std::unexpected(std::move(bool_result).error());
+                return make_bool_cell(!bool_result.value());
+            }
+            return std::unexpected(ConstexprError(
+                expr.loc, no_contextual_bool_conversion_message(describe_type_brief(*operand_class),
+                                                                "the operand of '!'", std::string{"!"})));
+        }
+        if (method_name.empty()) return std::nullopt;
+        return std::unexpected(ConstexprError(
+            expr.loc, no_unary_operator_function_message(unary_operator_spelling(expr.unary_op),
+                                                          describe_type_brief(*operand_class))));
+    }
+
+    // [over.match.conv]/1, through the same ast.cppm key typechecking
+    // and codegen use, so the evaluator cannot select a different
+    // conversion function from the one that runs.
+    [[nodiscard]] ExprPtr conversion_function_call_for(const Expr& operand, const Type& operand_class,
+                                                      const Type& destination, bool allow_explicit) {
+        std::string key = conversion_function_key(operand_class.name, destination);
+        auto it = functions_by_name_.find(key);
+        if (it == functions_by_name_.end() || it->second.empty()) return nullptr;
+        if (program_.functions[it->second[0]].is_explicit && !allow_explicit) return nullptr;
+        return make_unary_operator_call_expr(operand, conversion_function_method_name(destination), operand.loc);
+    }
+
+    // [conv.general]/4: the evaluator's single "make this expression a
+    // condition". A class operand is converted by calling its conversion
+    // function; every other operand is left to as_bool, which is where
+    // §16.3(4)'s "shall be of type bool" is answered.
+    [[nodiscard]] std::expected<bool, ConstexprError> evaluate_contextual_bool(const Expr& expr,
+                                                                              const SourceLocation& loc,
+                                                                              const std::string& position_description) {
+        Type operand_storage{};
+        if (const Type* operand_class = operator_operand_class_type(expr, operand_storage); operand_class != nullptr) {
+            ExprPtr conversion_call = conversion_function_call_for(expr, *operand_class, contextual_bool_type(),
+                                                                   /*allow_explicit=*/true);
+            if (conversion_call == nullptr) {
+                return std::unexpected(ConstexprError(
+                    loc, no_contextual_bool_conversion_message(describe_type_brief(*operand_class),
+                                                               position_description, std::string{})));
+            }
+            auto converted = evaluate_expr(*conversion_call);
+            if (!converted.has_value()) return std::unexpected(std::move(converted).error());
+            return as_bool(converted.value(), loc);
+        }
+        auto value = evaluate_expr(expr);
+        if (!value.has_value()) return std::unexpected(std::move(value).error());
+        return as_bool(value.value(), loc);
     }
 
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_call_expr(const Expr& expr) {
@@ -3885,8 +3986,58 @@ private:
     // expression statement, a condition). Both layers now decide
     // adoption with `scpp.ast`'s `literal_adopts_type`, so they cannot
     // drift apart again.
+    // [over.match.copy]/1 during constant evaluation: the initializer,
+    // argument or `return` operand has class type and the context wants
+    // another type, so the class's own non-explicit conversion function
+    // is what makes it well-formed. Kept in its own callee, not inlined
+    // into evaluate_expr_in_context below, for the reason
+    // ConstexprLimits states at the top of this file: at -O0 a frame is
+    // the sum of all its locals and max_recursion_depth is derived from
+    // a measured per-level cost, so every sub-expression at every level
+    // would otherwise pay for these.
+    // `explicit_only_message` is filled in when the class does declare a
+    // conversion function to the context type and [over.match.copy]/1 is
+    // the only reason it was not selected, so this pass says what
+    // typechecking says rather than "constexpr assignment requires
+    // exactly matching types".
+    // The explicit-only rejection is left in a member rather than
+    // returned through an out-parameter, for the same frame-size reason
+    // this helper exists at all: a `std::string` local in
+    // evaluate_expr_in_context is paid for at every recursion level, and
+    // max_recursion_depth is derived from a *measured* per-level cost
+    // (codegen_test's recursion_budget_is_reachable_at_the_documented_
+    // depth is the proof, and it fails the moment that cost grows).
+    // Written only on the path that immediately reports it, so no
+    // nested evaluation can observe a stale value.
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> report_pending_conversion_rejection(
+        const SourceLocation& loc) {
+        std::string message = std::move(pending_conversion_rejection_);
+        pending_conversion_rejection_.clear();
+        return std::unexpected(ConstexprError(loc, message));
+    }
+
+    [[nodiscard]] ExprPtr context_conversion_call(const Expr& expr, const Type* context_type) {
+        if (context_type == nullptr) return nullptr;
+        if (context_type->kind != TypeKind::Named) return nullptr;
+        Type operand_storage{};
+        const Type* operand_class = operator_operand_class_type(expr, operand_storage);
+        if (operand_class == nullptr) return nullptr;
+        if (operand_class->name == context_type->name) return nullptr;
+        ExprPtr call = conversion_function_call_for(expr, *operand_class, *context_type, /*allow_explicit=*/false);
+        if (call != nullptr) return call;
+        if (conversion_function_call_for(expr, *operand_class, *context_type, /*allow_explicit=*/true) != nullptr) {
+            pending_conversion_rejection_ = explicit_only_conversion_function_message(
+                describe_type_brief(*operand_class), describe_type_brief(*context_type));
+        }
+        return nullptr;
+    }
+
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_expr_in_context(const Expr& expr, const Type* context_type) {
         if (auto result = tick(expr.loc, "evaluating an expression"); !result.has_value()) return std::unexpected(std::move(result).error());
+        if (ExprPtr conversion_call = context_conversion_call(expr, context_type); conversion_call != nullptr) {
+            return evaluate_expr(*conversion_call);
+        }
+        if (!pending_conversion_rejection_.empty()) return report_pending_conversion_rejection(expr.loc);
         if (context_type != nullptr && is_untyped_numeric_literal(expr) &&
             literal_adopts_type(expr, *context_type, scpp::host_pointer_bit_width())) {
             return make_adopted_literal_cell(expr, literal_adoption_target(*context_type));
@@ -3972,9 +4123,8 @@ private:
                 }();
             case ExprKind::Conditional:
                 return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
-                    auto cond_result = evaluate_expr(*expr.lhs);
-                    if (!cond_result.has_value()) return std::unexpected(std::move(cond_result).error());
-                    auto cond_bool = as_bool(cond_result.value(), expr.loc);
+                    auto cond_bool = evaluate_contextual_bool(*expr.lhs, expr.loc,
+                                                             "the condition of a conditional expression");
                     if (!cond_bool.has_value()) return std::unexpected(std::move(cond_bool).error());
                     return cond_bool.value() ? evaluate_expr_in_context(*expr.rhs, context_type)
                                              : evaluate_expr_in_context(*expr.third, context_type);
@@ -4032,6 +4182,25 @@ private:
                     // so `static_cast<char>(200)` was read as the `char`
                     // literal 200 and rejected as an overflow rather than
                     // converted to -56.
+                    // [expr.static.cast]/4 direct-initializes, so a
+                    // class operand reaches the destination through a
+                    // conversion function including an `explicit` one --
+                    // asked before cast_value, whose as_bool/as_integer
+                    // can only fail for a class operand, which is how
+                    // `static_cast<bool>(h)` folded to "expected a
+                    // boolean constexpr value" while the same cast ran
+                    // at run time.
+                    {
+                        Type operand_storage{};
+                        if (const Type* operand_class = operator_operand_class_type(*expr.lhs, operand_storage);
+                            operand_class != nullptr) {
+                            if (ExprPtr conversion_call = conversion_function_call_for(
+                                    *expr.lhs, *operand_class, expr.type, /*allow_explicit=*/true);
+                                conversion_call != nullptr) {
+                                return evaluate_expr(*conversion_call);
+                            }
+                        }
+                    }
                     auto operand_result = evaluate_expr(*expr.lhs);
                     if (!operand_result.has_value()) return std::unexpected(std::move(operand_result).error());
                     return cast_value(expr.type, operand_result.value(), expr.loc);
@@ -4088,27 +4257,19 @@ private:
                     }
                     if (expr.binary_op == BinaryOp::And)
                         return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
-                        auto lhs_result = evaluate_expr(*expr.lhs);
-                        if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
-                        auto lhs_bool = as_bool(lhs_result.value(), expr.loc);
+                        auto lhs_bool = evaluate_contextual_bool(*expr.lhs, expr.loc, "each operand of '&&'");
                         if (!lhs_bool.has_value()) return std::unexpected(std::move(lhs_bool).error());
                         if (!lhs_bool.value()) return make_bool_cell(false);
-                        auto rhs_result = evaluate_expr(*expr.rhs);
-                        if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
-                        auto rhs_bool = as_bool(rhs_result.value(), expr.loc);
+                        auto rhs_bool = evaluate_contextual_bool(*expr.rhs, expr.loc, "each operand of '&&'");
                         if (!rhs_bool.has_value()) return std::unexpected(std::move(rhs_bool).error());
                         return make_bool_cell(rhs_bool.value());
                     }();
                     if (expr.binary_op == BinaryOp::Or)
                         return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
-                        auto lhs_result = evaluate_expr(*expr.lhs);
-                        if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
-                        auto lhs_bool = as_bool(lhs_result.value(), expr.loc);
+                        auto lhs_bool = evaluate_contextual_bool(*expr.lhs, expr.loc, "each operand of '||'");
                         if (!lhs_bool.has_value()) return std::unexpected(std::move(lhs_bool).error());
                         if (lhs_bool.value()) return make_bool_cell(true);
-                        auto rhs_result = evaluate_expr(*expr.rhs);
-                        if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
-                        auto rhs_bool = as_bool(rhs_result.value(), expr.loc);
+                        auto rhs_bool = evaluate_contextual_bool(*expr.rhs, expr.loc, "each operand of '||'");
                         if (!rhs_bool.has_value()) return std::unexpected(std::move(rhs_bool).error());
                         return make_bool_cell(rhs_bool.value());
                     }();
@@ -4142,6 +4303,18 @@ private:
             }();
             case ExprKind::Unary:
             return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+                    // [over.match.oper]/2, asked before any built-in
+                    // lowering below and for exactly the reason the
+                    // binary arm documents: an operand of class type has
+                    // no built-in candidate at all, so reaching
+                    // as_bool/as_integer with one could only ever fail.
+                    if (expr.unary_op == UnaryOp::Not || expr.unary_op == UnaryOp::Neg) {
+                        if (std::optional<std::expected<std::shared_ptr<Cell>, ConstexprError>> operator_result =
+                                evaluate_unary_operator_function(expr);
+                            operator_result.has_value()) {
+                            return std::move(*operator_result);
+                        }
+                    }
                     switch (expr.unary_op) {
                         case UnaryOp::Neg: {
                             auto operand_result = evaluate_expr_in_context(*expr.lhs, context_type);
@@ -4168,9 +4341,7 @@ private:
                             return make_checked_int_cell_as(negated_type, -value, expr.loc);
                         }
                         case UnaryOp::Not: {
-                            auto operand_result = evaluate_expr(*expr.lhs);
-                            if (!operand_result.has_value()) return std::unexpected(std::move(operand_result).error());
-                            auto bool_result = as_bool(operand_result.value(), expr.loc);
+                            auto bool_result = evaluate_contextual_bool(*expr.lhs, expr.loc, "the operand of '!'");
                             if (!bool_result.has_value()) return std::unexpected(std::move(bool_result).error());
                             return make_bool_cell(!bool_result.value());
                         }
@@ -4419,9 +4590,8 @@ private:
                     return ExecOutcome{};
                 }
                 {
-                    auto condition_result = evaluate_expr(*stmt.condition);
-                    if (!condition_result.has_value()) return std::unexpected(std::move(condition_result).error());
-                    auto condition_bool = as_bool(condition_result.value(), stmt.loc);
+                    auto condition_bool = evaluate_contextual_bool(
+                        *stmt.condition, stmt.loc, "the condition of an 'if' or iteration statement");
                     if (!condition_bool.has_value()) return std::unexpected(std::move(condition_bool).error());
                     if (condition_bool.value()) {
                         return execute_stmt(*stmt.then_branch, return_type);
@@ -4435,9 +4605,8 @@ private:
                 return [&, this]() -> std::expected<ExecOutcome, ConstexprError> {
                     int iterations = 0;
                     while (true) {
-                        auto condition_result = evaluate_expr(*stmt.condition);
-                        if (!condition_result.has_value()) return std::unexpected(std::move(condition_result).error());
-                        auto condition_bool = as_bool(condition_result.value(), stmt.loc);
+                        auto condition_bool = evaluate_contextual_bool(
+                            *stmt.condition, stmt.loc, "the condition of an 'if' or iteration statement");
                         if (!condition_bool.has_value()) return std::unexpected(std::move(condition_bool).error());
                         if (!condition_bool.value()) break;
                         ++iterations;

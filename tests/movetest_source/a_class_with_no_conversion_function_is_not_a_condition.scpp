@@ -1,0 +1,18 @@
+// §16.3(4) removes the [conv.bool] standard conversion, and
+// [over.built] provides no candidate with a class operand, so a class
+// declaring nothing has no route to `bool` at all. Rejected in
+// typechecking, where the rule is decided -- it used to reach codegen
+// and be reported there as a *scalar*-to-bool conversion, which
+// described the wrong problem and suggested a `static_cast` the cast
+// rules reject for the same reason.
+import std;
+
+struct Handle {
+    int v;
+};
+
+int main() {
+    Handle h{1};
+    if (h) { return 0; }
+    return 1;
+}

@@ -114,6 +114,14 @@ public:
     bool operator!=(T* other) const {
         return this->ptr_ != other;
     }
+
+    // [unique.ptr.single.observers]/5: `explicit operator bool() const
+    // noexcept` -- what makes `if (p)`, `!p` and `p && q` mean "does
+    // this handle own anything?". `explicit`, so `bool b = p;` stays
+    // ill-formed ([over.match.copy]/1) exactly as in C++.
+    explicit operator bool() const {
+        return this->owns_;
+    }
 };
 
 // The erased pointee is carried as `const void*`, not `void*`. A
@@ -356,6 +364,14 @@ public:
 
     bool operator!=(T* other) const {
         return this->ptr_ != other;
+    }
+
+    // [util.smartptr.shared.obs]/8: `explicit operator bool() const
+    // noexcept` is `get() != nullptr`, the same nullness test
+    // `p != nullptr` already spells.
+    explicit operator bool() const {
+        T* empty{};
+        return this->ptr_ != empty;
     }
 };
 

@@ -1,0 +1,24 @@
+// The IR half of the single-evaluation proof: seven contextual-bool
+// positions, seven calls to the one conversion function, and the
+// receiver is never additionally emitted as a value of its own class
+// type ("a query answered by emitting"). Counted rather than merely
+// present, because a position that emitted the operand *and* the
+// conversion would still contain the call.
+import std;
+
+struct Counter {
+    int v;
+    explicit operator bool() const { return this->v != 0; }
+};
+
+int main() {
+    Counter c{1};
+    if (c) { }
+    while (c) { break; }
+    bool cast_result = static_cast<bool>(c);
+    if (!c) { }
+    if (c && true) { }
+    if (c || false) { }
+    int arm = c ? 1 : 0;
+    return arm - (cast_result ? 1 : 0);
+}

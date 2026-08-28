@@ -1,0 +1,37 @@
+// [conv.general]/4: a contextual conversion to `bool` is a call to a
+// conversion function ([over.match.conv]), and a call runs exactly once
+// per evaluation. A verdict-only test cannot observe that -- the
+// conversion function counts its own invocations, so a position that
+// converted twice (or emitted the operand once and the conversion once
+// more, the "a query answered by emitting" shape) shows up as a wrong
+// number rather than as a still-passing test.
+//
+// Seven positions, seven calls: `if`, `while`, `static_cast`, `!`,
+// `&&`, `||`, `?:`. Cross-checked against clang++-22 -std=c++26 on the
+// same program, which also prints 7.
+import std;
+
+int calls = 0;
+
+struct Counter {
+    int v;
+    explicit operator bool() const {
+        calls = calls + 1;
+        return this->v != 0;
+    }
+};
+
+int main() {
+    Counter c{1};
+    if (c) { }
+    while (c) { break; }
+    bool cast_result = static_cast<bool>(c);
+    if (!c) { }
+    if (c && true) { }
+    if (c || false) { }
+    int arm = c ? 1 : 0;
+    std::print("calls {}\n", calls);
+    std::print("cast {}\n", cast_result);
+    std::print("arm {}\n", arm);
+    return 0;
+}

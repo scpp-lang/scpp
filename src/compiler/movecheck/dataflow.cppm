@@ -81,6 +81,14 @@ namespace scpp {
                 const Signatures& signatures, bool report_errors);
 [[nodiscard]] std::expected<void, DataflowError> check_call_arguments(const Expr& expr, DataflowState& state, const Body& body,
                           const Signatures& signatures, bool report_errors);
+// [over.match.conv]/1: resolves the conversion function that takes
+// `expr` to `destination` and checks the call it stands for -- true when
+// one was selected. Declared here because every boundary that requires a
+// value of a given type asks it, and each of them is defined before the
+// definition below.
+[[nodiscard]] std::expected<bool, DataflowError> check_user_defined_conversion(
+    const Expr& expr, const Type& destination, bool allow_explicit, DataflowState& state, const Body& body,
+    const Signatures& signatures, bool report_errors);
 [[nodiscard]] std::expected<void, DataflowError> apply_reference_argument(const Expr& arg, const Type& param_type, DataflowState& state,
                               BorrowMap& in_call_borrows, const Body& body,
                               const Signatures& signatures, bool report_errors);
@@ -1873,6 +1881,21 @@ struct ConvertingConstructorBinding {
                                         state.current_loc));
                 }
             }
+            // [over.ics.user]: the argument has class type and reaches
+            // the parameter through a conversion function its own class
+            // declares. Checked here, in the pass that decides
+            // viability, so the call codegen will emit was seen by this
+            // one -- and asked for a class-typed parameter too, since
+            // §6.6(1.2) makes the conversion function's own call a fresh
+            // value and the by-value rule below would otherwise reject
+            // the argument for not being one.
+            if (sig != nullptr && param_index < sig->param_types.size()) {
+                auto converted = check_user_defined_conversion(arg, sig->param_types[param_index],
+                                                               /*allow_explicit=*/false, state, body, signatures,
+                                                               report_errors);
+                if (!converted.has_value()) return std::unexpected(std::move(converted).error());
+                if (converted.value()) return {};
+            }
             bool class_value_param =
                 sig != nullptr && param_index < sig->param_types.size() &&
                 is_named_record_type(sig->param_types[param_index], body);
@@ -2304,6 +2327,96 @@ struct ConvertingConstructorBinding {
 // stable per-block states) and once more in the final reporting pass
 // (report_errors=true). Both runs must apply the *same* state mutations so
 // the two phases stay consistent.
+// [conv.general]/4 with [over.match.conv]: the one place typechecking
+// answers "make this expression a condition". Every contextual-bool
+// position -- an `if`/`while` (and so a desugared `for`) condition, a
+// conditional expression's condition, `!`'s operand and each operand of
+// `&&`/`||` -- routes through here, so a class operand cannot be
+// accepted in one of them and rejected in another.
+//
+// Returns true when a conversion function was selected *and checked*: a
+// selected conversion function is an ordinary call ([class.conv.fct]/1),
+// and nothing may be selected without being typechecked, so the call it
+// stands for is checked right here rather than left for codegen to
+// synthesize unseen.
+//
+// Returns false, without error, for every operand §16.3(4) governs
+// instead (a scalar, an ordinary pointer, an interface pointer under
+// §11(11)): those are not conversions at all, and their own positions
+// keep their own checks.
+[[nodiscard]] std::expected<bool, DataflowError> check_user_defined_conversion(
+    const Expr& expr, const Type& destination, bool allow_explicit, DataflowState& state, const Body& body,
+    const Signatures& signatures, bool report_errors) {
+    std::optional<Type> operand_type = infer_expr_type(expr, body, signatures);
+    if (!operand_type.has_value()) return false;
+    const Type& operand = binary_operand_type(*operand_type);
+    if (!is_named_record_type(operand, body)) return false;
+    SelectedOperator selected =
+        resolve_conversion_function_call(expr, operand_type, destination, allow_explicit, body, signatures);
+    if (selected.signature == nullptr) return false;
+    if (auto _r = check_call_arguments(*selected.call, state, body, signatures, report_errors); !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
+    return true;
+}
+
+// [over.match.conv]/1 at a copy-initialization boundary whose
+// destination is a scalar type: a value of class type gets there only
+// through a conversion function, so when none applies the program is
+// ill-formed and this is the pass that says so. Restricted to a scalar
+// destination because that is the whole of what can be decided from the
+// two types alone -- a class destination is constructor overload
+// resolution's question, and a reference/span/pointer destination has
+// its own binding rules.
+[[nodiscard]] std::expected<void, DataflowError> reject_missing_user_defined_conversion(
+    const Expr& expr, const Type& destination, const Body& body, const Signatures& signatures) {
+    if (destination.kind != TypeKind::Named || !is_scalar_type_name(destination.name)) return {};
+    std::optional<Type> source_type = infer_expr_type(expr, body, signatures);
+    if (!source_type.has_value()) return {};
+    const Type& source = binary_operand_type(*source_type);
+    if (source.kind != TypeKind::Named || !is_named_record_type(source, body)) return {};
+    if (has_explicit_only_conversion_function(source_type, destination, body, signatures)) {
+        return std::unexpected(DataflowError(
+            explicit_only_conversion_function_message(describe_type_brief(source), describe_type_brief(destination)),
+            expr.loc));
+    }
+    return std::unexpected(DataflowError(
+        no_user_defined_conversion_message(describe_type_brief(source), describe_type_brief(destination)), expr.loc));
+}
+
+[[nodiscard]] std::expected<bool, DataflowError> apply_contextual_bool_conversion(
+    const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures, bool report_errors,
+    const std::string& position_description, const std::string& alternative_operator) {
+    std::optional<Type> operand_type = infer_expr_type(expr, body, signatures);
+    if (!operand_type.has_value()) return false;
+    const Type& operand = binary_operand_type(*operand_type);
+    if (!is_named_record_type(operand, body)) return false;
+    // Direct-initialization ([conv.general]/4 is defined by `bool t(e);`),
+    // so an `explicit operator bool` is considered here and only excluded
+    // by copy-initialization.
+    auto converted = check_user_defined_conversion(expr, contextual_bool_type(), /*allow_explicit=*/true, state, body,
+                                                   signatures, report_errors);
+    if (!converted.has_value()) return std::unexpected(std::move(converted).error());
+    if (converted.value()) return true;
+    if (!report_errors) return false;
+    // The class does declare `operator bool`, but overload resolution
+    // rejected it for this receiver -- a non-const conversion function
+    // reached through a `const` object, say. Saying "declare
+    // 'X::operator bool'" there would name a fix the program already
+    // applied.
+    std::string key;
+    if (find_conversion_function_signature(operand_type, contextual_bool_type(), body, signatures, key) != nullptr) {
+        return std::unexpected(DataflowError(
+            unusable_conversion_function_message(describe_type_brief(*operand_type), describe_type_brief(operand),
+                                                 std::string{"bool"}),
+            expr.loc));
+    }
+    return std::unexpected(DataflowError(
+        no_contextual_bool_conversion_message(describe_type_brief(operand), position_description,
+                                              alternative_operator),
+        expr.loc));
+}
+
 [[nodiscard]] std::expected<void, DataflowError> apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
                  const Signatures& signatures, bool report_errors) {
     // Refreshed on every call (including each recursive call for a child
@@ -2504,6 +2617,16 @@ struct ConvertingConstructorBinding {
                 if (!diagnosis.has_value()) {
                     return std::unexpected(DataflowError(std::move(diagnosis).error(), state.current_loc));
                 }
+                // [expr.static.cast]/4 direct-initializes, so this
+                // spelling reaches an `explicit` conversion function --
+                // and the call it selects is checked here, in the pass
+                // that selects it, rather than emitted unseen.
+                if (*diagnosis == CastKind::UserDefinedConversion) {
+                    auto converted = check_user_defined_conversion(*expr.lhs, expr.type, /*allow_explicit=*/true, state,
+                                                                   body, signatures, report_errors);
+                    if (!converted.has_value()) return std::unexpected(std::move(converted).error());
+                    return {};
+                }
                 if (*diagnosis == CastKind::UnsafePointerConversion && state.unsafe_depth == 0) {
                     return std::unexpected(DataflowError(
                         "cannot cast '" + describe_type_brief(binary_operand_type(*source_type)) + "' to '" + describe_type_brief(expr.type) +
@@ -2555,6 +2678,18 @@ struct ConvertingConstructorBinding {
                 if (report_errors && operand_type.has_value() &&
                     operand_type_needs_an_operator_function(*operand_type, body) &&
                     !unary_operator_method_name(expr.unary_op).empty()) {
+                    // [expr.unary.op]/9: `!`'s operand is contextually
+                    // converted to `bool`, so failing to find
+                    // `operator!` is not the end of the rule -- a
+                    // conversion function is the other half of it. Every
+                    // other unary operator has no such second half and
+                    // keeps its own message.
+                    if (expr.unary_op == UnaryOp::Not) {
+                        auto converted = apply_contextual_bool_conversion(
+                            *expr.lhs, state, body, signatures, report_errors, "the operand of '!'", std::string{"!"});
+                        if (!converted.has_value()) return std::unexpected(std::move(converted).error());
+                        if (converted.value()) return {};
+                    }
                     return std::unexpected(DataflowError(
                         no_unary_operator_function_message(unary_operator_spelling(expr.unary_op),
                                                            describe_type_brief(*operand_type)),
@@ -2703,9 +2838,16 @@ struct ConvertingConstructorBinding {
                     return std::unexpected(std::move(_r).error());
                 }
                 std::optional<Type> condition_type = infer_expr_type(*expr.lhs, body, signatures);
-                if (!condition_type.has_value() || condition_type->kind != TypeKind::Named ||
-                    condition_type->name != "bool") {
-                    return std::unexpected(DataflowError("conditional operator requires a 'bool' condition", state.current_loc));
+                bool condition_is_bool = condition_type.has_value() && condition_type->kind == TypeKind::Named &&
+                                         condition_type->name == "bool";
+                if (!condition_is_bool) {
+                    auto converted = apply_contextual_bool_conversion(
+                        *expr.lhs, state, body, signatures, report_errors,
+                        "the condition of a conditional expression", std::string{});
+                    if (!converted.has_value()) return std::unexpected(std::move(converted).error());
+                    if (!converted.value()) {
+                        return std::unexpected(DataflowError("conditional operator requires a 'bool' condition", state.current_loc));
+                    }
                 }
                 std::optional<Type> then_type = infer_expr_type(*expr.rhs, body, signatures);
                 std::optional<Type> else_type = infer_expr_type(*expr.third, body, signatures);
@@ -2901,6 +3043,40 @@ struct ConvertingConstructorBinding {
                 bool lhs_is_record = lhs_type.has_value() && operand_type_needs_an_operator_function(*lhs_type, body);
                 bool rhs_is_record = rhs_type.has_value() && operand_type_needs_an_operator_function(*rhs_type, body);
                 if (report_errors && (lhs_is_record || rhs_is_record) && expr.binary_op != BinaryOp::Assign) {
+                    // [expr.log.and]/1 and [expr.log.or]/1: both operands
+                    // of the built-in `&&`/`||` are contextually
+                    // converted to `bool`, so no `operator&&` is not yet
+                    // the end of the rule -- exactly as for `!` above.
+                    // Asked here, after [over.match.oper], and never
+                    // before it: an operator function that exists wins,
+                    // and only then does the built-in candidate apply.
+                    if (expr.binary_op == BinaryOp::And || expr.binary_op == BinaryOp::Or) {
+                        std::string spelled = binary_operator_spelling(expr.binary_op);
+                        std::string position{"each operand of '"};
+                        position += spelled;
+                        position += "'";
+                        auto lhs_converted = apply_contextual_bool_conversion(*expr.lhs, state, body, signatures,
+                                                                             report_errors, position, spelled);
+                        if (!lhs_converted.has_value()) return std::unexpected(std::move(lhs_converted).error());
+                        auto rhs_converted = apply_contextual_bool_conversion(*expr.rhs, state, body, signatures,
+                                                                             report_errors, position, spelled);
+                        if (!rhs_converted.has_value()) return std::unexpected(std::move(rhs_converted).error());
+                        if ((lhs_converted.value() || !lhs_is_record) && (rhs_converted.value() || !rhs_is_record)) {
+                            if (!lhs_is_record) {
+                                if (auto _r = apply_expr(*expr.lhs, false, state, body, signatures, report_errors);
+                                    !_r.has_value()) {
+                                    return std::unexpected(std::move(_r).error());
+                                }
+                            }
+                            if (!rhs_is_record) {
+                                if (auto _r = apply_expr(*expr.rhs, false, state, body, signatures, report_errors);
+                                    !_r.has_value()) {
+                                    return std::unexpected(std::move(_r).error());
+                                }
+                            }
+                            return {};
+                        }
+                    }
                     // [over.built] lists no candidate with a class
                     // operand, so there is nothing left to select: the
                     // program is ill-formed. Reporting it here is the
@@ -3845,6 +4021,29 @@ struct ConvertingConstructorBinding {
                     // `std::string s = "hi";` ill-formed while the very
                     // same conversion was accepted as a call argument and
                     // as a `return` operand.
+                    // [over.ics.user]'s other half at this same
+                    // boundary: the *source* has class type and the
+                    // destination does not, so the source's own
+                    // conversion function is what makes the
+                    // initialization well-formed. Copy-initialization,
+                    // so only the non-explicit ones.
+                    {
+                        auto converted = check_user_defined_conversion(*stmt.expr, *local_type,
+                                                                       /*allow_explicit=*/false, state, body,
+                                                                       signatures, report_errors);
+                        if (!converted.has_value()) return std::unexpected(std::move(converted).error());
+                        if (converted.value()) {
+                            reinitialize_place(state.locals, whole_local_place(stmt.local));
+                            return {};
+                        }
+                        if (report_errors) {
+                            if (auto _r = reject_missing_user_defined_conversion(*stmt.expr, *local_type, body,
+                                                                                 signatures);
+                                !_r.has_value()) {
+                                return std::unexpected(std::move(_r).error());
+                            }
+                        }
+                    }
                     auto init_converting_ctor =
                         resolve_converting_constructor_binding(*local_type, *stmt.expr, state, body, signatures, report_errors);
                     if (!init_converting_ctor.has_value()) {
@@ -3914,6 +4113,28 @@ struct ConvertingConstructorBinding {
                 return {};
             }
 
+            // [over.match.copy]/1 at a non-class destination: a
+            // class-typed initializer reaches it only through a
+            // conversion function, and the call that conversion stands
+            // for is checked here rather than synthesized unseen in
+            // codegen. Placed on this path as well as the record-typed
+            // one above so `bool b = h;` and `Handle g = h;` are decided
+            // by the same rule.
+            if (local_type != nullptr && !is_named_record_type(*local_type, body)) {
+                auto converted = check_user_defined_conversion(*stmt.expr, *local_type, /*allow_explicit=*/false, state,
+                                                              body, signatures, report_errors);
+                if (!converted.has_value()) return std::unexpected(std::move(converted).error());
+                if (converted.value()) {
+                    reinitialize_place(state.locals, whole_local_place(stmt.local));
+                    return {};
+                }
+                if (report_errors) {
+                    if (auto _r = reject_missing_user_defined_conversion(*stmt.expr, *local_type, body, signatures);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
+            }
             if (auto _r = apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body,
                        signatures, report_errors); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
@@ -4041,6 +4262,20 @@ struct ConvertingConstructorBinding {
                     /*report_errors=*/true);
                 !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
+            }
+            // [stmt.if]/2, [stmt.while]/2: the condition is contextually
+            // converted to `bool`. A class-typed condition is that
+            // conversion's only case here (§16.3(4) leaves every other
+            // operand having to be a `bool` already), and the call it
+            // selects has to be checked in this pass rather than
+            // synthesized unchecked in codegen.
+            if (term.kind == TerminatorKind::Branch) {
+                auto converted = apply_contextual_bool_conversion(*term.condition, state, body, signatures,
+                                                                  /*report_errors=*/true,
+                                                                  "the condition of an 'if' or iteration statement",
+                                                                  std::string{});
+                if (!converted.has_value()) return std::unexpected(std::move(converted).error());
+                if (converted.value()) return {};
             }
             return apply_expr(*term.condition, false, state, body, signatures, /*report_errors=*/true);
         case TerminatorKind::Return: {
@@ -4357,6 +4592,22 @@ struct ConvertingConstructorBinding {
             // Without this, only a same-type source could ever be
             // returned, even though the exact same conversion is already
             // accepted when passed as a call *argument*.
+            // The `return` boundary's own [over.ics.user] half: a
+            // class-typed operand reaching a non-class return type
+            // through a conversion function ([over.match.copy]/1, so
+            // non-explicit only).
+            if (!return_is_class_value) {
+                auto converted = check_user_defined_conversion(*term.return_value, fn.return_type,
+                                                               /*allow_explicit=*/false, state, body, signatures,
+                                                               /*report_errors=*/true);
+                if (!converted.has_value()) return std::unexpected(std::move(converted).error());
+                if (converted.value()) return {};
+                if (auto _r = reject_missing_user_defined_conversion(*term.return_value, fn.return_type, body,
+                                                                     signatures);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
             const FunctionSignature* return_converting_ctor = nullptr;
             if (return_is_class_value) {
                 auto binding = resolve_converting_constructor_binding(fn.return_type, *term.return_value, state, body, signatures,

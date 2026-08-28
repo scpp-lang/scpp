@@ -1,0 +1,19 @@
+// [over.match.copy]/1 with [class.conv.fct]/2: copy-initialization
+// considers only the non-explicit conversion functions. This is the
+// discriminator that tells "the conversion mechanism exists" from "this
+// position was made to accept anything": the same class is accepted in
+// every contextual-bool position (see the `ok` sibling case) and
+// rejected here.
+import std;
+
+struct Handle {
+    int v;
+    explicit operator bool() const { return this->v != 0; }
+};
+
+int main() {
+    Handle h{1};
+    bool b = h;
+    if (b) { return 0; }
+    return 1;
+}

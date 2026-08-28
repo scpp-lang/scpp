@@ -1,0 +1,24 @@
+// A verdict-only cell cannot see a *wrong* conversion: selecting the
+// wrong one, or ignoring the conversion function's own answer, still
+// compiles. `Flag::operator bool` deliberately reports `v == 0`, the
+// opposite of what a nullness-style built-in test would say, so every
+// position below prints the branch it actually took.
+import std;
+
+struct Flag {
+    int v;
+    operator bool() const { return this->v == 0; }
+};
+
+int main() {
+    Flag zero{0};
+    Flag one{1};
+    std::print("if {}\n", zero ? 1 : 2);
+    std::print("not {}\n", !zero ? 1 : 2);
+    std::print("and {}\n", (zero && one) ? 1 : 2);
+    std::print("or {}\n", (one || zero) ? 1 : 2);
+    bool copy_initialized = zero;
+    std::print("copyinit {}\n", copy_initialized);
+    std::print("cast {}\n", static_cast<bool>(one));
+    return 0;
+}

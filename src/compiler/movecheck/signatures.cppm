@@ -41,6 +41,11 @@ struct FunctionSignature {
     // ill-formed -- so this must travel with the signature rather than
     // remove the candidate from the set.
     bool is_deleted = false;
+    // [class.conv.ctor]/2, [class.conv.fct]/2: an explicit converting
+    // entity is considered by direct-initialization and not by
+    // copy-initialization, so this has to reach overload resolution
+    // rather than stay behind on the Function.
+    bool is_explicit = false;
     std::string display_name;
 };
 
@@ -1477,6 +1482,7 @@ struct ConstructedOwner {
         sig.receiver_ref_qualifier = fn.receiver_ref_qualifier;
         sig.is_generic_template = fn.is_generic_template;
         sig.is_deleted = fn.is_deleted;
+        sig.is_explicit = fn.is_explicit;
         sig.display_name = fn.name;
         std::vector<FunctionSignature>& overloads = signatures[fn.name];
         for (const FunctionSignature& existing : overloads) {
