@@ -66,6 +66,17 @@ namespace scpp {
                              const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> apply_deref(const Expr& expr, const DataflowState& state, const Body& body, const Signatures& signatures,
                  bool report_errors);
+// A form-based rejection ("this variable can only be initialized
+// via ...") describes the *shape* of an initializer, and so speaks
+// last: if the initializer expression is itself ill-formed, its own
+// diagnosis names the actual defect. `V b = -a;` with no
+// `V::operator-` reported "no constructor of 'V' matches this call",
+// a consequence of the missing operator rather than the missing
+// operator. Ask the expression first, against a scratch state so the
+// probe cannot perturb the real one.
+[[nodiscard]] std::optional<DataflowError> diagnose_expression_itself(const Expr& expr, const DataflowState& state,
+                                                                      const Body& body, const Signatures& signatures);
+
 [[nodiscard]] std::expected<void, DataflowError> apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
                 const Signatures& signatures, bool report_errors);
 [[nodiscard]] std::expected<void, DataflowError> check_call_arguments(const Expr& expr, DataflowState& state, const Body& body,
@@ -136,19 +147,6 @@ namespace scpp {
     const GlobalVar* global = find_visible_global_for_name(name, explicit_global_qualification, body);
     if (global == nullptr || global->decl == nullptr) return std::nullopt;
     return global->decl->type;
-}
-
-[[nodiscard]] bool is_string_named_type(const Type& type) {
-    return type.kind == TypeKind::Named && (type.name == "std::string" || type.name == "string");
-}
-
-[[nodiscard]] bool is_const_char_pointer_type(const Type& raw_type) {
-    // A string literal's type is an array of `const char` ([lex.string]),
-    // and decays to `const char*` -- the two are indistinguishable at
-    // every use this predicate guards, so ask about the decayed type.
-    Type type = decay_array_to_pointer(raw_type);
-    return type.kind == TypeKind::Pointer && type.pointee != nullptr && type.pointee->kind == TypeKind::Named &&
-           type.pointee->name == "char" && !type.is_mutable_pointee;
 }
 
 [[nodiscard]] bool is_nullptr_literal_expr(const Expr& expr) {
@@ -345,12 +343,7 @@ namespace scpp {
     std::optional<Type> lhs_type = infer_expr_type(*expr.lhs, body, signatures);
     std::optional<Type> rhs_type = infer_expr_type(*expr.rhs, body, signatures);
     if (!lhs_type.has_value() || !rhs_type.has_value()) return {};
-    const Type& lhs_operand = binary_operand_type(*lhs_type);
-    const Type& rhs_operand = binary_operand_type(*rhs_type);
-    bool string_add_assign =
-        expr.binary_op == BinaryOp::AddAssign && is_string_named_type(lhs_operand) &&
-        (is_const_char_pointer_type(rhs_operand) || is_string_named_type(rhs_operand));
-    if (!string_add_assign) {
+    {
         Expr arithmetic_check{};
         arithmetic_check.binary_op = compound_base_operator(expr.binary_op);
         arithmetic_check.lhs = deep_clone_expr(*expr.lhs);
@@ -428,7 +421,19 @@ namespace scpp {
     bool lhs_is_enum = lhs_type.has_value() && is_enum_type(binary_operand_type(*lhs_type), body.program);
     bool rhs_is_enum = rhs_type.has_value() && is_enum_type(binary_operand_type(*rhs_type), body.program);
     if ((lhs_is_enum || rhs_is_enum) && expr.binary_op != BinaryOp::Eq && expr.binary_op != BinaryOp::Ne) {
-        return std::unexpected(DataflowError("enum class values only support '==' and '!=' in this version", loc));
+        // §14.1(3)/(5) adopt [expr.arith.conv] for *integral* types
+        // only, so a scoped enumeration is never promoted to one, and
+        // [over.built] offers no candidate for an enumeration operand
+        // beyond the equality and relational ones. The message used to
+        // say "in this version", describing the implementation instead
+        // of the program.
+        std::string _msg_enum_operator{"no operator for '"};
+        _msg_enum_operator += binary_operator_spelling(expr.binary_op);
+        _msg_enum_operator += "' on a scoped enumeration: §14.1(3)/(5) adopt the usual arithmetic conversions for "
+                              "integral types only, so an enumerator is never converted to one -- write "
+                              "'scpp::to_underlying(e)' (or a 'static_cast' to the underlying type) to operate on "
+                              "its value";
+        return std::unexpected(DataflowError(_msg_enum_operator, loc));
     }
     bool arithmetic_op = expr.binary_op == BinaryOp::Add || expr.binary_op == BinaryOp::Sub || expr.binary_op == BinaryOp::Mul ||
                          expr.binary_op == BinaryOp::Div;
@@ -1684,6 +1689,16 @@ struct ConvertingConstructorBinding {
         }
     }
     std::string callee_display = expr.name;
+    // An operator function reaches every diagnostic through the call
+    // node [over.match.oper]/2 rewrote the operator expression into, so
+    // it must be named the way the program spelled it -- `operator+`,
+    // not the internal `operator_plus`.
+    std::string _operator_lookup_name{"_"};
+    _operator_lookup_name += expr.name;
+    if (std::string operator_spelled = operator_function_display_spelling(_operator_lookup_name);
+        !operator_spelled.empty()) {
+        callee_display = operator_spelled;
+    }
     if (callee_display.empty()) {
         if (expr.lhs && expr.lhs->kind == ExprKind::Identifier) {
             callee_display = expr.lhs->name;
@@ -2518,6 +2533,34 @@ struct ConvertingConstructorBinding {
                 }
                 return {};
             }
+            {
+                // [over.match.oper]/2: a unary operator with a class
+                // operand is an operator function call. `-v`, `!v`,
+                // `++v` all went straight to the built-in rules -- `++`
+                // and `--` said "must be a builtin numeric lvalue" and
+                // `-`/`!` fell through to a type mismatch further out,
+                // so a class that *declared* the operator was rejected
+                // just the same. Ask before applying the built-in rule,
+                // for every unary operator that has one.
+                std::optional<Type> operand_type = infer_expr_type(*expr.lhs, body, signatures);
+                SelectedOperator selected = resolve_unary_operator_call(expr, operand_type, body, signatures);
+                if (selected.signature != nullptr) {
+                    if (auto _r = apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures,
+                                             report_errors);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                    return check_call_arguments(*selected.call, state, body, signatures, report_errors);
+                }
+                if (report_errors && operand_type.has_value() &&
+                    operand_type_needs_an_operator_function(*operand_type, body) &&
+                    !unary_operator_method_name(expr.unary_op).empty()) {
+                    return std::unexpected(DataflowError(
+                        no_unary_operator_function_message(unary_operator_spelling(expr.unary_op),
+                                                           describe_type_brief(*operand_type)),
+                        expr.loc));
+                }
+            }
             if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec ||
                 expr.unary_op == UnaryOp::PostInc || expr.unary_op == UnaryOp::PostDec) {
                 return validate_increment_decrement_expr(expr, state, body, signatures, report_errors);
@@ -2835,54 +2878,53 @@ struct ConvertingConstructorBinding {
                 }
                 return {};
             }
-            if (is_supported_compound_assignment(expr.binary_op)) {
-                return validate_compound_assignment_expr(expr, state, body, signatures, report_errors);
-            }
-            if (expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne) {
+            // [over.match.oper]/2: an operator expression whose
+            // operands include a class type is a call to an operator
+            // function. This used to be written for `==`/`!=` alone --
+            // every other operator fell past it into the built-in
+            // arithmetic path, where a class operand was silently
+            // accepted and lowered to integer arithmetic on the object's
+            // bytes. Every operator now asks the same question, through
+            // the same resolver codegen uses.
+            {
                 std::optional<Type> lhs_type = infer_expr_type(*expr.lhs, body, signatures);
                 std::optional<Type> rhs_type = infer_expr_type(*expr.rhs, body, signatures);
-                const Type* lhs_named =
-                    lhs_type.has_value() ? &(lhs_type->kind == TypeKind::Reference && lhs_type->pointee ? *lhs_type->pointee
-                                                                                                         : *lhs_type)
-                                         : nullptr;
-                const Type* rhs_named =
-                    rhs_type.has_value() ? &(rhs_type->kind == TypeKind::Reference && rhs_type->pointee ? *rhs_type->pointee
-                                                                                                         : *rhs_type)
-                                         : nullptr;
-                auto maybe_check_equality_overload = [&](const Expr& receiver_expr, const Expr& arg_expr,
-                                                         const Type* receiver_named) -> std::expected<bool, DataflowError> {
-                    if (receiver_named == nullptr || receiver_named->kind != TypeKind::Named) return false;
-                    std::string overload_name = receiver_named->name + "_" + equality_operator_method_name(expr.binary_op);
-                    if (!signatures.contains(overload_name)) return false;
-                    ExprPtr overload_call =
-                        make_overloaded_equality_call_expr(receiver_expr, arg_expr, expr.binary_op, expr.loc);
-                    if (auto _r = check_call_arguments(*overload_call, state, body, signatures, report_errors); !_r.has_value()) {
+                SelectedOperator operator_call =
+                    resolve_binary_operator_call(expr, lhs_type, rhs_type, body, signatures);
+                if (operator_call.signature != nullptr) {
+                    if (auto _r = check_call_arguments(*operator_call.call, state, body, signatures, report_errors);
+                        !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
-                    return true;
-                };
-                auto _lhs_overload = maybe_check_equality_overload(*expr.lhs, *expr.rhs, lhs_named);
-                if (!_lhs_overload.has_value()) return std::unexpected(std::move(_lhs_overload).error());
-                if (_lhs_overload.value()) return {};
-                auto _rhs_overload = maybe_check_equality_overload(*expr.rhs, *expr.lhs, rhs_named);
-                if (!_rhs_overload.has_value()) return std::unexpected(std::move(_rhs_overload).error());
-                if (_rhs_overload.value()) return {};
-                bool lhs_is_record = lhs_named != nullptr && lhs_named->kind == TypeKind::Named &&
-                                     body.program != nullptr &&
-                                     (find_class_def(*body.program, lhs_named->name) != nullptr ||
-                                      find_struct_def(*body.program, lhs_named->name) != nullptr);
-                bool rhs_is_record = rhs_named != nullptr && rhs_named->kind == TypeKind::Named &&
-                                     body.program != nullptr &&
-                                     (find_class_def(*body.program, rhs_named->name) != nullptr ||
-                                      find_struct_def(*body.program, rhs_named->name) != nullptr);
-                if (report_errors && (lhs_is_record || rhs_is_record)) {
-                    std::string receiver_name = lhs_is_record ? lhs_named->name : rhs_named->name;
-                    std::string receiver_side = lhs_is_record ? "left" : "right";
-                    return std::unexpected(DataflowError("operator '" + std::string(expr.binary_op == BinaryOp::Eq ? "==" : "!=") +
-                                            "' requires a matching overloaded member operator on " + receiver_side +
-                                            " operand type '" + receiver_name + "'",
-                                        state.current_loc));
+                    return {};
                 }
+                bool lhs_is_record = lhs_type.has_value() && operand_type_needs_an_operator_function(*lhs_type, body);
+                bool rhs_is_record = rhs_type.has_value() && operand_type_needs_an_operator_function(*rhs_type, body);
+                if (report_errors && (lhs_is_record || rhs_is_record) && expr.binary_op != BinaryOp::Assign) {
+                    // [over.built] lists no candidate with a class
+                    // operand, so there is nothing left to select: the
+                    // program is ill-formed. Reporting it here is the
+                    // whole point -- falling through produced
+                    // `llvm.sadd.with.overflow` on a class value, an
+                    // invalid-IR internal error at best and a wrong
+                    // answer at worst.
+                    if (auto _r = apply_expr(*expr.lhs, false, state, body, signatures, report_errors); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                    if (auto _r = apply_expr(*expr.rhs, false, state, body, signatures, report_errors); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                    std::string lhs_name = lhs_type.has_value() ? describe_type_brief(*lhs_type) : std::string("?");
+                    std::string rhs_name = rhs_type.has_value() ? describe_type_brief(*rhs_type) : std::string("?");
+                    std::string method_name = binary_operator_method_name(expr.binary_op);
+                    return std::unexpected(DataflowError(
+                        no_operator_function_message(binary_operator_spelling(expr.binary_op), lhs_name, rhs_name,
+                                                     method_name, lhs_is_record),
+                        state.current_loc));
+                }
+            }
+            if (is_supported_compound_assignment(expr.binary_op)) {
+                return validate_compound_assignment_expr(expr, state, body, signatures, report_errors);
             }
             if (auto _r = apply_expr(*expr.lhs, false, state, body, signatures, report_errors); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
@@ -2978,6 +3020,20 @@ struct ConvertingConstructorBinding {
         }
 
         case ExprKind::Subscript:
+            {
+                // [over.sub]: a class-typed base means `a[i]` is a call
+                // to `a.operator[](i)`, checked like any other call.
+                std::optional<Type> base_type = infer_expr_lvalue_type(*expr.lhs, body, signatures);
+                SelectedOperator selected = resolve_subscript_operator_call(expr, base_type, body, signatures);
+                if (selected.signature != nullptr) {
+                    if (auto _r = apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures,
+                                             report_errors);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                    return check_call_arguments(*selected.call, state, body, signatures, report_errors);
+                }
+            }
             if (report_errors) {
                 if (std::optional<Place> place = tracked_place_of(expr, state, body); place.has_value()) {
                     LocalState place_state = lookup(state.locals, *place);
@@ -3038,6 +3094,17 @@ struct ConvertingConstructorBinding {
             return {};
         }
     }
+}
+
+[[nodiscard]] std::optional<DataflowError> diagnose_expression_itself(const Expr& expr, const DataflowState& state,
+                                                                      const Body& body, const Signatures& signatures) {
+    DataflowState scratch = state;
+    if (auto probe = apply_expr(expr, /*is_move_target_context=*/false, scratch, body, signatures,
+                                /*report_errors=*/true);
+        !probe.has_value()) {
+        return std::move(probe).error();
+    }
+    return std::nullopt;
 }
 
 // Handles a `BindReference` MIR statement -- `T& r = place;` /
@@ -3690,6 +3757,11 @@ struct ConvertingConstructorBinding {
                     return {};
                 }
                 if (report_errors && state.locals.contains(whole_local_place(stmt.local))) {
+                    if (std::optional<DataflowError> own =
+                            diagnose_expression_itself(*stmt.expr, state, body, signatures);
+                        own.has_value()) {
+                        return std::unexpected(std::move(*own));
+                    }
                     return std::unexpected(DataflowError(
                         std::string(record_keyword((*local_type).name, *body.program)) + " '" +
                                          (*local_type).name + "'-typed variable '" + target_name +
@@ -3799,6 +3871,11 @@ struct ConvertingConstructorBinding {
                             // Say which rule it failed -- no viable candidate
                             // or an ambiguity -- rather than re-listing every
                             // initializer shape the language has.
+                            if (std::optional<DataflowError> own =
+                                    diagnose_expression_itself(*stmt.expr, state, body, signatures);
+                                own.has_value()) {
+                                return std::unexpected(std::move(*own));
+                            }
                             std::vector<ExprPtr> init_args;
                             init_args.push_back(deep_clone_expr(*stmt.expr));
                             if (std::optional<std::string> failure = describe_constructor_selection_failure(

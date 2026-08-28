@@ -1,0 +1,36 @@
+// A verdict-only cell cannot observe *selection*: two viable operator
+// functions differing only in const-qualification, or in parameter type,
+// must be told apart by the value they produce. Non-member operator
+// functions participate too ([over.match.oper]/2.2), including the
+// `literal @ class` direction a member can never provide.
+import std;
+
+class V {
+public:
+    virtual ~V() = default;
+    int a = 0;
+    V() { return; }
+    int operator+(const V& o) const { return 100 + this.a + o.a; }
+    int operator+(int n) const { return 200 + this.a + n; }
+};
+
+class W {
+public:
+    virtual ~W() = default;
+    int a = 0;
+    W() { return; }
+};
+
+int operator+(const W& l, const W& r) { return 300 + l.a + r.a; }
+int operator+(int l, const W& r) { return 400 + l + r.a; }
+int operator-(const W& l, const W& r) { return 500 + l.a - r.a; }
+
+int main() {
+    V v{}; V u{};
+    v.a = 5; u.a = 6;
+    std::print("{} {}\n", v + u, v + 7);
+    W w{}; W x{};
+    w.a = 1; x.a = 2;
+    std::print("{} {} {}\n", w + x, 9 + w, w - x);
+    return 0;
+}

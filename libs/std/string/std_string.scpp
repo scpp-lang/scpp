@@ -149,13 +149,20 @@ public:
     // It returns `const char&` only: this class hands out its bytes
     // through the C wrapper's `c_str()`, whose buffer is invalidated by
     // the next append(), so a mutable reference into it would be a handle
-    // SCPP26 cannot check. (`operator[]` is absent because SCPP26 has no
-    // syntax to declare a subscript operator.)
+    // SCPP26 cannot check -- which is why `operator[]` below is also
+    // const-only rather than the two overloads real std::string has.
     const char& at(size_t index) const {
         if (index >= this->length()) std::abort();
         [[scpp::unsafe]] {
             return this->c_str()[index];
         }
+    }
+
+    // [string.access]: `s[i]` is the unchecked spelling in C++; here it
+    // is the same checked access `at` performs, for the same
+    // buffer-lifetime reason given above.
+    const char& operator[](size_t index) const {
+        return this->at(index);
     }
 
     // std::string::clear(): empties this string's content in place,
@@ -190,6 +197,46 @@ public:
     void append(const string& s) {
         this->append(s.c_str());
         return;
+    }
+
+    // [string.op.append]: `s += x`. These are the operator functions the
+    // language selects for `+=` on a std::string; before they existed,
+    // codegen carried a hard-coded rewrite of `std::string += ...` into
+    // `.append(...)`, which is the shape of compensation this library
+    // declaration replaces.
+    string& operator+=(const char* s) {
+        this->append(s);
+        return *this;
+    }
+
+    string& operator+=(const string& s) {
+        this->append(s.c_str());
+        return *this;
+    }
+
+    string& operator+=(char c) {
+        this->push_back(c);
+        return *this;
+    }
+
+    // [string.op.plus]: `s + x` yields a new string, leaving both
+    // operands untouched.
+    string operator+(const char* s) const {
+        string result{this->c_str()};
+        result.append(s);
+        return result;
+    }
+
+    string operator+(const string& s) const {
+        string result{this->c_str()};
+        result.append(s.c_str());
+        return result;
+    }
+
+    string operator+(char c) const {
+        string result{this->c_str()};
+        result.push_back(c);
+        return result;
     }
 
     // True if this string's content equals `s` byte-for-byte.
@@ -293,6 +340,24 @@ public:
         return this->substr(pos, this->length());
     }
 };
+
+// [string.op.plus]/1: `"literal" + s`. A non-member operator function,
+// because the left operand is not a std::string and so has no member
+// operator to find. It is reached from outside namespace std by
+// [basic.lookup.argdep]: std::string's namespace is associated with the
+// call.
+export string operator+(const char* lhs, const string& rhs) {
+    string result{lhs};
+    result.append(rhs.c_str());
+    return result;
+}
+
+export string operator+(char lhs, const string& rhs) {
+    string result{""};
+    result.push_back(lhs);
+    result.append(rhs.c_str());
+    return result;
+}
 
 // std::to_string(std::int64_t)/std::to_string(std::size_t): formats an
 // integer value as a decimal std::string, mirroring real C++'s

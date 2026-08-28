@@ -245,6 +245,11 @@ namespace {
                         }
                     }
                 }
+                if (const Function* selected = resolve_subscript_operator_function(expr); selected != nullptr) {
+                    return selected->return_type.kind == TypeKind::Reference && selected->return_type.pointee
+                               ? member_access_type(*selected->return_type.pointee, !selected->return_type.is_mutable_ref)
+                               : selected->return_type;
+                }
                 return std::nullopt;
             }
 
@@ -329,7 +334,31 @@ namespace {
             // pairing is legal in the first place).
             case ExprKind::Cast: return expr.type;
 
-            case ExprKind::Binary:
+            case ExprKind::Binary: {
+                // [over.match.oper]/2: with a class operand the
+                // expression is a call, so its type is the selected
+                // operator function's return type. Asked before the
+                // built-in arms, which would otherwise report the left
+                // operand's type for `a + b` and `bool` for `a < b`
+                // regardless of what the operator function returns --
+                // and movecheck, which now asks the same question,
+                // would have disagreed with codegen about the type of
+                // the very same expression.
+                //
+                // The two operand types are inferred exactly once here
+                // and shared with the built-in arms below, for the 2^n
+                // reason the arithmetic arm documents.
+                std::optional<Type> binary_lhs_type;
+                std::optional<Type> binary_rhs_type;
+                if (expr.lhs != nullptr) binary_lhs_type = infer_type(*expr.lhs);
+                if (expr.rhs != nullptr) binary_rhs_type = infer_type(*expr.rhs);
+                if (expr.lhs != nullptr && expr.rhs != nullptr) {
+                    if (const Function* op =
+                            resolve_binary_operator_function(expr, binary_lhs_type, binary_rhs_type);
+                        op != nullptr) {
+                        return op->return_type;
+                    }
+                }
                 switch (expr.binary_op) {
                     case BinaryOp::Add:
                     case BinaryOp::Sub:
@@ -350,16 +379,15 @@ namespace {
                         // 2^22. movecheck's infer_expr_type had the same
                         // shape and is corrected the same way.
                         if (expr.binary_op != BinaryOp::Add && expr.binary_op != BinaryOp::Sub) {
-                            return infer_type(*expr.lhs);
+                            return binary_lhs_type;
                         }
-                        std::optional<Type> lhs = infer_type(*expr.lhs);
-                        std::optional<Type> rhs = infer_type(*expr.rhs);
-                        if (lhs.has_value() && rhs.has_value()) {
-                            if (std::optional<Type> result = pointer_arithmetic_result_type(expr.binary_op, *lhs, *rhs)) {
+                        if (binary_lhs_type.has_value() && binary_rhs_type.has_value()) {
+                            if (std::optional<Type> result = pointer_arithmetic_result_type(
+                                    expr.binary_op, *binary_lhs_type, *binary_rhs_type)) {
                                 return result;
                             }
                         }
-                        return lhs;
+                        return binary_lhs_type;
                     }
                     case BinaryOp::Eq:
                     case BinaryOp::Ne:
@@ -372,6 +400,7 @@ namespace {
                         return named_type("bool");
                 }
                 return std::nullopt;
+            }
 
             case ExprKind::Conditional: {
                 std::optional<Type> then_type = infer_type(*expr.rhs);
@@ -512,6 +541,18 @@ namespace {
             case ExprKind::Call: {
                 std::optional<Type> t = infer_type(arg);
                 if (!t.has_value() || t->kind == TypeKind::Reference) return false;
+                break;
+            }
+            case ExprKind::Binary: {
+                // [over.match.oper]/2: an operator expression with a
+                // class operand is a call, so its result is exactly as
+                // fresh as the operator function's by-value return.
+                // Mirrors movecheck's produces_rvalue_of_type, which
+                // gained the same arm for the same reason.
+                if (arg.lhs == nullptr || arg.rhs == nullptr) return false;
+                const Function* op =
+                    resolve_binary_operator_function(arg, infer_type(*arg.lhs), infer_type(*arg.rhs));
+                if (op == nullptr || op->return_type.kind == TypeKind::Reference) return false;
                 break;
             }
             default:

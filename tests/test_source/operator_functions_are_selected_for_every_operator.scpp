@@ -1,0 +1,39 @@
+// [over.match.oper]/2: an operator expression with a class operand names
+// an operator function. Only `operator=`, `operator==`, `operator!=`,
+// `operator*` (unary) and `operator->` had a declaration syntax at all;
+// every other operator was a parse error at the declaration and, at the
+// use, fell through to the *built-in* rules -- `a + b` on two class
+// values lowered to `llvm.sadd.with.overflow` on the object's bytes.
+import std;
+
+class V {
+public:
+    virtual ~V() = default;
+    int a = 0;
+    V() { return; }
+    V operator+(const V& o) const { V r{}; r.a = this.a + o.a; return r; }
+    V operator-(const V& o) const { V r{}; r.a = this.a - o.a; return r; }
+    V operator*(const V& o) const { V r{}; r.a = this.a * o.a; return r; }
+    V operator/(const V& o) const { V r{}; r.a = this.a / o.a; return r; }
+    bool operator<(const V& o) const { return this.a < o.a; }
+    bool operator>=(const V& o) const { return this.a >= o.a; }
+    V operator-() const { V r{}; r.a = 0 - this.a; return r; }
+    bool operator!() const { return this.a == 0; }
+    int operator[](int i) const { return this.a + i; }
+    int operator()(int i) const { return this.a * i; }
+};
+
+int main() {
+    V a{}; V b{}; V z{};
+    a.a = 12; b.a = 4;
+    V sum = a + b;
+    V diff = a - b;
+    V prod = a * b;
+    V quot = a / b;
+    V chained = a + b + b;
+    V neg = -a;
+    std::print("{} {} {} {} {} {}\n", sum.a, diff.a, prod.a, quot.a, chained.a, neg.a);
+    std::print("{} {} {} {}\n", b < a ? 1 : 0, b >= a ? 1 : 0, !z ? 1 : 0, !a ? 1 : 0);
+    std::print("{} {}\n", a[3], a(3));
+    return 0;
+}

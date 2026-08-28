@@ -2450,23 +2450,271 @@ class Function {
     return fn.is_defaulted && is_equality_like_operator_function(fn);
 }
 
-[[nodiscard]] inline std::string equality_operator_method_name(BinaryOp op) {
+// [over.oper]/1: an operator function's name is `operator` followed by
+// the operator. These four functions are the one place that mapping
+// lives. Everything downstream -- the parser's declaration form, the
+// mangled member name a resolver looks up, the spelling a diagnostic
+// prints, and the display name a module interface reports -- is derived
+// from them, so an operator cannot be overloadable in one pass and
+// unknown in another.
+//
+// The five names that predate this table (`_operator_equal`,
+// `_operator_not_equal`, `_operator_assign`, `_operator_deref`,
+// `_operator_arrow`) are kept exactly as they were: they are part of the
+// mangled symbol in every already-emitted `.scppm`/`.scppa` pair.
+//
+// An empty answer means "not an operator function name", which is not
+// the same as "this operator cannot be overloaded" -- every operator the
+// expression grammar can produce is in here. The operators C++ also
+// allows to be overloaded but that this language has no token for at all
+// (`%`, `<<`, `>>`, `<=>`, `^`, `|`, `~`, `,`) are absent because there
+// is no expression for them to give meaning to, not because a class is
+// forbidden from defining them.
+[[nodiscard]] inline std::string binary_operator_method_name(BinaryOp op) {
     switch (op) {
+        case BinaryOp::Add: return std::string{"operator_plus"};
+        case BinaryOp::Sub: return std::string{"operator_minus"};
+        case BinaryOp::Mul: return std::string{"operator_star"};
+        case BinaryOp::Div: return std::string{"operator_slash"};
+        case BinaryOp::AddAssign: return std::string{"operator_plus_assign"};
+        case BinaryOp::SubAssign: return std::string{"operator_minus_assign"};
+        case BinaryOp::MulAssign: return std::string{"operator_star_assign"};
+        case BinaryOp::DivAssign: return std::string{"operator_slash_assign"};
         case BinaryOp::Eq: return std::string{"operator_equal"};
         case BinaryOp::Ne: return std::string{"operator_not_equal"};
-        default: return std::string{};
+        case BinaryOp::Lt: return std::string{"operator_less"};
+        case BinaryOp::Gt: return std::string{"operator_greater"};
+        case BinaryOp::Le: return std::string{"operator_less_equal"};
+        case BinaryOp::Ge: return std::string{"operator_greater_equal"};
+        case BinaryOp::And: return std::string{"operator_and_and"};
+        case BinaryOp::Or: return std::string{"operator_or_or"};
+        case BinaryOp::Assign: return std::string{"operator_assign"};
     }
+    return std::string{};
+}
+
+[[nodiscard]] inline std::string unary_operator_method_name(UnaryOp op) {
+    switch (op) {
+        case UnaryOp::Neg: return std::string{"operator_negate"};
+        case UnaryOp::Not: return std::string{"operator_not"};
+        case UnaryOp::PreInc: return std::string{"operator_increment"};
+        case UnaryOp::PreDec: return std::string{"operator_decrement"};
+        case UnaryOp::PostInc: return std::string{"operator_increment"};
+        case UnaryOp::PostDec: return std::string{"operator_decrement"};
+        case UnaryOp::Deref: return std::string{"operator_deref"};
+        case UnaryOp::AddressOf: return std::string{};
+    }
+    return std::string{};
+}
+
+[[nodiscard]] inline std::string binary_operator_spelling(BinaryOp op) {
+    switch (op) {
+        case BinaryOp::Add: return std::string{"+"};
+        case BinaryOp::Sub: return std::string{"-"};
+        case BinaryOp::Mul: return std::string{"*"};
+        case BinaryOp::Div: return std::string{"/"};
+        case BinaryOp::AddAssign: return std::string{"+="};
+        case BinaryOp::SubAssign: return std::string{"-="};
+        case BinaryOp::MulAssign: return std::string{"*="};
+        case BinaryOp::DivAssign: return std::string{"/="};
+        case BinaryOp::Eq: return std::string{"=="};
+        case BinaryOp::Ne: return std::string{"!="};
+        case BinaryOp::Lt: return std::string{"<"};
+        case BinaryOp::Gt: return std::string{">"};
+        case BinaryOp::Le: return std::string{"<="};
+        case BinaryOp::Ge: return std::string{">="};
+        case BinaryOp::And: return std::string{"&&"};
+        case BinaryOp::Or: return std::string{"||"};
+        case BinaryOp::Assign: return std::string{"="};
+    }
+    return std::string{};
+}
+
+[[nodiscard]] inline std::string unary_operator_spelling(UnaryOp op) {
+    switch (op) {
+        case UnaryOp::Neg: return std::string{"-"};
+        case UnaryOp::Not: return std::string{"!"};
+        case UnaryOp::PreInc: return std::string{"++"};
+        case UnaryOp::PreDec: return std::string{"--"};
+        case UnaryOp::PostInc: return std::string{"++"};
+        case UnaryOp::PostDec: return std::string{"--"};
+        case UnaryOp::Deref: return std::string{"*"};
+        case UnaryOp::AddressOf: return std::string{"&"};
+    }
+    return std::string{};
+}
+
+// The inverse: given a mangled function name, the `operator@` spelling to
+// print for it, or an empty string when the name is not an operator
+// function's. Replaces three hand-maintained `ends_with` chains that had
+// each stopped at a different subset of the operators. The enumerators
+// are listed longest-suffix-first so that `_operator_plus_assign` is not
+// read as `_operator_plus`.
+[[nodiscard]] inline BinaryOp binary_operator_at_index(int index) {
+    switch (index) {
+        case 0: return BinaryOp::AddAssign;
+        case 1: return BinaryOp::SubAssign;
+        case 2: return BinaryOp::MulAssign;
+        case 3: return BinaryOp::DivAssign;
+        case 4: return BinaryOp::Ne;
+        case 5: return BinaryOp::Le;
+        case 6: return BinaryOp::Ge;
+        case 7: return BinaryOp::Eq;
+        case 8: return BinaryOp::Lt;
+        case 9: return BinaryOp::Gt;
+        case 10: return BinaryOp::Add;
+        case 11: return BinaryOp::Sub;
+        case 12: return BinaryOp::Mul;
+        case 13: return BinaryOp::Div;
+        case 14: return BinaryOp::And;
+        case 15: return BinaryOp::Or;
+        default: return BinaryOp::Assign;
+    }
+}
+
+[[nodiscard]] inline UnaryOp unary_operator_at_index(int index) {
+    switch (index) {
+        case 0: return UnaryOp::PreInc;
+        case 1: return UnaryOp::PreDec;
+        case 2: return UnaryOp::Neg;
+        case 3: return UnaryOp::Not;
+        default: return UnaryOp::Deref;
+    }
+}
+
+[[nodiscard]] inline std::string operator_function_display_spelling(const std::string& function_name) {
+    for (int index = 0; index < 17; index++) {
+        BinaryOp op = binary_operator_at_index(index);
+        std::string method{"_"};
+        method += binary_operator_method_name(op);
+        if (function_name.size() >= method.size() && function_name.ends_with(method)) {
+            std::string spelled{"operator"};
+            spelled += binary_operator_spelling(op);
+            return spelled;
+        }
+    }
+    for (int index = 0; index < 5; index++) {
+        UnaryOp op = unary_operator_at_index(index);
+        std::string method{"_"};
+        method += unary_operator_method_name(op);
+        if (function_name.size() >= method.size() && function_name.ends_with(method)) {
+            std::string spelled{"operator"};
+            spelled += unary_operator_spelling(op);
+            return spelled;
+        }
+    }
+    std::string arrow_suffix{"_operator_arrow"};
+    if (function_name.size() >= arrow_suffix.size() && function_name.ends_with(arrow_suffix)) {
+        return std::string{"operator->"};
+    }
+    std::string subscript_suffix{"_operator_subscript"};
+    if (function_name.size() >= subscript_suffix.size() && function_name.ends_with(subscript_suffix)) {
+        return std::string{"operator[]"};
+    }
+    return std::string{};
+}
+
+// [over.match.oper]/2: the operator expression is rewritten as a call to
+// the selected operator function. Both passes build the same call node
+// from here, so neither can rewrite it into something the other would
+// resolve differently.
+[[nodiscard]] inline ExprPtr make_operator_call_expr(const Expr& receiver, const Expr& argument,
+                                                     const std::string& method_name, SourceLocation loc) {
+    ExprPtr call = std::make_unique<Expr>();
+    call->kind = ExprKind::Call;
+    call->loc = std::move(loc);
+    call->name = method_name;
+    call->lhs = deep_clone_expr_with_loc(receiver, call->loc);
+    call->args.push_back(deep_clone_expr_with_loc(argument, call->loc));
+    return call;
+}
+
+[[nodiscard]] inline ExprPtr make_unary_operator_call_expr(const Expr& receiver, const std::string& method_name,
+                                                           SourceLocation loc) {
+    ExprPtr call = std::make_unique<Expr>();
+    call->kind = ExprKind::Call;
+    call->loc = std::move(loc);
+    call->name = method_name;
+    call->lhs = deep_clone_expr_with_loc(receiver, call->loc);
+    return call;
+}
+
+[[nodiscard]] inline std::string equality_operator_method_name(BinaryOp op) {
+    if (op == BinaryOp::Eq || op == BinaryOp::Ne) return binary_operator_method_name(op);
+    return std::string{};
 }
 
 [[nodiscard]] inline ExprPtr make_overloaded_equality_call_expr(const Expr& lhs, const Expr& rhs, BinaryOp op,
                                                                 SourceLocation loc) {
-    ExprPtr call = std::make_unique<Expr>();
-    call->kind = ExprKind::Call;
-    call->loc = std::move(loc);
-    call->name = equality_operator_method_name(op);
-    call->lhs = deep_clone_expr_with_loc(lhs, call->loc);
-    call->args.push_back(deep_clone_expr_with_loc(rhs, call->loc));
-    return call;
+    return make_operator_call_expr(lhs, rhs, equality_operator_method_name(op), std::move(loc));
+}
+
+// An operator's operand type after the reference is looked through:
+// `V&` and `V` select the same operator function.
+[[nodiscard]] inline const Type* operator_operand_type_or_null(const std::optional<Type>& type) {
+    if (!type.has_value()) return nullptr;
+    if (type->kind == TypeKind::Reference && type->pointee != nullptr) return type->pointee.get();
+    return &(*type);
+}
+
+// [over.match.oper]/1 with [over.built]: when an operand of an operator
+// expression has class type, the candidate set is the operator functions
+// found for it. There is no built-in candidate to fall back on --
+// [over.built] enumerates candidates for the arithmetic, enumeration and
+// pointer types only, and a class is none of those. The message lives
+// here so that every pass that reaches "no operator function" says the
+// same thing.
+[[nodiscard]] inline std::string no_operator_function_message(const std::string& spelled_operator,
+                                                              const std::string& lhs_type_name,
+                                                              const std::string& rhs_type_name,
+                                                              const std::string& method_name,
+                                                              bool lhs_has_class_type) {
+    std::string message{"no operator function for '"};
+    message += lhs_type_name;
+    message += " ";
+    message += spelled_operator;
+    message += " ";
+    message += rhs_type_name;
+    message += "': an operand has class type, and [over.built] provides a built-in '";
+    message += spelled_operator;
+    message += "' for arithmetic, enumeration and pointer operands only -- declare '";
+    message += spelled_operator;
+    message += "' for it";
+    // [over.binary]/1: `x @ y` considers `x.operator@(y)` only when `x`
+    // has class type, so suggesting a member on a non-class left operand
+    // would name a function the program could not declare.
+    if (lhs_has_class_type) {
+        message += ", as a member ('";
+        message += lhs_type_name;
+        message += "::operator";
+        message += spelled_operator;
+        message += "') or at namespace scope";
+    } else {
+        message += " at namespace scope (a member operator function would have to belong to the left operand's type, and '";
+        message += lhs_type_name;
+        message += "' is not a class type)";
+    }
+    if (method_name.size() > 0) {
+        message += " (looked for '";
+        message += method_name;
+        message += "')";
+    }
+    return message;
+}
+
+[[nodiscard]] inline std::string no_unary_operator_function_message(const std::string& spelled_operator,
+                                                                    const std::string& operand_type_name) {
+    std::string message{"no operator function for '"};
+    message += spelled_operator;
+    message += operand_type_name;
+    message += "': the operand has class type, and [over.built] provides a built-in '";
+    message += spelled_operator;
+    message += "' for arithmetic, enumeration and pointer operands only -- declare '";
+    message += operand_type_name;
+    message += "::operator";
+    message += spelled_operator;
+    message += "'";
+    return message;
 }
 
 class StructField {

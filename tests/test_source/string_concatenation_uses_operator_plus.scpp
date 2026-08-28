@@ -1,0 +1,20 @@
+// #490 typed a string literal as `const char[N+1]`. std::string never
+// had an `operator+` at all -- `+` on it fell through to the built-in
+// arithmetic rules and lowered `"literal" + s` to a machine ADD on the
+// object's bytes, a silent miscompilation caught only by the LLVM
+// verifier. std::string's `+=` "worked" solely through a hard-coded
+// rewrite into `std::string::append` that named the type in the compiler.
+import std;
+
+int main() {
+    std::string s{"world"};
+    std::string a = "hello " + s;
+    std::string b = s + "!";
+    std::string c = s + s;
+    std::string d{"x"};
+    d += "y";
+    d += s;
+    char first = s[0];
+    std::print("{}\n{}\n{}\n{}\n{}\n", a, b, c, d, static_cast<int>(first));
+    return 0;
+}

@@ -1,0 +1,17 @@
+// The unary half of the same rule. `-v` reported the *operand's* type as
+// its own, so the rejection came out of whatever consumed the value ("no
+// constructor of 'V' matches this call"); `++v` said "operand of '++'
+// must be a builtin numeric lvalue", which is also what it said when the
+// class did declare `operator++`.
+class V {
+public:
+    virtual ~V() = default;
+    int a = 0;
+    V() { return; }
+};
+
+int main() {
+    V x{};
+    V n = -x;
+    return n.a;
+}

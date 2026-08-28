@@ -1,0 +1,17 @@
+// [over.built] provides no candidate with a class operand, so with no
+// operator function the program is ill-formed. The compiler instead
+// abstained ("Arithmetic on a class type is dispatched through an
+// operator overload" -- but no such dispatch existed) and codegen
+// lowered it as a built-in: an integer add, or an ICmp, on the object.
+class V {
+public:
+    virtual ~V() = default;
+    int a = 0;
+    V() { return; }
+};
+
+int main() {
+    V x{}; V y{};
+    bool r = x == y;
+    return r ? 1 : 0;
+}

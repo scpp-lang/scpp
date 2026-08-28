@@ -1,0 +1,16 @@
+// [over.oper]/6: a unary member operator function takes no parameters and
+// a binary one takes exactly one. `*`, `-` and `+` name both, and are told
+// apart by that count and nothing else -- deciding on the token alone made
+// a binary `operator*` declaration silently become a dereference operator.
+class V {
+public:
+    virtual ~V() = default;
+    int a = 0;
+    V() { return; }
+    V operator/(const V& l, const V& r) const { V n{}; return n; }
+};
+
+int main() {
+    V x{};
+    return x.a;
+}

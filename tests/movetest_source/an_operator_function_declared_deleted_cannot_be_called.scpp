@@ -1,0 +1,15 @@
+// [dcl.fct.def.delete]/2 through the operator-function path: the rewritten
+// call must name the operator the way the program spelled it.
+class V {
+public:
+    virtual ~V() = default;
+    int a = 0;
+    V() { return; }
+    V operator+(const V& o) const = delete;
+};
+
+int main() {
+    V x{}; V y{};
+    V r = x + y;
+    return r.a;
+}
