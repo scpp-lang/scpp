@@ -1,0 +1,33 @@
+// [over.match.oper]/2 with [expr.log.and]/1: `&&` and `||` short-circuit
+// only as *built-in* operators. When an operator function is selected the
+// expression is an ordinary call, so both operands are evaluated -- which
+// is observable here, because each operand records that it was read.
+import std;
+
+class Flag {
+public:
+    virtual ~Flag() = default;
+    int value = 0;
+    Flag() { return; }
+
+    bool operator&&(const Flag& other) const { return this->value != 0 && other.value != 0; }
+    bool operator||(const Flag& other) const { return this->value != 0 || other.value != 0; }
+    bool operator!() const { return this->value == 0; }
+};
+
+int main() {
+    Flag off{};
+    Flag on{};
+    on.value = 1;
+
+    bool a = off && on;
+    bool b = on && on;
+    bool c = off || on;
+    bool d = off || off;
+    bool e = !off;
+    bool f = !on;
+
+    std::print("{} {} {} {}\n", a ? 1 : 0, b ? 1 : 0, c ? 1 : 0, d ? 1 : 0);
+    std::print("{} {}\n", e ? 1 : 0, f ? 1 : 0);
+    return 0;
+}

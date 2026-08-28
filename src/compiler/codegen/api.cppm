@@ -1844,6 +1844,28 @@ private:
     llvm::LLVMValueRef get_or_declare_printf();
 
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_binary(const Expr& expr);
+    // [over.match.oper]/2: selects and emits the operator function for
+    // `a @ b`, or returns nullopt when no operand has class type and the
+    // built-in lowering applies. Returns an error when an operand *does*
+    // have class type and no operator function is viable -- [over.built]
+    // has no candidate to fall back on.
+    [[nodiscard]] std::expected<std::optional<llvm::LLVMValueRef>, CodegenError> codegen_binary_operator_function_call(
+        const Expr& expr, const std::optional<Type>& lhs_type, const std::optional<Type>& rhs_type);
+    // The selection half of the same question, so "what type does
+    // `a @ b` have?" and "what does `a @ b` call?" cannot be answered by
+    // two different lookups. `out_key`/`out_param_offset` describe the
+    // selected function the way codegen_call needs it.
+    const Function* resolve_unary_operator_function(const Expr& expr, std::string* out_key);
+    const Function* resolve_subscript_operator_function(const Expr& expr);
+    [[nodiscard]] std::expected<std::optional<llvm::LLVMValueRef>, CodegenError> codegen_subscript_operator_call(
+        const Expr& expr);
+    [[nodiscard]] std::expected<std::optional<llvm::LLVMValueRef>, CodegenError> codegen_unary_operator_function_call(
+        const Expr& expr);
+    const Function* resolve_binary_operator_function(const Expr& expr, const std::optional<Type>& lhs_type,
+                                                     const std::optional<Type>& rhs_type,
+                                                     std::string* out_key = nullptr,
+                                                     std::size_t* out_param_offset = nullptr,
+                                                     bool* out_receiver_is_rhs = nullptr);
 
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_short_circuit(const Expr& expr);
 };

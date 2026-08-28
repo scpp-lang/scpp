@@ -345,11 +345,11 @@ enum class OutOfLineMemberKind {
     Constructor,
     Destructor,
     Method,
-    OperatorDeref,
-    OperatorArrow,
-    OperatorEqual,
-    OperatorNotEqual,
-    OperatorAssign,
+    // One kind for every `operator@`. There used to be one enumerator
+    // per operator, so an out-of-line definition of any operator without
+    // an enumerator did not parse. The mangled method name now travels
+    // in `member_name`, exactly as it does for an ordinary method.
+    Operator,
 };
 
 // Declared `class` (not `struct`) for the same reason as the 3 types
@@ -738,6 +738,107 @@ private:
     [[nodiscard]] const Token& peek_at(std::size_t offset) const {
         std::size_t idx = pos_ + offset;
         return idx < tokens_.size() ? tokens_[idx] : tokens_.back();
+    }
+
+    // [over.oper]/1: how many tokens after `operator` spell an
+    // operator-function-id, or 0 if what follows is not one. `[]` and
+    // `()` are two tokens; everything else the lexer produces is one.
+    [[nodiscard]] int operator_id_token_count(TokenKind first, TokenKind second) const {
+        if (first == TokenKind::LBracket) return second == TokenKind::RBracket ? 2 : 0;
+        if (first == TokenKind::LParen) return second == TokenKind::RParen ? 2 : 0;
+        if (first == TokenKind::Plus || first == TokenKind::Minus || first == TokenKind::Star ||
+            first == TokenKind::Slash || first == TokenKind::PlusAssign || first == TokenKind::MinusAssign ||
+            first == TokenKind::StarAssign || first == TokenKind::SlashAssign || first == TokenKind::Assign ||
+            first == TokenKind::EqualEqual || first == TokenKind::NotEqual || first == TokenKind::Less ||
+            first == TokenKind::Greater || first == TokenKind::LessEqual || first == TokenKind::GreaterEqual ||
+            first == TokenKind::AmpAmp || first == TokenKind::PipePipe || first == TokenKind::Bang ||
+            first == TokenKind::PlusPlus || first == TokenKind::MinusMinus || first == TokenKind::Arrow) {
+            return 1;
+        }
+        return 0;
+    }
+
+    [[nodiscard]] int member_operator_id_token_count() const {
+        return operator_id_token_count(peek_at(1).kind, peek_at(2).kind);
+    }
+
+    [[nodiscard]] std::string spelled_member_operator_id(TokenKind first, TokenKind second) const {
+        if (first == TokenKind::LBracket && second == TokenKind::RBracket) return std::string("[]");
+        if (first == TokenKind::LParen && second == TokenKind::RParen) return std::string("()");
+        if (first == TokenKind::Plus) return std::string("+");
+        if (first == TokenKind::Minus) return std::string("-");
+        if (first == TokenKind::Star) return std::string("*");
+        if (first == TokenKind::Slash) return std::string("/");
+        if (first == TokenKind::PlusAssign) return std::string("+=");
+        if (first == TokenKind::MinusAssign) return std::string("-=");
+        if (first == TokenKind::StarAssign) return std::string("*=");
+        if (first == TokenKind::SlashAssign) return std::string("/=");
+        if (first == TokenKind::Assign) return std::string("=");
+        if (first == TokenKind::EqualEqual) return std::string("==");
+        if (first == TokenKind::NotEqual) return std::string("!=");
+        if (first == TokenKind::Less) return std::string("<");
+        if (first == TokenKind::Greater) return std::string(">");
+        if (first == TokenKind::LessEqual) return std::string("<=");
+        if (first == TokenKind::GreaterEqual) return std::string(">=");
+        if (first == TokenKind::AmpAmp) return std::string("&&");
+        if (first == TokenKind::PipePipe) return std::string("||");
+        if (first == TokenKind::Bang) return std::string("!");
+        if (first == TokenKind::PlusPlus) return std::string("++");
+        if (first == TokenKind::MinusMinus) return std::string("--");
+        if (first == TokenKind::Arrow) return std::string("->");
+        return std::string();
+    }
+
+    // Maps an operator-function-id onto the single mangled method name
+    // table in ast.cppm. `unary` is decided by the declared parameter
+    // count, never by the token, because `* - +` name both arities.
+    [[nodiscard]] std::string member_operator_method_name(TokenKind first, TokenKind second, bool unary) const {
+        if (first == TokenKind::LBracket && second == TokenKind::RBracket) return std::string("operator_subscript");
+        // scpp already spells "the function-call operator" as a method
+        // named `call`: monomorphize.cppm desugars `f(args)` on a local
+        // of class type into `f.call(args)`, and that is how closures,
+        // concept witnesses and user-written callables are all invoked.
+        // `operator()` is therefore not a second mechanism -- it is the
+        // C++ spelling of the one that exists, so it maps onto the same
+        // name rather than introducing a parallel `operator_call` that
+        // nothing would ever dispatch to.
+        if (first == TokenKind::LParen && second == TokenKind::RParen) return std::string("call");
+        if (first == TokenKind::Arrow) return std::string("operator_arrow");
+        if (first == TokenKind::PlusPlus) {
+            if (unary) return unary_operator_method_name(UnaryOp::PreInc);
+            return unary_operator_method_name(UnaryOp::PostInc);
+        }
+        if (first == TokenKind::MinusMinus) {
+            if (unary) return unary_operator_method_name(UnaryOp::PreDec);
+            return unary_operator_method_name(UnaryOp::PostDec);
+        }
+        if (first == TokenKind::Bang) {
+            if (unary) return unary_operator_method_name(UnaryOp::Not);
+            return std::string();
+        }
+        if (unary) {
+            if (first == TokenKind::Star) return unary_operator_method_name(UnaryOp::Deref);
+            if (first == TokenKind::Minus) return unary_operator_method_name(UnaryOp::Neg);
+            return std::string();
+        }
+        if (first == TokenKind::Plus) return binary_operator_method_name(BinaryOp::Add);
+        if (first == TokenKind::Minus) return binary_operator_method_name(BinaryOp::Sub);
+        if (first == TokenKind::Star) return binary_operator_method_name(BinaryOp::Mul);
+        if (first == TokenKind::Slash) return binary_operator_method_name(BinaryOp::Div);
+        if (first == TokenKind::PlusAssign) return binary_operator_method_name(BinaryOp::AddAssign);
+        if (first == TokenKind::MinusAssign) return binary_operator_method_name(BinaryOp::SubAssign);
+        if (first == TokenKind::StarAssign) return binary_operator_method_name(BinaryOp::MulAssign);
+        if (first == TokenKind::SlashAssign) return binary_operator_method_name(BinaryOp::DivAssign);
+        if (first == TokenKind::Assign) return binary_operator_method_name(BinaryOp::Assign);
+        if (first == TokenKind::EqualEqual) return binary_operator_method_name(BinaryOp::Eq);
+        if (first == TokenKind::NotEqual) return binary_operator_method_name(BinaryOp::Ne);
+        if (first == TokenKind::Less) return binary_operator_method_name(BinaryOp::Lt);
+        if (first == TokenKind::Greater) return binary_operator_method_name(BinaryOp::Gt);
+        if (first == TokenKind::LessEqual) return binary_operator_method_name(BinaryOp::Le);
+        if (first == TokenKind::GreaterEqual) return binary_operator_method_name(BinaryOp::Ge);
+        if (first == TokenKind::AmpAmp) return binary_operator_method_name(BinaryOp::And);
+        if (first == TokenKind::PipePipe) return binary_operator_method_name(BinaryOp::Or);
+        return std::string();
     }
 
     [[nodiscard]] std::optional<std::string> referenced_pack_type_param_name(const Type& type) const {
@@ -1864,7 +1965,7 @@ private:
         case TypeKind::Pointer:
             return [&, this]() -> std::string {
                 std::string _msg_1557{const_prefix};
-                _msg_1557 += (type.is_mutable_pointee ? std::string() : std::string("const "));
+                if (!type.is_mutable_pointee) _msg_1557 += "const ";
                 _msg_1557 += type_to_string(*type.pointee);
                 _msg_1557 += "*";
                 return _msg_1557;
@@ -1887,7 +1988,7 @@ private:
             }
             return [&, this]() -> std::string {
                 std::string _msg_1565{const_prefix};
-                _msg_1565 += (type.is_mutable_ref ? std::string() : std::string("const "));
+                if (!type.is_mutable_ref) _msg_1565 += "const ";
                 _msg_1565 += type_to_string(*type.pointee);
                 _msg_1565 += "&";
                 return _msg_1565;
@@ -1896,7 +1997,7 @@ private:
             return [&, this]() -> std::string {
                 std::string _msg_1567{const_prefix};
                 _msg_1567 += std::string("std::span<");
-                _msg_1567 += (type.is_mutable_ref ? std::string() : std::string("const "));
+                if (!type.is_mutable_ref) _msg_1567 += "const ";
                 _msg_1567 += type_to_string(*type.pointee);
                 _msg_1567 += ">";
                 return _msg_1567;
@@ -2584,11 +2685,11 @@ private:
                     _msg_2288 += std::string(member_name.data(), member_name.size());
                     return _msg_2288;
                 }();
-            case OutOfLineMemberKind::OperatorDeref: return "_operator_deref";
-            case OutOfLineMemberKind::OperatorArrow: return "_operator_arrow";
-            case OutOfLineMemberKind::OperatorEqual: return "_operator_equal";
-            case OutOfLineMemberKind::OperatorNotEqual: return "_operator_not_equal";
-            case OutOfLineMemberKind::OperatorAssign: return "_operator_assign";
+            case OutOfLineMemberKind::Operator: return [&]() -> std::string {
+                    std::string _msg_operator_suffix{"_"};
+                    _msg_operator_suffix += std::string(member_name.data(), member_name.size());
+                    return _msg_operator_suffix;
+                }();
         }
         return {};
     }
@@ -2616,30 +2717,13 @@ private:
                     _msg_2305 += parsed.member_name;
                     return _msg_2305;
                 }();
-            case OutOfLineMemberKind::OperatorDeref: return [&]() -> std::string {
+            case OutOfLineMemberKind::Operator: return [&]() -> std::string {
                     std::string _msg_2306{parsed.owner.spelled_name};
-                    _msg_2306 += "::operator*";
+                    _msg_2306 += "::";
+                    std::string mangled{"_"};
+                    mangled += parsed.member_name;
+                    _msg_2306 += operator_function_display_spelling(mangled);
                     return _msg_2306;
-                }();
-            case OutOfLineMemberKind::OperatorArrow: return [&]() -> std::string {
-                    std::string _msg_2307{parsed.owner.spelled_name};
-                    _msg_2307 += "::operator->";
-                    return _msg_2307;
-                }();
-            case OutOfLineMemberKind::OperatorEqual: return [&]() -> std::string {
-                    std::string _msg_2308{parsed.owner.spelled_name};
-                    _msg_2308 += "::operator==";
-                    return _msg_2308;
-                }();
-            case OutOfLineMemberKind::OperatorNotEqual: return [&]() -> std::string {
-                    std::string _msg_2309{parsed.owner.spelled_name};
-                    _msg_2309 += "::operator!=";
-                    return _msg_2309;
-                }();
-            case OutOfLineMemberKind::OperatorAssign: return [&]() -> std::string {
-                    std::string _msg_2310{parsed.owner.spelled_name};
-                    _msg_2310 += "::operator=";
-                    return _msg_2310;
                 }();
         }
         return std::string(parsed.owner.spelled_name);
@@ -3024,23 +3108,16 @@ private:
         parsed.owner = std::move(owner).value();
         parsed.fn.return_type = std::move(return_type);
 
-        if (check(TokenKind::Identifier) && std::string(peek().text.data(), peek().text.size()) == "operator") {
+        TokenKind out_of_line_operator_first = TokenKind::Unknown;
+        TokenKind out_of_line_operator_second = TokenKind::Unknown;
+        if (check(TokenKind::Identifier) && std::string(peek().text.data(), peek().text.size()) == "operator" &&
+            operator_id_token_count(peek_at(1).kind, peek_at(2).kind) > 0) {
             advance();
-            if (match(TokenKind::Star)) {
-                parsed.kind = OutOfLineMemberKind::OperatorDeref;
-            } else if (match(TokenKind::Arrow)) {
-                parsed.kind = OutOfLineMemberKind::OperatorArrow;
-            } else if (match(TokenKind::EqualEqual)) {
-                parsed.kind = OutOfLineMemberKind::OperatorEqual;
-            } else if (match(TokenKind::NotEqual)) {
-                parsed.kind = OutOfLineMemberKind::OperatorNotEqual;
-            } else if (match(TokenKind::Assign)) {
-                parsed.kind = OutOfLineMemberKind::OperatorAssign;
-            } else {
-                const Token& tok = peek();
-                return std::unexpected(ParseError(tok.line, tok.column,
-                                 "unsupported out-of-line member operator definition in this version"));
-            }
+            int out_of_line_operator_tokens = operator_id_token_count(peek().kind, peek_at(1).kind);
+            out_of_line_operator_first = peek().kind;
+            if (out_of_line_operator_tokens > 1) out_of_line_operator_second = peek_at(1).kind;
+            for (int consumed = 0; consumed < out_of_line_operator_tokens; consumed++) advance();
+            parsed.kind = OutOfLineMemberKind::Operator;
         } else {
             parsed.kind = OutOfLineMemberKind::Method;
             auto method_name_result = expect(TokenKind::Identifier, "method name");
@@ -3048,12 +3125,33 @@ private:
             parsed.member_name = std::string(method_name_result.value().text.data(), method_name_result.value().text.size());
         }
 
-        bool allow_unnamed_single_parameter =
-            parsed.kind == OutOfLineMemberKind::OperatorEqual || parsed.kind == OutOfLineMemberKind::OperatorNotEqual ||
-            parsed.kind == OutOfLineMemberKind::OperatorAssign;
+        bool allow_unnamed_single_parameter = parsed.kind == OutOfLineMemberKind::Operator;
         auto params_result2 = parse_param_list(allow_unnamed_single_parameter);
         if (!params_result2.has_value()) return std::unexpected(std::move(params_result2).error());
         parsed.fn.params = std::move(params_result2).value();
+        if (parsed.kind == OutOfLineMemberKind::Operator) {
+            // [over.unary]/1 and [over.binary]/1: `* - +` are told apart
+            // by parameter count, which is only known now. `[]` and `()`
+            // take an arbitrary number ([over.sub]/1, [over.call]/1);
+            // everything else takes none or exactly one.
+            bool out_of_line_unary = parsed.fn.params.size() == 0;
+            bool out_of_line_arbitrary_parameters = out_of_line_operator_first == TokenKind::LBracket ||
+                                                    out_of_line_operator_first == TokenKind::LParen;
+            if (out_of_line_arbitrary_parameters || parsed.fn.params.size() <= 1) {
+                parsed.member_name = member_operator_method_name(out_of_line_operator_first,
+                                                                 out_of_line_operator_second, out_of_line_unary);
+            }
+            if (parsed.member_name.size() == 0) {
+                std::string _msg_ool_operator{"'operator"};
+                _msg_ool_operator += spelled_member_operator_id(out_of_line_operator_first, out_of_line_operator_second);
+                _msg_ool_operator += "' cannot be defined with ";
+                _msg_ool_operator += std::to_string(parsed.fn.params.size());
+                _msg_ool_operator += " parameter(s): a unary operator function is a member with no parameters "
+                                     "([over.unary]/1) and a binary one is a member with exactly one "
+                                     "([over.binary]/1)";
+                return std::unexpected(ParseError(parsed.fn.loc.line, parsed.fn.loc.column, _msg_ool_operator));
+            }
+        }
         auto trailing_attrs_result2 = parse_function_trailing_attributes(parsed.fn, "a member function declarator");
         if (!trailing_attrs_result2.has_value()) return std::unexpected(std::move(trailing_attrs_result2).error());
         parsed.is_const_method = match(TokenKind::KwConst);
@@ -3248,21 +3346,13 @@ private:
                 display_name = fn.member_owner_class;
                 display_name += "::~";
                 display_name += unqualified;
-            } else if (fn.name.ends_with("_operator_assign")) {
-                display_name = fn.member_owner_class;
-                display_name += "::operator=";
-            } else if (fn.name.ends_with("_operator_equal")) {
-                display_name = fn.member_owner_class;
-                display_name += "::operator==";
-            } else if (fn.name.ends_with("_operator_not_equal")) {
-                display_name = fn.member_owner_class;
-                display_name += "::operator!=";
-            } else if (fn.name.ends_with("_operator_deref")) {
-                display_name = fn.member_owner_class;
-                display_name += "::operator*";
-            } else if (fn.name.ends_with("_operator_arrow")) {
-                display_name = fn.member_owner_class;
-                display_name += "::operator->";
+            } else {
+                std::string operator_spelled = operator_function_display_spelling(fn.name);
+                if (operator_spelled.size() > 0) {
+                    display_name = fn.member_owner_class;
+                    display_name += "::";
+                    display_name += operator_spelled;
+                }
             }
             {
                 std::string _msg_2802{"member declaration '"};
@@ -8481,98 +8571,46 @@ private:
             if (!member_type_result.has_value()) return std::unexpected(std::move(member_type_result).error());
 
             Type member_type = std::move(member_type_result).value();
+            // [over.oper]/1: a member operator function is declared by
+            // the operator-function-id `operator@`. There used to be
+            // four near-identical copies of this block -- one for `*`,
+            // one for `->`, one for `==`/`!=`, one for `=` -- and an
+            // operator with no copy simply did not parse, which is why
+            // `operator+` did not exist. The set of overloadable
+            // operators now comes from ast.cppm's one table
+            // (binary_operator_method_name/unary_operator_method_name),
+            // so adding an operator to the language adds its
+            // operator-function-id at the same time.
             if (check(TokenKind::Identifier) && std::string(peek().text.data(), peek().text.size()) == "operator" &&
-                peek_at(1).kind == TokenKind::Star) {
+                member_operator_id_token_count() > 0) {
                 if (auto _rv = reject_alignment_specifiers(member_alignments, "a member function declaration"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
-                if (member_is_template) {
-                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
-                                      "an operator* cannot currently be a member template"));
+                int operator_token_count = member_operator_id_token_count();
+                TokenKind operator_first = peek_at(1).kind;
+                TokenKind operator_second = operator_token_count > 1 ? peek_at(2).kind : TokenKind::Unknown;
+                std::string operator_spelling = spelled_member_operator_id(operator_first, operator_second);
+                // [over.oper]/1: `*`, `-` and `+` name both a unary and a
+                // binary operator, told apart by the operator function's
+                // parameter count and by nothing else. Deciding here on
+                // the token alone is what made a binary `operator*`
+                // declaration silently become a `operator*` dereference
+                // -- a defect legible in the mangled name it produced.
+                bool is_arrow = operator_first == TokenKind::Arrow;
+                bool is_assign = operator_first == TokenKind::Assign;
+                bool receiver_only_operator = is_arrow || is_assign;
+                if (member_is_template && receiver_only_operator) {
+                    std::string _msg_operator_template{"an operator"};
+                    _msg_operator_template += operator_spelling;
+                    _msg_operator_template += " cannot currently be a member template";
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column, _msg_operator_template));
                 }
-                if (member_is_static) {
-                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
-                                      "an operator* cannot be declared static"));
-                }
-                advance(); // 'operator'
-                advance(); // '*'
-                Function fn{};
-
-                fn.loc = member_loc;
-                fn.is_unsafe = member_requested_unsafe;
-                fn.is_nodiscard = member_requested_nodiscard;
-                fn.nodiscard_reason = member_nodiscard_reason;
-                fn.eval_mode = member_eval_mode;
-                fn.member_owner_class = qualified_owner_name;
-                fn.access = current_access;
-                fn.is_virtual = member_is_virtual;
-                auto fn_params_result = parse_param_list();
-                if (!fn_params_result.has_value()) return std::unexpected(std::move(fn_params_result).error());
-                fn.params = std::move(fn_params_result).value();
-                if (auto _rv = parse_function_trailing_attributes(fn, "a member function declarator"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
-                if (auto _rv = reject_generic_params(fn.params, "an operator*"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
-                bool is_const = match(TokenKind::KwConst);
-                fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
-                fn.return_type = std::move(member_type);
-                fn.name = synthesized_member_owner_name;
-                fn.name += "_operator_deref";
-                fn.params = prepend_this_param(fn.params, qualified_owner_name, is_const);
-                auto fn_requires_result = parse_optional_method_requires_clause(template_params);
-                if (!fn_requires_result.has_value()) return std::unexpected(std::move(fn_requires_result).error());
-                fn.method_requires_concept = std::move(fn_requires_result).value();
-                auto fn_body_result = parse_member_function_suffix(fn);
-                if (!fn_body_result.has_value()) return std::unexpected(std::move(fn_body_result).error());
-                fn.body = std::move(fn_body_result).value();
-                finish_member_fn(fn, is_exported, generic_method_owner_id);
-                program.functions.push_back(std::move(fn));
-                continue;
-            }
-            if (check(TokenKind::Identifier) && std::string(peek().text.data(), peek().text.size()) == "operator" &&
-                peek_at(1).kind == TokenKind::Arrow) {
-                if (member_is_template) {
-                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
-                                      "an operator-> cannot currently be a member template"));
-                }
-                if (member_is_static) {
-                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
-                                      "an operator-> cannot be declared static"));
+                if (member_is_static && receiver_only_operator) {
+                    std::string _msg_operator_static{"an operator"};
+                    _msg_operator_static += operator_spelling;
+                    _msg_operator_static += " cannot be declared static";
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column, _msg_operator_static));
                 }
                 advance(); // 'operator'
-                advance(); // '->'
-                Function fn{};
-
-                fn.loc = member_loc;
-                fn.is_unsafe = member_requested_unsafe;
-                fn.is_nodiscard = member_requested_nodiscard;
-                fn.nodiscard_reason = member_nodiscard_reason;
-                fn.eval_mode = member_eval_mode;
-                fn.member_owner_class = qualified_owner_name;
-                fn.access = current_access;
-                fn.is_virtual = member_is_virtual;
-                auto fn_params_result = parse_param_list();
-                if (!fn_params_result.has_value()) return std::unexpected(std::move(fn_params_result).error());
-                fn.params = std::move(fn_params_result).value();
-                if (auto _rv = parse_function_trailing_attributes(fn, "a member function declarator"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
-                if (auto _rv = reject_generic_params(fn.params, "an operator->"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
-                bool is_const = match(TokenKind::KwConst);
-                fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
-                fn.return_type = std::move(member_type);
-                fn.name = synthesized_member_owner_name;
-                fn.name += "_operator_arrow";
-                fn.params = prepend_this_param(fn.params, qualified_owner_name, is_const);
-                auto fn_requires_result = parse_optional_method_requires_clause(template_params);
-                if (!fn_requires_result.has_value()) return std::unexpected(std::move(fn_requires_result).error());
-                fn.method_requires_concept = std::move(fn_requires_result).value();
-                auto fn_body_result = parse_member_function_suffix(fn);
-                if (!fn_body_result.has_value()) return std::unexpected(std::move(fn_body_result).error());
-                fn.body = std::move(fn_body_result).value();
-                finish_member_fn(fn, is_exported, generic_method_owner_id);
-                program.functions.push_back(std::move(fn));
-                continue;
-            }
-            if (check(TokenKind::Identifier) && std::string(peek().text.data(), peek().text.size()) == "operator" &&
-                (peek_at(1).kind == TokenKind::EqualEqual || peek_at(1).kind == TokenKind::NotEqual)) {
-                if (auto _rv = reject_alignment_specifiers(member_alignments, "a member function declaration"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
-                advance(); // 'operator'
-                TokenKind operator_kind = advance().kind;
+                for (int consumed = 0; consumed < operator_token_count; consumed++) advance();
                 Function fn{};
 
                 fn.loc = member_loc;
@@ -8588,7 +8626,9 @@ private:
                 if (!fn_params_result.has_value()) return std::unexpected(std::move(fn_params_result).error());
                 fn.params = std::move(fn_params_result).value();
                 if (auto _rv = parse_function_trailing_attributes(fn, "a member function declarator"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
-                if (auto _rv = reject_generic_params(fn.params, operator_kind == TokenKind::EqualEqual ? "an operator==" : "an operator!="); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+                std::string operator_role{"an operator"};
+                operator_role += operator_spelling;
+                if (auto _rv = reject_generic_params(fn.params, operator_role); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
                 fn.template_params = member_template_params;
                 fn.is_generic_template = member_is_template;
                 bool is_const = match(TokenKind::KwConst);
@@ -8597,59 +8637,37 @@ private:
                     return std::unexpected(ParseError(member_loc.line, member_loc.column,
                                      "a static member function cannot be const-qualified or ref-qualified"));
                 }
+                bool declared_as_unary = fn.params.size() == 0;
+                // [over.sub]/1 and [over.call]/1: `[]` and `()` are the
+                // two operator functions that take an arbitrary number of
+                // parameters. Every other one is a member with none
+                // (unary, [over.unary]/1) or exactly one (binary,
+                // [over.binary]/1) -- and since the arity is the only
+                // thing telling `* - +`'s two meanings apart, a third
+                // count has no meaning to give it.
+                bool takes_arbitrary_parameters =
+                    operator_first == TokenKind::LBracket || operator_first == TokenKind::LParen;
+                std::string operator_method{};
+                if (takes_arbitrary_parameters || fn.params.size() <= 1) {
+                    operator_method = member_operator_method_name(operator_first, operator_second, declared_as_unary);
+                }
+                if (operator_method.size() == 0) {
+                    std::string _msg_operator_unknown{"'operator"};
+                    _msg_operator_unknown += operator_spelling;
+                    _msg_operator_unknown += "' cannot be declared with ";
+                    _msg_operator_unknown += std::to_string(fn.params.size());
+                    _msg_operator_unknown += " parameter(s): a unary operator function is a member with no parameters "
+                                             "([over.unary]/1) and a binary one is a member with exactly one "
+                                             "([over.binary]/1)";
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column, _msg_operator_unknown));
+                }
                 fn.return_type = std::move(member_type);
                 fn.name = synthesized_member_owner_name;
-                fn.name += std::string(operator_kind == TokenKind::EqualEqual ? "_operator_equal" : "_operator_not_equal");
+                fn.name += "_";
+                fn.name += operator_method;
                 if (!member_is_static) {
                     fn.params = prepend_this_param(fn.params, qualified_owner_name, is_const);
                 }
-                fn.is_override = match(TokenKind::KwOverride);
-                auto fn_requires_result = parse_optional_method_requires_clause(template_params);
-                if (!fn_requires_result.has_value()) return std::unexpected(std::move(fn_requires_result).error());
-                fn.method_requires_concept = std::move(fn_requires_result).value();
-                auto fn_body_result = parse_member_function_suffix(fn);
-                if (!fn_body_result.has_value()) return std::unexpected(std::move(fn_body_result).error());
-                fn.body = std::move(fn_body_result).value();
-                if (auto _rv = reject_unnamed_defaulted_single_param_if_needed(fn.params, fn, member_loc); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
-                if (auto _rv = validate_defaulted_special_member(fn, member_loc); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
-                finish_member_fn(fn, is_exported, generic_method_owner_id);
-                program.functions.push_back(std::move(fn));
-                continue;
-            }
-            if (check(TokenKind::Identifier) && std::string(peek().text.data(), peek().text.size()) == "operator" &&
-                peek_at(1).kind == TokenKind::Assign) {
-                if (auto _rv = reject_alignment_specifiers(member_alignments, "a member function declaration"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
-                if (member_is_template) {
-                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
-                                      "an operator= cannot currently be a member template"));
-                }
-                if (member_is_static) {
-                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
-                                      "an operator= cannot be declared static"));
-                }
-                advance(); // 'operator'
-                advance(); // '='
-                Function fn{};
-
-                fn.loc = member_loc;
-                fn.is_unsafe = member_requested_unsafe;
-                fn.is_nodiscard = member_requested_nodiscard;
-                fn.nodiscard_reason = member_nodiscard_reason;
-                fn.eval_mode = member_eval_mode;
-                fn.member_owner_class = qualified_owner_name;
-                fn.access = current_access;
-                fn.is_virtual = member_is_virtual;
-                auto fn_params_result = parse_param_list(/*allow_unnamed_single_parameter=*/true);
-                if (!fn_params_result.has_value()) return std::unexpected(std::move(fn_params_result).error());
-                fn.params = std::move(fn_params_result).value();
-                if (auto _rv = parse_function_trailing_attributes(fn, "a member function declarator"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
-                if (auto _rv = reject_generic_params(fn.params, "an operator="); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
-                bool is_const = match(TokenKind::KwConst);
-                fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
-                fn.return_type = std::move(member_type);
-                fn.name = synthesized_member_owner_name;
-                fn.name += "_operator_assign";
-                fn.params = prepend_this_param(fn.params, qualified_owner_name, is_const);
                 auto fn_requires_result = parse_optional_method_requires_clause(template_params);
                 if (!fn_requires_result.has_value()) return std::unexpected(std::move(fn_requires_result).error());
                 fn.method_requires_concept = std::move(fn_requires_result).value();
@@ -8930,9 +8948,27 @@ private:
         auto return_type_result = parse_type_with_lifetime_attributes_enabled();
         if (!return_type_result.has_value()) return std::unexpected(std::move(return_type_result).error());
         fn.return_type = std::move(return_type_result).value();
-        auto fn_name_result = expect(TokenKind::Identifier, "function name");
-        if (!fn_name_result.has_value()) return std::unexpected(std::move(fn_name_result).error());
-        fn.name = std::string(fn_name_result.value().text.data(), fn_name_result.value().text.size());
+        // [over.oper]/1: an operator function may also be declared at
+        // namespace scope. `"literal" + s` has no class left operand, so
+        // there is no member operator to find and only a non-member one
+        // can serve it. There was no way to write one at all.
+        TokenKind free_operator_first = TokenKind::Unknown;
+        TokenKind free_operator_second = TokenKind::Unknown;
+        bool declares_free_operator = false;
+        if (check(TokenKind::Identifier) && std::string(peek().text.data(), peek().text.size()) == "operator" &&
+            operator_id_token_count(peek_at(1).kind, peek_at(2).kind) > 0) {
+            advance(); // 'operator'
+            int free_operator_tokens = operator_id_token_count(peek().kind, peek_at(1).kind);
+            free_operator_first = peek().kind;
+            if (free_operator_tokens > 1) free_operator_second = peek_at(1).kind;
+            for (int consumed = 0; consumed < free_operator_tokens; consumed++) advance();
+            declares_free_operator = true;
+            fn.name = member_operator_method_name(free_operator_first, free_operator_second, /*unary=*/false);
+        } else {
+            auto fn_name_result = expect(TokenKind::Identifier, "function name");
+            if (!fn_name_result.has_value()) return std::unexpected(std::move(fn_name_result).error());
+            fn.name = std::string(fn_name_result.value().text.data(), fn_name_result.value().text.size());
+        }
 
         if (auto _r = expect(TokenKind::LParen, "'('"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (!check(TokenKind::RParen)) {
@@ -9015,6 +9051,34 @@ private:
             }
         }
         if (auto _r = expect(TokenKind::RParen, "')'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (declares_free_operator) {
+            // [over.binary]/1: a non-member operator function for a
+            // binary operator takes exactly two operands; for a unary one
+            // ([over.unary]/1), exactly one.
+            bool free_operator_unary = fn.params.size() == 1;
+            fn.name = member_operator_method_name(free_operator_first, free_operator_second, free_operator_unary);
+            // [over.ass]/1, [over.sub]/1, [over.call]/1 and [over.ref]/1
+            // each say `shall be a non-static member function`, so these
+            // four have no namespace-scope form to reject an arity of.
+            bool member_only_operator =
+                free_operator_first == TokenKind::Assign || free_operator_first == TokenKind::LBracket ||
+                free_operator_first == TokenKind::LParen || free_operator_first == TokenKind::Arrow;
+            if (member_only_operator) {
+                std::string _msg_member_only{"'operator"};
+                _msg_member_only += spelled_member_operator_id(free_operator_first, free_operator_second);
+                _msg_member_only += "' must be a non-static member function, so it cannot be declared at namespace "
+                                    "scope -- declare it inside the class instead";
+                return std::unexpected(ParseError(fn.loc.line, fn.loc.column, _msg_member_only));
+            }
+            if (fn.name.empty() || fn.params.size() == 0 || fn.params.size() > 2) {
+                std::string _msg_free_operator{"'operator"};
+                _msg_free_operator += spelled_member_operator_id(free_operator_first, free_operator_second);
+                _msg_free_operator += "' declared at namespace scope must take one operand (unary, [over.unary]/1) or "
+                                      "two (binary, [over.binary]/1), not ";
+                _msg_free_operator += std::to_string(fn.params.size());
+                return std::unexpected(ParseError(fn.loc.line, fn.loc.column, _msg_free_operator));
+            }
+        }
         const Token& fn_attr_start_tok = peek();
         auto fn_attrs_result = parse_attribute_specifier_seq();
         if (!fn_attrs_result.has_value()) return std::unexpected(std::move(fn_attrs_result).error());
@@ -10343,11 +10407,26 @@ private:
     [[nodiscard]] std::expected<std::string, ParseError> parse_member_access_name() {
         if (check(TokenKind::Identifier) && std::string(peek().text.data(), peek().text.size()) == "operator") {
             advance(); // 'operator'
-            if (match(TokenKind::Star)) { std::string name_result{"operator_deref"}; return name_result; }
-            if (match(TokenKind::Arrow)) { std::string name_result{"operator_arrow"}; return name_result; }
-            if (match(TokenKind::Assign)) { std::string name_result{"operator_assign"}; return name_result; }
+            int access_operator_tokens = operator_id_token_count(peek().kind, peek_at(1).kind);
+            if (access_operator_tokens > 0) {
+                TokenKind access_first = peek().kind;
+                TokenKind access_second = TokenKind::Unknown;
+                if (access_operator_tokens > 1) access_second = peek_at(1).kind;
+                for (int consumed = 0; consumed < access_operator_tokens; consumed++) advance();
+                // An explicit `x.operator@(...)` spelling always names
+                // the binary form when an argument list follows; the
+                // unary form is reached with an empty one, which the
+                // caller cannot tell us about here. `*` and `-` keep
+                // their unary reading, which is what the two spellings
+                // that existed before did.
+                bool access_unary = access_first == TokenKind::Star || access_first == TokenKind::Minus ||
+                                    access_first == TokenKind::Bang || access_first == TokenKind::PlusPlus ||
+                                    access_first == TokenKind::MinusMinus;
+                std::string name_result = member_operator_method_name(access_first, access_second, access_unary);
+                if (name_result.size() > 0) return name_result;
+            }
             return std::unexpected(ParseError(current_loc().line, current_loc().column,
-                             "expected '*', '->', or '=' after 'operator' in member access"));
+                             "expected an operator-function-id after 'operator' in member access"));
         }
         auto tok_result = expect(TokenKind::Identifier, "field or method name");
         if (!tok_result.has_value()) return std::unexpected(std::move(tok_result).error());

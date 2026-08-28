@@ -240,11 +240,8 @@ private:
 
     [[nodiscard]] static std::string lookup_name(const Function& fn) {
         if (is_destructor_slot(fn)) return "~";
-        if (fn.name.ends_with("_operator_deref")) return "operator*";
-        if (fn.name.ends_with("_operator_arrow")) return "operator->";
-        if (fn.name.ends_with("_operator_assign")) return "operator=";
-        if (fn.name.ends_with("_operator_equal")) return "operator==";
-        if (fn.name.ends_with("_operator_not_equal")) return "operator!=";
+        std::string operator_spelled = operator_function_display_spelling(fn.name);
+        if (!operator_spelled.empty()) return operator_spelled;
         if (!fn.member_owner_class.empty() && fn.name.rfind(fn.member_owner_class + "_", 0) == 0) {
             return fn.name.substr(fn.member_owner_class.size() + 1);
         }

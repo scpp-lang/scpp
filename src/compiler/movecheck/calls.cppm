@@ -185,6 +185,31 @@ struct NodiscardInfo {
                                                                            const CalleeSignature& callee,
                                                                            const Body& body,
                                                                            const Signatures& signatures);
+// [over.match.oper]/2-3: an operator expression with a class operand is
+// resolved as a call to an operator function, chosen from the member
+// operator functions of the left operand's class plus the non-member
+// ones found for the operands. This is the *one* place that answers
+// "which operator function does `a @ b` call?" -- movecheck and codegen
+// both ask it, so neither can select a function the other did not.
+struct SelectedOperator {
+    const FunctionSignature* signature = nullptr;
+    ExprPtr call;
+    std::size_t param_offset = 0;
+    std::string method_name;
+};
+
+// `lhs_type`/`rhs_type` are passed in rather than inferred here: the
+// callers already have them, and inferring an operand twice at one level
+// of a left-leaning `a + b + c + ...` chain costs 2^n (see the
+// ExprKind::Binary arm of infer_expr_type for the measurement).
+[[nodiscard]] SelectedOperator resolve_binary_operator_call(const Expr& expr, const std::optional<Type>& lhs_type,
+                                                            const std::optional<Type>& rhs_type, const Body& body,
+                                                            const Signatures& signatures);
+[[nodiscard]] SelectedOperator resolve_subscript_operator_call(const Expr& expr, const std::optional<Type>& base_type,
+                                                               const Body& body, const Signatures& signatures);
+[[nodiscard]] SelectedOperator resolve_unary_operator_call(const Expr& expr, const std::optional<Type>& operand_type,
+                                                           const Body& body, const Signatures& signatures);
+[[nodiscard]] bool operand_type_needs_an_operator_function(const Type& type, const Body& body);
 [[nodiscard]] Type function_pointer_type_from_signature(const FunctionSignature& sig);
 [[nodiscard]] bool same_function_pointer_shape_ignoring_unsafe(const Type& a, const Type& b);
 [[nodiscard]] std::optional<Type> resolve_function_designator_type(const Expr& expr, const Type& target_type,
@@ -1325,6 +1350,185 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     }
     return nullptr;
 }
+// [over.built]: the built-in candidates for the operators exist for the
+// arithmetic, enumeration and pointer types only. An operand of class
+// type therefore has no built-in candidate at all, which is what makes
+// "no operator function" ill-formed rather than a fall-through to
+// integer arithmetic.
+[[nodiscard]] bool operand_type_needs_an_operator_function(const Type& type, const Body& body) {
+    const Type& effective = type.kind == TypeKind::Reference && type.pointee != nullptr ? *type.pointee : type;
+    return is_named_record_type(effective, body);
+}
+
+[[nodiscard]] const Type& operator_operand_type(const Type& type) {
+    return type.kind == TypeKind::Reference && type.pointee != nullptr ? *type.pointee : type;
+}
+
+// [basic.lookup.argdep]: a non-member operator function is looked up in
+// the namespaces associated with the operand types as well as at the
+// point of use. Without this, `std::operator+(const char*, const
+// std::string&)` would be invisible to `"a" + s` written outside
+// namespace std.
+void collect_operator_lookup_keys(const std::string& method_name, const std::optional<Type>& lhs_type,
+                                  const std::optional<Type>& rhs_type, const Body& body,
+                                  std::vector<std::string>& keys) {
+    keys.push_back(method_name);
+    if (!body.function_namespace_path.empty()) {
+        std::string qualified;
+        for (std::size_t i = 0; i < body.function_namespace_path.size(); i++) {
+            qualified += body.function_namespace_path[i];
+            qualified += "::";
+        }
+        qualified += method_name;
+        keys.push_back(qualified);
+    }
+    auto add_associated = [&](const std::optional<Type>& type) {
+        if (!type.has_value()) return;
+        const Type& effective = operator_operand_type(*type);
+        if (effective.kind != TypeKind::Named) return;
+        std::size_t pos = effective.name.rfind("::");
+        if (pos == std::string::npos) return;
+        std::string qualified = effective.name.substr(0, pos + 2);
+        qualified += method_name;
+        keys.push_back(qualified);
+    };
+    add_associated(lhs_type);
+    add_associated(rhs_type);
+}
+
+[[nodiscard]] ExprPtr make_free_operator_call_expr(const Expr& lhs, const Expr& rhs, const std::string& method_name,
+                                                   const SourceLocation& loc) {
+    ExprPtr call = std::make_unique<Expr>();
+    call->kind = ExprKind::Call;
+    call->loc = loc;
+    call->name = method_name;
+    call->args.push_back(deep_clone_expr_with_loc(lhs, loc));
+    call->args.push_back(deep_clone_expr_with_loc(rhs, loc));
+    return call;
+}
+
+[[nodiscard]] SelectedOperator resolve_binary_operator_call(const Expr& expr, const std::optional<Type>& lhs_type,
+                                                            const std::optional<Type>& rhs_type, const Body& body,
+                                                            const Signatures& signatures) {
+    SelectedOperator selected{};
+    if (expr.kind != ExprKind::Binary || expr.lhs == nullptr || expr.rhs == nullptr) return selected;
+    // Nothing to select unless an operand has class type: [over.built]
+    // covers every other operand pair, and asking further would search
+    // the signature table on every scalar `+` in the program.
+    bool class_operand_present = (lhs_type.has_value() && operand_type_needs_an_operator_function(*lhs_type, body)) ||
+                                 (rhs_type.has_value() && operand_type_needs_an_operator_function(*rhs_type, body));
+    if (!class_operand_present) return selected;
+    std::string method_name = binary_operator_method_name(expr.binary_op);
+    if (method_name.empty()) return selected;
+    // The member candidates of the left operand's class ([over.match.oper]/2.1).
+    if (lhs_type.has_value()) {
+        const Type& lhs_operand = operator_operand_type(*lhs_type);
+        if (lhs_operand.kind == TypeKind::Named) {
+            std::string key = lhs_operand.name;
+            key += "_";
+            key += method_name;
+            if (signatures.contains(key)) {
+                ExprPtr call = make_operator_call_expr(*expr.lhs, *expr.rhs, method_name, expr.loc);
+                CalleeSignature callee{key, 1, std::nullopt};
+                if (const FunctionSignature* sig = resolve_overload(*call, callee, body, signatures); sig != nullptr) {
+                    selected.signature = sig;
+                    selected.call = std::move(call);
+                    selected.param_offset = 1;
+                    selected.method_name = std::move(key);
+                    return selected;
+                }
+            }
+        }
+    }
+    // The non-member candidates ([over.match.oper]/2.2).
+    std::vector<std::string> keys;
+    collect_operator_lookup_keys(method_name, lhs_type, rhs_type, body, keys);
+    for (const std::string& key : keys) {
+        if (!signatures.contains(key)) continue;
+        ExprPtr call = make_free_operator_call_expr(*expr.lhs, *expr.rhs, key, expr.loc);
+        CalleeSignature callee{key, 0, std::nullopt};
+        if (const FunctionSignature* sig = resolve_overload(*call, callee, body, signatures); sig != nullptr) {
+            selected.signature = sig;
+            selected.call = std::move(call);
+            selected.param_offset = 0;
+            selected.method_name = key;
+            return selected;
+        }
+    }
+    // [over.match.oper]/3.4.3's rewritten candidate, for `==`/`!=` only:
+    // `a == b` also considers `b == a`.
+    if ((expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne) && rhs_type.has_value()) {
+        const Type& rhs_operand = operator_operand_type(*rhs_type);
+        if (rhs_operand.kind == TypeKind::Named) {
+            std::string key = rhs_operand.name;
+            key += "_";
+            key += method_name;
+            if (signatures.contains(key)) {
+                ExprPtr call = make_operator_call_expr(*expr.rhs, *expr.lhs, method_name, expr.loc);
+                CalleeSignature callee{key, 1, std::nullopt};
+                if (const FunctionSignature* sig = resolve_overload(*call, callee, body, signatures); sig != nullptr) {
+                    selected.signature = sig;
+                    selected.call = std::move(call);
+                    selected.param_offset = 1;
+                    selected.method_name = std::move(key);
+                    return selected;
+                }
+            }
+        }
+    }
+    return selected;
+}
+
+[[nodiscard]] SelectedOperator resolve_unary_operator_call(const Expr& expr, const std::optional<Type>& operand_type,
+                                                           const Body& body, const Signatures& signatures) {
+    SelectedOperator selected{};
+    if (expr.kind != ExprKind::Unary || expr.lhs == nullptr) return selected;
+    std::string method_name = unary_operator_method_name(expr.unary_op);
+    if (method_name.empty()) return selected;
+    if (!operand_type.has_value()) return selected;
+    const Type& operand = operator_operand_type(*operand_type);
+    if (operand.kind != TypeKind::Named) return selected;
+    std::string key = operand.name;
+    key += "_";
+    key += method_name;
+    if (!signatures.contains(key)) return selected;
+    ExprPtr call = make_unary_operator_call_expr(*expr.lhs, method_name, expr.loc);
+    CalleeSignature callee{key, 1, std::nullopt};
+    if (const FunctionSignature* sig = resolve_overload(*call, callee, body, signatures); sig != nullptr) {
+        selected.signature = sig;
+        selected.call = std::move(call);
+        selected.param_offset = 1;
+        selected.method_name = std::move(key);
+    }
+    return selected;
+}
+
+
+// [over.sub]: `a[i]` with a class operand is `a.operator[](i)`. The
+// declaration syntax exists, so the call has to resolve as well --
+// accepting a declaration nothing can ever reach is the same hole
+// one level down.
+[[nodiscard]] SelectedOperator resolve_subscript_operator_call(const Expr& expr, const std::optional<Type>& base_type,
+                                                               const Body& body, const Signatures& signatures) {
+    SelectedOperator selected{};
+    if (expr.kind != ExprKind::Subscript || expr.lhs == nullptr || expr.rhs == nullptr) return selected;
+    if (!base_type.has_value()) return selected;
+    const Type& base = operator_operand_type(*base_type);
+    if (base.kind != TypeKind::Named || !is_named_record_type(base, body)) return selected;
+    std::string key = base.name;
+    key += "_operator_subscript";
+    if (!signatures.contains(key)) return selected;
+    ExprPtr call = make_operator_call_expr(*expr.lhs, *expr.rhs, std::string("operator_subscript"), expr.loc);
+    CalleeSignature callee{key, 1, std::nullopt};
+    if (const FunctionSignature* sig = resolve_overload(*call, callee, body, signatures); sig != nullptr) {
+        selected.signature = sig;
+        selected.call = std::move(call);
+        selected.param_offset = 1;
+        selected.method_name = std::move(key);
+    }
+    return selected;
+}
+
 [[nodiscard]] const FunctionSignature* find_const_blocked_method_candidate(const Expr& call_expr,
                                                                            const CalleeSignature& callee,
                                                                            const Body& body,
@@ -2170,14 +2374,22 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             // construction path, so soundness doesn't depend on the
             // type-match performed here.
             return true;
-        case ExprKind::Unary:
+        case ExprKind::Unary: {
             // `&x` (address-of) always yields a brand new pointer prvalue,
             // independent of whatever move/borrow state `x` itself has --
             // exactly as fresh as a literal or std::make_unique<T>(...),
             // regardless of whether `x` is a plain local, a field access
             // (e.g. `&type.lifetime`), or any other place expression.
-            if (expr.unary_op != UnaryOp::AddressOf) return false;
+            if (expr.unary_op == UnaryOp::AddressOf) break;
+            // A unary operator function's result is a prvalue of its
+            // declared return type, like any other call -- `V b = -a;`
+            // otherwise looked for a converting constructor `V(V)`.
+            std::optional<Type> operand = infer_expr_type(*expr.lhs, body, signatures);
+            SelectedOperator selected = resolve_unary_operator_call(expr, operand, body, signatures);
+            if (selected.signature == nullptr || is_reference(selected.signature->return_type)) return false;
+            if (!types_equal(selected.signature->return_type, expected_type)) return false;
             break;
+        }
         case ExprKind::Call: {
             CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
@@ -2250,6 +2462,22 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             // abandoned, not aliasing something that outlives the call.
             call_receiver_is_move = expr.lhs != nullptr && expr.lhs->kind == ExprKind::Move;
             if (is_reference(sig->return_type) && !call_receiver_is_move) return false;
+            break;
+        }
+        case ExprKind::Binary: {
+            // [over.match.oper]/2: an operator expression with a class
+            // operand *is* a call, so it is exactly as fresh as the
+            // operator function's return -- `a + b` returning `V` by
+            // value initializes a `V` for the same reason
+            // `a.plus(b)` does. Without this arm, an operator function's
+            // result was not a usable initializer at all: the very first
+            // thing `V c = a + b;` reported.
+            if (expr.lhs == nullptr || expr.rhs == nullptr) return false;
+            std::optional<Type> lhs_type = infer_expr_type(*expr.lhs, body, signatures);
+            std::optional<Type> rhs_type = infer_expr_type(*expr.rhs, body, signatures);
+            SelectedOperator selected = resolve_binary_operator_call(expr, lhs_type, rhs_type, body, signatures);
+            if (selected.signature == nullptr) return false;
+            if (is_reference(selected.signature->return_type)) return false;
             break;
         }
         case ExprKind::Identifier:
@@ -2433,13 +2661,33 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
 
         case ExprKind::Unary:
             switch (expr.unary_op) {
-                case UnaryOp::Not: return named_type("bool");
-                case UnaryOp::Neg: return infer_expr_type(*expr.lhs, body, signatures);
+                case UnaryOp::Not:
+                case UnaryOp::Neg:
                 case UnaryOp::PreInc:
                 case UnaryOp::PreDec:
                 case UnaryOp::PostInc:
-                case UnaryOp::PostDec:
-                    return infer_expr_type(*expr.lhs, body, signatures);
+                case UnaryOp::PostDec: {
+                    // [over.match.oper]/2: a unary operator with a class
+                    // operand names an operator function, exactly as a
+                    // binary one does. Only `operator*` and `operator->`
+                    // were ever looked up, so `-v` reported `V` (the
+                    // operand's own type) and `!v` reported `bool`, both
+                    // without asking whether the class had the operator.
+                    std::optional<Type> operand = infer_expr_type(*expr.lhs, body, signatures);
+                    SelectedOperator selected = resolve_unary_operator_call(expr, operand, body, signatures);
+                    if (selected.signature != nullptr) return selected.signature->return_type;
+                    // No operator function and a class operand: [over.built]
+                    // offers no candidate either, so the expression has no
+                    // type at all. Reporting the operand's own type here is
+                    // what made `V b = -a;` say "no constructor of 'V'
+                    // matches this call ... argument type is 'V'" -- a
+                    // consequence of the lie, not the defect.
+                    if (operand.has_value() && operand_type_needs_an_operator_function(*operand, body)) {
+                        return std::nullopt;
+                    }
+                    if (expr.unary_op == UnaryOp::Not) return named_type("bool");
+                    return operand;
+                }
                 case UnaryOp::AddressOf: {
                     if (expr.lhs->kind == ExprKind::Identifier && !body.local_of(*expr.lhs).has_value() &&
                         find_visible_global_for_expr(*expr.lhs, body) == nullptr) {
@@ -2512,7 +2760,22 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             }
             return std::nullopt;
 
-        case ExprKind::Binary:
+        case ExprKind::Binary: {
+            // [over.match.oper]/2: when an operand has class type the
+            // expression *is* a call, so its type is the selected
+            // operator function's return type -- not the left operand's,
+            // and not `bool` for a relational one. Asked before the
+            // built-in arms below, because [over.built] provides no
+            // built-in candidate for a class operand at all.
+            //
+            // The two operand types are inferred exactly once here and
+            // handed to everything that needs them, for the 2^n reason
+            // spelled out in the arithmetic block below.
+            std::optional<Type> binary_lhs_type = infer_expr_type(*expr.lhs, body, signatures);
+            std::optional<Type> binary_rhs_type = infer_expr_type(*expr.rhs, body, signatures);
+            SelectedOperator operator_call =
+                resolve_binary_operator_call(expr, binary_lhs_type, binary_rhs_type, body, signatures);
+            if (operator_call.signature != nullptr) return operator_call.signature->return_type;
             switch (expr.binary_op) {
                 case BinaryOp::Add:
                 case BinaryOp::Sub:
@@ -2560,18 +2823,16 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
                                                  is_untyped_numeric_literal(*expr.lhs) &&
                                                  !is_untyped_numeric_literal(*expr.rhs);
                     if (additive) {
-                        std::optional<Type> lhs_type = infer_expr_type(*expr.lhs, body, signatures);
-                        std::optional<Type> rhs_type = infer_expr_type(*expr.rhs, body, signatures);
-                        if (lhs_type.has_value() && rhs_type.has_value()) {
-                            if (std::optional<Type> result =
-                                    pointer_arithmetic_result_type(expr.binary_op, *lhs_type, *rhs_type)) {
+                        if (binary_lhs_type.has_value() && binary_rhs_type.has_value()) {
+                            if (std::optional<Type> result = pointer_arithmetic_result_type(
+                                    expr.binary_op, *binary_lhs_type, *binary_rhs_type)) {
                                 return result;
                             }
                         }
-                        return adopts_rhs_type ? rhs_type : lhs_type;
+                        return adopts_rhs_type ? binary_rhs_type : binary_lhs_type;
                     }
-                    if (adopts_rhs_type) return infer_expr_type(*expr.rhs, body, signatures);
-                    return infer_expr_type(*expr.lhs, body, signatures);
+                    if (adopts_rhs_type) return binary_rhs_type;
+                    return binary_lhs_type;
                 }
                 case BinaryOp::Eq:
                 case BinaryOp::Ne:
@@ -2584,6 +2845,7 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
                     return named_type("bool");
             }
             return std::nullopt;
+        }
 
         case ExprKind::Conditional: {
             std::optional<Type> then_type = infer_expr_type(*expr.rhs, body, signatures);
@@ -2811,6 +3073,13 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             if (effective.kind == TypeKind::Pointer) return member_access_type(*effective.pointee, !effective.is_mutable_pointee);
             if (std::optional<Type> element = infer_vector_element_type(effective, body); element.has_value()) {
                 return *element;
+            }
+            SelectedOperator selected = resolve_subscript_operator_call(expr, base, body, signatures);
+            if (selected.signature != nullptr) {
+                return is_reference(selected.signature->return_type) && selected.signature->return_type.pointee
+                           ? member_access_type(*selected.signature->return_type.pointee,
+                                                !selected.signature->return_type.is_mutable_ref)
+                           : selected.signature->return_type;
             }
             return std::nullopt;
         }

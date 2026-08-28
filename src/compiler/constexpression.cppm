@@ -3507,6 +3507,61 @@ private:
         return object;
     }
 
+    // [over.match.oper]/2: an operator expression with a class operand
+    // is a call to an operator function -- in a constant expression
+    // exactly as at run time. Returns nothing when the built-in rules
+    // still apply, so the caller falls through to them.
+    //
+    // The whole decision, its locals and its diagnostic live in this
+    // callee rather than in evaluate_expr_in_context's Binary arm, for
+    // the reason ConstexprLimits states at the top of this file: at -O0
+    // a frame is the sum of all its locals, max_recursion_depth is
+    // derived from a *measured* per-level cost, and codegen_test's
+    // margin proof fails the moment that cost grows. Every operand of
+    // every binary expression at every level would otherwise pay for
+    // these.
+    [[nodiscard]] std::optional<std::expected<std::shared_ptr<Cell>, ConstexprError>>
+    evaluate_binary_operator_function(const Expr& expr) {
+        if (expr.lhs == nullptr || expr.rhs == nullptr) return std::nullopt;
+        Type lhs_storage{};
+        Type rhs_storage{};
+        const Type* lhs_class = operator_operand_class_type(*expr.lhs, lhs_storage);
+        const Type* rhs_class = operator_operand_class_type(*expr.rhs, rhs_storage);
+        if (lhs_class == nullptr && rhs_class == nullptr) return std::nullopt;
+        std::string method_name = binary_operator_method_name(expr.binary_op);
+        if (!method_name.empty()) {
+            if (lhs_class != nullptr && functions_by_name_.contains(lhs_class->name + "_" + method_name)) {
+                ExprPtr call = make_operator_call_expr(*expr.lhs, *expr.rhs, method_name, expr.loc);
+                return evaluate_expr(*call);
+            }
+            // [over.match.oper]/3.4.3's rewritten candidate, for `==`/`!=`.
+            if ((expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne) && rhs_class != nullptr &&
+                functions_by_name_.contains(rhs_class->name + "_" + method_name)) {
+                ExprPtr call = make_operator_call_expr(*expr.rhs, *expr.lhs, method_name, expr.loc);
+                return evaluate_expr(*call);
+            }
+        }
+        std::string lhs_display = lhs_class != nullptr ? describe_type_brief(*lhs_class) : std::string("?");
+        std::string rhs_display = rhs_class != nullptr ? describe_type_brief(*rhs_class) : std::string("?");
+        return std::unexpected(ConstexprError(
+            expr.loc, no_operator_function_message(binary_operator_spelling(expr.binary_op), lhs_display, rhs_display,
+                                                   method_name, lhs_class != nullptr)));
+    }
+
+    // The static type of an operator operand, looked through a
+    // reference; nothing unless it names a class or struct.
+    [[nodiscard]] const Type* operator_operand_class_type(const Expr& operand, Type& storage) {
+        std::optional<Type> inferred = infer_unevaluated_expr_type(operand);
+        if (!inferred.has_value()) return nullptr;
+        storage = inferred->kind == TypeKind::Reference && inferred->pointee != nullptr ? *inferred->pointee : *inferred;
+        if (storage.kind != TypeKind::Named) return nullptr;
+        if (classes_by_name_.find(storage.name) == classes_by_name_.end() &&
+            structs_by_name_.find(storage.name) == structs_by_name_.end()) {
+            return nullptr;
+        }
+        return &storage;
+    }
+
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_call_expr(const Expr& expr) {
         if (expr.lhs)
             return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
@@ -4010,6 +4065,26 @@ private:
                             return std::unexpected(std::move(result).error());
                         }
                         return clone_cell(target.cell);
+                    }
+                    // [over.match.oper]/2: an operator with a class
+                    // operand is a call to an operator function, in a
+                    // constant expression exactly as at runtime. The
+                    // evaluator had no operator dispatch of any kind --
+                    // it went straight to evaluate_binary_numeric, so a
+                    // `constexpr` `a + b` on a class reported "expected
+                    // an integer-like constexpr value" while the same
+                    // expression at runtime called the operator. A fold
+                    // and a run disagreeing is a wrong answer at compile
+                    // time, so both now rewrite to the same call node.
+                    // Asked before the `&&`/`||` arms for the same reason
+                    // codegen asks before its short-circuit lowering: a
+                    // selected operator function is an ordinary call and
+                    // evaluates both operands, while `as_bool` on a class
+                    // operand can only fail.
+                    if (std::optional<std::expected<std::shared_ptr<Cell>, ConstexprError>> operator_result =
+                            evaluate_binary_operator_function(expr);
+                        operator_result.has_value()) {
+                        return std::move(*operator_result);
                     }
                     if (expr.binary_op == BinaryOp::And)
                         return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {

@@ -1,0 +1,29 @@
+// The constant evaluator is a second implementation of every question
+// the other passes answer, and it had no operator dispatch of any kind:
+// it went straight to its built-in numeric path, so a `constexpr` `a + b`
+// on a class reported "expected an integer-like constexpr value" while
+// the very same expression at run time called the operator function.
+// A fold and a run disagreeing is a wrong answer at compile time.
+import std;
+
+class V {
+public:
+    virtual ~V() = default;
+    int a = 0;
+    constexpr V() { return; }
+    constexpr V(int n) { this.a = n; return; }
+    constexpr V operator+(const V& o) const { V r{}; r.a = this.a + o.a; return r; }
+    constexpr bool operator==(const V& o) const { return this.a == o.a; }
+};
+
+int main() {
+    constexpr V a{12}; constexpr V b{30};
+    constexpr V folded = a + b;
+    V x{12}; V y{30};
+    V ran = x + y;
+    constexpr bool folded_eq = a == b;
+    constexpr V same{12};
+    constexpr bool folded_eq2 = a == same;
+    std::print("{} {} {} {}\n", folded.a, ran.a, folded_eq ? 1 : 0, folded_eq2 ? 1 : 0);
+    return 0;
+}

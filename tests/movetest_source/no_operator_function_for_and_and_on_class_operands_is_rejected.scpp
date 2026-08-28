@@ -1,0 +1,17 @@
+// [over.built] lists no built-in '&&' with a class operand, so with no
+// operator function the program is ill-formed. This used to be reported
+// by codegen as "expected a 'bool' value here", which describes a
+// scalar-to-bool conversion that is not what the program asked for.
+class V {
+public:
+    virtual ~V() = default;
+    int a = 3;
+    V() { return; }
+};
+
+int main() {
+    V a{};
+    V b{};
+    bool c = a && b;
+    return c ? 1 : 0;
+}

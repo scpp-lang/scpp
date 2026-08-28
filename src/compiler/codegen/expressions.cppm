@@ -39,19 +39,6 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     return 0;
 }
 
-[[nodiscard]] bool is_string_named_type(const Type& type) {
-    return type.kind == TypeKind::Named && (type.name == "std::string" || type.name == "string");
-}
-
-[[nodiscard]] bool is_const_char_pointer_type(const Type& raw_type) {
-    // A string literal's type is an array of `const char` ([lex.string]),
-    // and decays to `const char*` -- the two are indistinguishable at
-    // every use this predicate guards, so ask about the decayed type.
-    Type type = decay_array_to_pointer(raw_type);
-    return type.kind == TypeKind::Pointer && type.pointee != nullptr && type.pointee->kind == TypeKind::Named &&
-           type.pointee->name == "char" && !type.is_mutable_pointee;
-}
-
 [[nodiscard]] bool is_compound_assignment(BinaryOp op) {
     return op == BinaryOp::AddAssign || op == BinaryOp::SubAssign || op == BinaryOp::MulAssign || op == BinaryOp::DivAssign;
 }
@@ -2379,6 +2366,14 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
             case ExprKind::Unary:
                 return [&, this]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
+                    // [over.match.oper]/2 applies to unary operators too:
+                    // ask for an operator function before any built-in
+                    // lowering, exactly as codegen_binary now does.
+                    {
+                        auto operator_result = codegen_unary_operator_function_call(expr);
+                        if (!operator_result.has_value()) return std::unexpected(std::move(operator_result).error());
+                        if (std::optional<llvm::LLVMValueRef> value = std::move(operator_result).value()) return *value;
+                    }
                     if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
                         auto lv_result = codegen_lvalue(expr);
                         if (!lv_result.has_value()) return std::unexpected(std::move(lv_result).error());
@@ -3324,6 +3319,31 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         return LValue{elem_ptr, *base.type.pointee, alignment_for_type(*base.type.pointee)};
                     }
                     if (base.type.kind != TypeKind::Array) {
+                        // [over.sub]: a class base means an operator[]
+                        // call; its result is a prvalue and gets a
+                        // materialized temporary, exactly like the
+                        // by-value Call case.
+                        const Function* subscript_fn = resolve_subscript_operator_function(expr);
+                        auto operator_result = codegen_subscript_operator_call(expr);
+                        if (!operator_result.has_value()) return std::unexpected(std::move(operator_result).error());
+                        if (std::optional<llvm::LLVMValueRef> value = std::move(operator_result).value()) {
+                            std::optional<Type> result_type = infer_type(expr);
+                            if (!result_type.has_value()) {
+                                return std::unexpected(CodegenError("subscript on a non-array type", current_loc_));
+                            }
+                            // A reference-returning `operator[]` already
+                            // hands back the element's address, which *is*
+                            // the place; storing it would make the place the
+                            // pointer itself and read the address as the
+                            // element's value.
+                            if (subscript_fn != nullptr && subscript_fn->return_type.kind == TypeKind::Reference) {
+                                return LValue{*value, *result_type, alignment_for_type(*result_type)};
+                            }
+                            llvm::LLVMValueRef temp =
+                                create_entry_block_alloca(llvm::LLVMTypeOf(*value), "subscriptlvaluetmp");
+                            llvm::LLVMBuildStore(builder_, *value, temp);
+                            return LValue{temp, *result_type, alignment_for_type(*result_type)};
+                        }
                         return std::unexpected(CodegenError("subscript on a non-array type",
                             current_loc_));
                     }
@@ -3494,6 +3514,26 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
             case ExprKind::Unary:
                 return [&, this]() -> std::expected<Codegen::LValue, CodegenError> {
+                    // Same materialization as the Binary case below: a unary
+                    // operator function returns a class prvalue, and `(-a).m()`
+                    // or `-a + b` makes it a receiver.
+                    if (const Function* unary_fn = resolve_unary_operator_function(expr, nullptr);
+                        unary_fn != nullptr) {
+                        std::optional<Type> result_type = infer_type(expr);
+                        auto value_result = codegen_expr(expr);
+                        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                        llvm::LLVMValueRef value = std::move(value_result).value();
+                        if (!result_type.has_value()) {
+                            return std::unexpected(CodegenError("expression is not assignable", current_loc_));
+                        }
+                        if (unary_fn->return_type.kind == TypeKind::Reference) {
+                            return LValue{value, *result_type, alignment_for_type(*result_type)};
+                        }
+                        llvm::LLVMValueRef temp =
+                            create_entry_block_alloca(llvm::LLVMTypeOf(value), "operatorlvaluetmp");
+                        llvm::LLVMBuildStore(builder_, value, temp);
+                        return LValue{temp, *result_type, alignment_for_type(*result_type)};
+                    }
                     if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
                         auto lv_result = codegen_lvalue(*expr.lhs);
                         if (!lv_result.has_value()) return std::unexpected(std::move(lv_result).error());
@@ -3604,6 +3644,35 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     return LValue{pointee_ptr, *operand_underlying.pointee, alignment_for_type(*operand_underlying.pointee)};
                 }();
 
+            case ExprKind::Binary:
+                return [&, this]() -> std::expected<Codegen::LValue, CodegenError> {
+                    // An operator function's result is a prvalue of class
+                    // type, and `a + b + c` makes it the *receiver* of the
+                    // next operator -- [class.temporary]/2 materializes it,
+                    // exactly as the by-value Call case above does. Without
+                    // this the second `+` in a chain, and any member call on
+                    // an operator result, fell to the `default:` arm and
+                    // reported "expression is not assignable".
+                    const Function* operator_fn =
+                        expr.lhs != nullptr && expr.rhs != nullptr
+                            ? resolve_binary_operator_function(expr, infer_type(*expr.lhs), infer_type(*expr.rhs),
+                                                               nullptr, nullptr, nullptr)
+                            : nullptr;
+                    std::optional<Type> result_type = operator_fn != nullptr ? infer_type(expr) : std::nullopt;
+                    if (!result_type.has_value()) {
+                        return std::unexpected(CodegenError("expression is not assignable", current_loc_));
+                    }
+                    auto value_result = codegen_expr(expr);
+                    if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                    llvm::LLVMValueRef value = std::move(value_result).value();
+                    if (operator_fn->return_type.kind == TypeKind::Reference) {
+                        return LValue{value, *result_type, alignment_for_type(*result_type)};
+                    }
+                    llvm::LLVMValueRef temp = create_entry_block_alloca(llvm::LLVMTypeOf(value), "operatorlvaluetmp");
+                    llvm::LLVMBuildStore(builder_, value, temp);
+                    return LValue{temp, *result_type, alignment_for_type(*result_type)};
+                }();
+
             case ExprKind::StringLiteral: {
                 // [lex.string]/1: a string literal *is* an lvalue, designating
                 // an array object with static storage duration -- so it has a
@@ -3672,6 +3741,197 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         llvm::LLVMTypeRef printf_type =
             llvm::LLVMFunctionType(llvm::LLVMInt32TypeInContext(context_), printf_param_types, 1, /*IsVarArg=*/1);
         return llvm::LLVMAddFunction(module_, "printf", printf_type);
+    }
+
+
+    const Function* Codegen::resolve_binary_operator_function(const Expr& expr, const std::optional<Type>& lhs_type,
+                                                              const std::optional<Type>& rhs_type, std::string* out_key,
+                                                              std::size_t* out_param_offset, bool* out_receiver_is_rhs)
+{
+        if (expr.kind != ExprKind::Binary || expr.lhs == nullptr || expr.rhs == nullptr) return nullptr;
+        const Type* lhs_named = operator_operand_type_or_null(lhs_type);
+        const Type* rhs_named = operator_operand_type_or_null(rhs_type);
+        bool lhs_is_record = lhs_named != nullptr && lhs_named->kind == TypeKind::Named && is_named_record_type(*lhs_named);
+        bool rhs_is_record = rhs_named != nullptr && rhs_named->kind == TypeKind::Named && is_named_record_type(*rhs_named);
+        // [over.built]: no built-in candidate has a class operand, and
+        // conversely a pair of non-class operands has no operator
+        // function to find -- asking further would search the function
+        // table on every scalar `+` in the program.
+        if (!lhs_is_record && !rhs_is_record) return nullptr;
+        std::string operator_name = binary_operator_method_name(expr.binary_op);
+        if (operator_name.empty()) return nullptr;
+
+        auto select_member = [&, this](const Expr& receiver_expr, const Expr& arg_expr,
+                                       const Type* receiver_named) -> const Function* {
+            if (receiver_named == nullptr || receiver_named->kind != TypeKind::Named) return nullptr;
+            std::vector<ExprPtr> overload_args;
+            overload_args.push_back(deep_clone_expr_with_loc(arg_expr, expr.loc));
+            return resolve_overload_by_type(receiver_named->name + "_" + operator_name, overload_args,
+                                            /*param_offset=*/1, !is_read_only_place(receiver_expr), &receiver_expr);
+        };
+        // The member candidates of the left operand's class ([over.match.oper]/2.1).
+        if (const Function* member = select_member(*expr.lhs, *expr.rhs, lhs_named); member != nullptr) {
+            if (out_key != nullptr) *out_key = operator_name;
+            if (out_param_offset != nullptr) *out_param_offset = 1;
+            if (out_receiver_is_rhs != nullptr) *out_receiver_is_rhs = false;
+            return member;
+        }
+        // The non-member candidates ([over.match.oper]/2.2), looked up at
+        // the point of use and in the operand types' own namespaces
+        // ([basic.lookup.argdep]).
+        std::vector<std::string> keys;
+        keys.push_back(operator_name);
+        {
+            const std::vector<std::string>& lookup_path = current_lookup_namespace_path();
+            std::string qualified;
+            for (std::size_t i = 0; i < lookup_path.size(); i++) {
+                qualified += lookup_path[i];
+                qualified += "::";
+            }
+            if (!qualified.empty()) keys.push_back(qualified + operator_name);
+        }
+        auto add_associated = [&](const Type* type) {
+            if (type == nullptr || type->kind != TypeKind::Named) return;
+            std::size_t pos = type->name.rfind("::");
+            if (pos == std::string::npos) return;
+            keys.push_back(type->name.substr(0, pos + 2) + operator_name);
+        };
+        add_associated(lhs_named);
+        add_associated(rhs_named);
+        for (const std::string& key : keys) {
+            std::vector<ExprPtr> free_args;
+            free_args.push_back(deep_clone_expr_with_loc(*expr.lhs, expr.loc));
+            free_args.push_back(deep_clone_expr_with_loc(*expr.rhs, expr.loc));
+            if (const Function* free_fn = resolve_overload_by_type(key, free_args, /*param_offset=*/0);
+                free_fn != nullptr) {
+                if (out_key != nullptr) *out_key = key;
+                if (out_param_offset != nullptr) *out_param_offset = 0;
+                if (out_receiver_is_rhs != nullptr) *out_receiver_is_rhs = false;
+                return free_fn;
+            }
+        }
+        // [over.match.oper]/3.4.3's rewritten candidate, for `==`/`!=`.
+        if (expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne) {
+            if (const Function* reversed = select_member(*expr.rhs, *expr.lhs, rhs_named); reversed != nullptr) {
+                if (out_key != nullptr) *out_key = operator_name;
+                if (out_param_offset != nullptr) *out_param_offset = 1;
+                if (out_receiver_is_rhs != nullptr) *out_receiver_is_rhs = true;
+                return reversed;
+            }
+        }
+        return nullptr;
+    }
+
+
+    [[nodiscard]] std::expected<std::optional<llvm::LLVMValueRef>, CodegenError>
+    Codegen::codegen_binary_operator_function_call(const Expr& expr, const std::optional<Type>& lhs_type,
+                                                   const std::optional<Type>& rhs_type)
+{
+        if (expr.lhs == nullptr || expr.rhs == nullptr) return std::optional<llvm::LLVMValueRef>{};
+        const Type* lhs_named = operator_operand_type_or_null(lhs_type);
+        const Type* rhs_named = operator_operand_type_or_null(rhs_type);
+        bool lhs_is_record = lhs_named != nullptr && lhs_named->kind == TypeKind::Named && is_named_record_type(*lhs_named);
+        bool rhs_is_record = rhs_named != nullptr && rhs_named->kind == TypeKind::Named && is_named_record_type(*rhs_named);
+        if (!lhs_is_record && !rhs_is_record) return std::optional<llvm::LLVMValueRef>{};
+        std::string key;
+        std::size_t param_offset = 0;
+        bool receiver_is_rhs = false;
+        const Function* selected =
+            resolve_binary_operator_function(expr, lhs_type, rhs_type, &key, &param_offset, &receiver_is_rhs);
+        if (selected == nullptr) {
+            std::string lhs_display = lhs_named != nullptr ? describe_type_brief(*lhs_named) : std::string("?");
+            std::string rhs_display = rhs_named != nullptr ? describe_type_brief(*rhs_named) : std::string("?");
+            return std::unexpected(CodegenError(
+                no_operator_function_message(binary_operator_spelling(expr.binary_op), lhs_display, rhs_display,
+                                             binary_operator_method_name(expr.binary_op), lhs_is_record),
+                current_loc_));
+        }
+        ExprPtr operator_call;
+        if (param_offset == 1) {
+            const Expr& receiver = receiver_is_rhs ? *expr.rhs : *expr.lhs;
+            const Expr& argument = receiver_is_rhs ? *expr.lhs : *expr.rhs;
+            operator_call = make_operator_call_expr(receiver, argument, key, expr.loc);
+        } else {
+            operator_call = std::make_unique<Expr>();
+            operator_call->kind = ExprKind::Call;
+            operator_call->loc = expr.loc;
+            operator_call->name = key;
+            operator_call->args.push_back(deep_clone_expr_with_loc(*expr.lhs, expr.loc));
+            operator_call->args.push_back(deep_clone_expr_with_loc(*expr.rhs, expr.loc));
+        }
+        auto call_result = codegen_call(*operator_call);
+        if (!call_result.has_value()) return std::unexpected(std::move(call_result).error());
+        return std::optional<llvm::LLVMValueRef>{std::move(call_result).value().value};
+    }
+
+
+    const Function* Codegen::resolve_subscript_operator_function(const Expr& expr)
+{
+        if (expr.kind != ExprKind::Subscript || expr.lhs == nullptr || expr.rhs == nullptr) return nullptr;
+        std::optional<Type> base_type = infer_lvalue_type(*expr.lhs);
+        const Type* base = operator_operand_type_or_null(base_type);
+        if (base == nullptr || base->kind != TypeKind::Named || !is_named_record_type(*base)) return nullptr;
+        std::vector<ExprPtr> index_args;
+        index_args.push_back(deep_clone_expr_with_loc(*expr.rhs, expr.loc));
+        return resolve_overload_by_type(base->name + "_operator_subscript", index_args, /*param_offset=*/1,
+                                        !is_read_only_place(*expr.lhs), expr.lhs.get());
+    }
+
+
+    [[nodiscard]] std::expected<std::optional<llvm::LLVMValueRef>, CodegenError>
+    Codegen::codegen_subscript_operator_call(const Expr& expr)
+{
+        if (resolve_subscript_operator_function(expr) == nullptr) return std::optional<llvm::LLVMValueRef>{};
+        ExprPtr operator_call =
+            make_operator_call_expr(*expr.lhs, *expr.rhs, std::string("operator_subscript"), expr.loc);
+        auto call_result = codegen_call(*operator_call);
+        if (!call_result.has_value()) return std::unexpected(std::move(call_result).error());
+        return std::optional<llvm::LLVMValueRef>{std::move(call_result).value().value};
+    }
+
+
+    const Function* Codegen::resolve_unary_operator_function(const Expr& expr, std::string* out_key)
+{
+        if (expr.kind != ExprKind::Unary || expr.lhs == nullptr) return nullptr;
+        if (expr.unary_op == UnaryOp::AddressOf || expr.unary_op == UnaryOp::Deref) return nullptr;
+        std::string operator_name = unary_operator_method_name(expr.unary_op);
+        if (operator_name.empty()) return nullptr;
+        std::optional<Type> operand_type = infer_type(*expr.lhs);
+        const Type* operand = operator_operand_type_or_null(operand_type);
+        if (operand == nullptr || operand->kind != TypeKind::Named || !is_named_record_type(*operand)) return nullptr;
+        std::string key = operand->name + "_" + operator_name;
+        std::vector<ExprPtr> no_args;
+        const Function* selected = resolve_overload_by_type(key, no_args, /*param_offset=*/1,
+                                                           !is_read_only_place(*expr.lhs), expr.lhs.get());
+        if (selected != nullptr && out_key != nullptr) *out_key = operator_name;
+        return selected;
+    }
+
+
+    [[nodiscard]] std::expected<std::optional<llvm::LLVMValueRef>, CodegenError>
+    Codegen::codegen_unary_operator_function_call(const Expr& expr)
+{
+        if (expr.lhs == nullptr) return std::optional<llvm::LLVMValueRef>{};
+        if (expr.unary_op == UnaryOp::AddressOf || expr.unary_op == UnaryOp::Deref) {
+            return std::optional<llvm::LLVMValueRef>{};
+        }
+        if (unary_operator_method_name(expr.unary_op).empty()) return std::optional<llvm::LLVMValueRef>{};
+        std::optional<Type> operand_type = infer_type(*expr.lhs);
+        const Type* operand = operator_operand_type_or_null(operand_type);
+        if (operand == nullptr || operand->kind != TypeKind::Named || !is_named_record_type(*operand)) {
+            return std::optional<llvm::LLVMValueRef>{};
+        }
+        std::string key;
+        const Function* selected = resolve_unary_operator_function(expr, &key);
+        if (selected == nullptr) {
+            return std::unexpected(CodegenError(
+                no_unary_operator_function_message(unary_operator_spelling(expr.unary_op), describe_type_brief(*operand)),
+                current_loc_));
+        }
+        ExprPtr operator_call = make_unary_operator_call_expr(*expr.lhs, key, expr.loc);
+        auto call_result = codegen_call(*operator_call);
+        if (!call_result.has_value()) return std::unexpected(std::move(call_result).error());
+        return std::optional<llvm::LLVMValueRef>{std::move(call_result).value().value};
     }
 
 
@@ -3777,42 +4037,28 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             }();
         if (is_compound_assignment(expr.binary_op))
             return [&, this]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
+                std::optional<Type> lhs_type = infer_type(*expr.lhs);
+                std::optional<Type> rhs_type = infer_type(*expr.rhs);
+                // [over.match.oper]/2: `s += x` on a class operand calls
+                // `operator+=`, like every other operator. What stood
+                // here instead was a hard-coded rewrite of
+                // `std::string += (std::string | const char*)` into
+                // `std::string::append(...)` -- a single library type
+                // named in the compiler, which worked only because
+                // std::string happened to have an `append` and nothing
+                // else in the language had `+=` at all. std::string now
+                // declares the three `operator+=` overloads the rewrite
+                // was standing in for, and every other class gets the
+                // same treatment for free.
+                {
+                    auto operator_result = codegen_binary_operator_function_call(expr, lhs_type, rhs_type);
+                    if (!operator_result.has_value()) return std::unexpected(std::move(operator_result).error());
+                    if (std::optional<llvm::LLVMValueRef> value = std::move(operator_result).value()) return *value;
+                }
                 auto lv_result = codegen_lvalue(*expr.lhs);
                 if (!lv_result.has_value()) return std::unexpected(std::move(lv_result).error());
                 LValue lv = std::move(lv_result).value();
-                std::optional<Type> lhs_type = infer_type(*expr.lhs);
-                std::optional<Type> rhs_type = infer_type(*expr.rhs);
                 const Type& operand_type = lv.type.kind == TypeKind::Reference && lv.type.pointee ? *lv.type.pointee : lv.type;
-                if (expr.binary_op == BinaryOp::AddAssign && lhs_type.has_value() && rhs_type.has_value()) {
-                    const Type& lhs_operand = binary_operand_type(*lhs_type);
-                    const Type& rhs_operand = binary_operand_type(*rhs_type);
-                    if (is_string_named_type(lhs_operand) &&
-                        (is_string_named_type(rhs_operand) || is_const_char_pointer_type(rhs_operand))) {
-                        std::vector<ExprPtr> append_args;
-                        append_args.push_back(deep_clone_expr(*expr.rhs));
-                        const Function* callee =
-                            resolve_overload_by_type(lhs_operand.name + "_append", append_args, /*param_offset=*/1,
-                                                     !is_read_only_place(*expr.lhs), expr.lhs.get());
-                        if (callee == nullptr) {
-                            return std::unexpected(CodegenError("class '" + lhs_operand.name + "' has no append overload matching this '+='", current_loc_));
-                        }
-                        llvm::LLVMValueRef target = llvm::LLVMGetNamedFunction(module_, overload_names_.at(callee).c_str());
-                        if (target == nullptr) {
-                            return std::unexpected(CodegenError("internal error: no generated code for '" +
-                                                                    lhs_operand.name + "::append' used here",
-                                current_loc_));
-                        }
-                        auto args_result = codegen_call_args(append_args, callee, /*param_offset=*/1);
-                        if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
-                        std::vector<llvm::LLVMValueRef> args = std::move(args_result).value();
-                        args.insert(args.begin(), lv.ptr);
-                        build_call(target, args);
-                        auto lv_llvm_type_result = to_llvm_type(lv.type);
-                        if (!lv_llvm_type_result.has_value()) return std::unexpected(std::move(lv_llvm_type_result).error());
-                        return create_load(std::move(lv_llvm_type_result).value(), lv.ptr, lv.alignment, "compoundassign.tmp");
-                    }
-                }
-
                 auto lv_llvm_type_result = to_llvm_type(lv.type);
                 if (!lv_llvm_type_result.has_value()) return std::unexpected(std::move(lv_llvm_type_result).error());
                 llvm::LLVMValueRef lhs = create_load(std::move(lv_llvm_type_result).value(), lv.ptr, lv.alignment, "compoundassign.lhs");
@@ -3868,6 +4114,37 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 return value;
             }();
 
+        // Inferred here, above the operator hook, because the hook runs
+        // before the `&&`/`||` short-circuit branch and needs both
+        // operand types to ask [over.match.oper]'s question. Each
+        // operand is inferred exactly once and the answer reused by
+        // every arm below, for the 2^n reason the arithmetic arm
+        // documents.
+        std::optional<Type> lhs_type = infer_type(*expr.lhs);
+        std::optional<Type> rhs_type = infer_type(*expr.rhs);
+
+        // [over.match.oper]/2: an operator expression whose operands
+        // include a class type is a call to an operator function. This
+        // used to run for `==`/`!=` only; every other operator fell
+        // straight through to the built-in arithmetic and comparison
+        // lowering below, which emitted `llvm.sadd.with.overflow` and
+        // `icmp` on class *values*. Asked for every operator now, and
+        // asked before any built-in lowering, because [over.built]
+        // provides no built-in candidate with a class operand.
+        //
+        // Asked before the `&&`/`||` short-circuit too: [expr.log.and]/1
+        // and [expr.log.or]/1 give the built-in operators their
+        // left-to-right sequencing, but a *selected operator function*
+        // is an ordinary call ([over.match.oper]/2), so both operands
+        // are evaluated. Asking after the short-circuit branch sent a
+        // class operand into `bool_to_i1`, where the only thing left to
+        // say was "expected a 'bool' value here".
+        {
+            auto operator_result = codegen_binary_operator_function_call(expr, lhs_type, rhs_type);
+            if (!operator_result.has_value()) return std::unexpected(std::move(operator_result).error());
+            if (std::optional<llvm::LLVMValueRef> value = std::move(operator_result).value()) return *value;
+        }
+
         // `&&`/`||` short-circuit like ordinary C++; everything else is a
         // plain eager binary op on the operand values.
         if (expr.binary_op == BinaryOp::And || expr.binary_op == BinaryOp::Or)
@@ -3893,8 +4170,6 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             lhs_literal_form.kind == ExprKind::IntegerLiteral || lhs_literal_form.kind == ExprKind::FloatLiteral;
         bool rhs_is_literal =
             rhs_literal_form.kind == ExprKind::IntegerLiteral || rhs_literal_form.kind == ExprKind::FloatLiteral;
-        std::optional<Type> lhs_type = infer_type(*expr.lhs);
-        std::optional<Type> rhs_type = infer_type(*expr.rhs);
         if (expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne) {
             // `rawPtr == nullptr` (or `!=`) -- unlike a smart pointer
             // (which defines a real overloaded operator== taking a
@@ -3941,51 +4216,6 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                                           : llvm::LLVMBuildICmp(builder_, llvm::LLVMIntNE, pointer_value, null_value,
                                                                 "nullnetmp"));
                 }
-            }
-            const Type* lhs_named =
-                lhs_type.has_value() ? &(lhs_type->kind == TypeKind::Reference && lhs_type->pointee ? *lhs_type->pointee
-                                                                                                     : *lhs_type)
-                                     : nullptr;
-            const Type* rhs_named =
-                rhs_type.has_value() ? &(rhs_type->kind == TypeKind::Reference && rhs_type->pointee ? *rhs_type->pointee
-                                                                                                     : *rhs_type)
-                                     : nullptr;
-            std::string operator_name = equality_operator_method_name(expr.binary_op);
-            auto resolve_equality_receiver =
-                [&, this](const Expr& receiver_expr, const Expr& arg_expr,
-                    const Type* receiver_named) -> std::expected<std::optional<llvm::LLVMValueRef>, CodegenError> {
-                if (receiver_named == nullptr || receiver_named->kind != TypeKind::Named) return std::nullopt;
-                std::vector<ExprPtr> overload_args;
-                overload_args.push_back(deep_clone_expr_with_loc(arg_expr, expr.loc));
-                if (resolve_overload_by_type(receiver_named->name + "_" + operator_name, overload_args, /*param_offset=*/1,
-                                             !is_read_only_place(receiver_expr), &receiver_expr) != nullptr) {
-                    ExprPtr overload_call =
-                        make_overloaded_equality_call_expr(receiver_expr, arg_expr, expr.binary_op, expr.loc);
-                    auto call_result = codegen_call(*overload_call);
-                    if (!call_result.has_value()) return std::unexpected(std::move(call_result).error());
-                    return std::move(call_result).value().value;
-                }
-                return std::nullopt;
-            };
-            auto lhs_receiver_result = resolve_equality_receiver(*expr.lhs, *expr.rhs, lhs_named);
-            if (!lhs_receiver_result.has_value()) return std::unexpected(std::move(lhs_receiver_result).error());
-            if (std::optional<llvm::LLVMValueRef> value = std::move(lhs_receiver_result).value()) {
-                return *value;
-            }
-            auto rhs_receiver_result = resolve_equality_receiver(*expr.rhs, *expr.lhs, rhs_named);
-            if (!rhs_receiver_result.has_value()) return std::unexpected(std::move(rhs_receiver_result).error());
-            if (std::optional<llvm::LLVMValueRef> value = std::move(rhs_receiver_result).value()) {
-                return *value;
-            }
-            bool lhs_is_record = lhs_named != nullptr && lhs_named->kind == TypeKind::Named && is_named_record_type(*lhs_named);
-            bool rhs_is_record = rhs_named != nullptr && rhs_named->kind == TypeKind::Named && is_named_record_type(*rhs_named);
-            if (lhs_is_record || rhs_is_record) {
-                std::string receiver_name = lhs_is_record ? lhs_named->name : rhs_named->name;
-                std::string receiver_side = lhs_is_record ? "left" : "right";
-                return std::unexpected(CodegenError("operator '" + std::string(expr.binary_op == BinaryOp::Eq ? "==" : "!=") +
-                                       "' requires a matching overloaded member operator on " + receiver_side +
-                                       " operand type '" + receiver_name + "'",
-                                   current_loc_));
             }
         }
         if ((expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne) && lhs_type.has_value() && rhs_type.has_value() &&
