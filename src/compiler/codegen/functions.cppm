@@ -103,6 +103,9 @@ namespace scpp {
         locals_.clear();
         reference_bound_places_.clear();
         scope_stack_.clear();
+        scope_temporaries_.clear();
+        full_expression_temporaries_.clear();
+        full_expression_start_blocks_.clear();
         std::size_t index = 0;
         for (unsigned i = 0, n = llvm::LLVMCountParams(llvm_fn); i < n; ++i) {
             llvm::LLVMValueRef arg = llvm::LLVMGetParam(llvm_fn, i);
@@ -201,6 +204,9 @@ namespace scpp {
         locals_.clear();
         reference_bound_places_.clear();
         scope_stack_.clear();
+        scope_temporaries_.clear();
+        full_expression_temporaries_.clear();
+        full_expression_start_blocks_.clear();
         build_call(get_or_declare_abort(), {});
         llvm::LLVMBuildUnreachable(builder_);
         current_function_def_ = nullptr;
@@ -245,6 +251,9 @@ namespace scpp {
         locals_.clear();
         reference_bound_places_.clear();
         scope_stack_.clear();
+        scope_temporaries_.clear();
+        full_expression_temporaries_.clear();
+        full_expression_start_blocks_.clear();
         std::size_t index = 0;
         for (unsigned i = 0, n = llvm::LLVMCountParams(llvm_fn); i < n; ++i) {
             llvm::LLVMValueRef arg = llvm::LLVMGetParam(llvm_fn, i);

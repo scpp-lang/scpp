@@ -1,0 +1,21 @@
+// `a + b + c` materializes `a + b` only to serve as the second `+`'s
+// receiver. It is a temporary, so it dies at the semicolon -- exactly
+// once, which also requires the receiver not to be evaluated twice.
+import std;
+
+class T {
+public:
+    T(int v) : x{v} { std::print("+T{}\n", v); return; }
+    virtual ~T() { std::print("~T{}\n", this->x); return; }
+    T operator+(const T& o) const { T r{this->x + o.x}; return r; }
+    int get() const { return this->x; }
+    int x;
+};
+T mk(int v) { T r{v}; return r; }
+
+int main() {
+    { T a{1}; T b{2}; T c{4}; T d = a + b + c; std::print("sum {}\n", d.x); }
+    { T d = mk(10) + mk(20); std::print("sum {}\n", d.x); }
+    { std::print("n {}\n", mk(30).get()); }
+    return 0;
+}

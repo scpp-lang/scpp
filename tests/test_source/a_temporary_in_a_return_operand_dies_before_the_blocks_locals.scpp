@@ -1,0 +1,18 @@
+// [stmt.return]: the result is initialized, then the operand's
+// temporaries are destroyed, then the block's local variables.
+import std;
+
+class T { public: T(int v) : x{v} { return; } virtual ~T() { std::print("~T{}\n", this->x); return; }
+    T operator+(const T& o) const { T r{this->x + o.x}; return r; } int x; };
+T mk(int v) { T r{v}; return r; }
+int val(const T& r) { return r.x; }
+
+T combine() { T local{20}; return local + mk(1); }
+int early(bool e) { if (e) { return val(mk(2)); } T local{3}; return val(mk(4)) + local.x; }
+
+int main() {
+    { T r = combine(); std::print("r {}\n", r.x); }
+    std::print("a {}\n", early(true));
+    std::print("b {}\n", early(false));
+    return 0;
+}

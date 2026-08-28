@@ -1,0 +1,21 @@
+// The reported leak: a `struct` need declare no destructor of its own
+// (unlike a `class`, which spec §11.5(1) forces to), so `delete p` asked
+// "does this record declare a destructor" -- and released nothing at all
+// for a struct whose *members* own something. Spec §6.3 destroys every
+// subobject; the storage path already knew that, the heap path did not.
+import std;
+
+struct R { int id = 0; R() {} R(int i) : id{i} {} ~R() { std::print("~R{}\n", this.id); } };
+struct Member { R a; Member() : a{1} {} Member(int v) : a{v} {} };
+struct Nested { R first; Member m; R last; Nested() : first{2}, m{7}, last{3} {} };
+struct WithArray { R a[2]; WithArray() : a{} {} };
+
+int main() {
+    { std::unique_ptr<Member> u = std::make_unique<Member>(); std::print("unique\n"); }
+    { std::shared_ptr<Member> s = std::make_shared<Member>(); std::print("shared\n"); }
+    { std::unique_ptr<Nested> u = std::make_unique<Nested>(); std::print("nested\n"); }
+    { std::unique_ptr<WithArray> u = std::make_unique<WithArray>(); std::print("array\n"); }
+    [[scpp::unsafe]] { Member* q = new Member(); std::print("raw\n"); delete q; }
+    [[scpp::unsafe]] { Member* q = new Member(); std::print("explicit\n"); q->~Member(); }
+    return 0;
+}

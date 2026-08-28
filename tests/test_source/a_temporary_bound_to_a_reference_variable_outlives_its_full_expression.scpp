@@ -1,0 +1,19 @@
+// [class.temporary]/6 and spec §6.2(11): a temporary materialized for a
+// reference *variable* lives as long as that reference, not to the end of
+// the declaration -- so it is torn down with the block's other locals, in
+// reverse of construction order among them.
+import std;
+
+class T { public: T(int v) : x{v} { return; } virtual ~T() { std::print("~T{}\n", this->x); return; } int x; };
+T mk(int v) { T r{v}; return r; }
+
+int main() {
+    {
+        T first{1};
+        const T& r = mk(2);
+        T last{3};
+        std::print("r {}\n", r.x);
+    }
+    std::print("after\n");
+    return 0;
+}

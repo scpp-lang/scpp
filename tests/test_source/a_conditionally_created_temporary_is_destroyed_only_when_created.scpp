@@ -1,0 +1,20 @@
+// A temporary created inside a branch of its own full-expression needs a
+// liveness flag: destroying it unconditionally would run a destructor on
+// storage no object was ever put in, and leaving the flag set would
+// destroy the previous iteration's object again on the next one.
+import std;
+
+class T { public: T(int v) : x{v} { return; } virtual ~T() { std::print("~T{}\n", this->x); return; } int x; };
+T mk(int v) { T r{v}; return r; }
+bool yes(const T& r) { return r.x > 0; }
+
+int main() {
+    int i = 0;
+    while (i < 4) {
+        bool take = (i - (i / 2) * 2) == 1;
+        if (take && yes(mk(i))) { std::print("hit {}\n", i); }
+        i = i + 1;
+    }
+    std::print("done\n");
+    return 0;
+}

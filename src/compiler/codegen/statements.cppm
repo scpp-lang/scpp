@@ -37,6 +37,11 @@ namespace scpp {
 
             case StmtKind::VarDecl:
                 return [&, this]() -> std::expected<void, CodegenError> {
+                    // The initializer is its own full-expression
+                    // ([intro.execution]): anything it materializes that
+                    // no declaration takes ownership of dies at the
+                    // semicolon.
+                    FullExpressionFrame frame(this);
                     // Every declaration is resolved (resolve_program_locals runs
                     // over the whole program before this point, and again after
                     // monomorphization synthesizes new functions), so an
@@ -412,6 +417,11 @@ namespace scpp {
                             auto addr_result = codegen_materialize_rvalue_reference_source(*stmt.init);
                             if (!addr_result.has_value()) return std::unexpected(std::move(addr_result).error());
                             referent_addr = std::move(addr_result).value();
+                            // [class.temporary]/6: bound to a reference
+                            // variable, the temporary lives as long as the
+                            // reference does -- not to the end of this
+                            // declaration's full-expression.
+                            register_scope_extended_temporary(*stmt.type.pointee, referent_addr);
                         } else {
                             auto lvalue_result = codegen_lvalue(*stmt.init);
                             if (!lvalue_result.has_value()) return std::unexpected(std::move(lvalue_result).error());
@@ -686,11 +696,17 @@ namespace scpp {
                     if (!scope_stack_.empty()) {
                         scope_stack_.back().push_back(declared_local_of(stmt));
                     }
+                    frame.pop();
                     return {};
                 }();
 
             case StmtKind::Return:
                 return [&, this]() -> std::expected<void, CodegenError> {
+                    // [stmt.return]: the result is initialized, *then* the
+                    // operand's temporaries are destroyed, *then* the
+                    // block's locals -- so the frame is popped between
+                    // computing `value` and emit_function_exit_cleanup.
+                    FullExpressionFrame frame(this);
                     // Evaluate the return value *before* freeing owned locals:
                     // `return std::move(a);` nulls out `a`'s slot as a side
                     // effect of the move, so by the time we free every
@@ -768,6 +784,7 @@ namespace scpp {
                     }
                     if (value != nullptr) returned_type = llvm::LLVMTypeOf(value);
                     if (auto r = check_return_type(returned_type, stmt); !r.has_value()) return std::unexpected(std::move(r).error());
+                    frame.pop();
                     if (auto r = emit_function_exit_cleanup(); !r.has_value()) return std::unexpected(std::move(r).error());
                     if (value != nullptr) {
                         llvm::LLVMBuildRet(builder_, value);
@@ -778,25 +795,45 @@ namespace scpp {
                 }();
 
             case StmtKind::ExprStmt:
-                if (stmt.expr && stmt.expr->kind == ExprKind::Delete) {
-                    if (auto r = codegen_delete_expr(*stmt.expr); !r.has_value()) return std::unexpected(std::move(r).error());
+                return [&, this]() -> std::expected<void, CodegenError> {
+                    if (stmt.expr && stmt.expr->kind == ExprKind::Delete) {
+                        return codegen_delete_expr(*stmt.expr);
+                    }
+                    if (stmt.expr && stmt.expr->kind == ExprKind::Destroy) {
+                        return codegen_destroy_expr(*stmt.expr);
+                    }
+                    FullExpressionFrame frame(this);
+                    auto value_result = codegen_expr(*stmt.expr);
+                    if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                    // A discarded class prvalue is a temporary like any
+                    // other ([class.temporary]/4 makes no exception for
+                    // one nobody looked at): `make_widget();` on its own
+                    // line has to run ~Widget. codegen represents a class
+                    // value as a loaded aggregate, so the object has to be
+                    // put back into addressable storage to be destroyed.
+                    if (auto r = destroy_discarded_class_value(*stmt.expr, std::move(value_result).value());
+                        !r.has_value()) {
+                        return std::unexpected(std::move(r).error());
+                    }
+                    frame.pop();
                     return {};
-                }
-                if (stmt.expr && stmt.expr->kind == ExprKind::Destroy) {
-                    if (auto r = codegen_destroy_expr(*stmt.expr); !r.has_value()) return std::unexpected(std::move(r).error());
-                    return {};
-                }
-                if (auto r = codegen_expr(*stmt.expr); !r.has_value()) return std::unexpected(std::move(r).error());
-                return {};
+                }();
 
             case StmtKind::If:
                 return [&, this]() -> std::expected<void, CodegenError> {
                     // `stmt.condition` is a `bool` expression, stored/passed
                     // as i8 (see to_llvm_type) -- CreateCondBr needs a 1-bit
                     // condition, so narrow it right here (see bool_to_i1).
-                    auto cond_result = codegen_contextual_bool_i1(*stmt.condition);
-                    if (!cond_result.has_value()) return std::unexpected(std::move(cond_result).error());
-                    llvm::LLVMValueRef cond = std::move(cond_result).value();
+                    // The condition is a full-expression of its own, and its
+                    // temporaries die before either branch runs.
+                    llvm::LLVMValueRef cond = nullptr;
+                    {
+                        FullExpressionFrame frame(this);
+                        auto cond_result = codegen_contextual_bool_i1(*stmt.condition);
+                        if (!cond_result.has_value()) return std::unexpected(std::move(cond_result).error());
+                        cond = std::move(cond_result).value();
+                        frame.pop();
+                    }
                     llvm::LLVMBasicBlockRef then_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "if.then");
                     llvm::LLVMBasicBlockRef else_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "if.else");
                     llvm::LLVMBasicBlockRef merge_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "if.end");
@@ -865,10 +902,15 @@ namespace scpp {
                     if (condition_always_true) {
                         llvm::LLVMBuildBr(builder_, body_block);
                     } else {
-                        // Same bool_to_i1 narrowing as the If case above.
+                        // Same bool_to_i1 narrowing as the If case above,
+                        // and the same per-evaluation full-expression: a
+                        // temporary the condition creates is destroyed on
+                        // every iteration, not accumulated.
+                        FullExpressionFrame frame(this);
                         auto cond_result = codegen_contextual_bool_i1(*stmt.condition);
                         if (!cond_result.has_value()) return std::unexpected(std::move(cond_result).error());
                         llvm::LLVMValueRef cond = std::move(cond_result).value();
+                        frame.pop();
                         llvm::LLVMBuildCondBr(builder_, cond, body_block, end_block);
                     }
 
@@ -896,9 +938,14 @@ namespace scpp {
 
             case StmtKind::Switch:
                 return [&, this]() -> std::expected<void, CodegenError> {
-                    auto condition_result = codegen_expr(*stmt.condition);
-                    if (!condition_result.has_value()) return std::unexpected(std::move(condition_result).error());
-                    llvm::LLVMValueRef condition = std::move(condition_result).value();
+                    llvm::LLVMValueRef condition = nullptr;
+                    {
+                        FullExpressionFrame frame(this);
+                        auto condition_result = codegen_expr(*stmt.condition);
+                        if (!condition_result.has_value()) return std::unexpected(std::move(condition_result).error());
+                        condition = std::move(condition_result).value();
+                        frame.pop();
+                    }
                     llvm::LLVMBasicBlockRef end_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "switch.end");
                     std::vector<llvm::LLVMBasicBlockRef> case_blocks;
                     case_blocks.reserve(stmt.switch_cases.size());
@@ -1050,24 +1097,162 @@ namespace scpp {
 
 
     void Codegen::push_scope()
-{ scope_stack_.emplace_back(); }
+{
+        scope_stack_.emplace_back();
+        scope_temporaries_.emplace_back();
+    }
+
+
+    void Codegen::push_full_expression()
+{
+        full_expression_temporaries_.emplace_back();
+        full_expression_start_blocks_.push_back(llvm::LLVMGetInsertBlock(builder_));
+    }
+
+
+    void Codegen::register_full_expression_temporary(const Type& type, llvm::LLVMValueRef ptr)
+{
+        if (ptr == nullptr) return;
+        if (!type_has_destructor(type)) return;
+        if (full_expression_temporaries_.empty()) return;
+        PendingTemporary pending;
+        pending.type = type;
+        pending.ptr = ptr;
+        // Created in a block the full-expression did not start in, so
+        // some branch decided whether it exists at all -- the same
+        // "record what actually happened, then consult it at teardown"
+        // shape as a moved-out local's flag.
+        if (llvm::LLVMGetInsertBlock(builder_) != full_expression_start_blocks_.back()) {
+            pending.live_flag = create_zeroed_flag_in_entry_block("tmplive");
+            llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 1, /*SignExtend=*/0),
+                                 pending.live_flag);
+        }
+        full_expression_temporaries_.back().push_back(pending);
+    }
+
+
+    void Codegen::register_scope_extended_temporary(const Type& type, llvm::LLVMValueRef ptr)
+{
+        if (ptr == nullptr) return;
+        if (!type_has_destructor(type)) return;
+        if (scope_temporaries_.empty()) return;
+        PendingTemporary pending;
+        pending.type = type;
+        pending.ptr = ptr;
+        pending.locals_before = scope_stack_.back().size();
+        scope_temporaries_.back().push_back(pending);
+    }
+
+
+    void Codegen::pop_full_expression()
+{
+        std::vector<PendingTemporary> pending = std::move(full_expression_temporaries_.back());
+        full_expression_temporaries_.pop_back();
+        full_expression_start_blocks_.pop_back();
+        // A `return` already ran emit_function_exit_cleanup and terminated
+        // the block; nothing more may be emitted, and the temporaries of
+        // the returning expression were destroyed there.
+        if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) != nullptr) return;
+        for (auto it = pending.rbegin(); it != pending.rend(); ++it) {
+            emit_pending_temporary_teardown(*it);
+        }
+    }
+
+
+    void Codegen::drop_full_expression()
+{
+        full_expression_temporaries_.pop_back();
+        full_expression_start_blocks_.pop_back();
+    }
+
+
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::destroy_discarded_class_value(const Expr& expr, llvm::LLVMValueRef value)
+{
+        if (value == nullptr) return {};
+        // Only a *fresh* value can be the discarded temporary. `s;` naming
+        // an existing object, or a call returning `T&`, yields a value
+        // loaded out of storage somebody else owns -- destroying that
+        // would be a double free, and neither is a temporary in the first
+        // place ([class.temporary]/1: a temporary is materialized, not
+        // merely read).
+        std::optional<Type> type = infer_type(expr);
+        if (!type.has_value() || !is_named_record_type(*type)) return {};
+        if (!type_has_destructor(*type)) return {};
+        if (!produces_rvalue_of_type(expr, *type)) return {};
+        auto llvm_type_result = to_llvm_type(*type);
+        if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
+        std::optional<unsigned> align = alignment_for_type(*type);
+        llvm::LLVMValueRef temp = create_entry_block_alloca(std::move(llvm_type_result).value(), "discardedtmp", align);
+        create_store(value, temp, align);
+        register_full_expression_temporary(*type, temp);
+        return {};
+    }
+
+
+    void Codegen::emit_pending_temporary_teardown(const PendingTemporary& pending)
+{
+        if (pending.live_flag == nullptr) {
+            emit_storage_destruction(pending.type, pending.ptr, /*place=*/nullptr);
+            return;
+        }
+        llvm::LLVMTypeRef i1 = llvm::LLVMInt1TypeInContext(context_);
+        llvm::LLVMValueRef live = llvm::LLVMBuildLoad2(builder_, i1, pending.live_flag, "tmpwaslive");
+        llvm::LLVMValueRef current_fn = llvm::LLVMGetBasicBlockParent(llvm::LLVMGetInsertBlock(builder_));
+        llvm::LLVMBasicBlockRef then_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "tmpdtor");
+        llvm::LLVMBasicBlockRef merge_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "tmpdtor.skip");
+        llvm::LLVMBuildCondBr(builder_, live, then_bb, merge_bb);
+        llvm::LLVMPositionBuilderAtEnd(builder_, then_bb);
+        emit_storage_destruction(pending.type, pending.ptr, /*place=*/nullptr);
+        // Cleared again so the next execution of the same full-expression
+        // -- the next iteration of an enclosing loop -- starts from "not
+        // created", instead of destroying the previous iteration's
+        // already-destroyed object.
+        llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(i1, 0, /*SignExtend=*/0), pending.live_flag);
+        llvm::LLVMBuildBr(builder_, merge_bb);
+        llvm::LLVMPositionBuilderAtEnd(builder_, merge_bb);
+    }
+
+
+    void Codegen::emit_scope_temporaries_teardown(const std::vector<PendingTemporary>& pending, std::size_t locals_before)
+{
+        for (auto it = pending.rbegin(); it != pending.rend(); ++it) {
+            if (it->locals_before != locals_before) continue;
+            emit_pending_temporary_teardown(*it);
+        }
+    }
+
+
+    void Codegen::emit_one_scope_cleanup(const std::vector<LocalId>& declared,
+                                         const std::vector<PendingTemporary>& temporaries)
+{
+        // Reverse of construction order across both kinds at once: a
+        // lifetime-extended temporary was created just before the
+        // reference variable that extended it, so it is destroyed just
+        // after that reference -- which is why the two lists are walked
+        // together rather than one after the other.
+        emit_scope_temporaries_teardown(temporaries, declared.size());
+        for (std::size_t i = declared.size(); i-- > 0;) {
+            auto slot_it = locals_.find(declared[i]);
+            if (slot_it != locals_.end() && !slot_it->second.is_static_storage) {
+                Place root = whole_local_place(declared[i]);
+                codegen_destroy_storage_unless_moved(slot_it->second.type, slot_it->second.alloca,
+                                                     /*moved_flag=*/nullptr, &root);
+            }
+            emit_scope_temporaries_teardown(temporaries, i);
+        }
+    }
 
 
     void Codegen::pop_scope()
 {
         std::vector<LocalId> declared = std::move(scope_stack_.back());
         scope_stack_.pop_back();
+        std::vector<PendingTemporary> temporaries = std::move(scope_temporaries_.back());
+        scope_temporaries_.pop_back();
 
         bool already_terminated = llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) != nullptr;
         if (!already_terminated) {
-            for (auto it = declared.rbegin(); it != declared.rend(); ++it) {
-                auto slot_it = locals_.find(*it);
-                if (slot_it == locals_.end()) continue;
-                if (slot_it->second.is_static_storage) continue;
-                Place root = whole_local_place(*it);
-                codegen_destroy_storage_unless_moved(slot_it->second.type, slot_it->second.alloca,
-                                                     /*moved_flag=*/nullptr, &root);
-            }
+            emit_one_scope_cleanup(declared, temporaries);
         }
         // By declaration, not by name: an inner scope that shadows an
         // outer local has its own LocalId, so dropping it here leaves the
@@ -1082,15 +1267,7 @@ namespace scpp {
     void Codegen::emit_scope_cleanup_to_depth(std::size_t target_depth)
 {
         for (std::size_t depth = scope_stack_.size(); depth > target_depth; depth--) {
-            const std::vector<LocalId>& declared = scope_stack_[depth - 1];
-            for (auto it = declared.rbegin(); it != declared.rend(); ++it) {
-                auto slot_it = locals_.find(*it);
-                if (slot_it == locals_.end()) continue;
-                if (slot_it->second.is_static_storage) continue;
-                Place root = whole_local_place(*it);
-                codegen_destroy_storage_unless_moved(slot_it->second.type, slot_it->second.alloca,
-                                                     /*moved_flag=*/nullptr, &root);
-            }
+            emit_one_scope_cleanup(scope_stack_[depth - 1], scope_temporaries_[depth - 1]);
         }
     }
 

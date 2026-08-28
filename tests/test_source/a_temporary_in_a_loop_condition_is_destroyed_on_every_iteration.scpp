@@ -1,0 +1,17 @@
+// The condition of a `while` is re-evaluated each iteration and is its own
+// full-expression each time, so a temporary it creates is destroyed that
+// many times -- not accumulated until the loop ends.
+import std;
+
+class T { public: T(int v) : x{v} { return; } virtual ~T() { std::print("~T{}\n", this->x); return; } int x; };
+T mk(int v) { T r{v}; return r; }
+bool below(const T& r, int n) { return r.x < n; }
+int val(const T& r) { return r.x; }
+
+int main() {
+    int i = 0;
+    while (below(mk(i), 3)) { val(mk(9)); i = i + 1; }
+    std::print("done {}\n", i);
+    switch (mk(7).x) { case 7: std::print("seven\n"); break; default: std::print("other\n"); break; }
+    return 0;
+}

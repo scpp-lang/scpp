@@ -1,0 +1,21 @@
+// [class.dtor]/12: members are destroyed in the reverse order of their
+// declaration. The walk for a record that declares a destructor already
+// went backwards; the walk for one that does not went forwards, so the
+// order a record's members were released in depended on whether the
+// record happened to declare a destructor.
+import std;
+
+struct R { int id = 0; R() {} R(int i) : id{i} {} ~R() { std::print("~R{}\n", this.id); } };
+R mk_r(int i) { R r{i}; return r; }
+struct Plain { R a; R b; R c; Plain() : a{1}, b{2}, c{3} {} Plain(int n) : a{n}, b{n + 1}, c{n + 2} {} };
+struct Declared { R a; R b; ~Declared() { std::print("~Declared\n"); } Declared() : a{4}, b{5} {} };
+struct Outer { Plain p; R tail; Outer() : p{1}, tail{6} {} };
+
+int main() {
+    { Plain t{}; std::print("plain\n"); }
+    { Declared d{}; std::print("declared\n"); }
+    { Outer o{}; std::print("outer\n"); }
+    { std::unique_ptr<Plain> u = std::make_unique<Plain>(); std::print("heap\n"); }
+    { R arr[3]{mk_r(7), mk_r(8), mk_r(9)}; std::print("array\n"); }
+    return 0;
+}

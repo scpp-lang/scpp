@@ -1,0 +1,16 @@
+// [class.temporary]/4: a temporary is destroyed as the last step of the
+// full-expression that created it. A discarded call result is a temporary
+// like any other; nothing ever ran its destructor before.
+import std;
+
+class T { public: T(int v) : x{v} { return; } virtual ~T() { std::print("~T{}\n", this->x); return; } int x; };
+T mk(int v) { T r{v}; return r; }
+int val(const T& r) { return r.x; }
+
+int main() {
+    mk(1);
+    std::print("after-discard\n");
+    std::print("n {}\n", val(mk(2)));
+    std::print("m {}\n", mk(3).x);
+    return 0;
+}
