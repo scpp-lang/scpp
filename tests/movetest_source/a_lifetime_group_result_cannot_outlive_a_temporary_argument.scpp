@@ -1,0 +1,26 @@
+// §6.2(20) with §6.2(11)-(12): a result tied to a named lifetime group
+// is no longer-lived than the shortest-lived argument in that group, and
+// a prvalue argument is a temporary materialized for the call -- it dies
+// at the end of the full-expression.
+//
+// This rule used to be enforced by accident: resolve_borrow_source_root
+// refused a literal as "an arbitrary expression", so the escape was
+// rejected without anyone stating why. Once a prvalue correctly
+// contributes *no* borrow root -- which §6.2(12) requires, and which is
+// what lets `const T&` bind a temporary at all -- the union was just the
+// other argument's root and the escape became invisible. The rule is
+// stated explicitly now, and this is the case that caught its absence.
+import std;
+
+const int& min_ref(
+    const int& x [[scpp::lifetime(a)]],
+    const int& y [[scpp::lifetime(a)]]
+) [[scpp::lifetime(a)]] {
+    return x < y ? x : y;
+}
+
+int main() {
+    int local = 7;
+    const int& r = min_ref(3, local);
+    return r;
+}

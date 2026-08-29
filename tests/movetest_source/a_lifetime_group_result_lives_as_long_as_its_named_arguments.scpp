@@ -1,0 +1,19 @@
+// The acceptance control beside it: the same call with both arguments
+// naming real objects, so the group's result is as long-lived as they
+// are. A rule that rejected "any call in a lifetime group" would fail
+// here; the pair is what makes the rejection about the *temporary*.
+import std;
+
+const int& min_ref(
+    const int& x [[scpp::lifetime(a)]],
+    const int& y [[scpp::lifetime(a)]]
+) [[scpp::lifetime(a)]] {
+    return x < y ? x : y;
+}
+
+int main() {
+    int small = 3;
+    int large = 7;
+    const int& r = min_ref(small, large);
+    return r - 3;
+}

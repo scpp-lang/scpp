@@ -266,6 +266,10 @@ struct SelectedOperator {
 [[nodiscard]] std::optional<LocalId> direct_write_root(const Expr& expr, const Body& body);
 [[nodiscard]] bool produces_rvalue_of_type(const Expr& expr, const Type& expected_type, const Body& body,
                                            const Signatures& signatures);
+// [basic.lval]: does this expression designate an existing object?
+// Declared here because both halves of the dichotomy -- "is it a place"
+// and "is it an rvalue" -- are asked from more than one file.
+[[nodiscard]] bool expression_designates_a_place(const Expr& expr, const Body& body, const Signatures& signatures);
 
 std::expected<void, DataflowError> check_enum_conversion_compatibility(const Type& target_type, const Expr& source_expr, const Body& body,
                                          const Signatures& signatures, const SourceLocation& loc) {
@@ -864,6 +868,18 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
         // `f(int&)` declared did not simply pick `f(int)`: `f(int&)`
         // stayed viable, tied, and the call was rejected for trying
         // to borrow `g()`'s result.
+        // Asked as [over.ics.ref]/1 asks it -- "is the argument an
+        // lvalue?" -- rather than "is it a fresh value of exactly the
+        // pointee type?". The second question is narrower: it missed
+        // every prvalue whose type is *not* the pointee (a literal
+        // against `int&`, whose §16.2 type is decided by context), and
+        // those used to be caught downstream by
+        // resolve_borrow_source_root's "arbitrary expression"
+        // rejection, which is not this rule and is now gone.
+        if (param_type.is_mutable_ref && !param_type.is_rvalue_ref &&
+            !expression_designates_a_place(arg, body, signatures)) {
+            return false;
+        }
         if (param_type.is_mutable_ref && param_type.pointee != nullptr &&
             produces_rvalue_of_type(arg, *param_type.pointee, body, signatures)) {
             return false;
@@ -2415,6 +2431,36 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
 // argument_matches_parameter's ordinary-reference case, which rejects
 // these same expression shapes for the opposite reason (there's no
 // borrowable place to speak of).
+// [basic.lval]: the expression kinds that designate an existing object.
+// The complement -- every other kind -- is a prvalue, which is what
+// §6.2(11.1) means by "an expression that is an rvalue of type T".
+// Stated once here so that produces_rvalue_of_type and
+// resolve_borrow_source_root cannot disagree about which side of the
+// dichotomy an expression is on.
+[[nodiscard]] bool expression_designates_a_place(const Expr& expr, const Body& body, const Signatures& signatures) {
+    switch (expr.kind) {
+        case ExprKind::Identifier:
+            return body.local_of(expr).has_value() || find_visible_global_for_expr(expr, body) != nullptr;
+        case ExprKind::Member:
+        case ExprKind::Subscript:
+            return true;
+        case ExprKind::Unary:
+            return expr.unary_op == UnaryOp::Deref;
+        case ExprKind::Conditional:
+            // [expr.cond]/7: an lvalue only when both arms are.
+            return expr.rhs != nullptr && expr.third != nullptr &&
+                   expression_designates_a_place(*expr.rhs, body, signatures) &&
+                   expression_designates_a_place(*expr.third, body, signatures);
+        case ExprKind::Call: {
+            CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
+            const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
+            return sig != nullptr && is_reference(sig->return_type);
+        }
+        default:
+            return false;
+    }
+}
+
 [[nodiscard]] bool produces_rvalue_of_type(const Expr& expr, const Type& expected_type, const Body& body,
                                             const Signatures& signatures) {
     bool call_receiver_is_move = false;
@@ -2589,10 +2635,44 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             // parameter's own use of that). Every other Identifier is a
             // place expression (some existing named variable), never a
             // fresh value, so it's rejected immediately just like the
-            // default case below.
+            // Member/Subscript cases below.
             return is_nullopt_literal(expr) && is_optional_named_type(expected_type);
-        default:
+        case ExprKind::Conditional: {
+            // [expr.cond]/7: when the two arms differ in value category,
+            // the result is a prvalue; when both are lvalues of the same
+            // type, the result is an lvalue and designates one of them.
+            // Only the first is an rvalue for §6.2(11.1)'s purposes.
+            if (expr.rhs == nullptr || expr.third == nullptr) return false;
+            bool then_is_place = expression_designates_a_place(*expr.rhs, body, signatures);
+            bool else_is_place = expression_designates_a_place(*expr.third, body, signatures);
+            if (then_is_place && else_is_place) return false;
+            break;
+        }
+        case ExprKind::Member:
+        case ExprKind::Subscript:
+            // A place expression: it designates an existing object, so
+            // it is never an rvalue. Listed rather than left to the
+            // default so that the two halves of [basic.lval]'s
+            // dichotomy are both written down here.
             return false;
+        default:
+            // [basic.lval]: every remaining kind -- a `static_cast`, a
+            // `sizeof`, a fold, `nullptr`, a built-in `a + b` or `-n`,
+            // a braced temporary -- yields a prvalue, and §6.2(11.1)
+            // admits "an expression that is an rvalue of type T"
+            // without qualification. Whether it is an rvalue *of the
+            // expected type* is the shared check below, which every arm
+            // of this switch already falls through to.
+            //
+            // This used to be `return false`, so those kinds were in
+            // neither this list nor resolve_borrow_source_root's list of
+            // places -- two hand-enumerated lists that must partition
+            // the expression kinds and did not. An expression kind
+            // absent from both could bind to nothing at all: `const
+            // int64_t& n = static_cast<int64_t>(m);` and
+            // `f(c ? make() : name)` were each rejected as "an
+            // arbitrary expression".
+            break;
     }
     std::optional<Type> actual_type = infer_expr_type(expr, body, signatures);
     if (!actual_type.has_value()) return false;

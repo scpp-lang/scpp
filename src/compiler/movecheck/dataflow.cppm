@@ -2967,6 +2967,22 @@ struct ConvertingConstructorBinding {
 
         case ExprKind::Binary:
             if (expr.binary_op == BinaryOp::Assign) {
+                // [expr.ass]/1: "the left operand shall be a modifiable
+                // lvalue". Nothing asked here; the only thing that
+                // rejected `(a + b) = 5;` was codegen's own
+                // "expression is not assignable", which was doing double
+                // duty as the *reference-binding* rejection as well --
+                // and that second use is wrong, because [conv.rval]
+                // materializes a prvalue bound to a `const T&` rather
+                // than refusing it. Separating them leaves this rule
+                // where it belongs and lets the binding materialize.
+                if (report_errors && expr.lhs != nullptr &&
+                    !expression_designates_a_place(*expr.lhs, body, signatures)) {
+                    return std::unexpected(DataflowError(
+                        "cannot assign to this expression: the left operand of '=' shall be a modifiable lvalue "
+                        "([expr.ass]/1), and this expression designates no object -- it is a prvalue",
+                        expr.lhs->loc));
+                }
                 bool target_is_movable_class = false;
                 std::optional<Type> target_class_type;
                 if (expr.lhs->kind == ExprKind::Identifier) {
@@ -3479,6 +3495,7 @@ struct ConvertingConstructorBinding {
         }
     }
 
+
     // Reject manufacturing a mutable `T&`/`std::span<T>` out of a place
     // that's only reachable read-only (e.g. `int& r = p.x;`/
     // `std::span<int> s = p.arr;` where `p` is `const Foo&`) -- spec
@@ -3525,6 +3542,31 @@ struct ConvertingConstructorBinding {
     auto roots_result = resolve_borrow_source_root(*stmt.expr, state, body, signatures, report_errors);
     if (!roots_result.has_value()) return std::unexpected(std::move(roots_result).error());
     RootSet roots = std::move(roots_result).value();
+    // [dcl.init.ref]/5: a non-const lvalue reference binds only to an
+    // lvalue. §6.2(11) materializes a temporary for a `const T&` and for
+    // nothing else, because there is no place a write through a mutable
+    // reference could land.
+    //
+    // The rejection that used to stand in for this was
+    // resolve_borrow_source_root's "arbitrary expression" -- one sentence
+    // doing duty for four separate rules ([expr.ass]/1's assignment
+    // target, [expr.unary.op]/3's address-of operand, this one, and a
+    // `const T&` binding, which is the one it got wrong). Asked *after*
+    // the roots are resolved so that a more specific diagnostic -- a call
+    // that returns no reference with an inferrable lifetime, a source
+    // reachable only read-only -- still speaks first; this is the
+    // backstop for every shape that has no more specific answer.
+    if (report_errors && stmt.type.kind == TypeKind::Reference && stmt.type.is_mutable_ref &&
+        !stmt.type.is_rvalue_ref && stmt.type.pointee != nullptr &&
+        !expression_designates_a_place(*stmt.expr, body, signatures)) {
+        return std::unexpected(DataflowError(
+            "cannot bind mutable reference '" + body.name_of(stmt.local) +
+                "' to this expression: a non-const lvalue reference binds only to an lvalue "
+                "([dcl.init.ref]/5), and this expression designates no object -- it is a prvalue; a "
+                "'const " + describe_type_brief(*stmt.type.pointee) + "&' would bind a materialized temporary "
+                "(spec §6.2(11)-(12))",
+            state.current_loc));
+    }
     if (roots.empty()) {
         // Only reachable when report_errors=false and the source
         // expression's shape isn't (yet) a supported borrow source --

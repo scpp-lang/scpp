@@ -1,0 +1,20 @@
+// The control beside a_conditional_of_two_lvalues_borrows_both_arms: the
+// same move, after the borrow is no longer live. Together the pair shows
+// the rejection there is about the borrow being *live*, not about a
+// conditional being refused wholesale -- which is how it used to pass,
+// since every conditional was rejected as "an arbitrary expression"
+// before it could borrow anything at all.
+import std;
+
+int main() {
+    std::string a{"one"};
+    std::string b{"two"};
+    bool c = true;
+    int seen = 0;
+    {
+        const std::string& bound = c ? a : b;
+        seen = static_cast<int>(bound.length());
+    }
+    std::string stolen = std::move(b);
+    return seen + static_cast<int>(stolen.length()) - 6;
+}

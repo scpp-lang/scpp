@@ -1,0 +1,11 @@
+// The same rule for the other prvalue shape that used to be rejected by
+// the same sentence: [expr.static.cast]'s result is a prvalue, so it is
+// not a modifiable lvalue ([expr.ass]/1). clang++-22 -std=c++26 rejects
+// this too ("expression is not assignable").
+import std;
+
+int main() {
+    int m = 1;
+    static_cast<int64_t>(m) = 5;
+    return 0;
+}

@@ -1,0 +1,17 @@
+// [expr.ass]/1: "the left operand shall be a modifiable lvalue".
+// Nothing in typechecking asked. The only thing that rejected
+// `(a + b) = 5;` was codegen's "expression is not assignable" -- which
+// was simultaneously the *reference-binding* rejection, and that second
+// use was wrong ([conv.rval] materializes a prvalue bound to a
+// `const T&` rather than refusing it). Separating the two questions put
+// this rule in the pass that decides it and let the binding materialize;
+// without the separation, making the binding work would have made this
+// assignment silently write into a temporary.
+import std;
+
+int main() {
+    int64_t a = 1;
+    int64_t b = 2;
+    (a + b) = 5;
+    return 0;
+}
