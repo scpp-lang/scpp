@@ -1,0 +1,29 @@
+// The tied-candidate set is the other half of one answer -- "a
+// selection, or the set it was ambiguous between" -- and it used to be
+// written through a raw `std::vector<const Function*>*` out-parameter
+// whose `nullptr` branch existed only because a pointer can be absent.
+// It is an ordinary out-reference now, always filled, and reading it to
+// build the message dereferenced a raw pointer: the gated operation the
+// self-hosting probe stopped on.
+//
+// A verdict-only test cannot see whether the set still carries the right
+// candidates -- "ambiguous" is reported from the *empty* selection, not
+// from the set. This one reaches the set itself, because the message
+// lists every tied candidate by signature.
+//
+// [over.ics.rank]/3.2.6 orders `int&` above `const int&` only when both
+// bind the same argument; two unrelated reference parameters that both
+// bind it are tied, which is the shape that fills the set.
+constexpr int both(int& v) { return 1; }
+constexpr int both(const int& v) { return 2; }
+constexpr int both(int v) { return 3; }
+
+constexpr int folded() {
+    int v = 0;
+    return both(v);
+}
+
+int main() {
+    constexpr int r = folded();
+    return r;
+}

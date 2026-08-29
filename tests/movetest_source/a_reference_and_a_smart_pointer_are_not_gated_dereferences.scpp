@@ -1,0 +1,26 @@
+// The other direction, and the reason the gate must ask about the
+// *pointer* rather than about indirection in general: §5.1(5.1) gates
+// "indirection through ... a value of pointer type". A reference is not
+// one; a `std::unique_ptr`/`std::shared_ptr` dereference is a call to
+// `operator*` (§7.1(3)); a span element is a subscript. None of them
+// needs a licence, and gating them would make `[[scpp::unsafe]]`
+// required for ordinary safe code.
+import std;
+
+class Node {
+public:
+    int v;
+    Node(int n) : v{n} {}
+    virtual ~Node() {}
+};
+
+int main() {
+    Node n{7};
+    Node& reference = n;
+    std::unique_ptr<Node> owned = std::make_unique<Node>(7);
+    std::shared_ptr<Node> shared = std::make_shared<Node>(7);
+    Node backing[1]{Node{7}};
+    std::span<Node> view = backing;
+    int total = reference.v + (*owned).v + owned->v + (*shared).v + shared->v + view[0].v;
+    return total - 42;
+}
