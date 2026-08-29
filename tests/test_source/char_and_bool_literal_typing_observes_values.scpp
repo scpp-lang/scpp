@@ -1,0 +1,37 @@
+// spec ch16 §16.2(4): a character-literal has type `char` and
+// `true`/`false` have type `bool`, so they need none of §16.2(2)'s
+// adoption. This observes the *values* that reach each of §16.2(1)'s
+// contexts rather than only that the program compiled: a regression
+// that quietly re-typed a character-literal as `int`, or that folded
+// '\0' to something else, changes these numbers.
+import std;
+
+char take(char c) { return c; }
+bool flag(bool b) { return b; }
+constexpr char folded() {
+    char nul = '\0';
+    return nul == '\0' ? 'F' : 'X';
+}
+
+struct S {
+    char m = 'M';
+    bool f = true;
+};
+
+char g_static = 'S';
+
+int main() {
+    constexpr char ce = folded();
+    char autoc = 'A';
+    const char cst = 'B';
+    S s{};
+    char arr[2] = {'x', 'y'};
+    char nul = '\0';
+    char ternary = true ? 'T' : 'E';
+    char cast = static_cast<char>(90);
+    std::print("{} {} {} {} {} {} {} {} {} {} {}\n", static_cast<int>(take('Q')), flag(true) ? 1 : 0,
+               static_cast<int>(g_static), static_cast<int>(autoc), static_cast<int>(cst), static_cast<int>(s.m),
+               s.f ? 1 : 0, static_cast<int>(arr[1]), static_cast<int>(ce), static_cast<int>(nul),
+               static_cast<int>(ternary) + static_cast<int>(cast));
+    return 0;
+}

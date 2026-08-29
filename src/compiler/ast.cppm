@@ -4165,6 +4165,39 @@ public:
     return expr.kind == ExprKind::IntegerLiteral || expr.kind == ExprKind::FloatLiteral;
 }
 
+// spec §16.2(1)-(2): an integer-literal "has no type of its own" and
+// "has the scalar type required by the context in which it appears", and
+// (2) permits every type in Table 1 for that *except* `bool` and `char`.
+// So `char c = 0;` is not a conversion that failed -- there is no `int`
+// value here to convert from; it is a literal that cannot be spelled as
+// the type its context requires, and §16.2's own note names both the
+// spellings that work: "`char c = 'A'`, `bool b = true`, and
+// `char c = static_cast<char>(65)` are well-formed".
+//
+// Worded here, beside the rule it reports, so that whichever pass
+// reaches it first says the same thing. It used to be reported by the
+// scalar-conversion diagnostic, which named a source type the literal
+// never had ("cannot convert a 'int' value to 'char'").
+[[nodiscard]] inline std::string integer_literal_cannot_name_type_message(const std::string& target_description,
+                                                                          const std::string& target_type_name) {
+    std::string message{"cannot initialize "};
+    message += target_description;
+    message += " of type '";
+    message += target_type_name;
+    message += "' with an integer literal: an integer-literal has no type of its own and takes the type its context "
+               "requires (spec ch16 §16.2(1)), and §16.2(2) allows that type to be any in Table 1 except 'bool' and "
+               "'char' -- write ";
+    if (target_type_name == "bool") {
+        message += "'true' or 'false'";
+    } else {
+        message += "a character-literal such as '\\0' or 'A'";
+    }
+    message += ", or 'static_cast<";
+    message += target_type_name;
+    message += ">(...)' if a conversion is intended (§16.3(2))";
+    return message;
+}
+
 [[nodiscard]] inline bool literal_adopts_type(const Expr& literal, const Type& type, int pointer_bit_width) {
     const Type& target = literal_adoption_target(type);
     if (literal.kind == ExprKind::Unary && literal.unary_op == UnaryOp::Neg && literal.lhs != nullptr) {

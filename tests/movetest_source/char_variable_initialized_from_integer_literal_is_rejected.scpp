@@ -1,0 +1,9 @@
+// spec ch16 §16.2(2): an integer-literal may take any type in Table 1
+// other than `bool` and `char`, and §16.2's note names this exact
+// spelling -- "`char c = 65;` ... ill-formed". Characterisation: the
+// rejection predates this change; what moved was the sentence, which
+// used to name a source type ("a 'int' value") the literal never had.
+int main() {
+    char c = 65;
+    return c == 65 ? 0 : 1;
+}
