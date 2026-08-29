@@ -1,0 +1,12 @@
+0
+cond_string 5
+cond_int 5
+cast 5
+call 5
+braced 5
+binary 8
+subscript 5
+unary 5
+sizeof 8
+two_lvalues 5
+move 5

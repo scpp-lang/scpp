@@ -3380,6 +3380,33 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     }
 
 
+    // [conv.rval] with [class.temporary]/4: a prvalue used where a
+    // glvalue is required is *materialized* -- it gets storage for the
+    // duration of the full-expression -- rather than refused. codegen
+    // already did exactly this for a by-value-returning call and for an
+    // operator function's result; the remaining prvalue shapes reported
+    // "expression is not assignable" instead, a sentence about
+    // assignment for a binding nobody assigns to. spec §6.2(11)-(12) is
+    // the same rule from the ownership side: the reference binds to a
+    // materialized temporary, which "introduces no lender object ...
+    // because it aliases no pre-existing object or range".
+    [[nodiscard]] std::expected<Codegen::LValue, CodegenError> Codegen::materialize_prvalue_lvalue(const Expr& expr)
+{
+        std::optional<Type> result_type = infer_type(expr);
+        if (!result_type.has_value()) {
+            return std::unexpected(CodegenError(
+                "cannot take a place for this expression: its type could not be inferred", expr.loc));
+        }
+        auto value_result = codegen_expr(expr);
+        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+        llvm::LLVMValueRef value = std::move(value_result).value();
+        llvm::LLVMValueRef temp = create_entry_block_alloca(llvm::LLVMTypeOf(value), "materializedtmp");
+        llvm::LLVMBuildStore(builder_, value, temp);
+        register_full_expression_temporary(*result_type, temp);
+        return LValue{temp, *result_type, alignment_for_type(*result_type)};
+    }
+
+
     [[nodiscard]] std::expected<Codegen::LValue, CodegenError> Codegen::codegen_lvalue(const Expr& expr)
 {
         // Same refresh discipline as codegen_expr above.
@@ -3667,8 +3694,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     // pattern.
                     std::optional<Type> result_type = infer_type(expr);
                     if (!result_type.has_value()) {
-                        return std::unexpected(CodegenError("expression is not assignable",
-                            current_loc_));
+                        return std::unexpected(CodegenError(
+                            "cannot take a place for this call's result: its type could not be inferred", expr.loc));
                     }
                     llvm::LLVMValueRef temp = create_entry_block_alloca(llvm::LLVMTypeOf(result.value), "calllvaluetmp");
                     llvm::LLVMBuildStore(builder_, result.value, temp);
@@ -3737,7 +3764,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             case ExprKind::Cast:
                 return [&, this]() -> std::expected<Codegen::LValue, CodegenError> {
                     if (expr.type.kind != TypeKind::Pointer) {
-                        return std::unexpected(CodegenError("expression is not assignable", current_loc_));
+                        // [expr.static.cast]: the result is a prvalue,
+                        // so it materializes like any other.
+                        return materialize_prvalue_lvalue(expr);
                     }
                     auto value_result = codegen_expr(expr);
                     if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
@@ -3761,7 +3790,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                         llvm::LLVMValueRef value = std::move(value_result).value();
                         if (!result_type.has_value()) {
-                            return std::unexpected(CodegenError("expression is not assignable", current_loc_));
+                            return std::unexpected(CodegenError(
+                                "cannot take a place for this operator result: its type could not be inferred",
+                                expr.loc));
                         }
                         if (unary_fn->return_type.kind == TypeKind::Reference) {
                             return LValue{value, *result_type, alignment_for_type(*result_type)};
@@ -3798,8 +3829,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     // other unary forms produce a plain value with no backing
                     // storage.
                     if (expr.unary_op != UnaryOp::Deref) {
-                        return std::unexpected(CodegenError("expression is not assignable",
-                            current_loc_));
+                        return materialize_prvalue_lvalue(expr);
                     }
                     if (expr.lhs->kind == ExprKind::Identifier && expr.lhs->name == "this") {
                         // parser/movecheck model `this` as a reference-typed
@@ -3812,7 +3842,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     }
                     std::optional<Type> operand_type = infer_type(*expr.lhs);
                     if (!operand_type.has_value()) {
-                        return std::unexpected(CodegenError("expression is not assignable", current_loc_));
+                        return std::unexpected(CodegenError(
+                            "cannot dereference this expression: its type could not be inferred", expr.loc));
                     }
                     const Type& operand_underlying =
                         operand_type->kind == TypeKind::Reference && operand_type->pointee ? *operand_type->pointee : *operand_type;
@@ -3898,7 +3929,11 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                             : nullptr;
                     std::optional<Type> result_type = operator_fn != nullptr ? infer_type(expr) : std::nullopt;
                     if (!result_type.has_value()) {
-                        return std::unexpected(CodegenError("expression is not assignable", current_loc_));
+                        // No operator function: this is a built-in
+                        // `a + b`/`a == b`, whose result is a prvalue --
+                        // materialized like every other, rather than
+                        // reported as unassignable.
+                        return materialize_prvalue_lvalue(expr);
                     }
                     auto value_result = codegen_expr(expr);
                     if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
@@ -3928,8 +3963,12 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             }
 
             default:
-                return std::unexpected(CodegenError("expression is not assignable",
-                    current_loc_));
+                // Every remaining kind is a prvalue -- a literal, a
+                // `sizeof`, a fold, a built-in `a + b`. [expr.ass]/1's
+                // "shall be a modifiable lvalue" is movecheck's rule and
+                // is enforced there now, so reaching here means a
+                // *binding*, and a binding materializes.
+                return materialize_prvalue_lvalue(expr);
         }
     }
 

@@ -781,6 +781,31 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
             // resolves to the same root as its own base.
             return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
 
+        case ExprKind::Conditional: {
+            // [expr.cond]: the result designates whichever arm was
+            // selected, so it aliases either of them and the roots are
+            // the union -- exactly what RootSet is a *set* for. An arm
+            // that is a prvalue contributes no root (§6.2(12): a binding
+            // that materializes a temporary "introduces no lender
+            // object ... because it aliases no pre-existing object or
+            // range"), which falls out of unioning an empty set.
+            //
+            // The condition is an ordinary value-producing
+            // sub-expression, checked like any other read.
+            if (expr.lhs == nullptr || expr.rhs == nullptr || expr.third == nullptr) return RootSet{};
+            if (auto _r = apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures,
+                                     report_errors);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            auto then_roots = resolve_borrow_source_root(*expr.rhs, state, body, signatures, report_errors);
+            if (!then_roots.has_value()) return std::unexpected(std::move(then_roots).error());
+            auto else_roots = resolve_borrow_source_root(*expr.third, state, body, signatures, report_errors);
+            if (!else_roots.has_value()) return std::unexpected(std::move(else_roots).error());
+            return union_roots(std::move(then_roots).value(), else_roots.value());
+        }
+
+
         case ExprKind::Subscript:
             // The index is a genuine value-producing sub-expression (it
             // could itself read/move/call), so it's checked exactly like
@@ -834,14 +859,16 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
                 return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
             }
             if (expr.unary_op != UnaryOp::Deref) {
-                if (report_errors) {
-                    return std::unexpected(DataflowError("a reference can currently only borrow a plain local variable, a "
-                                         "field of one ('a.b'), an array element of one ('arr[i]'), a "
-                                         "dereferenced raw-pointer local ('*p'/'p->x'), or "
-                                         "the result of a call to a reference-returning function -- not an "
-                                         "arbitrary expression",
-                        state.current_loc));
-                }
+                // Every other unary operator yields a prvalue -- `-n`,
+                // `!b` -- which aliases nothing, so it has no root. This
+                // used to report "a reference can currently only borrow
+                // ... not an arbitrary expression", a sentence about the
+                // implementation's reach rather than about the program:
+                // §6.2(11.1) admits "an expression that is an rvalue of
+                // type T" without qualification, and §6.2(12) says such a
+                // binding "introduces no lender object ... because it
+                // aliases no pre-existing object or range". No root *is*
+                // the answer.
                 return RootSet{};
             }
             if (report_errors) {
@@ -915,8 +942,35 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
                     roots = union_roots(std::move(roots), std::move(_r).value());
                     continue;
                 }
-                auto _r = resolve_borrow_source_root(*expr.args[source_index - callee.param_offset], state,
-                                                      body, signatures, report_errors);
+                const Expr& source_arg = *expr.args[source_index - callee.param_offset];
+                // §6.2(20) with §6.2(11)-(12): a result tied to a named
+                // group is no longer-lived than the shortest-lived
+                // argument in it, and an argument that is a prvalue is a
+                // temporary materialized for the call -- it dies at the
+                // end of this full-expression, so nothing may borrow the
+                // result beyond it.
+                //
+                // This used to fall out of resolve_borrow_source_root
+                // rejecting "an arbitrary expression": a literal
+                // argument was refused as a borrow source, which
+                // happened to enforce this rule. Once a prvalue
+                // correctly contributes *no root* (§6.2(12): it
+                // "introduces no lender object ... because it aliases no
+                // pre-existing object or range"), the union was just the
+                // other argument's root and the escape became invisible.
+                // The rule is stated here now rather than inherited from
+                // a shape rejection.
+                if (report_errors && !expression_designates_a_place(source_arg, body, signatures)) {
+                    std::string message{"cannot borrow the result of calling '"};
+                    message += expr.name;
+                    message += "': argument ";
+                    message += std::to_string(source_index - callee.param_offset + 1);
+                    message += " is a prvalue, so a temporary is materialized for its parameter (spec "
+                               "§6.2(11)-(12)) and dies at the end of this full-expression -- a result tied to "
+                               "that parameter's lifetime group is no longer-lived than it (spec §6.2(20))";
+                    return std::unexpected(DataflowError(message, state.current_loc));
+                }
+                auto _r = resolve_borrow_source_root(source_arg, state, body, signatures, report_errors);
                 if (!_r.has_value()) return std::unexpected(std::move(_r).error());
                 roots = union_roots(std::move(roots), std::move(_r).value());
             }
@@ -924,13 +978,16 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
         }
 
         default:
-            if (report_errors) {
-                return std::unexpected(DataflowError("a reference can currently only borrow a plain local variable, a field of "
-                                     "one ('a.b'), an array element of one ('arr[i]'), a dereferenced "
-                                     "raw-pointer local ('*p'/'p->x'), or the result of a call "
-                                     "to a reference-returning function -- not an arbitrary expression",
-                    state.current_loc));
-            }
+            // [basic.lval]: every remaining expression kind -- a literal,
+            // a `sizeof`, a fold, a braced temporary -- is a prvalue. A
+            // prvalue designates no pre-existing object, so it has no
+            // borrow root, and §6.2(11)-(12) is exactly the rule for
+            // binding a `const T&` to one. Enumerating the *places* and
+            // treating everything else as rootless is one list; the
+            // rejection this replaces was a second list that had to be
+            // its complement and was not, which is why an expression
+            // kind absent from both -- `static_cast<T>(x)`, `c ? a : b`,
+            // `sizeof(T)`, `a + b` -- could bind to nothing at all.
             return RootSet{};
     }
 }
@@ -1119,6 +1176,22 @@ std::expected<void, DataflowError> apply_address_of(const Expr& expr, DataflowSt
     if (expr.lhs->kind == ExprKind::Identifier && !body.local_of(*expr.lhs).has_value() &&
         signatures.contains(expr.lhs->name)) {
         return {};
+    }
+    // [expr.unary.op]/3: "The operand of the unary & operator shall be
+    // an lvalue ... or a qualified-id". A prvalue designates no object,
+    // so there is no address to take. This used to fall out of
+    // resolve_borrow_source_root's rejection of "an arbitrary
+    // expression" -- one sentence standing for three different rules
+    // (this one, [expr.ass]/1's assignment target, and reference
+    // binding), of which only this one and the assignment target are
+    // real. Stated separately now, so that making a `const T&` binding
+    // materialize a temporary (which [conv.rval] requires) does not
+    // silently license `&(a + b)`.
+    if (report_errors && !expression_designates_a_place(*expr.lhs, body, signatures)) {
+        return std::unexpected(DataflowError(
+            "cannot take the address of this expression: the operand of unary '&' shall be an lvalue "
+            "([expr.unary.op]/3), and this expression designates no object -- it is a prvalue",
+            expr.lhs->loc));
     }
     auto roots_result = resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
     if (!roots_result.has_value()) return std::unexpected(std::move(roots_result).error());

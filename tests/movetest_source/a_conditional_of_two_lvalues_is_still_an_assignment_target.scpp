@@ -1,0 +1,15 @@
+// The acceptance control beside the two rejections above, differing in
+// exactly one attribute: [expr.cond]/7 makes a conditional an *lvalue*
+// when both arms are lvalues of the same type, so it is a modifiable
+// lvalue and assigning through it writes to whichever arm was selected.
+// A rule that rejected "any conditional" would fail here; a rule that
+// accepted "any expression" would pass the two rejections above.
+import std;
+
+int main() {
+    int64_t a = 1;
+    int64_t b = 2;
+    bool c = true;
+    (c ? a : b) = 5;
+    return static_cast<int>(a) - 5;
+}

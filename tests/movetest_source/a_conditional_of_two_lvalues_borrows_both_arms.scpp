@@ -1,0 +1,20 @@
+// §6.2(7)-(10) with [expr.cond]/7: when both arms are lvalues the
+// conditional designates one of them, so a reference bound to it
+// borrows *either* -- the roots are the union of both arms, which is
+// what RootSet being a set is for. Moving out of the arm that was not
+// selected must still be rejected while the borrow is live, because
+// which arm was selected is a run-time fact the checker does not have.
+//
+// A treatment that answered "no root" for every conditional -- the
+// simplest way to make prvalue conditionals bind -- would accept this
+// program and lose the borrow entirely.
+import std;
+
+int main() {
+    std::string a{"one"};
+    std::string b{"two"};
+    bool c = true;
+    const std::string& bound = c ? a : b;
+    std::string stolen = std::move(b);
+    return static_cast<int>(bound.length()) - 3;
+}

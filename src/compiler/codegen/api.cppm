@@ -920,6 +920,10 @@ private:
     // closure" instead of "a pointer to the closure".
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_materialize_rvalue_reference_source(const Expr& expr);
 
+    // [conv.rval]: storage for a prvalue used where a glvalue is
+    // required, living for the full-expression.
+    [[nodiscard]] std::expected<LValue, CodegenError> materialize_prvalue_lvalue(const Expr& expr);
+
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_materialize_const_reference_source(const Expr& expr, const Type& target_type);
 
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> materialize_const_reference_source_storage(const Expr& expr, const Type& target_type);

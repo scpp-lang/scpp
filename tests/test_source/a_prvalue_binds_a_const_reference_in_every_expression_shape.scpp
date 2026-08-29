@@ -1,0 +1,48 @@
+// spec §6.2(11.1): "If a local variable or parameter of type `const T&`
+// is initialized from ... an expression that is an rvalue of type `T`,
+// **including** a fresh value of type `T` ... a temporary object of type
+// `T` is materialized and the reference binds to that temporary."
+// "Including" is an inclusion, not the whole rule -- the implementation
+// had collapsed it into §6.6(1)'s three fresh-value shapes
+// (`std::move(E)`, a call, `T{...}`), so every other rvalue was
+// rejected as "an arbitrary expression".
+//
+// Each line prints the value the binding actually saw; the same program
+// transliterated to C++ and built with clang++-22 -std=c++26 prints the
+// same ten numbers.
+import std;
+
+int take_ref(const std::string& s) { return static_cast<int>(s.length()); }
+int take_int_ref(const int64_t& n) { return static_cast<int>(n); }
+std::string make_string() { return std::string{"abcde"}; }
+int64_t make_int() { int64_t r = 5; return r; }
+
+int main() {
+    std::string name{"abcde"};
+    int64_t n = 5;
+    int64_t a = 5;
+    int64_t b = 9;
+    int m = 5;
+    int64_t backing[2]{5, 5};
+    bool c = false;
+    bool t = true;
+    std::print("cond_string {}\n", take_ref(c ? std::string{"xyzw!"} : name));
+    std::print("cond_int {}\n", take_int_ref(c ? make_int() : n));
+    std::print("cast {}\n", take_int_ref(static_cast<int64_t>(m)));
+    std::print("call {}\n", take_ref(make_string()));
+    std::print("braced {}\n", take_ref(std::string{"abcde"}));
+    std::print("binary {}\n", take_int_ref(n + 3));
+    std::print("subscript {}\n", take_int_ref(backing[0]));
+    std::print("unary {}\n", take_int_ref(-(-n)));
+    std::print("sizeof {}\n", take_int_ref(static_cast<int64_t>(sizeof(int64_t))));
+    // [expr.cond]/7: two lvalue arms of the same type make the
+    // conditional an *lvalue*, so this binding is a real borrow of
+    // either `a` or `b` -- the roots are the union of both arms, not an
+    // empty set. A materialized copy here would still print 5 and be
+    // wrong about aliasing, which is why the sibling movecheck case
+    // asserts the borrow.
+    const int64_t& two_lvalues = t ? a : b;
+    std::print("two_lvalues {}\n", take_int_ref(two_lvalues));
+    std::print("move {}\n", take_ref(std::move(name)));
+    return 0;
+}

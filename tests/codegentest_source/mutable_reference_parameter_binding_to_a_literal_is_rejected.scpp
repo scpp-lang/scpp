@@ -1,0 +1,22 @@
+// [dcl.init.ref]/5 with [over.ics.ref]/1: unlike a *const* reference
+// (see const_reference_parameter_binding_to_a_literal_is_allowed.scpp),
+// a *mutable* `T&` cannot bind to a prvalue -- there is no place a write
+// through it could ever land.
+//
+// This case lived in tests/movetest_source until the rule was stated as
+// [over.ics.ref]/1 rather than as a borrow-root shape list. It used to
+// be rejected by movecheck, because resolve_borrow_source_root refused
+// "an arbitrary expression" as a borrow source -- one sentence standing
+// for four separate rules. Now `identity(int&)` is simply not viable, no
+// overload matches, and the call is reported where every other
+// unresolvable call in the language is reported: codegen. Moved here so
+// the assertion is "the compiler rejects it" rather than "this
+// particular pass rejects it". (That movecheck reports no unresolvable
+// call at all is a separate, pre-existing gap; see the PR's
+// new-defects list.)
+int identity(int& r) {
+    return r;
+}
+int main() {
+    return identity(5);
+}
