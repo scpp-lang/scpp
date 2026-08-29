@@ -1,0 +1,31 @@
+// The acceptance control for the gate: the identical program inside
+// `[[scpp::unsafe]] { }`. §5.1(6) makes a gated operation well-formed
+// there and nowhere else, so a change that stopped gating would make
+// this pair stop discriminating -- which is exactly what the paired
+// `error` case detects.
+import std;
+
+class Node {
+public:
+    int v;
+    Node(int n) : v{n} {}
+    virtual ~Node() {}
+};
+
+struct Holder {
+    Node* p;
+};
+
+int main() {
+    Node n{7};
+    Node* raw{};
+    Holder h{};
+    [[scpp::unsafe]] {
+        raw = &n;
+        h.p = &n;
+        int total = (*raw).v + raw->v + h.p->v;
+        Node*& through_reference = raw;
+        total = total + (*through_reference).v;
+        return total - 28;
+    }
+}

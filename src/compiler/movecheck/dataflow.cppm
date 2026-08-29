@@ -1236,7 +1236,9 @@ namespace scpp {
     }
     if (is_raw_ptr && state.unsafe_depth == 0 && !(expr.implicit_arrow_deref && expr.implicit_arrow_chain_safe)) {
         return std::unexpected(DataflowError("cannot dereference raw pointer '" + describe +
-                             "': requires '[[scpp::unsafe]] { }' (spec ch01 §1.3/ch02)",
+                             "': indirection through a value of pointer type is a gated operation, "
+                             "well-formed only inside '[[scpp::unsafe]] { }' (spec §5.1(5.1), §5.1(6), "
+                             "restated for '*E' by §7.1(4))",
             state.current_loc));
     }
     // Only an *identifier* operand names a local whose move/borrow state
@@ -1616,7 +1618,7 @@ struct ConvertingConstructorBinding {
         return std::unexpected(DataflowError("cannot use '" + destination_type.name +
                              "'s converting constructor outside '[[scpp::unsafe]] { }': its own declaration is "
                              "marked '[[scpp::unsafe]]', so its soundness depends on a precondition only the "
-                             "caller can guarantee (ch01 §1.2/§1.3)",
+                             "caller can guarantee (spec §5.1(1.2), §5.1(5.7), §5.1(6))",
             state.current_loc));
     }
     binding.effective_param_type = binding.ctor->param_types[1];
@@ -1750,14 +1752,14 @@ struct ConvertingConstructorBinding {
     if (report_errors && sig != nullptr && sig->is_extern_c_declaration_only && state.unsafe_depth == 0) {
         return std::unexpected(DataflowError("cannot call 'extern \"C\"' function '" + callee_display +
                              "' outside '[[scpp::unsafe]] { }': no scpp compiler ever sees its real "
-                             "implementation to check it (spec ch01 §1.3/ch02)",
+                             "implementation to check it (spec §5.1(5.6), §5.1(6))",
             state.current_loc));
     }
     if (report_errors && sig != nullptr && sig->is_unsafe && state.unsafe_depth == 0) {
         return std::unexpected(DataflowError("cannot call '" + callee_display +
                              "' outside '[[scpp::unsafe]] { }': its own declaration is marked "
                              "'[[scpp::unsafe]]', so its soundness depends on a precondition only the "
-                             "caller can guarantee (ch01 §1.2/§1.3)",
+                             "caller can guarantee (spec §5.1(1.2), §5.1(5.7), §5.1(6))",
             state.current_loc));
     }
     // Scratch borrow-map shared by every reference argument of *this*
@@ -2176,7 +2178,7 @@ struct ConvertingConstructorBinding {
         return std::unexpected(DataflowError("cannot call '" + class_name +
                              "'s constructor outside '[[scpp::unsafe]] { }': its own declaration is marked "
                              "'[[scpp::unsafe]]', so its soundness depends on a precondition only the "
-                             "caller can guarantee (ch01 §1.2/§1.3)",
+                             "caller can guarantee (spec §5.1(1.2), §5.1(5.7), §5.1(6))",
             state.current_loc));
     }
     BorrowMap in_call_borrows;

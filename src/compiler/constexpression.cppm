@@ -433,6 +433,15 @@ public:
 // find_enum already use, and it keeps the found-object accesses inside the
 // safety checker rather than escaping it.
 using OptionalExprRef = std::optional<std::reference_wrapper<const Expr>>;
+// The argument-expression list an overload resolver may or may not have
+// been given. It was a `const std::vector<ExprPtr>*`, which is the same
+// "optional reference" every alias here exists to spell -- and the only
+// way to read it was to dereference a raw pointer, which §5.1(5.1) gates.
+using OptionalExprListRef = std::optional<std::reference_wrapper<const std::vector<ExprPtr>>>;
+// "The operand's class type, if it has one" -- another optional
+// reference that was a raw `const Type*`, and the one every operator and
+// conversion resolver in this file asks for.
+using OptionalTypeRef = std::optional<std::reference_wrapper<const Type>>;
 using OptionalInitializerRef = std::optional<std::reference_wrapper<const Initializer>>;
 using OptionalFunctionRef = std::optional<std::reference_wrapper<const Function>>;
 using OptionalStructDefRef = std::optional<std::reference_wrapper<StructDef>>;
@@ -446,6 +455,7 @@ using OptionalClassDefRef = std::optional<std::reference_wrapper<ClassDef>>;
 [[nodiscard]] OptionalExprRef make_expr_ref(const Expr& expr) {
     return std::optional<std::reference_wrapper<const Expr>>{std::reference_wrapper<const Expr>{expr}};
 }
+
 
 [[nodiscard]] OptionalInitializerRef make_initializer_ref(const Initializer& initializer) {
     return std::optional<std::reference_wrapper<const Initializer>>{std::reference_wrapper<const Initializer>{initializer}};
@@ -468,6 +478,39 @@ using OptionalClassDefRef = std::optional<std::reference_wrapper<ClassDef>>;
 [[nodiscard]] OptionalExprRef optional_expr_ref(const ExprPtr& expr) {
     if (!expr) return {};
     return make_expr_ref(*expr);
+}
+// The "resolver was given no argument-expression list" case. Spelled as
+// a helper for the same reason make_expr_list_ref is: scpp cannot yet
+// construct through an alias of a template specialization, so
+// `OptionalExprListRef{}` in an argument position is rejected with
+// "cannot deduce template arguments" (see the note above these aliases).
+[[nodiscard]] OptionalExprListRef no_expr_list_ref() {
+    return std::optional<std::reference_wrapper<const std::vector<ExprPtr>>>{};
+}
+
+// The "no context type" case, spelled as a helper for the same reason
+// make_type_ref is (see the note above these aliases).
+[[nodiscard]] OptionalTypeRef no_type_ref() {
+    return std::optional<std::reference_wrapper<const Type>>{};
+}
+
+[[nodiscard]] OptionalTypeRef make_type_ref(const Type& type) {
+    return std::optional<std::reference_wrapper<const Type>>{std::reference_wrapper<const Type>{type}};
+}
+
+[[nodiscard]] OptionalExprListRef make_expr_list_ref(const std::vector<ExprPtr>& list) {
+    return std::optional<std::reference_wrapper<const std::vector<ExprPtr>>>{
+        std::reference_wrapper<const std::vector<ExprPtr>>{list}};
+}
+
+// The i-th argument expression, when the resolver was given the list at
+// all and it is long enough. One place, so the three resolvers that ask
+// cannot disagree about what "no expression for this argument" means.
+[[nodiscard]] OptionalExprRef argument_expression_at(const OptionalExprListRef& arg_exprs, std::size_t index) {
+    if (!arg_exprs.has_value()) return {};
+    const std::vector<ExprPtr>& list = arg_exprs->get();
+    if (index >= list.size()) return {};
+    return optional_expr_ref(list[index]);
 }
 
 class ExprRewrite {
@@ -686,8 +729,10 @@ public:
             if (!arg_result.has_value()) return true;
             arg_values.push_back(std::move(arg_result).value());
         }
+        std::vector<std::size_t> ignored_ambiguity{};
         OptionalFunctionRef callee =
-            find_callable(expr.name, arg_values, expr.explicit_global_qualification, &expr.args);
+            find_callable(expr.name, arg_values, expr.explicit_global_qualification,
+                          make_expr_list_ref(expr.args), ignored_ambiguity);
         if (!callee.has_value()) return true;
         return callee->get().eval_mode == FunctionEvalMode::Consteval;
     }
@@ -1556,7 +1601,7 @@ private:
         // global itself was declared in, never from wherever the
         // reference that triggered this resolution happened to sit.
         std::vector<std::string> saved_namespace_path = enter_namespace(global.namespace_path);
-        auto value_result = evaluate_expr_in_context(*global.decl->init, &global.decl->type);
+        auto value_result = evaluate_expr_in_context(*global.decl->init, make_type_ref(global.decl->type));
         leave_namespace(saved_namespace_path);
         frames_ = std::move(saved_frames);
         globals_resolving_.erase(key);
@@ -1769,7 +1814,7 @@ private:
                                                                expr.kind == ExprKind::StringLiteral)));
             }
         }
-        auto value_result = evaluate_expr_in_context(expr, &type);
+        auto value_result = evaluate_expr_in_context(expr, make_type_ref(type));
         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
         return copy_into(cell, std::move(value_result).value(), loc);
     }
@@ -1995,7 +2040,7 @@ private:
     // finding and must read the same way. The three sites used to have
     // one message between them.
     [[nodiscard]] std::string ambiguous_candidates_message(const std::string& what,
-                                                           const std::vector<const Function*>& tied,
+                                                           const std::vector<std::size_t>& tied,
                                                            const std::string& display_name) {
         std::string message{};
         message += "ambiguous ";
@@ -2003,18 +2048,18 @@ private:
         message += ": ";
         message += std::to_string(tied.size());
         message += " overloads match these argument types equally well and none is better than the others ([over.match.best])";
-        for (const Function* fn : tied) {
+        for (std::size_t index : tied) {
             message += "\n  candidate: ";
-            message += describe_constexpr_candidate(*fn, display_name);
+            message += describe_constexpr_candidate(program_.functions[index], display_name);
         }
         return message;
     }
 
     [[nodiscard]] OptionalFunctionRef find_callable(const std::string& name, const std::vector<std::shared_ptr<Cell>>& args,
-                                                bool explicit_global_qualification = false,
-                                                const std::vector<ExprPtr>* arg_exprs = nullptr,
-                                                std::vector<const Function*>* out_ambiguous = nullptr) {
-        if (out_ambiguous != nullptr) out_ambiguous->clear();
+                                                bool explicit_global_qualification,
+                                                const OptionalExprListRef& arg_exprs,
+                                                std::vector<std::size_t>& out_ambiguous) {
+        out_ambiguous.clear();
         if (!explicit_global_qualification) {
             for (std::size_t depth = lookup_namespace_path_.size(); depth > 0; --depth) {
                 std::string candidate{};
@@ -2030,30 +2075,31 @@ private:
                 }
                 // A tie found at this depth is the answer: an outer scope
                 // does not un-ambiguate an inner one.
-                if (out_ambiguous != nullptr && out_ambiguous->size() > 1) return {};
+                if (out_ambiguous.size() > 1) return {};
             }
         }
         return find_callable_exact(name, args, arg_exprs, out_ambiguous);
     }
 
     [[nodiscard]] OptionalFunctionRef find_callable_exact(const std::string& name, const std::vector<std::shared_ptr<Cell>>& args,
-                                                const std::vector<ExprPtr>* arg_exprs = nullptr,
-                                                std::vector<const Function*>* out_ambiguous = nullptr) {
+                                                const OptionalExprListRef& arg_exprs,
+                                                std::vector<std::size_t>& out_ambiguous) {
         if (!functions_by_name_.contains(name)) return {};
         // Collect every match rather than returning the first. Returning
         // the first made a constexpr call's meaning depend on the order
         // its overloads happened to be declared in -- the same defect
         // codegen's resolve_overload_by_type had, and leaving it here
         // would make `constexpr` a way to bypass the ambiguity check.
-        std::vector<const Function*> matches{};
+        std::vector<std::size_t> matches{};
         for (std::size_t fn_index : functions_by_name_.at(name)) {
             const Function& fn = program_.functions[fn_index];
             if (fn.params.size() != args.size()) continue;
             bool params_match = true;
             for (std::size_t i = 0; i < args.size(); ++i) {
-                const Expr* arg_expr = arg_exprs != nullptr && i < arg_exprs->size() ? (*arg_exprs)[i].get() : nullptr;
-                if (arg_expr != nullptr && arg_expr->kind == ExprKind::BracedInitList) {
-                    if (!braced_init_list_can_initialize(fn.params[i].type, arg_expr->args, arg_expr->loc)) {
+                OptionalExprRef arg_expr = argument_expression_at(arg_exprs, i);
+                if (arg_expr.has_value() && arg_expr->get().kind == ExprKind::BracedInitList) {
+                    if (!braced_init_list_can_initialize(fn.params[i].type, arg_expr->get().args,
+                                                         arg_expr->get().loc)) {
                         params_match = false;
                         break;
                     }
@@ -2064,7 +2110,7 @@ private:
                     break;
                 }
             }
-            if (params_match) matches.push_back(&fn);
+            if (params_match) matches.push_back(fn_index);
         }
         return best_candidate(matches, args, arg_exprs, /*param_offset=*/0, out_ambiguous);
     }
@@ -2082,10 +2128,10 @@ private:
     //
     // `param_offset` is 1 for a member function, whose params[0] is the
     // implicit object parameter and has no argument opposite it.
-    [[nodiscard]] OptionalFunctionRef best_candidate(std::vector<const Function*>& matches,
+    [[nodiscard]] OptionalFunctionRef best_candidate(std::vector<std::size_t>& matches,
                                                      const std::vector<std::shared_ptr<Cell>>& args,
-                                                     const std::vector<ExprPtr>* arg_exprs, std::size_t param_offset,
-                                                     std::vector<const Function*>* out_ambiguous) {
+                                                     const OptionalExprListRef& arg_exprs, std::size_t param_offset,
+                                                     std::vector<std::size_t>& out_ambiguous) {
         // [basic.def]/1: a declaration and the definition it belongs to
         // declare *one* function, so a redeclaration is not a second
         // candidate. This used to be expressed as "skip any function with
@@ -2106,17 +2152,25 @@ private:
         // every clause of 7.3 is, about what evaluation *would evaluate*.
         // It rejects after selection, in call_function; it does not
         // withdraw the declaration from overload resolution.
-        std::vector<const Function*> distinct{};
-        for (const Function* fn : matches) {
+        std::vector<std::size_t> distinct{};
+        for (std::size_t fn_index : matches) {
+            const Function& fn = program_.functions[fn_index];
             bool redeclares_a_definition = false;
-            if (!fn->body) {
-                for (const Function* other : matches) {
-                    if (other == fn || !other->body) continue;
-                    if (other->member_owner_class != fn->member_owner_class) continue;
-                    if (other->params.size() != fn->params.size()) continue;
+            if (!fn.body) {
+                for (std::size_t other_index : matches) {
+                    // Identity is "the same element of
+                    // Program::functions", which the index says directly
+                    // -- this used to be a pointer comparison over a
+                    // second, raw-pointer representation of the very same
+                    // thing.
+                    if (other_index == fn_index) continue;
+                    const Function& other = program_.functions[other_index];
+                    if (!other.body) continue;
+                    if (other.member_owner_class != fn.member_owner_class) continue;
+                    if (other.params.size() != fn.params.size()) continue;
                     bool same_signature = true;
-                    for (std::size_t i = 0; i < fn->params.size(); ++i) {
-                        if (!types_equal(other->params[i].type, fn->params[i].type)) {
+                    for (std::size_t i = 0; i < fn.params.size(); ++i) {
+                        if (!types_equal(other.params[i].type, fn.params[i].type)) {
                             same_signature = false;
                             break;
                         }
@@ -2127,18 +2181,18 @@ private:
                     }
                 }
             }
-            if (!redeclares_a_definition) distinct.push_back(fn);
+            if (!redeclares_a_definition) distinct.push_back(fn_index);
         }
         matches = std::move(distinct);
         if (matches.empty()) return {};
-        if (matches.size() == 1) return make_function_ref(*matches[0]);
+        if (matches.size() == 1) return make_function_ref(program_.functions[matches[0]]);
         // [over.match.best]/2.4: a non-template is better than a template.
-        std::vector<const Function*> non_generic{};
-        for (const Function* fn : matches) {
-            if (!fn->is_generic_template) non_generic.push_back(fn);
+        std::vector<std::size_t> non_generic{};
+        for (std::size_t fn_index : matches) {
+            if (!program_.functions[fn_index].is_generic_template) non_generic.push_back(fn_index);
         }
         if (!non_generic.empty()) matches = std::move(non_generic);
-        if (matches.size() == 1) return make_function_ref(*matches[0]);
+        if (matches.size() == 1) return make_function_ref(program_.functions[matches[0]]);
         // [over.match.best] over [over.ics.rank], through the same shared
         // algebra codegen and movecheck use.
         //
@@ -2149,14 +2203,15 @@ private:
         // `f(const int&)` declared runs `f(int&)` at run time and was
         // rejected as ambiguous when folded.
         std::vector<std::vector<ArgumentConversion>> conversions{};
-        for (const Function* fn : matches) {
-            conversions.push_back(argument_conversions_for(*fn, args, arg_exprs, param_offset));
+        for (std::size_t fn_index : matches) {
+            conversions.push_back(
+                argument_conversions_for(program_.functions[fn_index], args, arg_exprs, param_offset));
         }
         std::vector<std::size_t> best = best_viable_candidates(conversions);
-        if (best.size() == 1) return make_function_ref(*matches[best[0]]);
-        std::vector<const Function*> tied{};
+        if (best.size() == 1) return make_function_ref(program_.functions[matches[best[0]]]);
+        std::vector<std::size_t> tied{};
         for (std::size_t index : best) tied.push_back(matches[index]);
-        if (out_ambiguous != nullptr) *out_ambiguous = std::move(tied);
+        out_ambiguous = std::move(tied);
         return {};
     }
 
@@ -2168,7 +2223,7 @@ private:
     // the ones that decide between two viable reference bindings.
     [[nodiscard]] std::vector<ArgumentConversion> argument_conversions_for(const Function& fn,
                                                                           const std::vector<std::shared_ptr<Cell>>& args,
-                                                                          const std::vector<ExprPtr>* arg_exprs,
+                                                                          const OptionalExprListRef& arg_exprs,
                                                                           std::size_t param_offset = 0) {
         auto strip_to_value = [](Type type) {
             if (type.kind == TypeKind::Reference && type.pointee != nullptr) type = *type.pointee;
@@ -2179,9 +2234,9 @@ private:
         for (std::size_t i = 0; i < args.size(); ++i) {
             ArgumentConversion conversion{};
             conversion.rank = ConversionRank::Identity;
-            const Expr* arg_expr = arg_exprs != nullptr && i < arg_exprs->size() ? (*arg_exprs)[i].get() : nullptr;
+            OptionalExprRef arg_expr = argument_expression_at(arg_exprs, i);
             if (i + param_offset >= fn.params.size() || args[i] == nullptr ||
-                (arg_expr != nullptr && arg_expr->kind == ExprKind::BracedInitList)) {
+                (arg_expr.has_value() && arg_expr->get().kind == ExprKind::BracedInitList)) {
                 // A braced list has no type of its own, so there is
                 // nothing to rank; an unknown sequence compares equal to
                 // every other one.
@@ -2218,19 +2273,20 @@ private:
         if (!functions_by_name_.contains(constructor_name)) return {};
         std::vector<std::shared_ptr<Cell>> args{};
         args.push_back(arg);
-        std::vector<const Function*> matches{};
+        std::vector<std::size_t> matches{};
         for (std::size_t fn_index : functions_by_name_.at(constructor_name)) {
             const Function& fn = program_.functions[fn_index];
             if (fn.params.size() != 2) continue;
             const Type& param_type = fn.params[1].type;
             const Type& arg_type = arg->type;
             if (param_type.kind == TypeKind::Reference) {
-                if (param_type.pointee && types_equal(*param_type.pointee, arg_type)) matches.push_back(&fn);
+                if (param_type.pointee && types_equal(*param_type.pointee, arg_type)) matches.push_back(fn_index);
             } else if (types_equal_ignoring_top_level_const(param_type, arg_type)) {
-                matches.push_back(&fn);
+                matches.push_back(fn_index);
             }
         }
-        return best_candidate(matches, args, /*arg_exprs=*/nullptr, /*param_offset=*/1, /*out_ambiguous=*/nullptr);
+        std::vector<std::size_t> ignored_ambiguity{};
+        return best_candidate(matches, args, /*arg_exprs=*/no_expr_list_ref(), /*param_offset=*/1, ignored_ambiguity);
     }
 
     [[nodiscard]] bool is_same_or_base_class_type(const Type& expected, const Type& actual) const {
@@ -2349,13 +2405,13 @@ private:
 
     [[nodiscard]] OptionalFunctionRef find_constructor(const std::string& class_name,
                                                    const std::vector<std::shared_ptr<Cell>>& args,
-                                                   std::vector<const Function*>* out_ambiguous = nullptr) {
-        if (out_ambiguous != nullptr) out_ambiguous->clear();
+                                                   std::vector<std::size_t>& out_ambiguous) {
+        out_ambiguous.clear();
         std::string constructor_name{};
         constructor_name += class_name;
         constructor_name += "_new";
         if (!functions_by_name_.contains(constructor_name)) return {};
-        std::vector<const Function*> matches{};
+        std::vector<std::size_t> matches{};
         for (std::size_t fn_index : functions_by_name_.at(constructor_name)) {
             const Function& fn = program_.functions[fn_index];
             if (fn.params.size() != args.size() + 1) continue;
@@ -2371,9 +2427,9 @@ private:
                     break;
                 }
             }
-            if (params_match) matches.push_back(&fn);
+            if (params_match) matches.push_back(fn_index);
         }
-        return best_candidate(matches, args, /*arg_exprs=*/nullptr, /*param_offset=*/1, out_ambiguous);
+        return best_candidate(matches, args, /*arg_exprs=*/no_expr_list_ref(), /*param_offset=*/1, out_ambiguous);
     }
 
     // The evaluator asks the same question as movecheck and codegen and now
@@ -2735,7 +2791,8 @@ private:
                 if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
                 arg_values.push_back(std::move(arg_result).value());
             }
-            if (OptionalFunctionRef ctor_ref = find_constructor(field_type.name, arg_values);
+            std::vector<std::size_t> ignored_ambiguity{};
+            if (OptionalFunctionRef ctor_ref = find_constructor(field_type.name, arg_values, ignored_ambiguity);
                 ctor_ref.has_value()) {
                 const Function& ctor = ctor_ref->get();
                 std::vector<Binding> bindings{};
@@ -2746,7 +2803,7 @@ private:
                     const Expr& arg_expr = *init.brace_args[i - 1];
                     if (param.type.kind == TypeKind::Reference) {
                         if (param.type.is_rvalue_ref) {
-                            auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
+                            auto value_result = evaluate_expr_in_context(arg_expr, make_type_ref(param.type));
                             if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                             bindings.push_back(Binding{std::move(value_result).value(), false});
                         } else if (param.type.is_mutable_ref) {
@@ -2758,13 +2815,13 @@ private:
                             if (lvalue_result.has_value()) {
                                 bindings.push_back(Binding{lvalue_result.value().cell, true});
                             } else {
-                                auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
+                                auto value_result = evaluate_expr_in_context(arg_expr, make_type_ref(param.type));
                                 if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                                 bindings.push_back(Binding{std::move(value_result).value(), true});
                             }
                         }
                     } else {
-                        auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
+                        auto value_result = evaluate_expr_in_context(arg_expr, make_type_ref(param.type));
                         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                         bindings.push_back(Binding{std::move(value_result).value(), false});
                     }
@@ -2983,11 +3040,17 @@ private:
         message += "required constant evaluation cannot execute user-defined destructor of '";
         message += *owner;
         message += "'";
-        const Type* declared = &type;
-        while (declared->kind == TypeKind::Array && declared->element) declared = declared->element.get();
-        if (declared->kind == TypeKind::Named && declared->name != *owner) {
+        // The element type an array declaration eventually names. A raw
+        // pointer cursor was the only reason this walk had to be
+        // dereferenced at all; a reference cursor says the same thing
+        // and needs no license.
+        std::reference_wrapper<const Type> declared{type};
+        while (declared.get().kind == TypeKind::Array && declared.get().element) {
+            declared = std::reference_wrapper<const Type>{*declared.get().element};
+        }
+        if (declared.get().kind == TypeKind::Named && declared.get().name != *owner) {
             message += ", reached from '";
-            message += declared->name;
+            message += declared.get().name;
             message += "'";
         }
         return std::unexpected(ConstexprError(loc, message));
@@ -3227,7 +3290,7 @@ private:
                 const Expr& arg_expr = *args[i];
                 if (param.type.kind == TypeKind::Reference) {
                     if (param.type.is_rvalue_ref) {
-                        auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
+                        auto value_result = evaluate_expr_in_context(arg_expr, make_type_ref(param.type));
                         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                         std::shared_ptr<Cell> value = std::move(value_result).value();
                         if (param.type.pointee && is_same_or_base_class_type(*param.type.pointee, value->type) &&
@@ -3285,7 +3348,7 @@ private:
                         if (can_bind_lvalue) {
                             bindings.push_back(Binding{std::move(bound_value), true});
                         } else {
-                            auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
+                            auto value_result = evaluate_expr_in_context(arg_expr, make_type_ref(param.type));
                             if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                             std::shared_ptr<Cell> value = std::move(value_result).value();
                             if (param.type.pointee && is_same_or_base_class_type(*param.type.pointee, value->type) &&
@@ -3298,7 +3361,7 @@ private:
                         }
                     }
                 } else {
-                    auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
+                    auto value_result = evaluate_expr_in_context(arg_expr, make_type_ref(param.type));
                     if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                     std::shared_ptr<Cell> value = std::move(value_result).value();
                     if (is_same_or_base_class_type(param.type, value->type) && !types_equal(param.type, value->type)) {
@@ -3346,9 +3409,9 @@ private:
 
     [[nodiscard]] std::expected<OptionalFunctionRef, ConstexprError> find_method_callable(const Expr& receiver_expr, const std::string& method_name,
                                                        const std::vector<std::shared_ptr<Cell>>& arg_values,
-                                                       const std::vector<ExprPtr>* arg_exprs = nullptr,
-                                                       std::vector<const Function*>* out_ambiguous = nullptr) {
-        if (out_ambiguous != nullptr) out_ambiguous->clear();
+                                                       const OptionalExprListRef& arg_exprs,
+                                                       std::vector<std::size_t>& out_ambiguous) {
+        out_ambiguous.clear();
         std::shared_ptr<Cell> receiver_value{};
         bool receiver_is_lvalue = false;
         bool receiver_read_only = false;
@@ -3383,7 +3446,7 @@ private:
         full_name += "_";
         full_name += method_name;
         if (!functions_by_name_.contains(full_name)) return {};
-        std::vector<const Function*> matches{};
+        std::vector<std::size_t> matches{};
         for (std::size_t fn_index : functions_by_name_.at(full_name)) {
             const Function& fn = program_.functions[fn_index];
             if (fn.params.size() != arg_values.size() + 1 || fn.params.empty()) continue;
@@ -3401,9 +3464,10 @@ private:
 
             bool params_match = true;
             for (std::size_t i = 0; i < arg_values.size(); ++i) {
-                const Expr* arg_expr = arg_exprs != nullptr && i < arg_exprs->size() ? (*arg_exprs)[i].get() : nullptr;
-                if (arg_expr != nullptr && arg_expr->kind == ExprKind::BracedInitList) {
-                    if (!braced_init_list_can_initialize(fn.params[i + 1].type, arg_expr->args, arg_expr->loc)) {
+                OptionalExprRef arg_expr = argument_expression_at(arg_exprs, i);
+                if (arg_expr.has_value() && arg_expr->get().kind == ExprKind::BracedInitList) {
+                    if (!braced_init_list_can_initialize(fn.params[i + 1].type, arg_expr->get().args,
+                                                         arg_expr->get().loc)) {
                         params_match = false;
                         break;
                     }
@@ -3414,7 +3478,7 @@ private:
                     break;
                 }
             }
-            if (params_match) matches.push_back(&fn);
+            if (params_match) matches.push_back(fn_index);
         }
         return best_candidate(matches, arg_values, arg_exprs, /*param_offset=*/1, out_ambiguous);
     }
@@ -3442,8 +3506,8 @@ private:
             if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
             arg_values.push_back(std::move(arg_result).value());
         }
-        std::vector<const Function*> tied_constructors{};
-        OptionalFunctionRef ctor_ref = find_constructor(expr.name, arg_values, &tied_constructors);
+        std::vector<std::size_t> tied_constructors{};
+        OptionalFunctionRef ctor_ref = find_constructor(expr.name, arg_values, tied_constructors);
         if (!ctor_ref.has_value()) {
             if (tied_constructors.size() > 1) {
                 return std::unexpected(ConstexprError(expr.loc, ambiguous_candidates_message(
@@ -3486,7 +3550,7 @@ private:
             const Expr& arg_expr = *expr.args[i - 1];
             if (param.type.kind == TypeKind::Reference) {
                 if (param.type.is_rvalue_ref) {
-                    auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
+                    auto value_result = evaluate_expr_in_context(arg_expr, make_type_ref(param.type));
                     if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                     bindings.push_back(Binding{std::move(value_result).value(), false});
                     continue;
@@ -3504,13 +3568,13 @@ private:
                     if (arg_lvalue_result.has_value()) {
                         bindings.push_back(Binding{arg_lvalue_result.value().cell, true});
                     } else {
-                        auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
+                        auto value_result = evaluate_expr_in_context(arg_expr, make_type_ref(param.type));
                         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                         bindings.push_back(Binding{std::move(value_result).value(), true});
                     }
                 }
             } else {
-                auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
+                auto value_result = evaluate_expr_in_context(arg_expr, make_type_ref(param.type));
                 if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                 bindings.push_back(Binding{std::move(value_result).value(), false});
             }
@@ -3538,34 +3602,34 @@ private:
         if (expr.lhs == nullptr || expr.rhs == nullptr) return std::nullopt;
         Type lhs_storage{};
         Type rhs_storage{};
-        const Type* lhs_class = operator_operand_class_type(*expr.lhs, lhs_storage);
-        const Type* rhs_class = operator_operand_class_type(*expr.rhs, rhs_storage);
-        if (lhs_class == nullptr && rhs_class == nullptr) return std::nullopt;
+        OptionalTypeRef lhs_class = operator_operand_class_type(*expr.lhs, lhs_storage);
+        OptionalTypeRef rhs_class = operator_operand_class_type(*expr.rhs, rhs_storage);
+        if (!lhs_class.has_value() && !rhs_class.has_value()) return std::nullopt;
         std::string method_name = binary_operator_method_name(expr.binary_op);
         if (!method_name.empty()) {
-            if (lhs_class != nullptr && functions_by_name_.contains(lhs_class->name + "_" + method_name)) {
+            if (lhs_class.has_value() && functions_by_name_.contains(lhs_class->get().name + "_" + method_name)) {
                 ExprPtr call = make_operator_call_expr(*expr.lhs, *expr.rhs, method_name, expr.loc);
                 return evaluate_expr(*call);
             }
             // [over.match.oper]/3.4.3's rewritten candidate, for `==`/`!=`.
-            if ((expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne) && rhs_class != nullptr &&
-                functions_by_name_.contains(rhs_class->name + "_" + method_name)) {
+            if ((expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne) && rhs_class.has_value() &&
+                functions_by_name_.contains(rhs_class->get().name + "_" + method_name)) {
                 ExprPtr call = make_operator_call_expr(*expr.rhs, *expr.lhs, method_name, expr.loc);
                 return evaluate_expr(*call);
             }
         }
-        std::string lhs_display = lhs_class != nullptr ? describe_type_brief(*lhs_class) : std::string("?");
-        std::string rhs_display = rhs_class != nullptr ? describe_type_brief(*rhs_class) : std::string("?");
+        std::string lhs_display = lhs_class.has_value() ? describe_type_brief(lhs_class->get()) : std::string("?");
+        std::string rhs_display = rhs_class.has_value() ? describe_type_brief(rhs_class->get()) : std::string("?");
         // [expr.log.and]/1, [expr.log.or]/1: both operands are
         // contextually converted to `bool`, so no `operator&&` leaves
         // the built-in candidate, whose operands go through
         // evaluate_contextual_bool -- the same fall-through codegen and
         // typechecking take.
         if (expr.binary_op == BinaryOp::And || expr.binary_op == BinaryOp::Or) {
-            bool lhs_converts = lhs_class == nullptr || conversion_function_call_for(*expr.lhs, *lhs_class,
+            bool lhs_converts = !lhs_class.has_value() || conversion_function_call_for(*expr.lhs, lhs_class->get(),
                                                                                     contextual_bool_type(),
                                                                                     /*allow_explicit=*/true) != nullptr;
-            bool rhs_converts = rhs_class == nullptr || conversion_function_call_for(*expr.rhs, *rhs_class,
+            bool rhs_converts = !rhs_class.has_value() || conversion_function_call_for(*expr.rhs, rhs_class->get(),
                                                                                     contextual_bool_type(),
                                                                                     /*allow_explicit=*/true) != nullptr;
             if (lhs_converts && rhs_converts) return std::nullopt;
@@ -3579,21 +3643,21 @@ private:
         }
         return std::unexpected(ConstexprError(
             expr.loc, no_operator_function_message(binary_operator_spelling(expr.binary_op), lhs_display, rhs_display,
-                                                   method_name, lhs_class != nullptr)));
+                                                   method_name, lhs_class.has_value())));
     }
 
     // The static type of an operator operand, looked through a
     // reference; nothing unless it names a class or struct.
-    [[nodiscard]] const Type* operator_operand_class_type(const Expr& operand, Type& storage) {
+    [[nodiscard]] OptionalTypeRef operator_operand_class_type(const Expr& operand, Type& storage) {
         std::optional<Type> inferred = infer_unevaluated_expr_type(operand);
-        if (!inferred.has_value()) return nullptr;
+        if (!inferred.has_value()) return {};
         storage = inferred->kind == TypeKind::Reference && inferred->pointee != nullptr ? *inferred->pointee : *inferred;
-        if (storage.kind != TypeKind::Named) return nullptr;
+        if (storage.kind != TypeKind::Named) return {};
         if (classes_by_name_.find(storage.name) == classes_by_name_.end() &&
             structs_by_name_.find(storage.name) == structs_by_name_.end()) {
-            return nullptr;
+            return {};
         }
-        return &storage;
+        return make_type_ref(storage);
     }
 
     // [over.match.oper]/2 for a unary operator, the counterpart of
@@ -3607,10 +3671,10 @@ private:
     evaluate_unary_operator_function(const Expr& expr) {
         if (expr.lhs == nullptr) return std::nullopt;
         Type operand_storage{};
-        const Type* operand_class = operator_operand_class_type(*expr.lhs, operand_storage);
-        if (operand_class == nullptr) return std::nullopt;
+        OptionalTypeRef operand_class = operator_operand_class_type(*expr.lhs, operand_storage);
+        if (!operand_class.has_value()) return std::nullopt;
         std::string method_name = unary_operator_method_name(expr.unary_op);
-        if (!method_name.empty() && functions_by_name_.contains(operand_class->name + "_" + method_name)) {
+        if (!method_name.empty() && functions_by_name_.contains(operand_class->get().name + "_" + method_name)) {
             ExprPtr call = make_unary_operator_call_expr(*expr.lhs, method_name, expr.loc);
             return evaluate_expr(*call);
         }
@@ -3618,7 +3682,7 @@ private:
         // `bool`, so a conversion function is the other half of the rule.
         if (expr.unary_op == UnaryOp::Not) {
             if (ExprPtr conversion_call =
-                    conversion_function_call_for(*expr.lhs, *operand_class, contextual_bool_type(),
+                    conversion_function_call_for(*expr.lhs, operand_class->get(), contextual_bool_type(),
                                                  /*allow_explicit=*/true);
                 conversion_call != nullptr) {
                 auto converted = evaluate_expr(*conversion_call);
@@ -3628,26 +3692,26 @@ private:
                 return make_bool_cell(!bool_result.value());
             }
             return std::unexpected(ConstexprError(
-                expr.loc, no_contextual_bool_conversion_message(describe_type_brief(*operand_class),
+                expr.loc, no_contextual_bool_conversion_message(describe_type_brief(operand_class->get()),
                                                                 "the operand of '!'", std::string{"!"})));
         }
         if (method_name.empty()) return std::nullopt;
         return std::unexpected(ConstexprError(
             expr.loc, no_unary_operator_function_message(unary_operator_spelling(expr.unary_op),
-                                                          describe_type_brief(*operand_class))));
+                                                          describe_type_brief(operand_class->get()))));
     }
 
     // [stmt.switch]/2: the `switch` condition, with the contextual
     // implicit conversion applied for a class-typed one.
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_switch_condition(const Expr& condition) {
         Type condition_storage{};
-        if (const Type* condition_class = operator_operand_class_type(condition, condition_storage);
-            condition_class != nullptr) {
-            std::vector<Type> viable = viable_conversion_destinations(program_, condition_class->name,
+        if (OptionalTypeRef condition_class = operator_operand_class_type(condition, condition_storage);
+            condition_class.has_value()) {
+            std::vector<Type> viable = viable_conversion_destinations(program_, condition_class->get().name,
                                                                       ConversionDestinationSet::SwitchCondition);
             if (viable.size() == 1) {
                 if (ExprPtr conversion_call =
-                        conversion_function_call_for(condition, *condition_class, viable[0], /*allow_explicit=*/false);
+                        conversion_function_call_for(condition, condition_class->get(), viable[0], /*allow_explicit=*/false);
                     conversion_call != nullptr) {
                     return evaluate_expr(*conversion_call);
                 }
@@ -3668,15 +3732,15 @@ private:
     evaluate_subscript_operator_function(const Expr& expr) {
         if (expr.lhs == nullptr || expr.rhs == nullptr) return std::nullopt;
         Type base_storage{};
-        const Type* base_class = operator_operand_class_type(*expr.lhs, base_storage);
-        if (base_class == nullptr) return std::nullopt;
+        OptionalTypeRef base_class = operator_operand_class_type(*expr.lhs, base_storage);
+        if (!base_class.has_value()) return std::nullopt;
         std::string method_name{"operator_subscript"};
-        std::string key = base_class->name;
+        std::string key = base_class->get().name;
         key += "_";
         key += method_name;
         if (!functions_by_name_.contains(key)) {
             return std::unexpected(ConstexprError(
-                expr.loc, no_subscript_operator_function_message(describe_type_brief(*base_class),
+                expr.loc, no_subscript_operator_function_message(describe_type_brief(base_class->get()),
                                                                  subscript_index_type_name(*expr.rhs), false)));
         }
         ExprPtr call = make_operator_call_expr(*expr.lhs, *expr.rhs, method_name, expr.loc);
@@ -3699,12 +3763,12 @@ private:
     [[nodiscard]] std::expected<std::int64_t, ConstexprError> evaluate_subscript_index(const Expr& index,
                                                                                        const SourceLocation& loc) {
         Type index_storage{};
-        if (const Type* index_class = operator_operand_class_type(index, index_storage); index_class != nullptr) {
-            std::vector<Type> viable = viable_conversion_destinations(program_, index_class->name,
+        if (OptionalTypeRef index_class = operator_operand_class_type(index, index_storage); index_class.has_value()) {
+            std::vector<Type> viable = viable_conversion_destinations(program_, index_class->get().name,
                                                                       ConversionDestinationSet::SubscriptIndex);
             if (viable.size() == 1) {
                 if (ExprPtr conversion_call =
-                        conversion_function_call_for(index, *index_class, viable[0], /*allow_explicit=*/false);
+                        conversion_function_call_for(index, index_class->get(), viable[0], /*allow_explicit=*/false);
                     conversion_call != nullptr) {
                     auto converted = evaluate_expr(*conversion_call);
                     if (!converted.has_value()) return std::unexpected(std::move(converted).error());
@@ -3712,7 +3776,7 @@ private:
                 }
             }
             return std::unexpected(ConstexprError(
-                loc, no_subscript_index_conversion_message(describe_type_brief(*index_class))));
+                loc, no_subscript_index_conversion_message(describe_type_brief(index_class->get()))));
         }
         // [expr.sub]/1 again, so a fold and a run reject the same
         // program with the same sentence: as_integer's "expected an
@@ -3751,12 +3815,12 @@ private:
                                                                               const SourceLocation& loc,
                                                                               const std::string& position_description) {
         Type operand_storage{};
-        if (const Type* operand_class = operator_operand_class_type(expr, operand_storage); operand_class != nullptr) {
-            ExprPtr conversion_call = conversion_function_call_for(expr, *operand_class, contextual_bool_type(),
+        if (OptionalTypeRef operand_class = operator_operand_class_type(expr, operand_storage); operand_class.has_value()) {
+            ExprPtr conversion_call = conversion_function_call_for(expr, operand_class->get(), contextual_bool_type(),
                                                                    /*allow_explicit=*/true);
             if (conversion_call == nullptr) {
                 return std::unexpected(ConstexprError(
-                    loc, no_contextual_bool_conversion_message(describe_type_brief(*operand_class),
+                    loc, no_contextual_bool_conversion_message(describe_type_brief(operand_class->get()),
                                                                position_description, std::string{})));
             }
             auto converted = evaluate_expr(*conversion_call);
@@ -3785,9 +3849,9 @@ private:
                     if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
                     arg_values.push_back(std::move(arg_result).value());
                 }
-                std::vector<const Function*> tied_methods{};
+                std::vector<std::size_t> tied_methods{};
                 auto fn_result =
-                    find_method_callable(*expr.lhs, expr.name, arg_values, &expr.args, &tied_methods);
+                    find_method_callable(*expr.lhs, expr.name, arg_values, make_expr_list_ref(expr.args), tied_methods);
                 if (!fn_result.has_value()) return std::unexpected(std::move(fn_result).error());
                 OptionalFunctionRef method_ref = fn_result.value();
                 if (!method_ref.has_value()) {
@@ -3824,9 +3888,9 @@ private:
             if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
             arg_values.push_back(std::move(arg_result).value());
         }
-        std::vector<const Function*> tied_callees{};
+        std::vector<std::size_t> tied_callees{};
         OptionalFunctionRef callee_ref =
-            find_callable(expr.name, arg_values, expr.explicit_global_qualification, &expr.args, &tied_callees);
+            find_callable(expr.name, arg_values, expr.explicit_global_qualification, make_expr_list_ref(expr.args), tied_callees);
         if (!callee_ref.has_value())
             return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
                 if (tied_callees.size() > 1) {
@@ -4075,7 +4139,7 @@ private:
     }
 
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_expr(const Expr& expr) {
-        return evaluate_expr_in_context(expr, nullptr);
+        return evaluate_expr_in_context(expr, no_type_ref());
     }
 
     // ch06 §6: a literal has no type of its own, it adopts the type of
@@ -4121,31 +4185,31 @@ private:
         return std::unexpected(ConstexprError(loc, message));
     }
 
-    [[nodiscard]] ExprPtr context_conversion_call(const Expr& expr, const Type* context_type) {
-        if (context_type == nullptr) return nullptr;
-        if (context_type->kind != TypeKind::Named) return nullptr;
+    [[nodiscard]] ExprPtr context_conversion_call(const Expr& expr, const OptionalTypeRef& context_type) {
+        if (!context_type.has_value()) return nullptr;
+        if (context_type->get().kind != TypeKind::Named) return nullptr;
         Type operand_storage{};
-        const Type* operand_class = operator_operand_class_type(expr, operand_storage);
-        if (operand_class == nullptr) return nullptr;
-        if (operand_class->name == context_type->name) return nullptr;
-        ExprPtr call = conversion_function_call_for(expr, *operand_class, *context_type, /*allow_explicit=*/false);
+        OptionalTypeRef operand_class = operator_operand_class_type(expr, operand_storage);
+        if (!operand_class.has_value()) return nullptr;
+        if (operand_class->get().name == context_type->get().name) return nullptr;
+        ExprPtr call = conversion_function_call_for(expr, operand_class->get(), context_type->get(), /*allow_explicit=*/false);
         if (call != nullptr) return call;
-        if (conversion_function_call_for(expr, *operand_class, *context_type, /*allow_explicit=*/true) != nullptr) {
+        if (conversion_function_call_for(expr, operand_class->get(), context_type->get(), /*allow_explicit=*/true) != nullptr) {
             pending_conversion_rejection_ = explicit_only_conversion_function_message(
-                describe_type_brief(*operand_class), describe_type_brief(*context_type));
+                describe_type_brief(operand_class->get()), describe_type_brief(context_type->get()));
         }
         return nullptr;
     }
 
-    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_expr_in_context(const Expr& expr, const Type* context_type) {
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_expr_in_context(const Expr& expr, const OptionalTypeRef& context_type) {
         if (auto result = tick(expr.loc, "evaluating an expression"); !result.has_value()) return std::unexpected(std::move(result).error());
         if (ExprPtr conversion_call = context_conversion_call(expr, context_type); conversion_call != nullptr) {
             return evaluate_expr(*conversion_call);
         }
         if (!pending_conversion_rejection_.empty()) return report_pending_conversion_rejection(expr.loc);
-        if (context_type != nullptr && is_untyped_numeric_literal(expr) &&
-            literal_adopts_type(expr, *context_type, scpp::host_pointer_bit_width())) {
-            return make_adopted_literal_cell(expr, literal_adoption_target(*context_type));
+        if (context_type.has_value() && is_untyped_numeric_literal(expr) &&
+            literal_adopts_type(expr, context_type->get(), scpp::host_pointer_bit_width())) {
+            return make_adopted_literal_cell(expr, literal_adoption_target(context_type->get()));
         }
         if (expr.kind == ExprKind::BracedInitList) {
             // A nested list is bound to whatever the enclosing
@@ -4154,15 +4218,15 @@ private:
             // through this one function against its target's declared
             // type, so handling the nested list here is what makes
             // nesting work at every depth and in every shape.
-            if (context_type == nullptr) {
+            if (!context_type.has_value()) {
                 return std::unexpected(ConstexprError(
                     expr.loc,
                     "a brace-enclosed initializer list has no type of its own and cannot be used here"));
             }
-            auto cell_result = make_default_cell(*context_type, expr.loc);
+            auto cell_result = make_default_cell(context_type->get(), expr.loc);
             if (!cell_result.has_value()) return std::unexpected(std::move(cell_result).error());
             auto cell = std::move(cell_result).value();
-            if (auto result = initialize_cell_from_brace_args(cell, *context_type, expr.args, expr.loc);
+            if (auto result = initialize_cell_from_brace_args(cell, context_type->get(), expr.args, expr.loc);
                 !result.has_value()) {
                 return std::unexpected(std::move(result).error());
             }
@@ -4308,10 +4372,10 @@ private:
                     // at run time.
                     {
                         Type operand_storage{};
-                        if (const Type* operand_class = operator_operand_class_type(*expr.lhs, operand_storage);
-                            operand_class != nullptr) {
+                        if (OptionalTypeRef operand_class = operator_operand_class_type(*expr.lhs, operand_storage);
+                            operand_class.has_value()) {
                             if (ExprPtr conversion_call = conversion_function_call_for(
-                                    *expr.lhs, *operand_class, expr.type, /*allow_explicit=*/true);
+                                    *expr.lhs, operand_class->get(), expr.type, /*allow_explicit=*/true);
                                 conversion_call != nullptr) {
                                 return evaluate_expr(*conversion_call);
                             }
@@ -4330,7 +4394,7 @@ private:
                         if (!target_result.has_value()) return std::unexpected(std::move(target_result).error());
                         LValue target = std::move(target_result).value();
                         if (target.read_only) return std::unexpected(ConstexprError(expr.loc, "cannot assign through a const/constexpr binding"));
-                        auto value_result = evaluate_expr_in_context(*expr.rhs, &target.cell->type);
+                        auto value_result = evaluate_expr_in_context(*expr.rhs, make_type_ref(target.cell->type));
                         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                         std::shared_ptr<Cell> value = std::move(value_result).value();
                         if (expr.binary_op != BinaryOp::Assign) {
@@ -4404,14 +4468,14 @@ private:
                             auto rhs_result = evaluate_expr_in_context(*expr.rhs, context_type);
                             if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
                             std::shared_ptr<Cell> rhs_cell = std::move(rhs_result).value();
-                            auto lhs_result = evaluate_expr_in_context(*expr.lhs, &rhs_cell->type);
+                            auto lhs_result = evaluate_expr_in_context(*expr.lhs, make_type_ref(rhs_cell->type));
                             if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
                             return evaluate_binary_numeric(expr, lhs_result.value(), rhs_cell);
                         }
                         auto lhs_result = evaluate_expr_in_context(*expr.lhs, context_type);
                         if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
                         std::shared_ptr<Cell> lhs_cell = std::move(lhs_result).value();
-                        const Type* rhs_context = rhs_is_literal ? &lhs_cell->type : context_type;
+                        OptionalTypeRef rhs_context = rhs_is_literal ? make_type_ref(lhs_cell->type) : context_type;
                         auto rhs_result = evaluate_expr_in_context(*expr.rhs, rhs_context);
                         if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
                         return evaluate_binary_numeric(expr, lhs_cell, rhs_result.value());
@@ -4600,10 +4664,10 @@ private:
                         std::string constructor_name{};
                         constructor_name += stmt.type.name;
                         constructor_name += "_new";
-                        std::vector<const Function*> tied_constructors{};
+                        std::vector<std::size_t> tied_constructors{};
                         OptionalFunctionRef ctor_ref = find_callable(
                             constructor_name, arg_values, /*explicit_global_qualification=*/false,
-                            /*arg_exprs=*/nullptr, &tied_constructors);
+                            /*arg_exprs=*/no_expr_list_ref(), tied_constructors);
                         if (!ctor_ref.has_value()) {
                             // A tie is the answer, not a miss: falling
                             // through to "no constexpr/consteval
@@ -4659,7 +4723,7 @@ private:
                                 if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
                                 ctor_bindings.push_back(Binding{arg_result.value().cell, false});
                             } else {
-                                auto value_result = evaluate_expr_in_context(arg_expr, &param.type);
+                                auto value_result = evaluate_expr_in_context(arg_expr, make_type_ref(param.type));
                                 if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                                 ctor_bindings.push_back(
                                     Binding{std::move(value_result).value(),
@@ -4680,7 +4744,7 @@ private:
             case StmtKind::Return:
                 return [&, this]() -> std::expected<ExecOutcome, ConstexprError> {
                     if (stmt.expr) {
-                        auto value_result = evaluate_expr_in_context(*stmt.expr, &return_type);
+                        auto value_result = evaluate_expr_in_context(*stmt.expr, make_type_ref(return_type));
                         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                         return ExecOutcome{ExecFlow::Return, std::move(value_result).value()};
                     }
