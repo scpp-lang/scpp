@@ -1,0 +1,18 @@
+// [expr.sub]/1 admits an *unscoped* enumeration index; SCPP26's
+// enumerations are all scoped, and §14.1(2)-(3) give a scoped
+// enumeration no implicit conversion to an integer at all -- an integer
+// reaches one only through `scpp::enum_cast`, and the reverse only
+// through an explicit cast. This was accepted and lowered, so
+// `values[Colour::Green]` silently indexed by the enumerator's
+// underlying value: a spurious acceptance the same missing check hid.
+// clang++-22 -std=c++26 rejects it too ("array subscript is not an
+// integer").
+import std;
+
+enum class Colour { Red, Green, Blue };
+
+int main() {
+    int values[3]{7, 8, 9};
+    Colour idx = Colour::Green;
+    return values[idx] - 8;
+}

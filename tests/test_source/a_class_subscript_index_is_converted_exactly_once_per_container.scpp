@@ -1,0 +1,43 @@
+// [expr.sub]/1 admits any integral index, and an index of class type
+// reaches one through a conversion function ([over.match.conv]). The
+// index used to go straight from codegen_expr into
+// LLVMBuildSExt/LLVMBuildGEP2, so this program emitted
+// `sext %struct.Idx ... to i64` and was caught -- if at all -- by LLVM's
+// own module verifier, as an internal error rather than a diagnostic.
+//
+// A conversion function is a call, so it must run exactly once per
+// subscript. The counter is what observes that: a lowering that emitted
+// the index for the bounds check and again for the GEP would still
+// produce the right element and the wrong count. Four containers, four
+// calls -- cross-checked against clang++-22 -std=c++26, which prints the
+// same two numbers.
+import std;
+
+int calls = 0;
+
+struct Idx {
+    int v;
+    operator int() const {
+        calls = calls + 1;
+        return this->v;
+    }
+};
+
+int main() {
+    int arr[3]{7, 8, 9};
+    int backing[3]{7, 8, 9};
+    std::span<int> sp = backing;
+    std::vector<int> vec{};
+    vec.push_back(7);
+    vec.push_back(8);
+    vec.push_back(9);
+    Idx i{1};
+    int total = arr[i] + sp[i] + vec[i];
+    [[scpp::unsafe]] {
+        int* p = &backing[0];
+        total = total + p[i];
+    }
+    std::print("calls {}\n", calls);
+    std::print("total {}\n", total);
+    return 0;
+}

@@ -1,0 +1,25 @@
+// The acceptance control beside every rejection below: the same class
+// index, in all four built-in containers, differing from the rejected
+// cases in exactly one attribute -- that its conversion function yields
+// a type [expr.sub]/1 admits and is not `explicit`.
+import std;
+
+struct Idx {
+    int v;
+    operator int() const { return this->v; }
+};
+
+int main() {
+    int arr[3]{7, 8, 9};
+    int backing[3]{7, 8, 9};
+    std::span<int> sp = backing;
+    std::vector<int> vec{};
+    vec.push_back(7);
+    Idx i{0};
+    int total = arr[i] + sp[i] + vec[i];
+    [[scpp::unsafe]] {
+        int* p = &backing[0];
+        total = total + p[i];
+    }
+    return total - 28;
+}

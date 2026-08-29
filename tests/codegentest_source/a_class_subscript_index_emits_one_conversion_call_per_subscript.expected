@@ -1,0 +1,2 @@
+contains: define i32 @Idx_operator_convert_int(ptr %this)
+count_at_least: 3 | call i32 @Idx_operator_convert_int(

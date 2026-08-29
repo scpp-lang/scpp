@@ -2937,6 +2937,86 @@ class Function {
     return message;
 }
 
+// [expr.sub]/1 with [over.built]: the built-in subscript's index operand
+// is not of a type it admits. Distinguished from the class-operand case
+// below because the fixes are different -- a scalar needs a cast, a
+// class needs a conversion function.
+[[nodiscard]] inline std::string bad_subscript_index_message(const std::string& index_type_name) {
+    std::string message{"a subscript index of type '"};
+    message += index_type_name;
+    message += "' is not an integral type: [expr.sub]/1 requires the index of a built-in subscript to be a prvalue of "
+               "integral type, and SCPP26's enumerations are all scoped, so no enumeration converts to one implicitly "
+               "(spec ch14 §14.1(2)-(3)) -- write an explicit 'static_cast<size_t>(...)', or 'scpp::enum_cast' for an "
+               "enumerator";
+    return message;
+}
+
+// The same position with an operand of class type: [over.match.conv]
+// applies, and the class declares no conversion function to any type the
+// index admits.
+[[nodiscard]] inline std::string no_subscript_index_conversion_message(const std::string& index_type_name) {
+    std::string message{"no conversion from '"};
+    message += index_type_name;
+    message += "' to an integral type for a subscript index: [expr.sub]/1's built-in subscript takes an integral "
+               "index, and an operand of class type reaches one through a conversion function the class declares "
+               "([class.conv.fct], [over.match.conv]) -- declare '";
+    message += index_type_name;
+    message += "::operator int'";
+    return message;
+}
+
+// [over.sub]/1 with [over.built]: `a[i]` where `a` has class type is
+// `a.operator[](i)` and nothing else -- [over.built]'s subscript
+// candidates exist for pointer operands only. The counterpart of
+// no_operator_function_message for the one operator whose left operand
+// decides everything.
+[[nodiscard]] inline std::string no_subscript_operator_function_message(const std::string& base_type_name,
+                                                                        const std::string& index_type_name,
+                                                                        bool base_declares_a_subscript_operator) {
+    std::string message{"no operator function for '"};
+    message += base_type_name;
+    message += "[";
+    message += index_type_name;
+    message += "]': the object subscripted has class type, and [over.built] provides a built-in '[]' for pointer "
+               "operands only -- ";
+    if (base_declares_a_subscript_operator) {
+        message += "'";
+        message += base_type_name;
+        message += "::operator[]' is declared, but no overload of it accepts an index of type '";
+        message += index_type_name;
+        message += "' ([over.match.oper]/2 with [over.sub]/1)";
+    } else {
+        message += "declare '";
+        message += base_type_name;
+        message += "::operator[]' ([over.sub]/1)";
+    }
+    return message;
+}
+
+// [over.match.conv]/1 left more than one candidate. Two conversion
+// functions whose return types a position accepts equally are ambiguous
+// rather than ordered, because §16.3(1) leaves nothing to rank them by.
+[[nodiscard]] inline std::string ambiguous_conversion_message(const std::string& source_type_name,
+                                                              const std::string& position_description,
+                                                              const std::string& first_destination,
+                                                              const std::string& second_destination) {
+    std::string message{"ambiguous conversion from '"};
+    message += source_type_name;
+    message += "' for ";
+    message += position_description;
+    message += ": '";
+    message += source_type_name;
+    message += "::operator ";
+    message += first_destination;
+    message += "' and '";
+    message += source_type_name;
+    message += "::operator ";
+    message += second_destination;
+    message += "' are both viable and neither is better than the other ([over.match.best], and §16.3(1) provides no "
+               "conversion between two scalar types to rank them by)";
+    return message;
+}
+
 class StructField {
   public:
     virtual ~StructField() = default;
@@ -4688,6 +4768,90 @@ enum class CastKind {
         }
     }
     return std::optional<std::size_t>{};
+}
+
+// [over.match.conv]/1 when the destination is not one specific type but
+// a *set* of them -- the built-in subscript's index ([expr.sub]/1 admits
+// any integral type) and a `switch` condition ([stmt.switch]/2 admits any
+// integral or enumeration type). Returns the destination types of
+// `class_name`'s own conversion functions, in declaration order; the
+// caller filters them by what its position accepts.
+//
+// SCPP26 needs no ranking over the survivors the way C++26 does:
+// [over.ics.user]'s second standard conversion sequence is the only thing
+// that could relate one conversion function's return type to a different
+// destination, and §16.3(1) provides no conversion between two distinct
+// scalar types. So a conversion function is viable for a position exactly
+// when its own return type is one the position accepts, and two survivors
+// are ambiguous rather than ordered.
+[[nodiscard]] inline std::vector<Type> conversion_function_destinations(const Program& program,
+                                                                        const std::string& class_name) {
+    std::vector<Type> destinations{};
+    std::string prefix = class_name;
+    prefix += "_";
+    prefix += conversion_function_method_prefix();
+    std::string_view prefix_view{prefix};
+    for (std::size_t i = 0; i < program.functions.size(); i++) {
+        const Function& fn = program.functions[i];
+        if (fn.params.size() != 1) continue;
+        std::string_view name_view{fn.name};
+        if (name_view.size() <= prefix_view.size()) continue;
+        if (!(name_view.substr(0, prefix_view.size()) == prefix_view)) continue;
+        destinations.push_back(fn.return_type);
+    }
+    return destinations;
+}
+
+// [expr.sub]/1: for a built-in subscript "the other [operand] shall be a
+// prvalue of unscoped enumeration or integral type". SCPP26's `enum` is
+// always scoped ([dcl.enum] as §14.1 leaves it) and §14.1(2)-(3) give a
+// scoped enumeration no implicit conversion at all, so the acceptable
+// index types are exactly the integral scalar types plus `bool`, which
+// [basic.fundamental]/10 also counts as integral.
+[[nodiscard]] inline bool is_builtin_subscript_index_type(const Type& type) {
+    if (type.kind != TypeKind::Named) return false;
+    std::string_view name{type.name};
+    return is_integral_scalar_type_name(name) || name == "bool";
+}
+
+// [stmt.switch]/2: "The condition shall be of integral type, enumeration
+// type, or class type. If of class type, the condition is contextually
+// implicitly converted to an integral or enumeration type."
+[[nodiscard]] inline bool is_switch_condition_builtin_type(const Type& type, const Program& program) {
+    if (type.kind != TypeKind::Named) return false;
+    if (find_enum_definition_index(program, type.name).has_value()) return true;
+    std::string_view name{type.name};
+    return is_integral_scalar_type_name(name) || name == "bool";
+}
+
+// The two positions that take "a builtin of a particular kind" and admit
+// a *set* of destinations rather than one. Spelled as a set rather than
+// a predicate parameter because ast.cppm is self-hosted and the front end
+// has no function-pointer-valued argument for a caller to pass.
+enum class ConversionDestinationSet {
+    SubscriptIndex,
+    SwitchCondition,
+};
+
+// [over.match.conv]/1's viable candidate set for such a position: the
+// destinations of `class_name`'s conversion functions that the position
+// accepts. Zero means no conversion exists, one is the selection, and
+// two or more is ambiguous -- see ambiguous_conversion_message.
+[[nodiscard]] inline std::vector<Type> viable_conversion_destinations(const Program& program,
+                                                                      const std::string& class_name,
+                                                                      ConversionDestinationSet destination_set) {
+    std::vector<Type> viable{};
+    std::vector<Type> declared = conversion_function_destinations(program, class_name);
+    for (std::size_t i = 0; i < declared.size(); i++) {
+        bool accepted = false;
+        if (destination_set == ConversionDestinationSet::SubscriptIndex) {
+            accepted = is_builtin_subscript_index_type(declared[i]);
+        } else {
+            accepted = is_switch_condition_builtin_type(declared[i], program);
+        }
+        if (accepted) viable.push_back(declared[i]);
+    }
+    return viable;
 }
 
 // `source` is the operand's type, or nullopt when the operand has no

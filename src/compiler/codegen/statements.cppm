@@ -941,7 +941,7 @@ namespace scpp {
                     llvm::LLVMValueRef condition = nullptr;
                     {
                         FullExpressionFrame frame(this);
-                        auto condition_result = codegen_expr(*stmt.condition);
+                        auto condition_result = codegen_switch_condition(*stmt.condition);
                         if (!condition_result.has_value()) return std::unexpected(std::move(condition_result).error());
                         condition = std::move(condition_result).value();
                         frame.pop();

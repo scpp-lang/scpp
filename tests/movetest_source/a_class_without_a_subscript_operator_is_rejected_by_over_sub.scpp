@@ -1,0 +1,15 @@
+// [over.sub]/1 with [over.built]: `a[i]` where `a` has class type is
+// `a.operator[](i)` and nothing else. Rejected before too, but as
+// "subscript on a non-array type" -- which named the base as the
+// problem when the base is exactly what makes [over.sub] apply, and
+// which said the same thing for `s[i]` on a `std::string`, where the
+// real answer is that `operator[](size_t)` takes a `size_t` and
+// §16.3(3) matches a scalar argument only exactly.
+import std;
+
+struct NoSub { int data[3]{7, 8, 9}; };
+
+int main() {
+    NoSub values{};
+    return values[1] - 8;
+}

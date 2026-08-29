@@ -1,0 +1,27 @@
+// [expr.sub]/1 with [over.match.conv]: once the index's conversion is a
+// call, `arr[std::move(x)]` is `arr[std::move(x).operator int()]` -- a
+// member call on a moved receiver, which this language already licenses
+// (`std::move(a).get()` compiles today). The same spelling with an
+// `int` index stays ill-formed, because there is no call for the move to
+// be the receiver of and a bare `std::move` in a subscript index is not
+// one of the positions ch04 §4.2 licenses. Recorded because the
+// asymmetry is a consequence of the rewrite, not an accident of it.
+//
+// This case fails pre-fix at that bare-`std::move` rule rather than at
+// the invalid IR the other cases hit, so it guards the rewrite's
+// receiver position rather than the index check itself.
+import std;
+
+class Idx {
+public:
+    int v;
+    Idx(int n) : v{n} {}
+    virtual ~Idx() {}
+    operator int() const { return this->v; }
+};
+
+int main() {
+    int arr[3]{7, 8, 9};
+    Idx movable{2};
+    return arr[std::move(movable)] - 9;
+}

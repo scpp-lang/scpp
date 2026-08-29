@@ -1,0 +1,13 @@
+// The critical control: a class index with no viable conversion must be
+// rejected with a message about the program, never lowered. [over.built]
+// provides no subscript candidate this class fits and it declares no
+// conversion function at all.
+import std;
+
+struct NoConvIdx { int v; };
+
+int main() {
+    int values[3]{7, 8, 9};
+    NoConvIdx idx{1};
+    return values[idx] - 8;
+}

@@ -1,0 +1,26 @@
+// The IR half of the single-evaluation proof. A built-in subscript's
+// index feeds both the bounds check and the GEP, and a lowering that
+// emitted the index expression for each would still read the right
+// element -- so the call is counted, not merely looked for. Three
+// built-in containers, three calls, and the conversion function itself
+// defined once. (std::vector is exercised by the run-time case in
+// tests/test_source, which links the standard library.)
+import std;
+
+struct Idx {
+    int v;
+    operator int() const { return this->v; }
+};
+
+int main() {
+    int arr[3]{7, 8, 9};
+    int backing[3]{7, 8, 9};
+    std::span<int> sp = backing;
+    Idx i{0};
+    int total = arr[i] + sp[i];
+    [[scpp::unsafe]] {
+        int* p = &backing[0];
+        total = total + p[i];
+    }
+    return total - 21;
+}

@@ -1,0 +1,68 @@
+// The constant evaluator is a separate implementation of every rule and
+// had none of this one: its subscript went straight to array/span/
+// pointer storage and asked as_integer for the index, so `b[1]` on a
+// class folded to "constexpr subscript requires an array, pointer, or
+// std::span" while the same expression at run time called
+// `Boxed::operator[]`, and `arr[idx]` for a class index folded to
+// "expected an integer-like constexpr value" while the run-time
+// lowering emitted invalid IR. Two different wrong answers for one
+// question.
+//
+// Each line prints the folded answer beside the run-time one, so a
+// divergence is a wrong value rather than a still-passing verdict.
+import std;
+
+struct Idx {
+    int v;
+    constexpr operator int() const { return this->v; }
+};
+
+struct Boxed {
+    int data[3]{7, 8, 9};
+    constexpr int operator[](int i) const { return this->data[i]; }
+};
+
+struct Sel {
+    int v;
+    constexpr operator int() const { return this->v; }
+};
+
+constexpr int folded_class_index() {
+    int values[3]{7, 8, 9};
+    Idx i{1};
+    return values[i];
+}
+
+constexpr int folded_subscript_operator() {
+    Boxed b{};
+    Idx i{2};
+    return b[i];
+}
+
+constexpr int folded_switch_condition() {
+    Sel s{1};
+    switch (s) {
+        case 1: return 10;
+        default: return 20;
+    }
+}
+
+int main() {
+    constexpr int class_index = folded_class_index();
+    constexpr int subscript_operator = folded_subscript_operator();
+    constexpr int switch_condition = folded_switch_condition();
+    int runtime_values[3]{7, 8, 9};
+    Idx runtime_index{1};
+    Boxed runtime_boxed{};
+    Idx runtime_two{2};
+    Sel runtime_sel{1};
+    int runtime_switch = 20;
+    switch (runtime_sel) {
+        case 1: runtime_switch = 10; break;
+        default: break;
+    }
+    std::print("index {} {}\n", class_index, runtime_values[runtime_index]);
+    std::print("operator {} {}\n", subscript_operator, runtime_boxed[runtime_two]);
+    std::print("switch {} {}\n", switch_condition, runtime_switch);
+    return 0;
+}

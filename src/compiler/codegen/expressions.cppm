@@ -1611,6 +1611,82 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     }
 
 
+    // [stmt.switch]/2: the condition of a `switch`, with the contextual
+    // implicit conversion applied for a class-typed one. The subscript
+    // index's sibling -- the two positions that take "a builtin of a
+    // particular kind" and admit a set of destinations rather than one.
+    [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::codegen_switch_condition(const Expr& condition)
+{
+        std::optional<Type> condition_type = infer_type(condition);
+        if (condition_type.has_value()) {
+            const Type& operand = binary_operand_type(*condition_type);
+            if (operand.kind == TypeKind::Named && is_named_record_type(operand)) {
+                std::vector<Type> viable = viable_conversion_destinations(*program_, operand.name,
+                                                                          ConversionDestinationSet::SwitchCondition);
+                if (viable.size() == 1) {
+                    if (ExprPtr conversion_call =
+                            conversion_function_call_for(condition, viable[0], /*allow_explicit=*/false);
+                        conversion_call != nullptr) {
+                        return codegen_expr(*conversion_call);
+                    }
+                }
+            }
+        }
+        return codegen_expr(condition);
+    }
+
+
+    // [over.sub]/1 with [over.built]: why this subscript selected
+    // nothing. Worded once so codegen and typechecking say the same
+    // thing about the same program.
+    [[nodiscard]] std::string Codegen::describe_failed_subscript(const Expr& expr, const Type& base_type)
+{
+        std::optional<Type> index_type = expr.rhs != nullptr ? infer_type(*expr.rhs) : std::nullopt;
+        std::string index_name = index_type.has_value() ? describe_type_brief(binary_operand_type(*index_type))
+                                                        : std::string("?");
+        bool declares_subscript = base_type.kind == TypeKind::Named &&
+                                  find_function_def(base_type.name + "_operator_subscript") != nullptr;
+        return no_subscript_operator_function_message(describe_type_brief(base_type), index_name, declares_subscript);
+    }
+
+
+    // [expr.sub]/1: the index of a built-in subscript. A class-typed
+    // index reaches an integral type through a conversion function
+    // ([over.match.conv]); every other index is emitted unchanged.
+    //
+    // Every built-in container's lowering below -- array, pointer, span
+    // and vector -- goes through this one function, which is what keeps
+    // an index accepted for one of them from being rejected (or, as it
+    // was, sign-extended as an aggregate) for another. Typechecking has
+    // already selected the same conversion through the same ast.cppm
+    // key, so nothing is emitted here that it did not see.
+    [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::codegen_subscript_index(const Expr& index)
+{
+        std::optional<Type> index_type = infer_type(index);
+        if (index_type.has_value()) {
+            const Type& operand = binary_operand_type(*index_type);
+            if (operand.kind == TypeKind::Named && is_named_record_type(operand)) {
+                std::vector<Type> viable = viable_conversion_destinations(*program_, operand.name,
+                                                                          ConversionDestinationSet::SubscriptIndex);
+                if (viable.size() == 1) {
+                    if (ExprPtr conversion_call =
+                            conversion_function_call_for(index, viable[0], /*allow_explicit=*/false);
+                        conversion_call != nullptr) {
+                        return codegen_expr(*conversion_call);
+                    }
+                }
+                return std::unexpected(CodegenError(
+                    no_subscript_index_conversion_message(describe_type_brief(operand)), index.loc));
+            }
+            if (!is_builtin_subscript_index_type(operand)) {
+                return std::unexpected(
+                    CodegenError(bad_subscript_index_message(describe_type_brief(operand)), index.loc));
+            }
+        }
+        return codegen_expr(index);
+    }
+
+
     // [over.match.conv]/1: the call `e.operator T()` when `e` has class
     // type and that class declares a conversion function to `T`, or null
     // when it does not. The candidate is found by name through
@@ -3423,7 +3499,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                                                                          size_ptr, "vec.size32");
                         llvm::LLVMValueRef size = llvm::LLVMBuildSExt(builder_, size32, llvm::LLVMInt64TypeInContext(context_),
                                                                       "vec.size");
-                        auto index_result = codegen_expr(*expr.rhs);
+                        auto index_result = codegen_subscript_index(*expr.rhs);
                         if (!index_result.has_value()) return std::unexpected(std::move(index_result).error());
                         llvm::LLVMValueRef index = std::move(index_result).value();
                         emit_span_bounds_check(index, size);
@@ -3442,7 +3518,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         llvm::LLVMValueRef size = llvm::LLVMBuildLoad2(builder_, llvm::LLVMInt64TypeInContext(context_), size_ptr, "size");
                         llvm::LLVMValueRef data_ptr = llvm::LLVMBuildStructGEP2(builder_, span_type, base.ptr, 0, "dataptr");
                         llvm::LLVMValueRef data = llvm::LLVMBuildLoad2(builder_, llvm::LLVMPointerTypeInContext(context_, 0), data_ptr, "data");
-                        auto index_result = codegen_expr(*expr.rhs);
+                        auto index_result = codegen_subscript_index(*expr.rhs);
                         if (!index_result.has_value()) return std::unexpected(std::move(index_result).error());
                         llvm::LLVMValueRef index = std::move(index_result).value();
                         // Runtime bounds check (spec ch08: checked by default,
@@ -3462,7 +3538,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     }
                     if (base.type.kind == TypeKind::Pointer) {
                         llvm::LLVMValueRef data = llvm::LLVMBuildLoad2(builder_, llvm::LLVMPointerTypeInContext(context_, 0), base.ptr, "data");
-                        auto index_result = codegen_expr(*expr.rhs);
+                        auto index_result = codegen_subscript_index(*expr.rhs);
                         if (!index_result.has_value()) return std::unexpected(std::move(index_result).error());
                         llvm::LLVMValueRef index = std::move(index_result).value();
                         llvm::LLVMValueRef gep_indices_ptr[] = {index};
@@ -3483,7 +3559,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         if (std::optional<llvm::LLVMValueRef> value = std::move(operator_result).value()) {
                             std::optional<Type> result_type = infer_type(expr);
                             if (!result_type.has_value()) {
-                                return std::unexpected(CodegenError("subscript on a non-array type", current_loc_));
+                                return std::unexpected(CodegenError(describe_failed_subscript(expr, base.type), expr.loc));
                             }
                             // A reference-returning `operator[]` already
                             // hands back the element's address, which *is*
@@ -3498,8 +3574,12 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                             llvm::LLVMBuildStore(builder_, *value, temp);
                             return LValue{temp, *result_type, alignment_for_type(*result_type)};
                         }
-                        return std::unexpected(CodegenError("subscript on a non-array type",
-                            current_loc_));
+                        // [over.sub]/1: a class base has no built-in
+                        // candidate, so no `operator[]` overload is the
+                        // end of the rule. Naming the base as
+                        // "non-array" described the one thing about it
+                        // that was not the problem.
+                        return std::unexpected(CodegenError(describe_failed_subscript(expr, base.type), expr.loc));
                     }
                     // A fixed-size array's bound `N` is always statically known
                     // (ch05 §9.4), so a compile-time-constant index (e.g. a bare
@@ -3518,7 +3598,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                                                 std::to_string(base.type.array_size),
                             current_loc_));
                     }
-                    auto index_result = codegen_expr(*expr.rhs);
+                    auto index_result = codegen_subscript_index(*expr.rhs);
                     if (!index_result.has_value()) return std::unexpected(std::move(index_result).error());
                     llvm::LLVMValueRef index = std::move(index_result).value();
                     // Otherwise (a runtime-variable index), the same runtime

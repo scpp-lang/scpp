@@ -1873,9 +1873,7 @@ private:
                         if (!base_value_result.has_value()) return std::unexpected(std::move(base_value_result).error());
                         base = std::move(base_value_result).value();
                     }
-                    auto index_value_result = evaluate_expr(*expr.rhs);
-                    if (!index_value_result.has_value()) return std::unexpected(std::move(index_value_result).error());
-                    auto index_result = as_integer(index_value_result.value(), expr.loc);
+                    auto index_result = evaluate_subscript_index(*expr.rhs, expr.loc);
                     if (!index_result.has_value()) return std::unexpected(std::move(index_result).error());
                     std::int64_t index = index_result.value();
                     if (base->data.is_array()) {
@@ -2310,6 +2308,19 @@ private:
         if (is_same_or_base_class_type(param_value_type, arg_value_type)) return true;
         if (param_type.kind == TypeKind::Named && is_record_name(param_type.name)) {
             return find_single_argument_converting_constructor(param_type.name, arg).has_value();
+        }
+        // [over.ics.user]'s other half, the one this pass never had: the
+        // *argument* has class type and the parameter does not, so a
+        // conversion function the argument's class declares is what makes
+        // the candidate viable. Only the non-explicit ones, since
+        // argument passing is copy-initialization ([over.match.copy]/1).
+        // Without it `b[i]` for a class index reported "no constexpr/
+        // consteval overload of method 'operator_subscript' matches"
+        // while the same call ran at run time.
+        if (arg_value_type.kind == TypeKind::Named && is_record_name(arg_value_type.name)) {
+            std::optional<std::size_t> conversion =
+                find_conversion_function_index(program_, arg_value_type.name, param_value_type);
+            if (conversion.has_value() && !program_.functions[*conversion].is_explicit) return true;
         }
         return false;
     }
@@ -3626,6 +3637,100 @@ private:
                                                           describe_type_brief(*operand_class))));
     }
 
+    // [stmt.switch]/2: the `switch` condition, with the contextual
+    // implicit conversion applied for a class-typed one.
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_switch_condition(const Expr& condition) {
+        Type condition_storage{};
+        if (const Type* condition_class = operator_operand_class_type(condition, condition_storage);
+            condition_class != nullptr) {
+            std::vector<Type> viable = viable_conversion_destinations(program_, condition_class->name,
+                                                                      ConversionDestinationSet::SwitchCondition);
+            if (viable.size() == 1) {
+                if (ExprPtr conversion_call =
+                        conversion_function_call_for(condition, *condition_class, viable[0], /*allow_explicit=*/false);
+                    conversion_call != nullptr) {
+                    return evaluate_expr(*conversion_call);
+                }
+            }
+        }
+        return evaluate_expr(condition);
+    }
+
+    // [over.sub]/1: `a[i]` where `a` has class type is a call to
+    // `a.operator[](i)`, in a constant expression exactly as at run
+    // time. The evaluator had no subscript dispatch of any kind -- it
+    // went straight to array/span/pointer storage, so a `constexpr`
+    // `b[1]` on a class reported "constexpr subscript requires an array,
+    // pointer, or std::span" while the same expression at run time
+    // called the operator. Returns nothing when the base is a built-in
+    // container, so the caller falls through to it.
+    [[nodiscard]] std::optional<std::expected<std::shared_ptr<Cell>, ConstexprError>>
+    evaluate_subscript_operator_function(const Expr& expr) {
+        if (expr.lhs == nullptr || expr.rhs == nullptr) return std::nullopt;
+        Type base_storage{};
+        const Type* base_class = operator_operand_class_type(*expr.lhs, base_storage);
+        if (base_class == nullptr) return std::nullopt;
+        std::string method_name{"operator_subscript"};
+        std::string key = base_class->name;
+        key += "_";
+        key += method_name;
+        if (!functions_by_name_.contains(key)) {
+            return std::unexpected(ConstexprError(
+                expr.loc, no_subscript_operator_function_message(describe_type_brief(*base_class),
+                                                                 subscript_index_type_name(*expr.rhs), false)));
+        }
+        ExprPtr call = make_operator_call_expr(*expr.lhs, *expr.rhs, method_name, expr.loc);
+        return evaluate_expr(*call);
+    }
+
+    [[nodiscard]] std::string subscript_index_type_name(const Expr& index) {
+        std::optional<Type> inferred = infer_unevaluated_expr_type(index);
+        if (!inferred.has_value()) return std::string("?");
+        if (inferred->kind == TypeKind::Reference && inferred->pointee != nullptr) {
+            return describe_type_brief(*inferred->pointee);
+        }
+        return describe_type_brief(*inferred);
+    }
+
+    // [expr.sub]/1: the index of a built-in subscript, with
+    // [over.match.conv] applied for a class-typed one -- the evaluator's
+    // counterpart of Codegen::codegen_subscript_index, reached from the
+    // one place this pass turns a subscript into an offset.
+    [[nodiscard]] std::expected<std::int64_t, ConstexprError> evaluate_subscript_index(const Expr& index,
+                                                                                       const SourceLocation& loc) {
+        Type index_storage{};
+        if (const Type* index_class = operator_operand_class_type(index, index_storage); index_class != nullptr) {
+            std::vector<Type> viable = viable_conversion_destinations(program_, index_class->name,
+                                                                      ConversionDestinationSet::SubscriptIndex);
+            if (viable.size() == 1) {
+                if (ExprPtr conversion_call =
+                        conversion_function_call_for(index, *index_class, viable[0], /*allow_explicit=*/false);
+                    conversion_call != nullptr) {
+                    auto converted = evaluate_expr(*conversion_call);
+                    if (!converted.has_value()) return std::unexpected(std::move(converted).error());
+                    return as_integer(converted.value(), loc);
+                }
+            }
+            return std::unexpected(ConstexprError(
+                loc, no_subscript_index_conversion_message(describe_type_brief(*index_class))));
+        }
+        // [expr.sub]/1 again, so a fold and a run reject the same
+        // program with the same sentence: as_integer's "expected an
+        // integer-like constexpr value" describes the evaluator's own
+        // storage model, not the rule.
+        if (std::optional<Type> inferred = infer_unevaluated_expr_type(index); inferred.has_value()) {
+            const Type& operand = inferred->kind == TypeKind::Reference && inferred->pointee != nullptr
+                                      ? *inferred->pointee
+                                      : *inferred;
+            if (!is_builtin_subscript_index_type(operand)) {
+                return std::unexpected(ConstexprError(loc, bad_subscript_index_message(describe_type_brief(operand))));
+            }
+        }
+        auto index_value = evaluate_expr(index);
+        if (!index_value.has_value()) return std::unexpected(std::move(index_value).error());
+        return as_integer(index_value.value(), loc);
+    }
+
     // [over.match.conv]/1, through the same ast.cppm key typechecking
     // and codegen use, so the evaluator cannot select a different
     // conversion function from the one that runs.
@@ -4143,6 +4248,17 @@ private:
                 }();
             case ExprKind::Subscript:
                 return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
+                    // [over.sub]/1, asked before the built-in storage
+                    // paths for the same reason the Binary arm asks
+                    // [over.match.oper] before built-in lowering: a
+                    // class base has no built-in candidate at all, so
+                    // reaching array/span/pointer storage with one can
+                    // only fail.
+                    if (std::optional<std::expected<std::shared_ptr<Cell>, ConstexprError>> operator_result =
+                            evaluate_subscript_operator_function(expr);
+                        operator_result.has_value()) {
+                        return std::move(*operator_result);
+                    }
                     auto lvalue_result = resolve_lvalue(expr);
                     if (!lvalue_result.has_value()) return std::unexpected(std::move(lvalue_result).error());
                     return clone_cell(lvalue_result.value().cell);
@@ -4626,7 +4742,12 @@ private:
                 }();
             case StmtKind::Switch:
                 return [&, this]() -> std::expected<ExecOutcome, ConstexprError> {
-                    auto condition_value_result = evaluate_expr(*stmt.condition);
+                    // [stmt.switch]/2's contextual implicit conversion,
+                    // the same one typechecking selected and codegen
+                    // emits -- reached through ast.cppm's own key, so
+                    // the three passes cannot convert a condition three
+                    // different ways.
+                    auto condition_value_result = evaluate_switch_condition(*stmt.condition);
                     if (!condition_value_result.has_value()) return std::unexpected(std::move(condition_value_result).error());
                     std::shared_ptr<Cell> condition_value = std::move(condition_value_result).value();
                     auto condition_key_result = switch_match_key(condition_value, stmt.loc);
