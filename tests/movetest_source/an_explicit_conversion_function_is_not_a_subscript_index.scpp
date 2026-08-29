@@ -1,0 +1,17 @@
+// A subscript index copy-initializes the built-in operator's parameter,
+// so [over.match.copy]/1 does not consider an `explicit` conversion
+// function -- the same discriminator that tells "the mechanism is real"
+// from "this position was made to accept anything". clang++-22
+// -std=c++26 rejects it too.
+import std;
+
+struct ExplicitIdx {
+    int v;
+    explicit operator int() const { return this->v; }
+};
+
+int main() {
+    int values[3]{7, 8, 9};
+    ExplicitIdx idx{1};
+    return values[idx] - 8;
+}

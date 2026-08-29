@@ -89,6 +89,14 @@ namespace scpp {
 [[nodiscard]] std::expected<bool, DataflowError> check_user_defined_conversion(
     const Expr& expr, const Type& destination, bool allow_explicit, DataflowState& state, const Body& body,
     const Signatures& signatures, bool report_errors);
+// [expr.sub]/1 with [over.sub]/1: the one place typechecking answers
+// "may this expression index this object?". Every subscript -- array,
+// pointer, span, vector and class base alike -- routes through it, so an
+// index accepted for one container cannot be rejected for another.
+[[nodiscard]] std::expected<bool, DataflowError> check_subscript_expr(const Expr& expr, DataflowState& state,
+                                                                      const Body& body,
+                                                                      const Signatures& signatures,
+                                                                      bool report_errors);
 [[nodiscard]] std::expected<void, DataflowError> apply_reference_argument(const Expr& arg, const Type& param_type, DataflowState& state,
                               BorrowMap& in_call_borrows, const Body& body,
                               const Signatures& signatures, bool report_errors);
@@ -2417,6 +2425,102 @@ struct ConvertingConstructorBinding {
         expr.loc));
 }
 
+// [expr.sub]/1: `E1[E2]` with a built-in subscript requires "a prvalue of
+// unscoped enumeration or integral type" for the index. §16.3(1) does not
+// speak here at all -- its list of positions where "a value of a scalar
+// type is required" names an initializer, an assignment's right operand,
+// a call argument, a `return` operand, "both operands of a binary
+// operator" and both arms of a conditional, and a subscript is a
+// postfix-expression, not a binary operator -- so the ordinary C++ rule
+// applies, conversions and all.
+//
+// Nothing asked this before. The index went straight from `codegen_expr`
+// into `LLVMBuildSExt`/`LLVMBuildGEP2`, so a class-typed or floating
+// index produced `sext %struct.Idx ... to i64` and was caught, if at
+// all, by LLVM's own module verifier -- a compiler internal error
+// standing in for a diagnostic about the program.
+// Returns true when the index expression was *applied* here -- a
+// selected conversion function is an ordinary call, and
+// check_call_arguments already walks its receiver. Applying the index a
+// second time afterwards would move `std::move(x)` twice and report the
+// second read as a use of a moved-out variable.
+[[nodiscard]] std::expected<bool, DataflowError> check_builtin_subscript_index(const Expr& index,
+                                                                               DataflowState& state, const Body& body,
+                                                                               const Signatures& signatures,
+                                                                               bool report_errors) {
+    std::optional<Type> index_type = infer_expr_type(index, body, signatures);
+    if (!index_type.has_value()) return false;
+    const Type& operand = binary_operand_type(*index_type);
+    if (is_builtin_subscript_index_type(operand)) return false;
+    if (body.program == nullptr) return false;
+    if (!is_named_record_type(operand, body)) {
+        if (!report_errors) return false;
+        return std::unexpected(DataflowError(bad_subscript_index_message(describe_type_brief(operand)), index.loc));
+    }
+    // [over.match.conv]/1 over the destinations [expr.sub]/1 admits.
+    std::vector<Type> viable =
+        viable_conversion_destinations(*body.program, operand.name, ConversionDestinationSet::SubscriptIndex);
+    if (viable.empty()) {
+        if (!report_errors) return false;
+        return std::unexpected(
+            DataflowError(no_subscript_index_conversion_message(describe_type_brief(operand)), index.loc));
+    }
+    if (viable.size() > 1) {
+        if (!report_errors) return false;
+        return std::unexpected(DataflowError(
+            ambiguous_conversion_message(describe_type_brief(operand), "a subscript index",
+                                         describe_type_brief(viable[0]), describe_type_brief(viable[1])),
+            index.loc));
+    }
+    // A subscript index copy-initializes the built-in operator's
+    // parameter, so [over.match.copy]/1 excludes an `explicit` conversion
+    // function -- and says so, rather than reporting "no conversion".
+    auto converted = check_user_defined_conversion(index, viable[0], /*allow_explicit=*/false, state, body, signatures,
+                                                   report_errors);
+    if (!converted.has_value()) return std::unexpected(std::move(converted).error());
+    if (converted.value()) return true;
+    if (!report_errors) return false;
+    return std::unexpected(DataflowError(
+        explicit_only_conversion_function_message(describe_type_brief(operand), describe_type_brief(viable[0])),
+        index.loc));
+}
+
+[[nodiscard]] std::expected<bool, DataflowError> check_subscript_expr(const Expr& expr, DataflowState& state,
+                                                                      const Body& body,
+                                                                      const Signatures& signatures,
+                                                                      bool report_errors) {
+    if (expr.lhs == nullptr || expr.rhs == nullptr) return false;
+    std::optional<Type> base_type = infer_expr_lvalue_type(*expr.lhs, body, signatures);
+    if (!base_type.has_value()) return false;
+    const Type& base = binary_operand_type(*base_type);
+    if (base.kind == TypeKind::Array || base.kind == TypeKind::Span || base.kind == TypeKind::Pointer) {
+        return check_builtin_subscript_index(*expr.rhs, state, body, signatures, report_errors);
+    }
+    if (infer_vector_element_type(base, body).has_value()) {
+        return check_builtin_subscript_index(*expr.rhs, state, body, signatures, report_errors);
+    }
+    if (!is_named_record_type(base, body)) return false;
+    // [over.sub]/1: a class base has no built-in candidate at all, so
+    // failing to select an `operator[]` is the end of the rule. Saying
+    // "subscript on a non-array type" here described the base as the
+    // problem when the base is exactly what makes `operator[]` apply --
+    // and said it for `s[i]` on a `std::string` with an `int` index,
+    // where the real answer is that `operator[](size_t)` takes a
+    // `size_t` (spec §16.3(3)).
+    if (!report_errors) return false;
+    SelectedOperator selected = resolve_subscript_operator_call(expr, base_type, body, signatures);
+    if (selected.signature != nullptr) return false;
+    std::optional<Type> index_type = infer_expr_type(*expr.rhs, body, signatures);
+    std::string index_name = index_type.has_value() ? describe_type_brief(binary_operand_type(*index_type))
+                                                    : std::string("?");
+    std::string subscript_key = base.name;
+    subscript_key += "_operator_subscript";
+    return std::unexpected(DataflowError(
+        no_subscript_operator_function_message(describe_type_brief(base), index_name,
+                                               signatures.contains(subscript_key)),
+        expr.loc));
+}
+
 [[nodiscard]] std::expected<void, DataflowError> apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
                  const Signatures& signatures, bool report_errors) {
     // Refreshed on every call (including each recursive call for a child
@@ -3242,6 +3346,11 @@ struct ConvertingConstructorBinding {
                 if (auto _r = validate_subscript_expr(expr, state, body, signatures); !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
+            }
+            {
+                auto index_applied = check_subscript_expr(expr, state, body, signatures, report_errors);
+                if (!index_applied.has_value()) return std::unexpected(std::move(index_applied).error());
+                if (index_applied.value()) return {};
             }
             return apply_expr(*expr.rhs, false, state, body, signatures, report_errors);
 
@@ -4269,6 +4378,26 @@ struct ConvertingConstructorBinding {
             // operand having to be a `bool` already), and the call it
             // selects has to be checked in this pass rather than
             // synthesized unchecked in codegen.
+            // [stmt.switch]/2's contextual implicit conversion is a
+            // call like any other, so this pass checks it rather than
+            // leaving codegen to synthesize one it never saw.
+            if (term.kind == TerminatorKind::Switch && body.program != nullptr) {
+                if (std::optional<Type> condition_type = infer_expr_type(*term.condition, body, signatures);
+                    condition_type.has_value()) {
+                    const Type& operand_type = binary_operand_type(*condition_type);
+                    if (is_named_record_type(operand_type, body)) {
+                        std::vector<Type> viable = viable_conversion_destinations(
+                            *body.program, operand_type.name, ConversionDestinationSet::SwitchCondition);
+                        if (viable.size() == 1) {
+                            auto converted =
+                                check_user_defined_conversion(*term.condition, viable[0], /*allow_explicit=*/false,
+                                                              state, body, signatures, /*report_errors=*/true);
+                            if (!converted.has_value()) return std::unexpected(std::move(converted).error());
+                            if (converted.value()) return {};
+                        }
+                    }
+                }
+            }
             if (term.kind == TerminatorKind::Branch) {
                 auto converted = apply_contextual_bool_conversion(*term.condition, state, body, signatures,
                                                                   /*report_errors=*/true,
@@ -4715,11 +4844,45 @@ struct SwitchCaseKey {
         case StmtKind::Switch: {
             std::optional<Type> condition_type = infer_expr_type(*stmt.condition, body, signatures);
             if (condition_type.has_value()) {
-                const Type& operand_type = binary_operand_type(*condition_type);
+                Type operand_type = binary_operand_type(*condition_type);
                 bool condition_ok =
                     is_enum_type(operand_type, body.program) ||
                     (operand_type.kind == TypeKind::Named &&
                      (operand_type.name == "bool" || is_integral_scalar_type_name(operand_type.name)));
+                // [stmt.switch]/2: "The condition shall be of integral
+                // type, enumeration type, or class type. If of class
+                // type, the condition is contextually implicitly
+                // converted to an integral or enumeration type." No
+                // clause of this document modifies [stmt.switch], so the
+                // class case applies unchanged -- it was simply never
+                // asked, exactly as the subscript index was never asked.
+                // The case labels are then normalized against the
+                // *converted* type, which is what makes `case 1:` mean
+                // the same thing here as for an `int` condition.
+                if (!condition_ok && body.program != nullptr && is_named_record_type(operand_type, body)) {
+                    std::vector<Type> viable = viable_conversion_destinations(
+                        *body.program, operand_type.name, ConversionDestinationSet::SwitchCondition);
+                    if (viable.size() > 1) {
+                        return std::unexpected(DataflowError(
+                            ambiguous_conversion_message(describe_type_brief(operand_type), "a 'switch' condition",
+                                                         describe_type_brief(viable[0]), describe_type_brief(viable[1])),
+                            stmt.condition->loc));
+                    }
+                    if (viable.size() == 1 &&
+                        find_conversion_function_index(*body.program, operand_type.name, viable[0]).has_value()) {
+                        const Function& conversion =
+                            body.program->functions[*find_conversion_function_index(*body.program, operand_type.name,
+                                                                                     viable[0])];
+                        if (conversion.is_explicit) {
+                            return std::unexpected(DataflowError(
+                                explicit_only_conversion_function_message(describe_type_brief(operand_type),
+                                                                          describe_type_brief(viable[0])),
+                                stmt.condition->loc));
+                        }
+                        operand_type = viable[0];
+                        condition_ok = true;
+                    }
+                }
                 if (!condition_ok) {
                     return std::unexpected(DataflowError("switch requires an integral or enum condition expression", stmt.condition->loc));
                 }

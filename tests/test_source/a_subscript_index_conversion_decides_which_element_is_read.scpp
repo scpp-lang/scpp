@@ -1,0 +1,33 @@
+// A verdict-only cell cannot see a *wrong* index: reading the wrong
+// element still compiles and still returns an int. `Idx::operator int`
+// deliberately answers `2 - v`, so the element printed is the one the
+// conversion function chose and not the one the field holds -- a
+// lowering that read the object's bytes, or picked a different
+// conversion function, prints a different number.
+//
+// The class also converts across a value category and a `const`
+// reference, because each is a separate receiver shape for the call.
+// The xvalue receiver is a separate case (see
+// an_xvalue_subscript_index_is_a_moved_receiver_of_the_conversion_call),
+// because its pre-fix rejection came from a different rule.
+import std;
+
+class Idx {
+public:
+    int v;
+    Idx(int n) : v{n} {}
+    virtual ~Idx() {}
+    operator int() const { return 2 - this->v; }
+};
+
+Idx make(int n) { return Idx{n}; }
+
+int main() {
+    int arr[3]{70, 80, 90};
+    Idx lvalue{1};
+    const Idx& reference = lvalue;
+    std::print("lvalue {}\n", arr[lvalue]);
+    std::print("prvalue {}\n", arr[make(2)]);
+    std::print("reference {}\n", arr[reference]);
+    return 0;
+}

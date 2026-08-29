@@ -1,0 +1,13 @@
+// [expr.sub]/1: the index of a built-in subscript is "a prvalue of
+// unscoped enumeration or integral type". Nothing asked, so the index
+// went from codegen_expr straight into LLVMBuildSExt and this program
+// emitted `sext double ... to i64` -- caught by LLVM's own verifier as
+// an internal error, which is a compiler bug report rather than a
+// diagnostic about the program.
+import std;
+
+int main() {
+    int values[3]{7, 8, 9};
+    double idx = 1.0;
+    return values[idx] - 8;
+}

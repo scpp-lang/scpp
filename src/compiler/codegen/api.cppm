@@ -1145,6 +1145,17 @@ private:
     // copy-initialization's is false ([over.match.copy]/1).
     [[nodiscard]] ExprPtr conversion_function_call_for(const Expr& expr, const Type& destination, bool allow_explicit);
 
+    // [expr.sub]/1: the index of a built-in subscript, with
+    // [over.match.conv] applied for a class-typed one. Shared by every
+    // built-in container's lowering.
+    [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_subscript_index(const Expr& index);
+
+    [[nodiscard]] std::string describe_failed_subscript(const Expr& expr, const Type& base_type);
+
+    // [stmt.switch]/2: the condition of a `switch`, with the contextual
+    // implicit conversion applied for a class-typed one.
+    [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_switch_condition(const Expr& condition);
+
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_contextual_bool_i1(const Expr& expr);
 
     [[nodiscard]] std::expected<std::vector<llvm::LLVMValueRef>, CodegenError> codegen_call_args(const std::vector<ExprPtr>& args, const Function* callee_def,
