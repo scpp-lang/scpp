@@ -1,0 +1,14 @@
+// The other direction, and the control for the three rejections above:
+// §16.2(4) gives `true`/`false` type `bool` and a character-literal
+// type `char` outright, so these need no adoption and are well-formed
+// in every one of §16.2(1)'s contexts. §16.3(2) admits the static_cast
+// spelling the diagnostic recommends. If a fix to §16.2(2) were spelled
+// as "reject char and bool here", this file would go red.
+char take(char c) { return c; }
+bool flag(bool b) { return b; }
+int main() {
+    char c = 'A';
+    bool b = true;
+    char cast = static_cast<char>(65);
+    return take(c) == 'A' && flag(b) && cast == 'A' ? 0 : 1;
+}

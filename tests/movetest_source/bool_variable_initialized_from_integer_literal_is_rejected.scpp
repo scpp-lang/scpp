@@ -1,0 +1,7 @@
+// spec ch16 §16.2(2), same clause as the `char` case: "`bool b = 1;`
+// ... ill-formed". Kept separate so a narrowing that reached only one
+// of the two names in §16.2(2) still fails a test.
+int main() {
+    bool b = 1;
+    return b ? 0 : 1;
+}

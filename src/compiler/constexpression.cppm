@@ -3231,7 +3231,10 @@ private:
         // has consumed. The stack grows downward on every target scpp
         // supports; the ordering test below simply declines to measure if it
         // ever does not.
-        const char stack_probe = 0;
+        // spec ch16 §16.2(4): a character-literal has type `char`, where
+        // §16.2(2) forbids an integer-literal from taking it. The value is
+        // never read -- only `&stack_probe` is -- so this is the same object.
+        const char stack_probe = '\0';
         if (call_depth_ == 0) {
             stack_base_ = &stack_probe;
         } else if (stack_base_ != nullptr && stack_base_ > &stack_probe &&

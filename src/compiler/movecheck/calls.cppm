@@ -2017,11 +2017,24 @@ std::expected<void, DataflowError> check_scalar_conversion(const Type& target_ty
         !integer_literal_value_fits(literal_sign * integer_literal->int_value, target_operand.name)) {
         return std::unexpected(DataflowError(
             "integer literal " + std::to_string(literal_sign * integer_literal->int_value) +
-                " is out of range for " + target_name + " of type '" + target_operand.name + "' (spec §6)",
+                " is out of range for " + target_name + " of type '" + target_operand.name +
+                "': §16.2(2) lets an integer-literal take any type in Table 1, and Table 1 fixes that type's width, "
+                "so a value it cannot represent is not one of its values (spec ch16 §16.2(2))",
             loc));
     }
     if (integer_literal->kind == ExprKind::IntegerLiteral && integer_literal_compatible_with_type(target_operand)) {
         return {};
+    }
+    // §16.2(2): the literal is well-formed, the *type it is being asked
+    // to take* is not one an integer-literal may take. Reported here for
+    // the reason the range case just above is: a literal has no source
+    // type to name, so falling through to the conversion diagnostic
+    // below described "a 'int' value" the program never wrote. That
+    // fall-through is what the comment on this function already warns
+    // against; only the range branch was honouring it.
+    if (integer_literal->kind == ExprKind::IntegerLiteral && !integer_literal_compatible_with_type(target_operand)) {
+        return std::unexpected(DataflowError(
+            integer_literal_cannot_name_type_message(target_name, target_operand.name), loc));
     }
     if (literal_compatible_with_type(expr, target_operand)) return {};
     std::optional<Type> source_type = infer_expr_type(expr, body, signatures);
@@ -2032,7 +2045,7 @@ std::expected<void, DataflowError> check_scalar_conversion(const Type& target_ty
     return std::unexpected(DataflowError(
         "cannot convert a '" + source_operand.name + "' value to '" + target_operand.name + "' for " + target_name +
             ": scpp has no implicit conversion between distinct scalar types, not even between two of the same width "
-            "(spec §6) -- use an explicit 'static_cast<" +
+            "(spec ch16 §16.3(1)) -- use an explicit 'static_cast<" +
             target_operand.name + ">(...)' if the conversion is intended",
         loc));
 }
