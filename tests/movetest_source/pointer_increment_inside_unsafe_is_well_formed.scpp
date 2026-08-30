@@ -1,0 +1,19 @@
+// spec §5.1(5.1) makes pointer arithmetic a *gated* operation and
+// §5.1(6) says a gated operation is "ill-formed in a safe context and
+// well-formed in an unsafe context" -- both halves. [expr.pre.incr]/1
+// makes `++p` equivalent to `p += 1`, which was already gated and
+// accepted here; `++p` was rejected outright as "must be a builtin
+// numeric lvalue", so one of the two spellings of one operation could
+// not be reached at all. Fails before the fix.
+[[scpp::unsafe]] int main() {
+    int32_t a[3];
+    a[0] = 1;
+    a[1] = 2;
+    a[2] = 3;
+    int32_t* p = &a[0];
+    ++p;
+    p++;
+    --p;
+    p--;
+    return *p == 1 ? 0 : 1;
+}

@@ -4165,6 +4165,23 @@ public:
     return expr.kind == ExprKind::IntegerLiteral || expr.kind == ExprKind::FloatLiteral;
 }
 
+// spec §5.1(5.1) makes "indirection through, or pointer arithmetic on, a
+// value of pointer type ([expr.unary.op], [expr.add])" a gated
+// operation, and §5.1(6) makes a gated operation ill-formed in a safe
+// context and *well-formed in an unsafe one*. Both halves belong in the
+// sentence: a reader told only the first would reasonably conclude the
+// form is unavailable, which is what `++p`'s own message used to say.
+//
+// Shared because [expr.add]'s forms are recognised in more than one
+// place -- `p + n` and `p - q` in check_binary_expr_operand_types, `p +=
+// n` through the compound-assignment rewrite, and `++p`/`p--` in
+// validate_increment_decrement_expr, which [expr.pre.incr]/1 defines as
+// `p += 1`. One rule, one sentence.
+[[nodiscard]] inline std::string raw_pointer_arithmetic_error_message() {
+    return std::string{"cannot do pointer arithmetic on a raw pointer outside '[[scpp::unsafe]] { }' "
+                       "(spec ch01 §5.1(5.1), §5.1(6))"};
+}
+
 // spec §16.2(1)-(2): an integer-literal "has no type of its own" and
 // "has the scalar type required by the context in which it appears", and
 // (2) permits every type in Table 1 for that *except* `bool` and `char`.
@@ -4714,7 +4731,7 @@ struct EnumVariantIndex {
 
 // Is `derived` the same class as `base`, or does it reach it through its
 // base-specifiers? Answers the "convertible to the other by an implicit
-// conversion this document permits" half of spec §1(5.2) for the
+// conversion this document permits" half of spec §5.1(5.2) for the
 // derived-to-base direction, which is what keeps an ordinary upcast off
 // the unsafe gate.
 [[nodiscard]] inline bool class_reaches_base(const Program& program, const std::string& derived, const std::string& base,
@@ -5011,7 +5028,7 @@ enum class ConversionDestinationSet {
     message += target_name;
     message += "': no conversion between these two types exists. SCPP26 converts between two scalar types (spec ch16 ";
     message += "§16.3(2)), from an enumeration type to an arithmetic or enumeration type (spec ch14 §14.1(2)), and between ";
-    message += "two pointer types (spec ch01 §1(5.2)), and from a class type through a conversion function it declares ";
+    message += "two pointer types (spec ch01 §5.1(5.2)), and from a class type through a conversion function it declares ";
     message += "([class.conv.fct], [over.match.conv]); a conversion involving a class or struct type is otherwise ";
     message += "spelled as a constructor call or a named member function";
     return std::unexpected(message);

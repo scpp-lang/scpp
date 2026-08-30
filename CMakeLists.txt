@@ -117,6 +117,16 @@ target_sources(scpp_constexpr
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
             src/compiler/constexpression.cppm)
+# Same reason as scpp_ast and scpp_parser above: this file now spells one
+# genuinely unsafe operation with `[[scpp::unsafe]]` (the stack-depth
+# measurement in call_function), and a real C++ compiler warns that it
+# does not know the attribute. Front-matter Clause 4 (2)'s note names
+# `-Wno-unknown-attributes` as the expected accommodation, because an
+# scpp attribute is by construction one C++26 "can already parse and
+# silently ignore".
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(scpp_constexpr PRIVATE -Wno-error=unknown-attributes)
+endif()
 target_link_libraries(scpp_constexpr PUBLIC scpp_ast)
 
 add_library(scpp_driver)

@@ -1,0 +1,10 @@
+// The other half of §5.1(6): gated means ill-formed *here*. Passes
+// before the fix too, but for a different reason -- the operand rule
+// rejected every pointer, so this could not tell a gate from a
+// prohibition. It guards the gate now that one exists.
+int main() {
+    int32_t a[2];
+    int32_t* p = &a[0];
+    ++p;
+    return 0;
+}

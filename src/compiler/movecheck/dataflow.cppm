@@ -220,10 +220,27 @@ namespace scpp {
     }
 }
 
-// `++`/`--` apply to every scalar that can be added to, which is every
-// one but `bool` -- `is_scalar_type_name` already excludes the
-// non-numeric named types, so this needs no list of its own.
-[[nodiscard]] bool is_increment_decrement_numeric_type(const Type& type) {
+// [expr.post.incr]/1 states the operand rule outright: "The type of the
+// operand shall be an arithmetic type other than cv bool, *or a pointer
+// to a complete object type*"; [expr.pre.incr]/1 says `++x` is otherwise
+// "equivalent to x+=1". `docs/spec/` adopts neither clause and so does
+// not modify either, which by §1(2) leaves both applying unchanged.
+//
+// The pointer half was missing. The comment that stood here said
+// "`++`/`--` apply to every scalar that can be added to, which is every
+// one but `bool`" -- which is the rule, and a pointer *is* something
+// that can be added to ([expr.add]/4) -- but the predicate below asked
+// for TypeKind::Named, and a pointer is TypeKind::Pointer. So `++p` was
+// ill-formed everywhere, including inside `[[scpp::unsafe]] { }`, while
+// its equivalent `p += 1` was gated and accepted there. Two spellings of
+// one operation, one of them unopenable.
+//
+// `pointer_supports_arithmetic` is the same predicate `p + n` uses --
+// deliberately, so that "complete object type" has one answer. It
+// excludes `void*` (an incomplete pointee), and TypeKind::FunctionPointer
+// is a distinct kind it never matches.
+[[nodiscard]] bool is_increment_decrement_operand_type(const Type& type) {
+    if (pointer_supports_arithmetic(type)) return true;
     return type.kind == TypeKind::Named && type.name != "bool" &&
            scpp::is_scalar_type_name(std::string_view{type.name});
 }
@@ -239,11 +256,21 @@ namespace scpp {
     const Type& effective = operand_type->kind == TypeKind::Reference && operand_type->pointee != nullptr
                                 ? *operand_type->pointee
                                 : *operand_type;
-    if (!is_increment_decrement_numeric_type(effective)) {
+    if (!is_increment_decrement_operand_type(effective)) {
         return std::unexpected(DataflowError("operand of '" +
                                 std::string(expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PostInc ? "++" : "--") +
-                                "' must be a builtin numeric lvalue",
+                                "' must be an arithmetic lvalue other than 'bool', or a pointer to a complete object "
+                                "type ([expr.post.incr]/1)",
                             expr.loc));
+    }
+    // §5.1(5.1) gates "pointer arithmetic on a value of pointer type
+    // ([expr.unary.op], [expr.add])", and [expr.pre.incr]/1 makes `++p`
+    // exactly `p += 1` -- which validate_compound_assignment_expr already
+    // routes through the same gate, for the reason its comment gives.
+    // §5.1(6) is the other half: gated means ill-formed *here* and
+    // well-formed inside an unsafe context, not ill-formed everywhere.
+    if (effective.kind == TypeKind::Pointer && state.unsafe_depth == 0) {
+        return std::unexpected(DataflowError(raw_pointer_arithmetic_error_message(), expr.loc));
     }
     if (!expr_is_assignable_place(*expr.lhs, body)) {
         return std::unexpected(DataflowError("operand of '" +
@@ -473,9 +500,7 @@ namespace scpp {
         // so a compound assignment is the same [expr.add] arithmetic.
         if (lhs_type.has_value() && rhs_type.has_value() && unsafe_depth == 0 &&
             pointer_arithmetic_result_type(expr.binary_op, *lhs_type, *rhs_type).has_value()) {
-            return std::unexpected(DataflowError("cannot do pointer arithmetic on a raw pointer outside '[[scpp::unsafe]] { }' "
-                                 "(spec §5.1(5.1))",
-                loc));
+            return std::unexpected(DataflowError(raw_pointer_arithmetic_error_message(), loc));
         }
         if (binary_expr_has_valid_arithmetic_types(expr, body, signatures)) return {};
         if (!lhs_type.has_value() || !rhs_type.has_value()) return {};
@@ -2737,7 +2762,7 @@ struct ConvertingConstructorBinding {
                     return std::unexpected(DataflowError(
                         "cannot cast '" + describe_type_brief(binary_operand_type(*source_type)) + "' to '" + describe_type_brief(expr.type) +
                             "': a conversion between two pointer types that no implicit conversion relates is a gated "
-                            "operation; write it inside '[[scpp::unsafe]] { }' (spec ch01 §1(5.2), §1(6))",
+                            "operation; write it inside '[[scpp::unsafe]] { }' (spec ch01 §5.1(5.2), §5.1(6))",
                         state.current_loc));
                 }
                 // CastKind::OperandTypeUnknown: whatever left the operand

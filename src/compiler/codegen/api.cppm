@@ -1961,6 +1961,7 @@ private:
     llvm::LLVMValueRef codegen_checked_div(llvm::LLVMValueRef lhs, llvm::LLVMValueRef rhs, bool is_unsigned, bool is_checked);
 
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_pointer_offset(llvm::LLVMValueRef base_ptr, llvm::LLVMValueRef offset, const Type& pointer_type, bool negate_offset);
+    [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_increment_decrement_step(llvm::LLVMValueRef old_value, const Type& operand_type, bool is_increment, const char* increment_name, const char* decrement_name);
 
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_pointer_difference(llvm::LLVMValueRef lhs_ptr, llvm::LLVMValueRef rhs_ptr, const Type& pointer_type);
 

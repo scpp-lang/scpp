@@ -64,6 +64,37 @@ struct ConstexprLimits {
     int max_loop_iterations = 262144;
 };
 
+// How much host stack the walk between two frames has consumed. The
+// operation genuinely is unsafe, and the `[[scpp::unsafe]]` block is the
+// honest spelling of that rather than a way around spec §5.1(5.1):
+// [expr.add]/5 defines pointer subtraction only when both operands point
+// to elements of the same array object, and [basic.compound]/3 makes two
+// unrelated automatic objects elements of two *different* one-element
+// arrays. No representation change can make this defined -- unlike the
+// raw-pointer handles this file used to hold, where the operation was
+// ordinary and only the representation was wrong.
+//
+// The block is confined to the subtraction because that is all §5.1(5.1)
+// names. The null test is [expr.eq] and the ordering test is [expr.rel],
+// which the clause does not list; §5.1(7) is explicit that entering an
+// unsafe context relaxes nothing beyond (5)'s enumerated operations, so
+// widening the block would claim a permission it does not grant.
+// [expr.rel]/5 leaves the ordering of unrelated pointers unspecified,
+// which is exactly the "declines to measure" case: on a downward-growing
+// stack `base > probe` holds, and where it does not this returns 0 and
+// the guard does not fire.
+//
+// A function rather than a local block: this file's frame budget is a
+// conformance property (see ConstexprLimits), and call_function is the
+// frame that recurses. A callee's frame is transient and never
+// accumulates, so measuring here costs the walk nothing per level.
+[[nodiscard]] std::size_t stack_bytes_consumed(const char* base, const char* probe) {
+    if (base == nullptr || !(base > probe)) return 0;
+    [[scpp::unsafe]] {
+        return static_cast<std::size_t>(base - probe);
+    }
+}
+
 // A base-class mem-initializer cannot bind a temporary, so the "line:column: "
 // prefix cannot be built inline; scpp does accept the by-value result of a
 // free function there, which is what this exists for. (A static member
@@ -3237,8 +3268,7 @@ private:
         const char stack_probe = '\0';
         if (call_depth_ == 0) {
             stack_base_ = &stack_probe;
-        } else if (stack_base_ != nullptr && stack_base_ > &stack_probe &&
-                   static_cast<std::size_t>(stack_base_ - &stack_probe) > limits_.max_stack_bytes) {
+        } else if (stack_bytes_consumed(stack_base_, &stack_probe) > limits_.max_stack_bytes) {
             return std::unexpected(ConstexprError(loc, "constexpr evaluation exceeded recursion budget"));
         }
         ++call_depth_;
