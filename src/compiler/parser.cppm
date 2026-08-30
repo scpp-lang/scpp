@@ -7139,6 +7139,23 @@ private:
         auto arg_name_result = expect(TokenKind::Identifier, "the generic type's own template parameter name");
         if (!arg_name_result.has_value()) return std::unexpected(std::move(arg_name_result).error());
         std::string arg_name{arg_name_result.value().text.data(), arg_name_result.value().text.size()};
+        // [temp.arg]/1: `Concept<X>` names a *type* template parameter of
+        // the concept, so `X` has to be a type. A class template whose
+        // own first parameter is a non-type one (`template<int N>`) has
+        // no type to constrain, and `requires C<N>` was accepted and then
+        // silently ignored: `Fixed<3>::gated() requires HasDoubled<N>`
+        // compiled and ran, where clang++-22 rejects it with "template
+        // argument for template type parameter must be a type".
+        if (template_params[0].is_non_type) {
+            std::string _msg_5715{"'requires "};
+            _msg_5715 += concept_name;
+            _msg_5715 += "<";
+            _msg_5715 += arg_name;
+            _msg_5715 += ">' names the non-type template parameter '";
+            _msg_5715 += template_params[0].name;
+            _msg_5715 += "'; a concept constrains a type ([temp.arg]/1)";
+            return std::unexpected(ParseError(param_tok.line, param_tok.column, _msg_5715));
+        }
         if (arg_name != template_params[0].name) {
             {
                 std::string _msg_5720{"'requires "};

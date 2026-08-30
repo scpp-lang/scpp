@@ -3604,6 +3604,20 @@ class ImportDecl {
     bool is_partition = false;
 };
 
+// See Program::constraint_excluded_members.
+class ConstraintExcludedMember {
+  public:
+    virtual ~ConstraintExcludedMember() = default;
+    // The instantiated class, e.g. "std::vector.scpp::Stmt".
+    std::string class_name;
+    // The member as the program spells it, e.g. "push_back".
+    std::string member_name;
+    // The concept the member's own requires-clause names, and the
+    // template argument that failed to satisfy it.
+    std::string concept_name;
+    std::string argument_spelling;
+};
+
 class Program {
   public:
     virtual ~Program() = default;
@@ -3621,6 +3635,18 @@ class Program {
     // merged in from an imported module -- concepts participate in
     // export/import exactly like a struct/class declaration).
     std::vector<ConceptDef> concepts;
+
+    // [temp.constr.decl], [over.match.viable]/1: one entry per member of
+    // a class-template specialization whose own `requires` clause is not
+    // satisfied for that specialization's template argument. Such a
+    // member is never a viable candidate, so monomorphization
+    // instantiates no declaration for it at all -- and without a record
+    // of *why*, the only thing left to say about a call to it is that no
+    // function of that name is declared, which is a name-lookup answer to
+    // a constraint question. Derived state, recomputed by
+    // monomorphize_generics in every translation unit, so it is neither
+    // written to nor read from a `.scppm` payload.
+    std::vector<ConstraintExcludedMember> constraint_excluded_members;
     // Absolute path of the source file this Program was parsed from when
     // one is known (e.g. a real CLI/driver build from disk); empty for
     // in-memory/unit-test sources that have no backing file path.

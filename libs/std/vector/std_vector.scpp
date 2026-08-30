@@ -168,17 +168,15 @@ public:
     // std::vector::emplace_back() -- 0-arg form only, the sole shape
     // scpp's self-hosting sources use so far: default-constructs a new
     // trailing element in place, avoiding the extra move/copy a
-    // push_back(T{}) call would need. Constrained the same way
-    // resize()'s 2-arg overload below is: without a `requires` clause
-    // this method's body (`T()`) is still monomorphized/type-checked
-    // for *every* std::vector<T> instantiation regardless of whether
-    // emplace_back() is ever actually called (see
-    // Monomorphizer::instantiate_ordinary_generic_class's
-    // method_requires_concept gate, which only *skips* a constrained
-    // method's clone -- an unconstrained one is never skipped) --
-    // wrongly rejecting any T without a default constructor (e.g. a
-    // move/copy-tracking helper type with only a value constructor).
-    void emplace_back() requires std::default_initializable<T> {
+    // push_back(T{}) call would need. Unconstrained, like the real one:
+    // `T()` makes this ill-formed for a `T` with no default constructor
+    // only if the member is actually used, which is what [temp.inst]/4
+    // says and what the compiler now does. It carried a
+    // `requires std::default_initializable<T>` clause purely because
+    // every member definition used to be instantiated for every
+    // std::vector<T> whether or not it was ever called, so an
+    // unconstrained body rejected any T without a default constructor.
+    void emplace_back() {
         this->__ensure_capacity_for_one_more();
         [[scpp::unsafe]] {
             new (&this->data_[this->size_]) T();
@@ -223,7 +221,13 @@ public:
     // element from `value` (mirrors real std::vector::resize's 2-arg
     // overload); shrinking destroys the excess trailing elements, same
     // as repeatedly calling pop_back().
-    void resize(size_t new_size, const T& value) requires std::copy_constructible<T> {
+    //
+    // Unconstrained for the same reason emplace_back() above is: the
+    // copy this performs is `push_back(const T&)`'s, whose own
+    // `requires std::copy_constructible<T>` reports a non-copyable T at
+    // the point this member is called ([temp.inst]/4) rather than
+    // removing resize() from every std::vector<T> that never calls it.
+    void resize(size_t new_size, const T& value) {
         while (this->size_ > new_size) {
             this->pop_back();
         }

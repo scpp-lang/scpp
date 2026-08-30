@@ -327,6 +327,277 @@ void run_test_case_files() {
 // 22-term chain. Structural rather than timed, for the same reason as
 // movecheck's counterpart: pre-fix this input does not terminate at 40
 // terms, so there is nothing to threshold.
+// [temp.inst]/3.1, /4: a class-template specialization gets the
+// *declarations* of all its members and the *definitions* of only the ones
+// something names. Asserted on the emitted IR because that is where the
+// question has an observable answer -- a verdict-only test cannot see that
+// an accepted program still compiled a member nobody called.
+//
+// One case per clone loop in monomorphize.cppm, since each was a separate
+// copy of the same decision.
+std::string generated_ir_or_empty(std::string_view source, const std::string& case_name) {
+    auto ir_result = try_generate_ir(source);
+    if (!ir_result.has_value()) {
+        expect(false, case_name + ": unexpectedly failed with " + ir_result.error().kind + ": " +
+                          ir_result.error().message);
+        return {};
+    }
+    return ir_result.value();
+}
+
+// Every `define` line of the module, which is exactly the set of function
+// *definitions* the translation unit instantiated. A `declare` line is a
+// declaration and is deliberately not counted: [temp.inst]/3.1 instantiates
+// the declaration of every member.
+std::string defined_function_lines(const std::string& ir, std::string_view mentioning) {
+    std::string lines;
+    std::size_t pos = 0;
+    while (pos < ir.size()) {
+        std::size_t end = ir.find('\n', pos);
+        if (end == std::string::npos) end = ir.size();
+        std::string_view line{ir.data() + pos, end - pos};
+        if (line.starts_with("define ") && line.find(mentioning) != std::string_view::npos) {
+            lines += std::string(line) + "\n";
+        }
+        pos = end + 1;
+    }
+    return lines;
+}
+
+void test_only_the_named_members_of_a_specialization_are_defined() {
+    cases_run++;
+    std::string ir = generated_ir_or_empty(R"(
+template<typename T>
+class Box {
+public:
+    virtual ~Box() { return; }
+    T t;
+    Box(T x) : t{x} { return; }
+    Box() : t{} { return; }
+    int used() { return this->t; }
+    int unused() { return this->t + 1; }
+    static int used_static() { return 1; }
+    static int unused_static() { return 2; }
+};
+int main() {
+    Box<int> b{7};
+    return b.used() + Box<int>::used_static() - 8;
+}
+)",
+                                           "only_the_named_members_of_a_specialization_are_defined");
+    std::string defined = defined_function_lines(ir, "Box.int_");
+    expect(defined.find("Box.int_used(") != std::string::npos,
+           "only_the_named_members_of_a_specialization_are_defined: expected Box.int_used to be defined, got:\n" +
+               defined);
+    expect(defined.find("Box.int_used_static(") != std::string::npos,
+           "only_the_named_members_of_a_specialization_are_defined: expected Box.int_used_static to be defined, "
+           "got:\n" +
+               defined);
+    expect(defined.find("Box.int_unused(") == std::string::npos,
+           "only_the_named_members_of_a_specialization_are_defined: Box.int_unused must not be instantiated, "
+           "got:\n" +
+               defined);
+    expect(defined.find("Box.int_unused_static(") == std::string::npos,
+           "only_the_named_members_of_a_specialization_are_defined: Box.int_unused_static must not be "
+           "instantiated, got:\n" +
+               defined);
+    // Two constructors share one Function name (`Box.int_new`) and are
+    // told apart only by their parameter list, which the emitted symbol
+    // carries: `Box(int)` is `Box.int_new.Box.int_ref.int`, `Box()` is
+    // `Box.int_new.Box.int_ref`. Only the overload the construction
+    // selected has a definition.
+    expect(defined.find("@Box.int_new.Box.int_ref.int(") != std::string::npos,
+           "only_the_named_members_of_a_specialization_are_defined: expected Box<int>'s value constructor, got:\n" +
+               defined);
+    expect(defined.find("@Box.int_new.Box.int_ref(") == std::string::npos,
+           "only_the_named_members_of_a_specialization_are_defined: Box<int>'s unused default constructor must "
+           "not be instantiated, got:\n" +
+               defined);
+}
+
+// [temp.inst]/4 is per *member*, and two constructors of one specialization
+// are two members: selecting `Box(int)` requires that constructor's
+// definition and no other. This is the reduced form of the defect --
+// `Box<NoDef> b{7};` diagnosed the body of a `Box()` nothing calls, where
+// clang++-22 accepts. Asserted here rather than in movecheck_test because
+// the diagnostic it must not produce is codegen's.
+void test_an_unused_constructor_overload_is_not_instantiated() {
+    cases_run++;
+    auto ir_result = try_generate_ir(R"(
+class NoDef {
+public:
+    virtual ~NoDef() { return; }
+    int v{};
+    NoDef(int x) : v{x} { return; }
+};
+template<typename T>
+class Box {
+public:
+    virtual ~Box() { return; }
+    T t;
+    Box() : t{} { return; }
+    Box(int x) : t{x} { return; }
+};
+int main() {
+    Box<NoDef> b{7};
+    return b.t.v - 7;
+}
+)");
+    expect(ir_result.has_value(),
+           "an_unused_constructor_overload_is_not_instantiated: expected acceptance, got " +
+               (ir_result.has_value() ? std::string{} : ir_result.error().kind + ": " + ir_result.error().message));
+}
+
+void test_only_the_named_members_of_a_non_type_specialization_are_defined() {
+    cases_run++;
+    std::string ir = generated_ir_or_empty(R"(
+template<int N>
+class Fixed {
+public:
+    virtual ~Fixed() { return; }
+    int v{};
+    Fixed(int x) : v{x} { return; }
+    int used() { return this->v * N; }
+    int unused() { return this->v + N; }
+};
+int main() {
+    Fixed<3> f{7};
+    return f.used() - 21;
+}
+)",
+                                           "only_the_named_members_of_a_non_type_specialization_are_defined");
+    std::string defined = defined_function_lines(ir, "Fixed.3_");
+    expect(defined.find("Fixed.3_used(") != std::string::npos,
+           "only_the_named_members_of_a_non_type_specialization_are_defined: expected Fixed.3_used to be "
+           "defined, got:\n" +
+               defined);
+    expect(defined.find("Fixed.3_unused(") == std::string::npos,
+           "only_the_named_members_of_a_non_type_specialization_are_defined: Fixed.3_unused must not be "
+           "instantiated, got:\n" +
+               defined);
+}
+
+void test_only_the_named_members_of_a_variadic_specialization_are_defined() {
+    cases_run++;
+    std::string ir = generated_ir_or_empty(R"(
+template<typename... Ts>
+class Bag;
+template<>
+class Bag<> {
+public:
+    virtual ~Bag() { return; }
+    int used() const { return 0; }
+    int unused() const { return 9; }
+};
+template<typename Head, typename... Tail>
+class Bag<Head, Tail...> : private Bag<Tail...> {
+public:
+    virtual ~Bag() override { return; }
+    int used() const { return 1; }
+    int unused() const { return 8; }
+};
+int main() {
+    Bag<int> b{};
+    return b.used() - 1;
+}
+)",
+                                           "only_the_named_members_of_a_variadic_specialization_are_defined");
+    std::string defined = defined_function_lines(ir, "Bag.");
+    expect(defined.find("Bag.int_used(") != std::string::npos,
+           "only_the_named_members_of_a_variadic_specialization_are_defined: expected Bag.int_used to be "
+           "defined, got:\n" +
+               defined);
+    expect(defined.find("Bag.int_unused(") == std::string::npos,
+           "only_the_named_members_of_a_variadic_specialization_are_defined: Bag.int_unused must not be "
+           "instantiated, got:\n" +
+               defined);
+    expect(defined.find("Bag.empty_used(") == std::string::npos,
+           "only_the_named_members_of_a_variadic_specialization_are_defined: the empty-pack base's own unused "
+           "member must not be instantiated either, got:\n" +
+               defined);
+}
+
+// [temp.constr.decl], [over.match.viable]/1: a member whose requires-clause
+// is not satisfied for this specialization is never a viable candidate.
+// Only the ordinary-class clone loop asked; the variadic one cloned the
+// member unconditionally, so `Bag<int>::gated() requires HasDoubled<int>`
+// compiled and ran where clang++-22 reports "constraints not satisfied".
+void test_a_variadic_member_with_an_unsatisfied_constraint_is_not_callable() {
+    cases_run++;
+    auto ir_result = try_generate_ir(R"(
+template<typename T>
+concept HasDoubled = requires(T t) { t.doubled(); };
+template<typename... Ts>
+class Bag;
+template<>
+class Bag<> {
+public:
+    virtual ~Bag() { return; }
+    int used() const { return 0; }
+};
+template<typename Head, typename... Tail>
+class Bag<Head, Tail...> : private Bag<Tail...> {
+public:
+    virtual ~Bag() override { return; }
+    int used() const { return 1; }
+    int gated() requires HasDoubled<Head> { return 2; }
+};
+int main() {
+    Bag<int> b{};
+    return b.gated();
+}
+)");
+    expect(!ir_result.has_value(),
+           "a_variadic_member_with_an_unsatisfied_constraint_is_not_callable: expected rejection");
+    if (!ir_result.has_value()) {
+        expect(ir_result.error().message.find("HasDoubled") != std::string::npos,
+               "a_variadic_member_with_an_unsatisfied_constraint_is_not_callable: the message must name the "
+               "constraint, got '" +
+                   ir_result.error().message + "'");
+    }
+}
+
+// The message for such a call is a constraint answer, not a name-lookup
+// answer: the member *is* declared, in the template the reader wrote.
+void test_calling_a_member_with_an_unsatisfied_constraint_names_the_constraint() {
+    cases_run++;
+    auto ir_result = try_generate_ir(R"(
+template<typename T>
+concept HasDoubled = requires(T t) { t.doubled(); };
+class Plain {
+public:
+    virtual ~Plain() { return; }
+    int v{};
+    Plain(int x) : v{x} { return; }
+};
+template<typename T>
+class Holder {
+public:
+    virtual ~Holder() { return; }
+    T item;
+    Holder(int x) : item{x} { return; }
+    int gated() requires HasDoubled<T> { return this->item.v; }
+};
+int main() {
+    Holder<Plain> h{21};
+    return h.gated();
+}
+)");
+    expect(!ir_result.has_value(),
+           "calling_a_member_with_an_unsatisfied_constraint_names_the_constraint: expected rejection");
+    if (!ir_result.has_value()) {
+        const std::string& message = ir_result.error().message;
+        expect(message.find("no viable 'gated'") != std::string::npos && message.find("HasDoubled") != std::string::npos,
+               "calling_a_member_with_an_unsatisfied_constraint_names_the_constraint: expected a constraint "
+               "message, got '" +
+                   message + "'");
+        expect(message.find("no function with that name is declared") == std::string::npos,
+               "calling_a_member_with_an_unsatisfied_constraint_names_the_constraint: must not report this as a "
+               "name-lookup failure, got '" +
+                   message + "'");
+    }
+}
+
 void test_long_binary_chain_generates_without_re_walking_its_prefix() {
     cases_run++;
     std::string chain = "1";
@@ -5299,6 +5570,13 @@ int main() {
     test_a_string_literal_does_not_initialize_an_array_of_non_character_type();
     test_an_array_is_not_assignable();
     test_a_char_array_is_initialized_from_a_string_literal_in_every_position();
+
+    test_only_the_named_members_of_a_specialization_are_defined();
+    test_an_unused_constructor_overload_is_not_instantiated();
+    test_only_the_named_members_of_a_non_type_specialization_are_defined();
+    test_only_the_named_members_of_a_variadic_specialization_are_defined();
+    test_a_variadic_member_with_an_unsatisfied_constraint_is_not_callable();
+    test_calling_a_member_with_an_unsatisfied_constraint_names_the_constraint();
 
     test_long_binary_chain_generates_without_re_walking_its_prefix();
     test_member_type_is_usable_through_its_qualified_name();

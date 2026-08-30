@@ -548,6 +548,7 @@ private:
     // `display_name` is the call as *written* (`f`, `Box::take`), never
     // codegen's mangled `Box_take`; `callee_name` stays the mangled name
     // the resolver looks up.
+    [[nodiscard]] const ConstraintExcludedMember* constraint_excluded_member_for(const std::string& callee_name);
     std::string describe_call_resolution_failure(const std::string& callee_name, const std::string& display_name,
                                                   const std::vector<ExprPtr>& args, std::size_t param_offset,
                                                   bool receiver_is_mutable, const Expr* receiver_expr);
