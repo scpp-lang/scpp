@@ -860,6 +860,34 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             }
             return initialize_record_storage_by_constructor(target, args);
         }
+        // [dcl.init]/8.1: to value-initialize an object of *class type*,
+        // "let C be the constructor selected to default-initialize the
+        // object ... In all cases, the object is then default-initialized"
+        // -- so a user-provided default constructor runs. [class.pre]/1
+        // makes `struct` a class type as much as `class` is, and
+        // [class.pre]/8 gives the class-key no meaning beyond default
+        // member access. The branch above asks find_class_def, which
+        // answers the *class-key*, so a struct with a user-declared
+        // default constructor fell past it to the zero-fill below and
+        // was value-initialized without ever calling it. `SD sd{}` was
+        // right because a VarDecl with ctor-args resolves `SD_new`
+        // itself; `SD sd = {};` and a mem-initializer `: m{}` came
+        // through here and silently produced the default member
+        // initializer's value instead of the constructor's.
+        //
+        // Aggregate initialization is unaffected: a struct with no
+        // matching `_new` overload resolves nothing here and falls
+        // through to [dcl.init.aggr] exactly as before.
+        if (target.type.kind == TypeKind::Named && find_class_def(target.type.name) == nullptr &&
+            find_struct_def(target.type.name) != nullptr) {
+            if (const Function* ctor_def =
+                    resolve_overload_by_type(target.type.name + "_new", args, /*param_offset=*/1);
+                ctor_def != nullptr) {
+                if (auto r = zero_initialize_storage(target.ptr, target.type, target.alignment); !r.has_value())
+                    return std::unexpected(std::move(r).error());
+                return initialize_record_storage_by_constructor(target, args);
+            }
+        }
         if (args.empty()) {
             // An array of class type is not "trivially" initialized by a
             // zero fill: each element is an object of the element type

@@ -1,0 +1,47 @@
+// [dcl.init.list]/3.5 sends an empty braced-init-list to value-
+// initialization, and [dcl.init]/8.1 says that for a class type "let C
+// be the constructor selected to default-initialize the object ... In
+// all cases, the object is then default-initialized" -- the constructor
+// runs. [class.pre]/1 makes `struct` a class type as much as `class` is.
+//
+// The numbers are the point: the constructor writes 99 and the default
+// member initializer writes 1, so a path that skips the constructor
+// prints 1 and compiles either way. `struct` printed `99 1 1` and
+// `class` printed `99 99 99`; clang++-22 -std=c++26 prints `99 99 99`
+// for both.
+import std;
+
+struct SD {
+    int v = 1;
+    SD() { this.v = 99; }
+};
+
+class CD {
+public:
+    virtual ~CD() { return; }
+    int v = 1;
+    CD() { this.v = 99; }
+};
+
+struct HS {
+    SD m;
+    HS() : m{} {}
+};
+
+class HC {
+public:
+    virtual ~HC() { return; }
+    CD m;
+    HC() : m{} {}
+};
+
+int main() {
+    SD direct{};
+    SD copy = {};
+    HS hs{};
+    CD cdirect{};
+    CD ccopy = {};
+    HC hc{};
+    std::print("{} {} {} {} {} {}\n", direct.v, copy.v, hs.m.v, cdirect.v, ccopy.v, hc.m.v);
+    return 0;
+}

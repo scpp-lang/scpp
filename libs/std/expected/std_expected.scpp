@@ -1,6 +1,7 @@
 export module std:expected;
 
 import :cstdlib;
+import :concepts;
 
 namespace std {
 
@@ -44,6 +45,27 @@ private:
     alignas(T) alignas(E) char storage_[sizeof(T) > sizeof(E) ? sizeof(T) : sizeof(E)]{};
 
 public:
+    // [expected.object.ctor]: `constexpr expected();` is constrained on
+    // `is_default_constructible_v<T>` and value-initializes the
+    // contained value, leaving `has_value()` true. It was simply never
+    // declared here, so `std::expected<T, E> r{};` -- ordinary C++ --
+    // was reported as "type has no default constructor".
+    //
+    // The constraint is not decoration: scpp instantiates every method
+    // of a class specialization, so an unconstrained body naming `T{}`
+    // is diagnosed for every `expected<T, E>` whose `T` has no default
+    // constructor -- `std::expected<Token, ParseError>` among them.
+    // `std::vector`'s own `emplace_back() requires
+    // std::default_initializable<T>` is the same constructor-shaped
+    // member constrained on the same concept, for the same reason.
+    expected() requires std::default_initializable<T> {
+        this->has_value_ = true;
+        [[scpp::unsafe]] {
+            new ((T*)&this->storage_) T();
+        }
+        return;
+    }
+
     template<typename U>
     expected(U value) {
         this->has_value_ = true;
