@@ -212,6 +212,38 @@ namespace scpp {
             }
         }
     }
+    // `T{}` -- the probe `std::default_initializable` is written with.
+    // [dcl.init.list]/3.5 sends an empty list to value-initialization
+    // and [dcl.init]/8.1 defines that for a class type as "let C be the
+    // constructor selected to default-initialize the object, *if any*.
+    // If C is not user-provided, the object is first zero-initialized.
+    // In all cases, the object is then default-initialized" -- so a
+    // record with no user-declared constructor at all is value-
+    // initializable, and so is a scalar or an enumeration ([dcl.init]/8.3
+    // zero-initializes it). Searching program.functions for a
+    // `ClassName_new` answers "is a constructor *declared*", which is a
+    // different question and the wrong one: `struct Z { int a = 5; };`
+    // declares none and `Z{}` is well-formed.
+    //
+    // The consequence was silent. A constrained member whose concept is
+    // judged unsatisfied is not instantiated -- it simply does not
+    // exist -- so `std::vector<Z>::emplace_back()` reported "no function
+    // with that name is declared here", and no constructor constrained
+    // on std::default_initializable could ever be added to std::expected.
+    if (arg_types.empty()) {
+        if (is_scalar_named_type(target_type) || is_enum_type(target_type, &program)) return true;
+        bool declares_a_constructor = false;
+        for (const Function& fn : program.functions) {
+            if (fn.member_owner_class == target_type.name && is_constructor_function(fn)) {
+                declares_a_constructor = true;
+                break;
+            }
+        }
+        if (!declares_a_constructor && (find_class_def(program, target_type.name) != nullptr ||
+                                        find_struct_def(program, target_type.name) != nullptr)) {
+            return true;
+        }
+    }
     for (const Function& fn : program.functions) {
         if (fn.member_owner_class != target_type.name || !is_constructor_function(fn)) continue;
         if (fn.params.size() != arg_types.size() + 1) continue;

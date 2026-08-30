@@ -1,0 +1,28 @@
+// `concept default_initializable = requires(T t) { T{}; };` probes
+// value-initialization, which [dcl.init]/8.1 defines for a class type
+// whose selected constructor may be "if any" -- a record that declares
+// no constructor at all is value-initializable. Asking instead whether
+// a `ClassName_new` is *declared* answered a different question, and a
+// constrained member judged unsatisfied is not instantiated at all: it
+// simply does not exist. `std::vector<T>::emplace_back()` -- already
+// written `requires std::default_initializable<T>` -- was therefore
+// unreachable for every such struct, and `std::expected`'s own default
+// constructor could not be written at all.
+import std;
+
+struct Z {
+    int a = 3;
+    int b = 4;
+};
+
+int main() {
+    std::vector<Z> v{};
+    v.emplace_back();
+    std::expected<Z, int> ok{};
+    std::expected<Z, int> bad = std::unexpected<int>{7};
+    std::print("{} {} {}\n", static_cast<int>(v.size()), v[0].a, v[0].b);
+    int ok_flag = ok.has_value() ? 1 : 0;
+    int bad_error = bad.has_value() ? 0 : bad.error();
+    std::print("{} {} {}\n", ok_flag, ok.value().a, bad_error);
+    return 0;
+}
