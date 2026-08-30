@@ -564,7 +564,6 @@ struct Body {
 
 // Why `expr` does not name a place the move checker can record state
 // for. Empty when it does. See place_of.
-[[nodiscard]] std::string explain_untrackable_place(const Expr& expr);
 
 // The place `expr` names, or nullopt when it names no statically
 // identifiable storage at all (a temporary, a call result, a global, a
@@ -1676,37 +1675,6 @@ namespace {
 }
 
 } // namespace
-
-[[nodiscard]] std::string explain_untrackable_place(const Expr& expr) {
-    switch (expr.kind) {
-        case ExprKind::Subscript:
-            if (!constant_subscript_index(*expr.rhs).has_value()) {
-                return "a subscript whose index is not a literal: which element it names is not "
-                       "known until the program runs, so its ownership state cannot be tracked";
-            }
-            return explain_untrackable_place(*expr.lhs);
-        case ExprKind::Unary:
-            if (expr.unary_op == UnaryOp::Deref && expr.lhs != nullptr) {
-                return "a dereference of " + explain_untrackable_place(*expr.lhs);
-            }
-            return "an operator result, which names no object";
-        case ExprKind::Member:
-            return explain_untrackable_place(*expr.lhs);
-        case ExprKind::Call:
-            // `*h` and `h->m` on a class type arrive as a call to the
-            // selected operator; the place is identified by the receiver
-            // (see place_of), so report why *that* is not one.
-            if (is_indirection_operator_call(expr) && expr.lhs != nullptr) {
-                return explain_untrackable_place(*expr.lhs);
-            }
-            return "a call result, which is a temporary with no name to record state against";
-        case ExprKind::Identifier:
-            return "a name that does not resolve to a local variable, parameter, or member of "
-                   "the current object";
-        default:
-            return "an expression that names no object";
-    }
-}
 
 [[nodiscard]] std::optional<Place> place_of(const Expr& expr, const Body& body,
                                             const std::function<std::optional<Place>(LocalId)>& resolve_root,

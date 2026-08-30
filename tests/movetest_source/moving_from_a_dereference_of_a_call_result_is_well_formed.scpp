@@ -1,0 +1,32 @@
+// `get()->a` names no fixed object, so there is no place to record a
+// state transition against -- which settles what the checker *records*,
+// not whether the program is well-formed. ch02 §6.2(3) says what
+// `std::move(E)` does when `E` is an *id-expression*; it imposes no
+// requirement on any other `E`, and no clause of the document makes one
+// ill-formed. §6.2(2)/§6.3(1) then destroy the object normally, exactly
+// as C++ destroys a moved-from object. Kept as the call-result cell of
+// that rule; it used to assert the rejection.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { return; }
+};
+
+R mk(int i) { R r{}; r.id = i; return r; }
+
+struct S {
+    R a;
+    R b;
+    S() : a{0}, b{0} {}
+    S(int x, int y) : a{x}, b{y} {}
+};
+
+S global_s{1, 2};
+S* global_p = &global_s;
+S* get() { return global_p; }
+int main() {
+    [[scpp::unsafe]] { R t = std::move(get()->a); return t.id; }
+}

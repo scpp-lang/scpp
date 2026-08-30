@@ -1,0 +1,31 @@
+// The whole question is which destructors run. A literal index names a
+// place, so spec ch02 §6.2(3) puts that element in the moved-out state
+// and §6.3(1) skips its destructor. A runtime index names no place, so
+// no element is transitioned, every element stays initialized by
+// §6.2(2), and §6.3(1) invokes every destructor -- on a source codegen
+// has already zeroed, which is why the moved-from element prints ~R0
+// rather than repeating its old id. Neither a leak (nothing skipped)
+// nor a double-destroy (each element exactly once).
+//
+// `clang++-22 -std=c++26` prints this same sequence for the
+// transliteration with a move constructor that zeroes the source.
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { std::print("~R{}\n", this.id); }
+};
+
+R make_r(int i) { R r{i}; return r; }
+
+int main() {
+    R arr[2];
+    arr[0] = make_r(1);
+    arr[1] = make_r(2);
+    std::size_t i = 0;
+    R t = std::move(arr[i]);
+    std::print("t={} other={}\n", t.id, arr[1].id);
+    return 0;
+}

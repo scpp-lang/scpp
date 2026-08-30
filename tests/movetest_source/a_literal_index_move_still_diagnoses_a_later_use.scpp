@@ -1,0 +1,22 @@
+// The precision that does exist must survive: a literal subscript still
+// names a place, so ch02 §6.2(3) transitions it and §6.2(6) makes the
+// later read ill-formed. Accepting a runtime index must not be spelled
+// as "stop tracking subscripts".
+import std;
+
+struct R {
+    int id = 0;
+    R() {}
+    R(int i) : id{i} {}
+    ~R() { return; }
+};
+
+R make_r(int i) { R r{i}; return r; }
+
+int main() {
+    R arr[2];
+    arr[0] = make_r(1);
+    arr[1] = make_r(2);
+    R t = std::move(arr[0]);
+    return arr[0].id;
+}
