@@ -1,0 +1,11 @@
+// [expr.post.incr]/1 bounds the operand rule from the other side: an
+// arithmetic type "other than cv bool, or a pointer to a complete
+// object type". `void` is incomplete, so `void*` is not one, and no
+// unsafe context makes it one -- §5.1(6) relaxes ill-formedness only
+// for §5.1(5)'s gated operations, and this is not one of them.
+[[scpp::unsafe]] int main() {
+    int32_t a[2];
+    void* v = &a[0];
+    ++v;
+    return 0;
+}

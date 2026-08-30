@@ -1,0 +1,46 @@
+// The step size is the whole question: an integer add of one would give
+// 1 for every element type, and these three differ. `char*` steps 1,
+// `int32_t*` steps 4, and a 24-byte struct steps 24, so the values read
+// back through each stepped pointer are the observation, not the fact
+// that the program compiled. Prefix yields the new value and postfix the
+// old one ([expr.pre.incr]/1, [expr.post.incr]/1), which the last two
+// numbers separate.
+import std;
+
+struct Big {
+    int64_t a;
+    int64_t b;
+    int64_t c;
+};
+
+[[scpp::unsafe]] int main() {
+    char cs[3];
+    cs[0] = 'x';
+    cs[1] = 'y';
+    cs[2] = 'z';
+    char* cp = &cs[0];
+    ++cp;
+
+    int32_t is[3];
+    is[0] = 10;
+    is[1] = 20;
+    is[2] = 30;
+    int32_t* ip = &is[0];
+    ip++;
+    ip++;
+
+    Big bs[2];
+    bs[0].a = 5;
+    bs[1].a = 7;
+    Big* bp = &bs[0];
+    ++bp;
+
+    int32_t* pre = &is[0];
+    int32_t prefix_value = *(++pre);
+    int32_t* post = &is[0];
+    int32_t postfix_value = *(post++);
+
+    std::print("{} {} {} {} {} {}\n", static_cast<int>(*cp), static_cast<int>(*ip), static_cast<int>(bp->a),
+               static_cast<int>(prefix_value), static_cast<int>(postfix_value), static_cast<int>(*post));
+    return 0;
+}

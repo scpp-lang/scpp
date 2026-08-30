@@ -1,0 +1,16 @@
+// [expr.pre.incr]/1 makes `++p` equivalent to `p += 1`, and [expr.add]/4
+// makes that an *element* step, not an integer add of one. Both codegen
+// arms built LLVMAdd against the pointer value; movecheck rejected every
+// pointer operand first, so the arm was unreachable and never wrong.
+// Widening the operand rule makes it reachable, so this asserts the
+// lowering is the same 'getelementptr' that `p + 1` already emits.
+[[scpp::unsafe]] int main() {
+    int64_t a[3];
+    a[0] = 1;
+    a[1] = 2;
+    a[2] = 3;
+    int64_t* p = &a[0];
+    ++p;
+    p--;
+    return *p == 1 ? 0 : 1;
+}

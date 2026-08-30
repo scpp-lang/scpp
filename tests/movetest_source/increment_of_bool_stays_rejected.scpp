@@ -1,0 +1,9 @@
+// [expr.pre.incr]/1's only outright prohibition: "The operand of prefix
+// ++ or -- shall not be of type cv bool." Kept separate from the
+// `void*` case so a widening that reached only one of the two bounds
+// still fails a test.
+[[scpp::unsafe]] int main() {
+    bool b = false;
+    ++b;
+    return 0;
+}

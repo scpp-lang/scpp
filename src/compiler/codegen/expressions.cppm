@@ -2609,19 +2609,11 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         auto old_value_result = load_value(lv);
                         if (!old_value_result.has_value()) return std::unexpected(std::move(old_value_result).error());
                         llvm::LLVMValueRef old_value = std::move(old_value_result).value();
-                        bool is_float = lv.type.kind == TypeKind::Named && is_float_scalar_type_name(lv.type.name);
-                        auto llvm_type_result = to_llvm_type(lv.type);
-                        if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
-                        llvm::LLVMTypeRef llvm_type = std::move(llvm_type_result).value();
-                        llvm::LLVMValueRef one = is_float ? llvm::LLVMConstReal(llvm_type, 1.0)
-                                                          : llvm::LLVMConstInt(llvm_type, 1, 0);
-                        llvm::LLVMValueRef new_value =
-                            expr.unary_op == UnaryOp::PostInc
-                                ? (is_float ? llvm::LLVMBuildFAdd(builder_, old_value, one, "postinc")
-                                            : llvm::LLVMBuildAdd(builder_, old_value, one, "postinc"))
-                                : (is_float ? llvm::LLVMBuildFSub(builder_, old_value, one, "postdec")
-                                            : llvm::LLVMBuildSub(builder_, old_value, one, "postdec"));
-                        create_store(new_value, lv.ptr, lv.alignment);
+                        auto new_value_result =
+                            codegen_increment_decrement_step(old_value, lv.type, expr.unary_op == UnaryOp::PostInc,
+                                                             "postinc", "postdec");
+                        if (!new_value_result.has_value()) return std::unexpected(std::move(new_value_result).error());
+                        create_store(std::move(new_value_result).value(), lv.ptr, lv.alignment);
                         return old_value;
                     }
                     if (expr.unary_op == UnaryOp::Deref) {
@@ -3363,6 +3355,36 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     }
 
 
+    // [expr.pre.incr]/1: `++x` is "equivalent to x+=1", so the step is
+    // whatever `x + 1` means for x's type -- and for a pointer that is
+    // [expr.add]/4's element step, not an integer add of one. Both arms
+    // used to build LLVMAdd against a *pointer* value: movecheck rejected
+    // every pointer operand before codegen could be asked, so the arm was
+    // never reached and never wrong. Widening the operand rule makes it
+    // reachable, and codegen_pointer_offset is the emitter `p + 1`
+    // already uses, so there is still one lowering of [expr.add].
+    [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::codegen_increment_decrement_step(llvm::LLVMValueRef old_value, const Type& operand_type, bool is_increment, const char* increment_name, const char* decrement_name)
+{
+        if (operand_type.kind == TypeKind::Pointer) {
+            auto step_type_result = to_llvm_type(named_type("ptrdiff_t"));
+            if (!step_type_result.has_value()) return std::unexpected(std::move(step_type_result).error());
+            llvm::LLVMValueRef step = llvm::LLVMConstInt(std::move(step_type_result).value(), 1, 0);
+            return codegen_pointer_offset(old_value, step, operand_type, /*negate_offset=*/!is_increment);
+        }
+        bool is_float = operand_type.kind == TypeKind::Named && is_float_scalar_type_name(operand_type.name);
+        auto llvm_type_result = to_llvm_type(operand_type);
+        if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
+        llvm::LLVMTypeRef llvm_type = std::move(llvm_type_result).value();
+        llvm::LLVMValueRef one = is_float ? llvm::LLVMConstReal(llvm_type, 1.0) : llvm::LLVMConstInt(llvm_type, 1, 0);
+        if (is_increment) {
+            return is_float ? llvm::LLVMBuildFAdd(builder_, old_value, one, increment_name)
+                            : llvm::LLVMBuildAdd(builder_, old_value, one, increment_name);
+        }
+        return is_float ? llvm::LLVMBuildFSub(builder_, old_value, one, decrement_name)
+                        : llvm::LLVMBuildSub(builder_, old_value, one, decrement_name);
+    }
+
+
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::codegen_pointer_difference(llvm::LLVMValueRef lhs_ptr, llvm::LLVMValueRef rhs_ptr, const Type& pointer_type)
 {
         auto diff_type_result = to_llvm_type(named_type("ptrdiff_t"));
@@ -3810,19 +3832,11 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         auto old_value_result = load_value(lv);
                         if (!old_value_result.has_value()) return std::unexpected(std::move(old_value_result).error());
                         llvm::LLVMValueRef old_value = std::move(old_value_result).value();
-                        bool is_float = lv.type.kind == TypeKind::Named && is_float_scalar_type_name(lv.type.name);
-                        auto llvm_type_result = to_llvm_type(lv.type);
-                        if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
-                        llvm::LLVMTypeRef llvm_type = std::move(llvm_type_result).value();
-                        llvm::LLVMValueRef one = is_float ? llvm::LLVMConstReal(llvm_type, 1.0)
-                                                          : llvm::LLVMConstInt(llvm_type, 1, 0);
-                        llvm::LLVMValueRef new_value =
-                            expr.unary_op == UnaryOp::PreInc
-                                ? (is_float ? llvm::LLVMBuildFAdd(builder_, old_value, one, "preinc")
-                                            : llvm::LLVMBuildAdd(builder_, old_value, one, "preinc"))
-                                : (is_float ? llvm::LLVMBuildFSub(builder_, old_value, one, "predec")
-                                            : llvm::LLVMBuildSub(builder_, old_value, one, "predec"));
-                        create_store(new_value, lv.ptr, lv.alignment);
+                        auto new_value_result =
+                            codegen_increment_decrement_step(old_value, lv.type, expr.unary_op == UnaryOp::PreInc,
+                                                             "preinc", "predec");
+                        if (!new_value_result.has_value()) return std::unexpected(std::move(new_value_result).error());
+                        create_store(std::move(new_value_result).value(), lv.ptr, lv.alignment);
                         return lv;
                     }
                     // Only `*p` (Deref) and prefix ++/-- are addressable; the
