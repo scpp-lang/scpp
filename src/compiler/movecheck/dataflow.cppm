@@ -569,7 +569,11 @@ namespace scpp {
 
 // The place `expr` names, with references resolved to what they are
 // bound to. nullopt when `expr` names no statically identifiable
-// storage -- see explain_untrackable_place for why.
+// storage -- an element at a runtime index, a call result, a
+// conditional. That is an answer, not a failure: every caller records
+// no state against such an expression and none of them rejects it,
+// which leaves the object in §6.2(2)'s initialized state and its
+// destructor invoked by §6.3(1).
 [[nodiscard]] std::optional<Place> tracked_place_of(const Expr& expr, const DataflowState& state, const Body& body,
                                                    std::vector<LocalId>* traversed_references,
                                                    PlacePrecision precision) {
@@ -2653,26 +2657,58 @@ struct ConvertingConstructorBinding {
             // place: a local, a member of it however deeply nested, a
             // member of the current object, an element at a literal
             // index, or any of those reached through a reference
-            // binding. What it may *not* be is an expression that names
-            // no identifiable object, because then there is nowhere to
-            // record the state transition; explain_untrackable_place
-            // says which of those it was rather than listing the forms
-            // that would have worked.
+            // binding.
+            //
+            // Where `E` names no place the checker can compute -- an
+            // element at a runtime index, a call result -- there is
+            // nowhere to record the transition, and that used to be
+            // reported as though the *program* were ill-formed. It is
+            // not. §6.2(3) attaches the transition to `E` being an
+            // *id-expression*; it does not require `E` to be one, and no
+            // clause of this document says a program may not move from
+            // anything else. §6.2's own note is explicit that the area
+            // is open: "whether, and under what conditions, a program
+            // may move a subobject out while its complete object remains
+            // otherwise initialized is not yet specified by this
+            // document" -- and by front-matter §1(2) an unspecified
+            // topic leaves the C++ rule applying unchanged, under which
+            // `std::move(arr[i])` is well-formed.
+            //
+            // Recording nothing is not merely permitted, it is what the
+            // text already prescribes: §6.2(2) leaves an object with no
+            // recorded transition in the initialized state, and §6.3(1)
+            // then invokes its destructor -- which is exactly C++'s "a
+            // moved-from object is still destroyed". Codegen zeroes the
+            // source storage on every move regardless of any place, so
+            // that destructor runs on an empty object rather than a
+            // duplicated one.
+            //
+            // §6.2(4)'s half of the same two-state model had this right
+            // all along: the assignment arm asks the same
+            // tracked_place_of, and on std::nullopt reinitializes
+            // nothing and carries on.
             std::vector<LocalId> moved_through;
             std::optional<Place> moved = tracked_place_of(*expr.lhs, state, body, &moved_through);
             if (!moved.has_value()) {
-                if (expr.lhs->kind == ExprKind::Identifier &&
-                    find_visible_global_for_name(expr.lhs->name, expr.lhs->explicit_global_qualification, body) !=
-                        nullptr) {
-                    return {};
+                if (report_errors && expr.lhs->kind == ExprKind::Identifier &&
+                    find_visible_global_for_name(expr.lhs->name, expr.lhs->explicit_global_qualification, body) ==
+                        nullptr &&
+                    !body.local_of(*expr.lhs).has_value()) {
+                    return std::unexpected(DataflowError("unknown variable '" + expr.lhs->name + "'",
+                        state.current_loc));
+                }
+                // The operand is still evaluated: a subscript's index, a
+                // call's arguments and the reads inside them all happen,
+                // and each is subject to every rule that governs it.
+                if (auto _r = apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures,
+                                         report_errors);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
                 }
                 if (report_errors) {
-                    if (expr.lhs->kind == ExprKind::Identifier) {
-                        return std::unexpected(DataflowError("unknown variable '" + expr.lhs->name + "'",
-                            state.current_loc));
+                    if (auto _r = validate_place_indirections(*expr.lhs, state, body, signatures); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
                     }
-                    return std::unexpected(DataflowError("cannot move from " + explain_untrackable_place(*expr.lhs),
-                        state.current_loc));
                 }
                 return {};
             }

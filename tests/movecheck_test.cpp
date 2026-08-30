@@ -1342,7 +1342,20 @@ void test_move_of_a_member_is_accepted_at_every_boundary() {
               use_after.value_or(std::string("<no error>")) + "'");
 }
 
-void test_move_of_an_untrackable_place_reports_the_same_reason_at_every_boundary() {
+// An expression that names no trackable place is not thereby
+// ill-formed. spec ch02 §6.2(3) says what `std::move(E)` does when `E`
+// is an *id-expression*; it requires nothing of any other `E`, and
+// §6.2's note puts moving a subobject out among the topics "not yet
+// specified by this document", which front-matter §1(2) leaves to the
+// C++ rule. What the checker records is a separate question from
+// whether the program is well-formed, and a runtime subscript answers
+// the first with "nothing" -- §6.2(2) then leaves the element
+// initialized and §6.3(1) destroys it.
+//
+// The raw-pointer dereference alongside it still *is* rejected, by a
+// different clause -- §5.1(5.1)'s gate on indirection -- which is why
+// the two cannot share one reason.
+void test_an_untrackable_move_source_is_well_formed() {
     cases_run++;
     const std::string preamble =
         "import std;\n"
@@ -1358,8 +1371,8 @@ void test_move_of_an_untrackable_place_reports_the_same_reason_at_every_boundary
         "    sink(std::move(*p));\n"
         "    return;\n"
         "}\n");
-    expect(deref.has_value() && deref->find("dereference") != std::string::npos,
-           "move_of_an_untrackable_place_reports_the_same_reason_at_every_boundary: deref gave '" +
+    expect(deref.has_value() && deref->find("[[scpp::unsafe]]") != std::string::npos,
+           "an_untrackable_move_source_is_well_formed: a raw-pointer deref must still be gated by \u00a75.1(5.1), got '" +
               deref.value_or(std::string("<no error>")) + "'");
 
     std::optional<std::string> subscript = move_error_message(
@@ -1369,9 +1382,22 @@ void test_move_of_an_untrackable_place_reports_the_same_reason_at_every_boundary
         "    sink(std::move(arr[i]));\n"
         "    return;\n"
         "}\n");
-    expect(subscript.has_value() && subscript->find("not a literal") != std::string::npos,
-           "move_of_an_untrackable_place_reports_the_same_reason_at_every_boundary: runtime subscript gave '" +
+    expect(!subscript.has_value(),
+           "an_untrackable_move_source_is_well_formed: runtime subscript gave '" +
               subscript.value_or(std::string("<no error>")) + "'");
+
+    std::optional<std::string> call_result = move_error_message(
+        preamble +
+        "int mk() {\n"
+        "    return 1;\n"
+        "}\n"
+        "void caller() {\n"
+        "    sink(std::move(mk()));\n"
+        "    return;\n"
+        "}\n");
+    expect(!call_result.has_value(),
+           "an_untrackable_move_source_is_well_formed: call result gave '" +
+              call_result.value_or(std::string("<no error>")) + "'");
 }
 
 // Per-place granularity, stated as three claims a coarse per-LocalId
@@ -3161,7 +3187,7 @@ int main() {
     test_expected_of_a_smart_pointer_accepts_nullptr();
     test_rejected_initializer_diagnostic_advises_a_syntax_that_parses();
     test_move_of_a_member_is_accepted_at_every_boundary();
-    test_move_of_an_untrackable_place_reports_the_same_reason_at_every_boundary();
+    test_an_untrackable_move_source_is_well_formed();
     test_move_of_a_member_tracks_state_per_place();
     test_overload_failure_distinguishes_arity_from_argument_type();
     test_overload_failure_names_the_offending_argument_and_types();
