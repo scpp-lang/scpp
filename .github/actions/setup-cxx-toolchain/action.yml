@@ -1,0 +1,106 @@
+name: Set up the scpp C++ toolchain
+description: >
+  Installs the apt build dependencies and the exact pinned CMake this project
+  requires, and puts that CMake first in PATH for the rest of the calling job.
+
+  This lives in a composite action rather than being spelled out inline in
+  ci.yml because CI is no longer a single job: the build job, every unit-test
+  shard and the blackbox job all need an identical toolchain, and the CMake pin
+  below is version-exact and silently breakable (see the long comment on the
+  "Install pinned CMake" step). Copying that pin into four jobs would be four
+  places for it to drift out of sync; there is exactly one copy here instead.
+
+runs:
+  using: composite
+  steps:
+    - name: Install build dependencies
+      shell: bash
+      run: |
+        set -euxo pipefail
+        ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+        if [ ! -f "${ubuntu_sources}" ]; then
+          ubuntu_sources=/etc/apt/sources.list
+        fi
+        scoped_update() {
+          sudo apt-get update \
+            -o Dir::Etc::sourcelist="$1" \
+            -o Dir::Etc::sourceparts="-" \
+            -o APT::Get::List-Cleanup="0"
+        }
+        scoped_update "${ubuntu_sources}"
+        # `g++` is not used as the compiler (that's still clang-22, via
+        # the CC/CXX the calling job sets) -- it's here so Clang's
+        # `import std;` support has a standard library to build the
+        # `std`/`std.compat` modules from: Clang implements `import std;`
+        # against whichever standard library it's configured for, and this
+        # project intentionally stays on the platform default (libstdc++)
+        # rather than libc++, since the prebuilt LLVM static libraries below
+        # are themselves built against libstdc++ (see the CMakeLists.txt
+        # comment next to `CMAKE_EXPERIMENTAL_CXX_IMPORT_STD` for the full
+        # ABI-compat rationale). `g++`'s `libstdc++-*-dev` provides the
+        # `bits/std.cc`/`bits/std.compat.cc` module interface units and
+        # `libstdc++.modules.json` manifest that CMake's CXX_MODULE_STD
+        # machinery needs.
+        #
+        # The full set is installed in the *test* jobs too, not just the
+        # build job, and that is not belt-and-braces: the test binaries and
+        # the `scpp` binary they drive genuinely need it at run time.
+        # `ldd build/driver_test` resolves libz3.so.4 / libzstd.so.1 /
+        # libz.so.1 (from llvm-22-dev and libzstd-dev) and libstdc++.so.6,
+        # and `scpp` itself shells out to a real compiler driver to link --
+        # `cc -static ... -lstdc++ -lm` in driver.cppm's link_executable,
+        # and one of `clang++`/`clang++-22`/`g++`/`c++` in project.cppm.
+        # A test job without these does not fail to start; it fails deep
+        # inside a test case, which is much harder to read.
+        #
+        # `cmake` is deliberately NOT installed here -- see the "Install
+        # pinned CMake" step below for why.
+        sudo apt-get install -y ca-certificates curl ninja-build libzstd-dev libsqlite3-dev clang-22 llvm-22-dev g++
+
+    - name: Install pinned CMake
+      shell: bash
+      run: |
+        set -euxo pipefail
+        # CMAKE_EXPERIMENTAL_CXX_IMPORT_STD's required activation UUID
+        # (see CMakeLists.txt) is tied to one exact CMake version -- CMake's
+        # own Help/dev/experimental.rst warns the UUID "may change in
+        # future versions of CMake", and it did: CMake 4.2.3 uses
+        # d0edc3af-4c50-42ea-a356-e2862fe7a444, but CMake 4.4.0 uses
+        # f35a9ac6-8463-4d38-8eec-5d6008153e7d instead.
+        #
+        # This is exactly what broke CI originally, and it wasn't even an
+        # apt-version-drift problem: `apt-get install cmake` correctly
+        # installed 4.2.3 (matching local dev validation), but the
+        # ubuntu-26.04 runner image ships its own pre-installed CMake
+        # 4.4.0 under /usr/local, which sits earlier in PATH than the
+        # apt-installed copy under /usr -- so the apt-installed 4.2.3 was
+        # silently shadowed and never actually used, and the runner's
+        # 4.4.0 (with the "wrong" UUID for our CMakeLists.txt) ran
+        # instead. Since this experimental feature is this fragile across
+        # versions, and PATH-shadowing by the runner image can silently
+        # reintroduce the same class of bug even if apt's version stays
+        # put, download and use one exact, pinned upstream CMake release
+        # instead of whatever apt/the runner image happen to provide, and
+        # put it first in PATH for the rest of this job. Re-check this
+        # pin (and the CMakeLists.txt UUID) together when deliberately
+        # upgrading CMake.
+        #
+        # The unit-test jobs need this pin as much as the build job does,
+        # even though they only run `ctest`: they run the `ctest` that
+        # belongs to the same CMake that generated the build tree's
+        # CTestTestfile.cmake, rather than the runner image's unrelated
+        # 4.4.0 ctest. It is also installed at the same ${RUNNER_TEMP}
+        # path in every job, which matters because the build tree's
+        # CMakeCache.txt records CMAKE_COMMAND as an absolute path into it.
+        cmake_version=4.2.3
+        cmake_sha256=5bb505d5e0cca0480a330f7f27ccf52c2b8b5214c5bba97df08899f5ef650c23
+        cmake_archive="cmake-${cmake_version}-linux-x86_64.tar.gz"
+        cmake_dir="${RUNNER_TEMP}/cmake-${cmake_version}-linux-x86_64"
+        curl -fsSL -o "${cmake_archive}" \
+          "https://github.com/Kitware/CMake/releases/download/v${cmake_version}/${cmake_archive}"
+        echo "${cmake_sha256}  ${cmake_archive}" | sha256sum -c -
+        mkdir -p "${cmake_dir}"
+        tar xzf "${cmake_archive}" -C "${cmake_dir}" --strip-components=1
+        rm -f "${cmake_archive}"
+        echo "${cmake_dir}/bin" >> "${GITHUB_PATH}"
+        "${cmake_dir}/bin/cmake" --version

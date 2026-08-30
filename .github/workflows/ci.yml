@@ -1,5 +1,61 @@
 name: CI
 
+# The C++ build and the test suites used to live in one `build-and-test` job.
+# That job ran build (~6-9.5 min), `ctest` (~22-39 min) and the blackbox suite
+# (~11-13 min) strictly in sequence, so its wall clock was the *sum* of all
+# three -- and on 2026-08-30 run 33337729995 was cancelled by the 60-minute
+# `timeout-minutes` partway through the blackbox suite, needing ~71 minutes.
+#
+# The measured per-step numbers behind the split below (cancelled run
+# 33337729995 / successful run 33322429959):
+#
+#   install deps            10 s  /   10 s
+#   install pinned CMake     2 s  /    2 s
+#   configure main project   6 s  /    5 s
+#   build main project     564 s  /  366 s
+#   ctest (serial)        2314 s  / 1314 s
+#   configure blackbox       0 s  /    0 s
+#   build blackbox           7 s  /    7 s
+#   run blackbox           707 s+ /  649 s
+#
+# and inside that serial `ctest`, per suite (cancelled / successful):
+#
+#   lexer_test               0 s  /    0 s
+#   parser_test             11 s  /    8 s
+#   codegen_test           145 s  /   77 s
+#   movecheck_test         744 s  /  392 s
+#   driver_test           1405 s  /  833 s
+#   httpserver_test          8 s  /    5 s
+#
+# So the build is a small part of the cost and the tests are ~90% of it, with
+# `driver_test` alone worth 61% of `ctest`. The structure that follows is
+# therefore: build once, hand the finished build tree to the test jobs as an
+# artifact, and run the unit-test shards and the blackbox suite concurrently.
+#
+# Handing the tree over rather than rebuilding it is the whole point: separate
+# jobs get separate machines and separate filesystems, so a naive "one job
+# builds, another runs ctest" split would pay the 6-9.5 minute C++26-modules +
+# LLVM build again in every test job and end up slower, not faster. Packing the
+# tree costs ~4 s (514 MB -> 175 MB with `gzip -1`) plus the artifact
+# round-trip, against 6-9.5 minutes of rebuild.
+#
+# No suite, case or compiler flag changed here: `ctest` still runs all six
+# tests, the blackbox runner still runs its whole corpus, and the build still
+# uses the same `-Werror` configuration.
+#
+# The resulting graph is:
+#
+#   workflow-scope -> build -> unit-tests (3 shards) --\
+#                          \-> blackbox-tests ----------> build-and-test
+#                                                            |
+#                                                  docker-website-smoke
+#                                                            |
+#                                                 publish-website-image
+#
+# `build-and-test` survives as the aggregating gate rather than as the job
+# that does the work, because `main`'s branch protection requires the status
+# checks `build-and-test` and `docker-website-smoke` by name.
+
 on:
   pull_request:
   push:
@@ -7,13 +63,17 @@ on:
       - main
 
 jobs:
-  build-and-test:
+  # Answers, exactly once for the whole workflow, the two questions every
+  # downstream job needs answered the same way: "is this a docs-only change
+  # set?" and "which unit tests belong to which shard?". Both are exposed as
+  # job outputs, so the other jobs consume one answer instead of each
+  # recomputing its own and risking a disagreement.
+  workflow-scope:
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
-    env:
-      CC: clang-22
-      CXX: clang++-22
-      LLVM_CMAKE_DIR: /usr/lib/llvm-22/lib/cmake/llvm
+    timeout-minutes: 10
+    outputs:
+      docs_only: ${{ steps.change-scope.outputs.docs_only }}
+      unit_test_shards: ${{ steps.shard-map.outputs.shards }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -62,80 +122,43 @@ jobs:
         if: steps.change-scope.outputs.docs_only == 'true'
         run: echo "Docs-only change set detected; skipping build and test steps."
 
-      - name: Install build dependencies
-        if: steps.change-scope.outputs.docs_only != 'true'
+      # The single source of truth for how `ctest`'s tests are divided across
+      # the `unit-tests` matrix. The matrix is built from this output with
+      # `fromJSON`, *and* the build job checks this same output against the
+      # test list `ctest` actually declares -- so the map that schedules the
+      # shards and the map that is audited for coverage cannot drift apart.
+      #
+      # Shards are grouped by measured cost, not alphabetically: `driver_test`
+      # (833-1405 s) and `movecheck_test` (392-744 s) each get a shard to
+      # themselves and everything else (<170 s combined) shares the third, so
+      # the wall clock of this stage is one `driver_test`, not the sum.
+      - name: Publish the unit-test shard map
+        id: shard-map
+        shell: bash
         run: |
-          set -euxo pipefail
-          ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
-          if [ ! -f "${ubuntu_sources}" ]; then
-            ubuntu_sources=/etc/apt/sources.list
-          fi
-          scoped_update() {
-            sudo apt-get update \
-              -o Dir::Etc::sourcelist="$1" \
-              -o Dir::Etc::sourceparts="-" \
-              -o APT::Get::List-Cleanup="0"
-          }
-          scoped_update "${ubuntu_sources}"
-          # `g++` is not used as the compiler (that's still clang-22, via
-          # CC/CXX above) -- it's here so Clang's `import std;` support has
-          # a standard library to build the `std`/`std.compat` modules
-          # from: Clang implements `import std;` against whichever standard
-          # library it's configured for, and this project intentionally
-          # stays on the platform default (libstdc++) rather than libc++,
-          # since the prebuilt LLVM static libraries below are themselves
-          # built against libstdc++ (see the CMakeLists.txt comment next to
-          # `CMAKE_EXPERIMENTAL_CXX_IMPORT_STD` for the full ABI-compat
-          # rationale). `g++`'s `libstdc++-*-dev` provides the
-          # `bits/std.cc`/`bits/std.compat.cc` module interface units and
-          # `libstdc++.modules.json` manifest that CMake's CXX_MODULE_STD
-          # machinery needs.
-          #
-          # `cmake` is deliberately NOT installed here -- see the "Install
-          # pinned CMake" step below for why.
-          sudo apt-get install -y ca-certificates curl ninja-build libzstd-dev libsqlite3-dev clang-22 llvm-22-dev g++
+          set -euo pipefail
+          shards='[{"name":"driver","tests":"driver_test"},{"name":"movecheck","tests":"movecheck_test"},{"name":"frontend","tests":"lexer_test parser_test codegen_test httpserver_test"}]'
+          python3 -c 'import json,sys; json.loads(sys.argv[1])' "${shards}"
+          echo "shards=${shards}" >> "${GITHUB_OUTPUT}"
 
-      - name: Install pinned CMake
-        if: steps.change-scope.outputs.docs_only != 'true'
-        run: |
-          set -euxo pipefail
-          # CMAKE_EXPERIMENTAL_CXX_IMPORT_STD's required activation UUID
-          # (see CMakeLists.txt) is tied to one exact CMake version -- CMake's
-          # own Help/dev/experimental.rst warns the UUID "may change in
-          # future versions of CMake", and it did: CMake 4.2.3 uses
-          # d0edc3af-4c50-42ea-a356-e2862fe7a444, but CMake 4.4.0 uses
-          # f35a9ac6-8463-4d38-8eec-5d6008153e7d instead.
-          #
-          # This is exactly what broke CI originally, and it wasn't even an
-          # apt-version-drift problem: `apt-get install cmake` correctly
-          # installed 4.2.3 (matching local dev validation), but the
-          # ubuntu-26.04 runner image ships its own pre-installed CMake
-          # 4.4.0 under /usr/local, which sits earlier in PATH than the
-          # apt-installed copy under /usr -- so the apt-installed 4.2.3 was
-          # silently shadowed and never actually used, and the runner's
-          # 4.4.0 (with the "wrong" UUID for our CMakeLists.txt) ran
-          # instead. Since this experimental feature is this fragile across
-          # versions, and PATH-shadowing by the runner image can silently
-          # reintroduce the same class of bug even if apt's version stays
-          # put, download and use one exact, pinned upstream CMake release
-          # instead of whatever apt/the runner image happen to provide, and
-          # put it first in PATH for the rest of this job. Re-check this
-          # pin (and the CMakeLists.txt UUID) together when deliberately
-          # upgrading CMake.
-          cmake_version=4.2.3
-          cmake_sha256=5bb505d5e0cca0480a330f7f27ccf52c2b8b5214c5bba97df08899f5ef650c23
-          cmake_archive="cmake-${cmake_version}-linux-x86_64.tar.gz"
-          cmake_dir="${RUNNER_TEMP}/cmake-${cmake_version}-linux-x86_64"
-          curl -fsSL -o "${cmake_archive}" \
-            "https://github.com/Kitware/CMake/releases/download/v${cmake_version}/${cmake_archive}"
-          echo "${cmake_sha256}  ${cmake_archive}" | sha256sum -c -
-          mkdir -p "${cmake_dir}"
-          tar xzf "${cmake_archive}" -C "${cmake_dir}" --strip-components=1
-          echo "${cmake_dir}/bin" >> "${GITHUB_PATH}"
-          "${cmake_dir}/bin/cmake" --version
+  build:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    needs: workflow-scope
+    env:
+      CC: clang-22
+      CXX: clang++-22
+      LLVM_CMAKE_DIR: /usr/lib/llvm-22/lib/cmake/llvm
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up the scpp C++ toolchain
+        if: needs.workflow-scope.outputs.docs_only != 'true'
+        uses: ./.github/actions/setup-cxx-toolchain
 
       - name: Configure main project
-        if: steps.change-scope.outputs.docs_only != 'true'
+        if: needs.workflow-scope.outputs.docs_only != 'true'
         run: |
           set -euxo pipefail
           # Confirm which cmake actually resolves in PATH, so any future
@@ -146,24 +169,262 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH="${LLVM_CMAKE_DIR}"
 
       - name: Build main project
-        if: steps.change-scope.outputs.docs_only != 'true'
+        if: needs.workflow-scope.outputs.docs_only != 'true'
         run: cmake --build build
 
-      - name: Run unit tests
-        if: steps.change-scope.outputs.docs_only != 'true'
-        run: ctest --test-dir build --output-on-failure
-
       - name: Configure blackbox test runner
-        if: steps.change-scope.outputs.docs_only != 'true'
+        if: needs.workflow-scope.outputs.docs_only != 'true'
         run: cmake -S blackbox_test -B blackbox_test/build
 
       - name: Build blackbox test runner
-        if: steps.change-scope.outputs.docs_only != 'true'
+        if: needs.workflow-scope.outputs.docs_only != 'true'
         run: cmake --build blackbox_test/build
 
+      # Coverage audit for the shard map. A shard that silently runs zero
+      # tests, or a newly added `add_test` that no shard claims, would both
+      # otherwise show up as a green run that tested less than it looked like
+      # it did. This compares the shard map against `ctest`'s own declared
+      # test list and fails on any test that is unassigned, assigned twice, or
+      # assigned but not declared.
+      - name: Verify the shard map covers every declared unit test
+        if: needs.workflow-scope.outputs.docs_only != 'true'
+        env:
+          UNIT_TEST_SHARDS: ${{ needs.workflow-scope.outputs.unit_test_shards }}
+        run: |
+          set -euo pipefail
+          ctest --test-dir build --show-only=json-v1 > build/ctest-declared-tests.json
+          python3 <<'PY'
+          import json
+          import os
+
+          with open("build/ctest-declared-tests.json", encoding="utf-8") as handle:
+              declared = sorted(test["name"] for test in json.load(handle)["tests"])
+
+          assigned = [
+              name
+              for shard in json.loads(os.environ["UNIT_TEST_SHARDS"])
+              for name in shard["tests"].split()
+          ]
+
+          problems = []
+          if not declared:
+              problems.append("ctest declared no tests at all")
+          duplicated = sorted({name for name in assigned if assigned.count(name) > 1})
+          if duplicated:
+              problems.append(f"assigned to more than one shard: {duplicated}")
+          unassigned = sorted(set(declared) - set(assigned))
+          if unassigned:
+              problems.append(f"declared by ctest but claimed by no shard: {unassigned}")
+          unknown = sorted(set(assigned) - set(declared))
+          if unknown:
+              problems.append(f"claimed by a shard but not declared by ctest: {unknown}")
+
+          if problems:
+              for problem in problems:
+                  print(f"::error::unit-test shard map: {problem}")
+              raise SystemExit(1)
+
+          print(f"shard map covers all {len(declared)} declared tests: {', '.join(declared)}")
+          PY
+
+      # Both build trees travel to the test jobs as one gzipped tar rather than
+      # as a raw directory upload. Two reasons, both load-bearing:
+      #
+      #   * `actions/upload-artifact` normalises file modes, so a directory
+      #     upload would hand the test jobs non-executable `scpp`,
+      #     `driver_test`, `run_tests`, ... A tar preserves the mode bits.
+      #   * The tree is ~514 MB across tens of thousands of small object and
+      #     module files; one 175 MB stream moves far faster than that many
+      #     individual entries. `compression-level: 0` on the upload stops the
+      #     action from re-compressing an already-compressed tar.
+      #
+      # `build/.ci-workspace-path` records where the tree was built. CMake and
+      # Ninja bake absolute paths into CMakeCache.txt, CTestTestfile.cmake and
+      # driver_test's own SCPP_BINARY_PATH/SCPP_*_SOURCE_DIR defines, so this
+      # relocation only works because every job in a run gets the identical
+      # /home/runner/work/scpp/scpp workspace. That is true today, and the
+      # marker turns "if it ever stops being true" from a baffling
+      # file-not-found deep inside a test into an explicit CI error.
+      - name: Package the build tree for the test jobs
+        if: needs.workflow-scope.outputs.docs_only != 'true'
+        run: |
+          set -euxo pipefail
+          printf '%s\n' "${GITHUB_WORKSPACE}" > build/.ci-workspace-path
+          tar -I 'gzip -1' -cf build-tree.tar.gz build blackbox_test/build
+          ls -l build-tree.tar.gz
+
+      - name: Upload the build tree
+        if: needs.workflow-scope.outputs.docs_only != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-tree
+          path: build-tree.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  unit-tests:
+    name: unit-tests (${{ matrix.shard.name }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    needs:
+      - workflow-scope
+      - build
+    strategy:
+      # Every shard reports its own result: a red `driver` shard must not hide
+      # a red `movecheck` one.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.workflow-scope.outputs.unit_test_shards) }}
+    env:
+      CC: clang-22
+      CXX: clang++-22
+      LLVM_CMAKE_DIR: /usr/lib/llvm-22/lib/cmake/llvm
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up the scpp C++ toolchain
+        if: needs.workflow-scope.outputs.docs_only != 'true'
+        uses: ./.github/actions/setup-cxx-toolchain
+
+      - name: Download the build tree
+        if: needs.workflow-scope.outputs.docs_only != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: build-tree
+
+      - name: Unpack the build tree
+        if: needs.workflow-scope.outputs.docs_only != 'true'
+        run: |
+          set -euxo pipefail
+          tar -xf build-tree.tar.gz
+          rm -f build-tree.tar.gz
+          built_in="$(cat build/.ci-workspace-path)"
+          if [ "${built_in}" != "${GITHUB_WORKSPACE}" ]; then
+            echo "::error::build tree was produced in ${built_in} but this job runs in ${GITHUB_WORKSPACE}; the absolute paths baked into CMakeCache.txt/CTestTestfile.cmake will not resolve"
+            exit 1
+          fi
+
+      - name: Run unit tests
+        if: needs.workflow-scope.outputs.docs_only != 'true'
+        env:
+          SHARD_NAME: ${{ matrix.shard.name }}
+          SHARD_TESTS: ${{ matrix.shard.tests }}
+        run: |
+          set -euo pipefail
+          read -r -a shard_tests <<< "${SHARD_TESTS}"
+          if [ "${#shard_tests[@]}" -eq 0 ]; then
+            echo "::error::shard '${SHARD_NAME}' has no tests assigned to it"
+            exit 1
+          fi
+          selector="^($(IFS='|'; echo "${shard_tests[*]}"))$"
+
+          # `--no-tests=error` alone only catches a shard that selects
+          # *nothing*; this also catches a shard that selects some but not all
+          # of what it was assigned (a renamed test, say), which would
+          # otherwise be a quietly smaller test run that still reports green.
+          selected=$(ctest --test-dir build --show-only=json-v1 -R "${selector}" |
+            python3 -c 'import json,sys; print(len(json.load(sys.stdin)["tests"]))')
+          if [ "${selected}" -ne "${#shard_tests[@]}" ]; then
+            echo "::error::shard '${SHARD_NAME}' selected ${selected} test(s) but was assigned ${#shard_tests[@]} (${SHARD_TESTS})"
+            exit 1
+          fi
+
+          ctest --test-dir build -R "${selector}" --no-tests=error --output-on-failure
+
+  blackbox-tests:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    needs:
+      - workflow-scope
+      - build
+    env:
+      CC: clang-22
+      CXX: clang++-22
+      LLVM_CMAKE_DIR: /usr/lib/llvm-22/lib/cmake/llvm
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up the scpp C++ toolchain
+        if: needs.workflow-scope.outputs.docs_only != 'true'
+        uses: ./.github/actions/setup-cxx-toolchain
+
+      - name: Download the build tree
+        if: needs.workflow-scope.outputs.docs_only != 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: build-tree
+
+      - name: Unpack the build tree
+        if: needs.workflow-scope.outputs.docs_only != 'true'
+        run: |
+          set -euxo pipefail
+          tar -xf build-tree.tar.gz
+          rm -f build-tree.tar.gz
+          built_in="$(cat build/.ci-workspace-path)"
+          if [ "${built_in}" != "${GITHUB_WORKSPACE}" ]; then
+            echo "::error::build tree was produced in ${built_in} but this job runs in ${GITHUB_WORKSPACE}; the blackbox runner's baked-in path to the scpp binary will not resolve"
+            exit 1
+          fi
+
       - name: Run blackbox suite
-        if: steps.change-scope.outputs.docs_only != 'true'
+        if: needs.workflow-scope.outputs.docs_only != 'true'
         run: ./blackbox_test/build/run_tests
+
+  # The single gate that stands in for everything above. It keeps the name
+  # `build-and-test` deliberately: `main`'s branch protection requires the
+  # status checks `build-and-test` and `docker-website-smoke` by name, so
+  # letting `build-and-test` stop existing would leave every pull request
+  # waiting forever on a check that can never report. Aggregating behind one
+  # stable name also means the shard map above can be re-cut at any time
+  # without having to re-edit branch protection to match new job names.
+  #
+  # `always()` plus an explicit result check, rather than a plain `needs:`,
+  # because the default `needs:` behaviour would *skip* this job when
+  # something upstream fails or is skipped -- and a skipped required check
+  # never reports a conclusion at all. Running unconditionally and then
+  # demanding `success` from every dependency turns "upstream failed",
+  # "upstream was skipped" and "upstream was cancelled" all into a red
+  # `build-and-test`, which is what a required check has to be.
+  build-and-test:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    if: always()
+    needs:
+      - workflow-scope
+      - build
+      - unit-tests
+      - blackbox-tests
+    steps:
+      - name: Require every build and test job to have succeeded
+        env:
+          # `needs.unit-tests.result` is the matrix job's aggregate: it is
+          # `success` only when every shard succeeded, so one red shard lands
+          # here as a red gate.
+          DEPENDENCY_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import json
+          import os
+
+          results = {
+              name: value["result"]
+              for name, value in json.loads(os.environ["DEPENDENCY_RESULTS"]).items()
+          }
+          for name in sorted(results):
+              print(f"{name}: {results[name]}")
+
+          failed = sorted(name for name, result in results.items() if result != "success")
+          if failed:
+              for name in failed:
+                  print(f"::error::job '{name}' did not succeed (result: {results[name]})")
+              raise SystemExit(1)
+
+          print(f"all {len(results)} build and test jobs succeeded")
+          PY
 
   docker-website-smoke:
     runs-on: ubuntu-26.04
@@ -361,6 +622,14 @@ jobs:
     permissions:
       id-token: write
       contents: read
+    # Unchanged from before the split, and still correct: `build-and-test` is
+    # now the gate that demands success from the build job, every unit-test
+    # shard and the blackbox job, so publishing still requires all of them to
+    # be green. `needs` defaults to requiring success from everything listed,
+    # and the `if` above adds a condition rather than replacing that
+    # requirement -- it contains no job-status function (`always()`,
+    # `failure()`, ...), so the implicit `success()` over `needs` still
+    # applies and a failed or skipped dependency skips this job.
     needs:
       - build-and-test
       - docker-website-smoke
