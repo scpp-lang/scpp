@@ -2718,6 +2718,178 @@ void test_blanket_capture_without_a_member_use_is_still_accepted() {
 // pair -- the binding is accepted, and a second mutable borrow of the
 // same local through it is rejected, which only holds if movecheck
 // sees a Reference and not a value.
+// [temp.inst]/3.1 (C++23 [temp.inst]/2.1): "The implicit instantiation of
+// a class template specialization causes the implicit instantiation of the
+// declarations, but not of the definitions, of the non-deleted class
+// member functions", and /4: a member's definition is instantiated only
+// "when the specialization is referenced in a context that requires the
+// member definition to exist". docs/spec/ adopts no clause modifying
+// [temp.inst], so front-matter §1(2) makes the C++ rule apply unchanged --
+// and [temp.inst]'s own Example 3 is this exact program.
+//
+// Every clone loop in monomorphize.cppm used to instantiate every member's
+// *definition* at the point the class was instantiated, so a member that
+// is ill-formed only for this argument rejected the program whether or not
+// anything named it.
+void test_unused_member_definition_is_not_instantiated() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(R"(
+class NoDef {
+public:
+    virtual ~NoDef() { return; }
+    int v{};
+    NoDef(int x) : v{x} { return; }
+};
+template<typename T>
+class Box {
+public:
+    virtual ~Box() { return; }
+    T t;
+    Box(int x) : t{x} { return; }
+    int unused() { T local{}; return local.v; }
+};
+int main() {
+    Box<NoDef> b{7};
+    return b.t.v - 7;
+}
+)");
+    expect(!error.has_value(), "unused_member_definition_is_not_instantiated: expected acceptance, got '" +
+                                   error.value_or("") + "'");
+}
+
+// The other direction of the same rule: naming the member *is* a context
+// that requires its definition, so the same body is still instantiated and
+// still rejected. Characterisation of the verdict this always had -- what
+// changed is only when the instantiation happens.
+void test_used_member_definition_is_still_instantiated() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(R"(
+class NoDef {
+public:
+    virtual ~NoDef() { return; }
+    int v{};
+    NoDef(int x) : v{x} { return; }
+};
+template<typename T>
+class Box {
+public:
+    virtual ~Box() { return; }
+    T t;
+    Box(int x) : t{x} { return; }
+    int used() { T local{}; return local.v; }
+};
+int main() {
+    Box<NoDef> b{7};
+    return b.used();
+}
+)");
+    expect(error.has_value() && error.value().find("has no default constructor") != std::string::npos,
+           "used_member_definition_is_still_instantiated: expected the no-default-constructor diagnostic, got '" +
+               error.value_or("<accepted>") + "'");
+}
+
+// The same rule reaches a *variadic* specialization's members, whose clone
+// loop is a different one (clone_variadic_class_methods).
+void test_unused_variadic_member_definition_is_not_instantiated() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(R"(
+class NoDef {
+public:
+    virtual ~NoDef() { return; }
+    int v{};
+    NoDef(int x) : v{x} { return; }
+};
+template<typename... Ts>
+class Bag;
+template<>
+class Bag<> {
+public:
+    virtual ~Bag() { return; }
+    int size() const { return 0; }
+};
+template<typename Head, typename... Tail>
+class Bag<Head, Tail...> : private Bag<Tail...> {
+public:
+    virtual ~Bag() override { return; }
+    int size() const { return 1; }
+    int unused() { Head local{}; return local.v; }
+};
+int main() {
+    Bag<NoDef> b{};
+    return b.size() - 1;
+}
+)");
+    expect(!error.has_value(), "unused_variadic_member_definition_is_not_instantiated: expected acceptance, got '" +
+                                   error.value_or("") + "'");
+}
+
+// [temp.inst]/4 does not close over the *template*: a member named only
+// from another member that is itself never instantiated is never
+// referenced in a context that requires its definition, so neither is
+// instantiated. Establishing this by construction rather than by assuming
+// one pass reaches the other transitively.
+void test_member_named_only_from_an_uninstantiated_member_is_not_instantiated() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(R"(
+class NoDef {
+public:
+    virtual ~NoDef() { return; }
+    int v{};
+    NoDef(int x) : v{x} { return; }
+};
+template<typename T>
+class Box {
+public:
+    virtual ~Box() { return; }
+    T t;
+    Box(int x) : t{x} { return; }
+    int unused() { T local{}; return local.v; }
+    int also_unused() { return this->unused(); }
+};
+int main() {
+    Box<NoDef> b{7};
+    return b.t.v - 7;
+}
+)");
+    expect(!error.has_value(),
+           "member_named_only_from_an_uninstantiated_member_is_not_instantiated: expected acceptance, got '" +
+               error.value_or("") + "'");
+}
+
+// [temp.inst]/12 leaves it unspecified whether a virtual member function
+// of a class template is instantiated when it would not otherwise be, and
+// clang++-22 instantiates it; SCPP26 needs it for the vtable of a class
+// whose virtual destructor spec §11.5(1) makes mandatory. So this member
+// stays eagerly instantiated on purpose, and the program stays rejected --
+// the control beside the five acceptances above.
+void test_a_virtual_member_definition_is_still_instantiated_when_unused() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(R"(
+class NoDef {
+public:
+    virtual ~NoDef() { return; }
+    int v{};
+    NoDef(int x) : v{x} { return; }
+};
+template<typename T>
+class Box {
+public:
+    virtual ~Box() { return; }
+    T t;
+    Box(int x) : t{x} { return; }
+    virtual int unused() { T local{}; return local.v; }
+};
+int main() {
+    Box<NoDef> b{7};
+    return b.t.v - 7;
+}
+)");
+    expect(error.has_value() && error.value().find("has no default constructor") != std::string::npos,
+           "a_virtual_member_definition_is_still_instantiated_when_unused: expected the "
+           "no-default-constructor diagnostic, got '" +
+               error.value_or("<accepted>") + "'");
+}
+
 void test_auto_reference_is_tracked_as_a_borrow() {
     cases_run++;
     expect(!throws_move_error(
@@ -3230,6 +3402,12 @@ int main() {
     test_empty_capture_list_using_a_member_names_the_rule();
     test_every_explicit_this_capture_spelling_is_accepted();
     test_blanket_capture_without_a_member_use_is_still_accepted();
+
+    test_unused_member_definition_is_not_instantiated();
+    test_used_member_definition_is_still_instantiated();
+    test_unused_variadic_member_definition_is_not_instantiated();
+    test_member_named_only_from_an_uninstantiated_member_is_not_instantiated();
+    test_a_virtual_member_definition_is_still_instantiated_when_unused();
 
     test_auto_reference_is_tracked_as_a_borrow();
     test_const_auto_reference_rejects_a_write();

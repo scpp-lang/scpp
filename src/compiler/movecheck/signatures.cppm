@@ -160,6 +160,7 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 [[nodiscard]] bool param_can_outlive_call_for_lifetime_return(const Param& param);
 [[nodiscard]] std::expected<void, DataflowError> validate_lifetime_annotation_placement(const Function& fn);
 [[nodiscard]] std::expected<std::vector<std::size_t>, DataflowError> resolve_returned_lifetime_param_indices(const Function& fn);
+[[nodiscard]] std::expected<void, DataflowError> add_function_signature(Signatures& signatures, const Function& fn);
 [[nodiscard]] std::expected<Signatures, DataflowError> build_signatures(const Program& program);
 
 // spec §6.5: whether `class_name` has declared its own copy constructor
@@ -1438,71 +1439,84 @@ struct ConstructedOwner {
 [[nodiscard]] std::expected<Signatures, DataflowError> build_signatures(const Program& program) {
     Signatures signatures;
     for (const Function& fn : program.functions) {
-        if (auto _r = validate_equality_operator_signature(fn); !_r.has_value()) return std::unexpected(std::move(_r).error());
-        if (auto _r = validate_operator_arrow_signature(fn); !_r.has_value()) return std::unexpected(std::move(_r).error());
-        FunctionSignature sig;
-        sig.param_types.reserve(fn.params.size());
-        sig.param_is_forwarding_reference.reserve(fn.params.size());
-        sig.param_names.reserve(fn.params.size());
-        sig.param_default_exprs.reserve(fn.params.size());
-        sig.param_require_thread_movable.reserve(fn.params.size());
-        sig.param_require_thread_shareable.reserve(fn.params.size());
-        for (const Param& param : fn.params) {
-            sig.param_types.push_back(param.type);
-            sig.param_is_forwarding_reference.push_back(is_forwarding_reference_param(fn, param));
-            sig.param_names.push_back(param.name);
-            sig.param_default_exprs.push_back(param.default_expr);
-            sig.param_require_thread_movable.push_back(param.require_thread_movable);
-            sig.param_require_thread_shareable.push_back(param.require_thread_shareable);
-            sig.param_lifetimes.push_back(param.lifetime);
+        if (auto _r = add_function_signature(signatures, fn); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
         }
-        sig.return_type = fn.return_type;
-        sig.return_lifetime = fn.return_lifetime;
-        auto returned_lifetime_result = resolve_returned_lifetime_param_indices(fn);
-        if (!returned_lifetime_result.has_value()) return std::unexpected(std::move(returned_lifetime_result).error());
-        sig.returned_lifetime_param_indices = std::move(returned_lifetime_result).value();
-        if (fn.return_lifetime.present()) {
-            sig.elided_param_index = std::nullopt;
-        } else {
-            auto elided_result = resolve_elided_param_index(fn);
-            if (!elided_result.has_value()) return std::unexpected(std::move(elided_result).error());
-            sig.elided_param_index = std::move(elided_result).value();
-        }
-        sig.is_extern_c_declaration_only = fn.is_extern_c && fn.body == nullptr;
-        sig.is_unsafe = fn.is_unsafe;
-        sig.is_nodiscard = fn.is_nodiscard;
-        sig.nodiscard_reason = fn.nodiscard_reason;
-        sig.is_compile_time_dependency = fn.is_compile_time_dependency;
-        sig.owning_module = fn.visibility_module.empty() ? fn.owning_module : fn.visibility_module;
-        sig.member_owner_class = fn.member_owner_class;
-        sig.is_static = fn.is_static;
-        sig.has_varargs = fn.has_varargs;
-        sig.access = fn.access;
-        sig.loc = fn.loc;
-        sig.receiver_ref_qualifier = fn.receiver_ref_qualifier;
-        sig.is_generic_template = fn.is_generic_template;
-        sig.is_deleted = fn.is_deleted;
-        sig.is_explicit = fn.is_explicit;
-        sig.display_name = fn.name;
-        std::vector<FunctionSignature>& overloads = signatures[fn.name];
-        for (const FunctionSignature& existing : overloads) {
-            if (existing.is_generic_template != sig.is_generic_template) continue;
-            bool same_params = existing.param_types.size() == sig.param_types.size();
-            for (std::size_t i = 0; same_params && i < sig.param_types.size(); i++) {
-                same_params = types_equal(existing.param_types[i], sig.param_types[i]);
-            }
-            if (same_params && existing.receiver_ref_qualifier == sig.receiver_ref_qualifier) {
-                return std::unexpected(DataflowError("redefinition of '" + fn.name +
-                                     "': a previous declaration with an identical parameter list already "
-                                     "exists ([basic.def.odr]/1 with [over.load]/2 -- functions can only be "
-                                     "overloaded by parameter list, return type alone doesn't count as a "
-                                     "difference)",
-                    fn.loc));
-            }
-        }
-        overloads.push_back(std::move(sig));
     }
     return signatures;
+}
+
+// One function's entry in the table, validations included -- the body of
+// build_signatures' own loop, named so a caller that has appended a
+// single Function to the program can bring `signatures` up to date in
+// O(1) instead of rebuilding the whole table. Sharing the implementation
+// is the point: an appended entry is *the same* entry a rebuild would
+// have produced, so the two can never disagree about what a signature is.
+[[nodiscard]] std::expected<void, DataflowError> add_function_signature(Signatures& signatures, const Function& fn) {
+    if (auto _r = validate_equality_operator_signature(fn); !_r.has_value()) return std::unexpected(std::move(_r).error());
+    if (auto _r = validate_operator_arrow_signature(fn); !_r.has_value()) return std::unexpected(std::move(_r).error());
+    FunctionSignature sig;
+    sig.param_types.reserve(fn.params.size());
+    sig.param_is_forwarding_reference.reserve(fn.params.size());
+    sig.param_names.reserve(fn.params.size());
+    sig.param_default_exprs.reserve(fn.params.size());
+    sig.param_require_thread_movable.reserve(fn.params.size());
+    sig.param_require_thread_shareable.reserve(fn.params.size());
+    for (const Param& param : fn.params) {
+        sig.param_types.push_back(param.type);
+        sig.param_is_forwarding_reference.push_back(is_forwarding_reference_param(fn, param));
+        sig.param_names.push_back(param.name);
+        sig.param_default_exprs.push_back(param.default_expr);
+        sig.param_require_thread_movable.push_back(param.require_thread_movable);
+        sig.param_require_thread_shareable.push_back(param.require_thread_shareable);
+        sig.param_lifetimes.push_back(param.lifetime);
+    }
+    sig.return_type = fn.return_type;
+    sig.return_lifetime = fn.return_lifetime;
+    auto returned_lifetime_result = resolve_returned_lifetime_param_indices(fn);
+    if (!returned_lifetime_result.has_value()) return std::unexpected(std::move(returned_lifetime_result).error());
+    sig.returned_lifetime_param_indices = std::move(returned_lifetime_result).value();
+    if (fn.return_lifetime.present()) {
+        sig.elided_param_index = std::nullopt;
+    } else {
+        auto elided_result = resolve_elided_param_index(fn);
+        if (!elided_result.has_value()) return std::unexpected(std::move(elided_result).error());
+        sig.elided_param_index = std::move(elided_result).value();
+    }
+    sig.is_extern_c_declaration_only = fn.is_extern_c && fn.body == nullptr;
+    sig.is_unsafe = fn.is_unsafe;
+    sig.is_nodiscard = fn.is_nodiscard;
+    sig.nodiscard_reason = fn.nodiscard_reason;
+    sig.is_compile_time_dependency = fn.is_compile_time_dependency;
+    sig.owning_module = fn.visibility_module.empty() ? fn.owning_module : fn.visibility_module;
+    sig.member_owner_class = fn.member_owner_class;
+    sig.is_static = fn.is_static;
+    sig.has_varargs = fn.has_varargs;
+    sig.access = fn.access;
+    sig.loc = fn.loc;
+    sig.receiver_ref_qualifier = fn.receiver_ref_qualifier;
+    sig.is_generic_template = fn.is_generic_template;
+    sig.is_deleted = fn.is_deleted;
+    sig.is_explicit = fn.is_explicit;
+    sig.display_name = fn.name;
+    std::vector<FunctionSignature>& overloads = signatures[fn.name];
+    for (const FunctionSignature& existing : overloads) {
+        if (existing.is_generic_template != sig.is_generic_template) continue;
+        bool same_params = existing.param_types.size() == sig.param_types.size();
+        for (std::size_t i = 0; same_params && i < sig.param_types.size(); i++) {
+            same_params = types_equal(existing.param_types[i], sig.param_types[i]);
+        }
+        if (same_params && existing.receiver_ref_qualifier == sig.receiver_ref_qualifier) {
+            return std::unexpected(DataflowError("redefinition of '" + fn.name +
+                                 "': a previous declaration with an identical parameter list already "
+                                 "exists ([basic.def.odr]/1 with [over.load]/2 -- functions can only be "
+                                 "overloaded by parameter list, return type alone doesn't count as a "
+                                 "difference)",
+                fn.loc));
+        }
+    }
+    overloads.push_back(std::move(sig));
+    return {};
 }
 
 } // namespace scpp

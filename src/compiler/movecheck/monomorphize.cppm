@@ -100,11 +100,7 @@ public:
     }
 
     [[nodiscard]] std::expected<void, DataflowError> run() {
-        {
-            auto _r = build_signatures(program_);
-            if (!_r.has_value()) return std::unexpected(std::move(_r).error());
-            signatures_ = std::move(_r).value();
-        }
+        if (auto _r = rebuild_signatures(); !_r.has_value()) return std::unexpected(std::move(_r).error());
         // ch05 §5.14: synthesizes a "forwarding stub" Function for every
         // inherited method/field access a derived class doesn't itself
         // override (see synthesize_inherited_method_forwards' own
@@ -133,11 +129,7 @@ public:
         // later overload resolution or generic-function constraint check
         // consults it, so those queries see the fully concrete program
         // shape rather than the pre-resolution templates.
-        {
-            auto _r = build_signatures(program_);
-            if (!_r.has_value()) return std::unexpected(std::move(_r).error());
-            signatures_ = std::move(_r).value();
-        }
+        if (auto _r = rebuild_signatures(); !_r.has_value()) return std::unexpected(std::move(_r).error());
         // A snapshot of the function count *before* any clone is
         // injected: new clones/synthesized closure classes are appended
         // to program_.functions/program_.classes as we go (see
@@ -214,7 +206,8 @@ public:
             std::vector<MemberInitializer> walk_member_inits = program_.functions[i].member_initializers;
             current_walk_return_type_ = program_.functions[i].return_type;
             if (auto _r = walk_member_initializers(walk_member_inits, body, enclosing_this_type,
-                                                   allow_generic_monomorphization);
+                                                   allow_generic_monomorphization,
+                                                   is_constructor_function(program_.functions[i]));
                 !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
@@ -272,7 +265,65 @@ private:
     std::unordered_map<std::string, std::string> clone_cache_;
     std::unordered_set<std::string> known_type_names_;
     std::unordered_set<std::string> known_function_names_;
+    // The verdict of unsatisfied_method_constraint below: empty when the
+    // member has no requires-clause or its clause is satisfied.
+    struct MethodConstraint {
+        std::string concept_name;
+        std::string argument_spelling;
+
+        [[nodiscard]] bool is_unsatisfied() const { return !concept_name.empty(); }
+    };
+
+    // [temp.inst]/3.1, /4: one entry per class-template member whose
+    // declaration has been instantiated and whose definition has not --
+    // see member_definition_is_deferrable and require_member_definition
+    // below.
+    struct DeferredMemberDefinition {
+        std::string function_name;
+        // Two overloads of one member share a Function name exactly
+        // (`Box.NoDef_new` for both `Box()` and `Box(int)`; only the
+        // parameter list distinguishes them, and only in the emitted
+        // symbol). Overload resolution picks one, so the definition
+        // required has to be identified by the declaration the selected
+        // signature came from -- FunctionSignature::loc is that
+        // declaration's own source location, copied from the template
+        // method the clone was made from. Keying on the name alone
+        // instantiated *every* overload of the member, which is exactly
+        // the unused `Box()` [temp.inst]/3.1 exists to leave alone.
+        SourceLocation declaration_loc;
+        std::size_t function_index = 0;
+        bool materialized = false;
+        std::function<std::expected<void, DataflowError>(Function&)> build_definition;
+    };
+    // A vector plus a name index rather than a plain map: two
+    // instantiations of the same specialization (one imported, one made
+    // locally -- see instantiate_imported_generic_locally) legitimately
+    // produce two clones spelled identically.
+    std::vector<DeferredMemberDefinition> deferred_member_definitions_;
+    std::unordered_map<std::string, std::vector<std::size_t>> deferred_by_function_name_;
+    // Every name require_member_definition_family could be asked about
+    // that some deferral would answer to: for a clone named `n`, `n`
+    // itself and every prefix of `n` that ends just before a `.` --
+    // exactly the strings `n` satisfies that function's
+    // `name == base || name.starts_with(base + ".")` test for. Not an
+    // approximation, and it exists so the two callers that ask "is any
+    // definition still deferred under this name?" -- and especially
+    // require_constructor_definition, which asks it at every construction
+    // in the program -- can answer in O(1) instead of walking the whole
+    // deferral index and running a full constructor overload resolution
+    // against a class that has nothing deferred.
+    std::unordered_set<std::string> deferred_family_bases_;
     Signatures signatures_;
+    // program_.functions.size() as of the last time signatures_ was
+    // synced, or SIZE_MAX when a rollback (see the `fail` lambdas in
+    // instantiate_generic_type and friends) has shortened
+    // program_.functions and left entries in signatures_ that name
+    // functions no longer there. sync_appended_function_signatures uses
+    // it to append the entries for the functions pushed since, instead of
+    // rebuilding a table whose every other entry is already correct --
+    // the rebuild is O(program), so doing it once per instantiated member
+    // declaration is quadratic in the size of the program.
+    std::size_t signatures_function_count_ = 0;
     // ch05 §5.14: every generic class/struct template's own name -- see
     // the constructor's own comment.
     std::unordered_set<std::string> generic_type_template_names_;
@@ -503,11 +554,7 @@ private:
         // A concrete clone is created during this pass, after the
         // program-wide resolution ran, so it is bound here.
         resolve_locals(fn);
-        {
-            auto _r = build_signatures(program_);
-            if (!_r.has_value()) return std::unexpected(std::move(_r).error());
-            signatures_ = std::move(_r).value();
-        }
+        if (auto _r = rebuild_signatures(); !_r.has_value()) return std::unexpected(std::move(_r).error());
         Body body = build_mir(fn);
         body.program = &program_;
         WalkReturnTypeScope return_type_scope(current_walk_return_type_, fn.return_type);
@@ -521,7 +568,7 @@ private:
         // vector held *inside* the Function object and would dangle.
         std::vector<MemberInitializer> walked_initializers = fn.member_initializers;
         if (auto _r = walk_member_initializers(walked_initializers, body, enclosing_this_type,
-                                               allow_generic_monomorphization);
+                                               allow_generic_monomorphization, is_constructor_function(fn));
             !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
@@ -587,7 +634,35 @@ private:
     // construction order, and before the body, which is when it runs.
     [[nodiscard]] std::expected<void, DataflowError> walk_member_initializers(
         std::vector<MemberInitializer>& initializers, Body& body, const std::optional<Type>& enclosing_this_type,
-        bool allow_generic_monomorphization) {
+        bool allow_generic_monomorphization, bool enclosing_is_constructor = false) {
+        // ch06 §6.1: a direct base with no mem-initializer of its own is
+        // default-constructed, and nothing in the AST spells that call --
+        // the only record of it is the *absence* of an initializer. It is
+        // still a construction, so [temp.inst]/4 requires the base's
+        // default constructor. Missing this linked
+        // `TagList<int, bool>{}` against an undefined `TagList.bool_new`.
+        if (allow_generic_monomorphization && enclosing_is_constructor && enclosing_this_type.has_value()) {
+            std::vector<Type> implicit_bases;
+            for (const ClassDef& def : program_.classes) {
+                if (def.name != enclosing_this_type->name) continue;
+                for (const BaseSpecifier& base : def.base_specifiers) {
+                    bool explicitly_initialized = false;
+                    for (const MemberInitializer& init : initializers) {
+                        explicitly_initialized =
+                            explicitly_initialized || callee_name_spells_type(init.member_name, base.base_type.name);
+                    }
+                    if (!explicitly_initialized) implicit_bases.push_back(base.base_type);
+                }
+                break;
+            }
+            for (const Type& base_type : implicit_bases) {
+                if (base_type.kind != TypeKind::Named) continue;
+                std::vector<ExprPtr> no_arguments;
+                if (auto _r = require_constructor_definition(base_type.name, no_arguments, body); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+        }
         for (MemberInitializer& init : initializers) {
             if (init.initializer.expr != nullptr) {
                 if (auto _r = walk_expr(*init.initializer.expr, body, enclosing_this_type,
@@ -603,8 +678,54 @@ private:
                     return std::unexpected(std::move(_r).error());
                 }
             }
+            // ch06 §6.1: a mem-initializer *constructs* its member or
+            // base, so it requires that constructor's definition just as
+            // a `T x{...}` declaration does ([temp.inst]/4) -- the third
+            // place a construction is spelled, after a VarDecl and a
+            // `new`.
+            if (allow_generic_monomorphization && enclosing_this_type.has_value()) {
+                std::optional<Type> initialized =
+                    initialized_subobject_type(enclosing_this_type->name, init.member_name);
+                if (initialized.has_value() && initialized->kind == TypeKind::Named) {
+                    if (auto _r = require_constructor_definition(initialized->name, init.initializer.brace_args, body);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
+            }
         }
         return {};
+    }
+
+    // The declared type of whatever a mem-initializer names inside
+    // `class_name`: one of its own non-static data members, or one of its
+    // direct bases.
+    [[nodiscard]] std::optional<Type> initialized_subobject_type(const std::string& class_name,
+                                                                 const std::string& member_name) const {
+        for (const ClassDef& def : program_.classes) {
+            if (def.name != class_name) continue;
+            for (const ClassField& field : def.fields) {
+                if (field.name == member_name) return field.type;
+            }
+            // A base-class mem-initializer names the base as the
+            // *template* spells it (`: Box{s}`), while the instantiated
+            // base specifier carries the monomorphized name
+            // (`Box.bool`) -- the same two spellings of one type
+            // callee_name_spells_type already reconciles for a
+            // construction call.
+            for (const BaseSpecifier& base : def.base_specifiers) {
+                if (callee_name_spells_type(member_name, base.base_type.name)) return base.base_type;
+            }
+            return std::nullopt;
+        }
+        for (const StructDef& def : program_.structs) {
+            if (def.name != class_name) continue;
+            for (const StructField& field : def.fields) {
+                if (field.name == member_name) return field.type;
+            }
+            return std::nullopt;
+        }
+        return std::nullopt;
     }
 
     // Every expression an Initializer holds, in either spelling
@@ -705,11 +826,20 @@ private:
             for (std::size_t j = 0; j < program_.classes[i].fields.size(); j++) {
                 Type field_type = program_.classes[i].fields[j].type;
                 std::vector<Expr*> exprs = default_initializer_exprs(program_.classes[i].fields[j]);
-                if (exprs.empty()) continue;
+                // Not gated on `exprs.empty()`: `T t{};` has a default
+                // member initializer with no arguments at all, and still
+                // constructs.
+                if (!program_.classes[i].fields[j].default_initializer.has_value()) continue;
                 Body body = non_function_body(program_.classes[i].owning_module, program_.classes[i].namespace_path,
                                               program_.classes[i].name);
                 current_walk_return_type_ = initializer_target_type(field_type);
                 if (auto _r = walk_initializer_exprs(exprs, body); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                if (auto _r = require_default_initializer_constructor(field_type,
+                                                                      program_.classes[i].fields[j].default_initializer,
+                                                                      body);
+                    !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
             }
@@ -719,11 +849,20 @@ private:
             for (std::size_t j = 0; j < program_.structs[i].fields.size(); j++) {
                 Type field_type = program_.structs[i].fields[j].type;
                 std::vector<Expr*> exprs = default_initializer_exprs(program_.structs[i].fields[j]);
-                if (exprs.empty()) continue;
+                // Not gated on `exprs.empty()`: `T t{};` has a default
+                // member initializer with no arguments at all, and still
+                // constructs.
+                if (!program_.structs[i].fields[j].default_initializer.has_value()) continue;
                 Body body = non_function_body(program_.structs[i].owning_module, program_.structs[i].namespace_path,
                                               program_.structs[i].name);
                 current_walk_return_type_ = initializer_target_type(field_type);
                 if (auto _r = walk_initializer_exprs(exprs, body); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                if (auto _r = require_default_initializer_constructor(field_type,
+                                                                      program_.structs[i].fields[j].default_initializer,
+                                                                      body);
+                    !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
             }
@@ -759,6 +898,16 @@ private:
             }
         }
         return {};
+    }
+
+    // ch06 §6.1: a default member initializer on a class-typed field is
+    // the fourth spelling of a construction (after a VarDecl, a `new`,
+    // and a mem-initializer), and requires that constructor's definition
+    // the same way ([temp.inst]/4).
+    [[nodiscard]] std::expected<void, DataflowError> require_default_initializer_constructor(
+        const Type& field_type, const std::optional<Initializer>& initializer, Body& body) {
+        if (field_type.kind != TypeKind::Named || !initializer.has_value()) return {};
+        return require_constructor_definition(field_type.name, initializer->brace_args, body);
     }
 
     void rewrite_implicit_member_field_access(Function& fn) {
@@ -1324,6 +1473,367 @@ private:
         return result;
     }
 
+    // [temp.inst]/3.1: "The implicit instantiation of a class template
+    // specialization causes the implicit instantiation of the
+    // declarations, but not of the definitions, of the non-deleted class
+    // member functions"; [temp.inst]/4: a member's definition is
+    // instantiated only "when the specialization is referenced in a
+    // context that requires the member definition to exist". (C++23
+    // numbered the same two sentences [temp.inst]/2.1 and /3.)
+    // docs/spec/ adopts no clause modifying [temp.inst] -- and ch05
+    // §9.4(7) writes a rule *about* [temp.point]/[temp.dep.constexpr],
+    // so the C++ instantiation model is presupposed, not replaced -- so
+    // front-matter §1(2) makes the C++ rule apply unchanged.
+    //
+    // Every method clone therefore carries its signature immediately (so
+    // overload resolution, concept satisfaction and vtable layout see the
+    // complete member set) and its *body* only once something names it.
+    // `build_definition` is the substitution the owning clone loop would
+    // have run inline; it is replayed verbatim at the point of use (see
+    // DeferredMemberDefinition, declared with this class's other state).
+    //
+    // [temp.inst]/12 leaves it unspecified whether a virtual member
+    // function of a class template is instantiated when it would not
+    // otherwise be, and clang++-22 instantiates it; every SCPP26 class
+    // must declare a virtual destructor (spec §11.5(1)), whose definition
+    // the vtable needs in any case. A deleted or bodyless member has no
+    // definition to defer ([temp.inst]/3.2).
+    [[nodiscard]] static bool member_definition_is_deferrable(const Function& method_tmpl) {
+        // A member *template*'s class-level clone is not a definition at
+        // all -- it is the template every later `Class_new.int`-style
+        // specialization is cloned from ([temp.inst]/3.1 instantiates the
+        // declarations of member templates; their own specializations are
+        // instantiated on use, which this pass already does on demand via
+        // maybe_instantiate_generic_constructor_overloads /
+        // get_or_create_clone). Deferring its body left those
+        // specializations bodyless, so `std::expected<int, E>{7}` linked
+        // against an `expected_new.int` nothing defined.
+        if (!method_tmpl.template_params.empty()) return false;
+        return method_tmpl.body != nullptr && !method_tmpl.is_virtual && !method_tmpl.is_pure &&
+               !method_tmpl.is_deleted;
+    }
+
+    // The whole table, from the program as it stands. Every caller that
+    // changes an *existing* function's signature -- resolve_generic_types
+    // rewriting a return type, a closure's inferred return type replacing
+    // its `void` placeholder -- needs this one, since only a rebuild can
+    // unsay what the table already says.
+    [[nodiscard]] std::expected<void, DataflowError> rebuild_signatures() {
+        auto _r = build_signatures(program_);
+        if (!_r.has_value()) return std::unexpected(std::move(_r).error());
+        signatures_ = std::move(_r).value();
+        signatures_function_count_ = program_.functions.size();
+        return {};
+    }
+
+    // The entries for the functions appended since the last sync, and
+    // nothing else. A rebuild is O(program) and this pass appends a
+    // function for every member of every instantiated class template, so
+    // rebuilding per append is quadratic: compiling
+    // `libs/scpp/scpp.scpp`'s `mt19937`/`uniform_int_distribution` spent
+    // 2.8 s of an 11 s compile in 511 such rebuilds, and the entries they
+    // recomputed were, but for the last one, byte-identical to the ones
+    // already in the table.
+    //
+    // Equivalent to a rebuild exactly when no earlier function's
+    // signature has changed and none has been removed. The two places
+    // that change one already call rebuild_signatures immediately after,
+    // and a removal (the `fail` lambdas' rollback) is announced by
+    // forget_deferred_member_definitions_from, which invalidates the
+    // watermark -- so the next sync rebuilds instead.
+    [[nodiscard]] std::expected<void, DataflowError> sync_appended_function_signatures() {
+        if (signatures_function_count_ > program_.functions.size()) return rebuild_signatures();
+        for (std::size_t i = signatures_function_count_; i < program_.functions.size(); i++) {
+            if (auto _r = add_function_signature(signatures_, program_.functions[i]); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        signatures_function_count_ = program_.functions.size();
+        return {};
+    }
+
+    // Registering a declaration-only clone must refresh the signature
+    // table for the same reason walk_new_concrete_function does it for a
+    // clone that keeps its body: the very next thing this pass does with
+    // the freshly instantiated class -- resolving an overload against it,
+    // finding its converting constructor for an argument conversion --
+    // reads `signatures_`, and a member that is not in there yet is a
+    // member that does not exist. Skipping the refresh made
+    // `std::print("{}\n", 1)` stop compiling: format_string<int>'s
+    // constructor was declared but not yet in `signatures_`, so the
+    // `const char[4]` argument had no conversion to it.
+    [[nodiscard]] std::expected<void, DataflowError> register_deferred_member_definition(
+        std::size_t function_index, std::function<std::expected<void, DataflowError>(Function&)> build) {
+        DeferredMemberDefinition deferred;
+        deferred.function_name = program_.functions[function_index].name;
+        deferred.declaration_loc = program_.functions[function_index].loc;
+        deferred.function_index = function_index;
+        deferred.build_definition = std::move(build);
+        remember_deferred_family_bases(deferred.function_name);
+        deferred_by_function_name_[deferred.function_name].push_back(deferred_member_definitions_.size());
+        deferred_member_definitions_.push_back(std::move(deferred));
+        return sync_appended_function_signatures();
+    }
+
+    // See deferred_family_bases_' own comment: `name`, plus every prefix
+    // of it that ends where a `.` begins.
+    void remember_deferred_family_bases(const std::string& name) {
+        deferred_family_bases_.insert(name);
+        for (std::size_t i = 0; i < name.size(); i++) {
+            if (name[i] == '.') deferred_family_bases_.insert(name.substr(0, i));
+        }
+    }
+
+    // Drops every deferral recorded for a clone that an
+    // instantiation-failure rollback has just removed from
+    // program_.functions again (see instantiate_generic_type's own
+    // `fail`), so a later clone that lands on the same index can never
+    // inherit a stale definition builder. The same rollback leaves
+    // signatures_ describing functions that are about to stop existing,
+    // so the append watermark is dropped here too and the next sync
+    // rebuilds the table outright.
+    void forget_deferred_member_definitions_from(std::size_t first_function_index) {
+        signatures_function_count_ = std::numeric_limits<std::size_t>::max();
+        for (DeferredMemberDefinition& deferred : deferred_member_definitions_) {
+            if (deferred.function_index < first_function_index) continue;
+            deferred.materialized = true;
+            deferred.build_definition = nullptr;
+        }
+    }
+
+    [[nodiscard]] std::expected<void, DataflowError> materialize_member_definition(std::size_t slot) {
+        if (slot >= deferred_member_definitions_.size()) return {};
+        if (deferred_member_definitions_[slot].materialized) return {};
+        // Marked before building: the body being built can name the very
+        // member it belongs to (ordinary recursion), and that reference
+        // must find the definition already under way rather than start a
+        // second one.
+        deferred_member_definitions_[slot].materialized = true;
+        std::size_t function_index = deferred_member_definitions_[slot].function_index;
+        if (function_index >= program_.functions.size()) return {};
+        if (program_.functions[function_index].name != deferred_member_definitions_[slot].function_name) return {};
+        // Built into a scratch Function rather than in place: the
+        // substitution below resolves generic types, which can instantiate
+        // a further generic class and push onto program_.functions,
+        // reallocating it out from under a held reference.
+        Function scratch;
+        auto build = deferred_member_definitions_[slot].build_definition;
+        deferred_member_definitions_[slot].build_definition = nullptr;
+        if (build == nullptr) return {};
+        if (auto _r = build(scratch); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        program_.functions[function_index].member_initializers = std::move(scratch.member_initializers);
+        program_.functions[function_index].body = std::move(scratch.body);
+        return walk_new_concrete_function(function_index);
+    }
+
+    // The definition of exactly the member overload resolution selected.
+    [[nodiscard]] std::expected<void, DataflowError> require_member_definition(const FunctionSignature& selected) {
+        if (deferred_member_definitions_.empty()) return {};
+        auto it = deferred_by_function_name_.find(selected.display_name);
+        if (it == deferred_by_function_name_.end()) return {};
+        // Copied, not iterated in place: materializing one definition can
+        // instantiate further classes and register further deferrals,
+        // which rehashes this map.
+        std::vector<std::size_t> slots = it->second;
+        for (std::size_t slot : slots) {
+            if (slot >= deferred_member_definitions_.size()) continue;
+            const SourceLocation& declared_at = deferred_member_definitions_[slot].declaration_loc;
+            if (declared_at.line != selected.loc.line || declared_at.column != selected.loc.column) continue;
+            if (auto _r = materialize_member_definition(slot); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        return {};
+    }
+
+    // Every overload spelled under one member name (`C_m`, `C_m.1`, ...),
+    // for the cases where the *name* is known but which overload a use
+    // selects is not -- an unresolved receiver type, an ambiguity, or a
+    // callee spelling this pass has not rewritten. Over-approximating
+    // here only reinstates the instantiation that would have happened
+    // anyway; under-approximating would lose a definition the program
+    // needs.
+    [[nodiscard]] std::expected<void, DataflowError> require_member_definition_family(const std::string& base_name) {
+        if (deferred_member_definitions_.empty() || base_name.empty()) return {};
+        if (!deferred_family_bases_.contains(base_name)) return {};
+        std::string overload_prefix = base_name + ".";
+        std::vector<std::size_t> slots;
+        for (const auto& [name, name_slots] : deferred_by_function_name_) {
+            if (name != base_name && !name.starts_with(overload_prefix)) continue;
+            slots.insert(slots.end(), name_slots.begin(), name_slots.end());
+        }
+        for (std::size_t slot : slots) {
+            if (auto _r = materialize_member_definition(slot); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        return {};
+    }
+
+    // The last resort: a use whose receiver type this pass could not name
+    // at all, matched on the member name alone (`_m`, `_m.1`) across every
+    // instantiation. Same direction of error as the family form above.
+    [[nodiscard]] std::expected<void, DataflowError> require_member_definitions_named(const std::string& member_name) {
+        if (deferred_member_definitions_.empty() || member_name.empty()) return {};
+        std::vector<std::size_t> slots;
+        for (const auto& [name, name_slots] : deferred_by_function_name_) {
+            std::string_view spelled{name};
+            if (std::size_t overload_suffix = spelled.rfind('.'); overload_suffix != std::string_view::npos) {
+                spelled = spelled.substr(0, overload_suffix);
+            }
+            if (!spelled.ends_with("_" + member_name)) continue;
+            slots.insert(slots.end(), name_slots.begin(), name_slots.end());
+        }
+        for (std::size_t slot : slots) {
+            if (auto _r = materialize_member_definition(slot); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        return {};
+    }
+
+    // [temp.inst]/4: "the specialization of the member is implicitly
+    // instantiated when the specialization is referenced in a context
+    // that requires the member definition to exist". Every context that
+    // does so in SCPP26 selects one function, and the shared resolvers
+    // below are the *same* ones check_moves and codegen select with, so
+    // "which definition does this expression require" is answered here by
+    // the same algebra that later decides which definition to call.
+    //
+    // A construction is not among these kinds: it is requested at each of
+    // the sites that knows the constructed type -- a VarDecl, a
+    // `new T{...}`, a class-named call, a mem-initializer, a default
+    // member initializer, and the argument/parameter boundary that
+    // initializes a by-value class parameter (ch06 §6.6(3)-(5)).
+    [[nodiscard]] std::expected<void, DataflowError> require_definitions_referenced_by(const Expr& expr, Body& body) {
+        if (deferred_member_definitions_.empty()) return {};
+        switch (expr.kind) {
+            case ExprKind::Call: {
+                CalleeSignature callee = resolve_callee_signature(expr, body, signatures_);
+                if (const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures_); sig != nullptr) {
+                    return require_member_definition(*sig);
+                }
+                // No single winner: an unresolved receiver type, an
+                // ambiguity, or a callee spelling a later step still
+                // rewrites. Requiring more than the program needs only
+                // restores the instantiation this pass used to do
+                // unconditionally; requiring less would lose a definition
+                // it does need.
+                if (auto _r = require_member_definition_family(callee.key); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                return require_member_definitions_named(expr.name);
+            }
+            case ExprKind::Binary: {
+                std::optional<Type> lhs_type = expr.lhs ? infer_expr_type(*expr.lhs, body, signatures_) : std::nullopt;
+                std::optional<Type> rhs_type = expr.rhs ? infer_expr_type(*expr.rhs, body, signatures_) : std::nullopt;
+                SelectedOperator selected = resolve_binary_operator_call(expr, lhs_type, rhs_type, body, signatures_);
+                if (selected.signature == nullptr) return {};
+                return require_member_definition(*selected.signature);
+            }
+            case ExprKind::Unary: {
+                std::optional<Type> operand_type =
+                    expr.lhs ? infer_expr_type(*expr.lhs, body, signatures_) : std::nullopt;
+                SelectedOperator selected = resolve_unary_operator_call(expr, operand_type, body, signatures_);
+                if (selected.signature == nullptr) return {};
+                return require_member_definition(*selected.signature);
+            }
+            case ExprKind::Subscript: {
+                std::optional<Type> base_type = expr.lhs ? infer_expr_type(*expr.lhs, body, signatures_) : std::nullopt;
+                SelectedOperator selected = resolve_subscript_operator_call(expr, base_type, body, signatures_);
+                if (selected.signature == nullptr) return {};
+                return require_member_definition(*selected.signature);
+            }
+            default:
+                return {};
+        }
+    }
+
+    // ch06 §6.1/§6.6(3)-(5)/§6.7: the constructor a construction selects.
+    // [over.match.ctor] has exactly one answer and
+    // resolve_constructor_signature (signatures.cppm) is the one
+    // implementation of it -- the same [over.ics.rank] algebra
+    // check_moves selects a constructor with and codegen emits a call to,
+    // so the definition instantiated here cannot be a different overload
+    // from the one that gets called. This pass's own
+    // find_ordinary_constructor_overload deliberately answers a narrower
+    // question (is there a *non-template* constructor for these
+    // arguments, for the converting-template suppression guard) and
+    // scans an unordered map, so for `std::optional<NoDefault>
+    // full{NoDefault{7}}` it named `optional(const NoDefault&)` while
+    // codegen called `optional(NoDefault&&)`, and the definition
+    // instantiated was not the definition linked against.
+    [[nodiscard]] std::expected<void, DataflowError> require_constructor_definition(const std::string& class_name,
+                                                                                     const std::vector<ExprPtr>& args,
+                                                                                     Body& body) {
+        if (deferred_member_definitions_.empty() || class_name.empty()) return {};
+        // Both branches below can only ever reach a deferral named
+        // `class_name + "_new"` or an overload of it --
+        // resolve_constructor_signature considers no other name -- so
+        // when nothing is deferred under that name there is no definition
+        // to require and the overload resolution is pure waste.
+        // resolve_constructor_signature walks every entry in the
+        // signature table, and this pass asks it at every construction in
+        // the program: for `libs/scpp/scpp.scpp` that was 3,525 whole-
+        // table scans of which 3,446 named nothing.
+        std::string constructor_family = class_name + "_new";
+        if (!deferred_family_bases_.contains(constructor_family)) return {};
+        if (const FunctionSignature* sig = resolve_constructor_signature(class_name, args, body, signatures_);
+            sig != nullptr) {
+            return require_member_definition(*sig);
+        }
+        return require_member_definition_family(constructor_family);
+    }
+
+    // Records the exclusion so a later call to the member can be told
+    // *why* the member is not there (codegen's
+    // describe_call_resolution_failure), instead of being told only that
+    // no function of that name is declared.
+    void record_constraint_excluded_member(const std::string& class_name, const Function& method_tmpl,
+                                           const std::string& owner_name, const std::string& owner_id,
+                                           const MethodConstraint& constraint) {
+        std::string member_name = method_suffix_after_owner_prefix(method_tmpl, owner_name, owner_id);
+        if (!member_name.empty() && member_name.front() == '_') member_name.erase(member_name.begin());
+        if (std::size_t overload_suffix = member_name.rfind('.'); overload_suffix != std::string::npos) {
+            member_name = member_name.substr(0, overload_suffix);
+        }
+        for (const ConstraintExcludedMember& recorded : program_.constraint_excluded_members) {
+            if (recorded.class_name == class_name && recorded.member_name == member_name) return;
+        }
+        ConstraintExcludedMember excluded;
+        excluded.class_name = class_name;
+        excluded.member_name = std::move(member_name);
+        excluded.concept_name = constraint.concept_name;
+        excluded.argument_spelling = constraint.argument_spelling;
+        program_.constraint_excluded_members.push_back(std::move(excluded));
+    }
+
+    // [temp.constr.decl], [over.match.viable]/1: a member function whose
+    // *requires-clause* is not satisfied for this specialization's own
+    // template argument is still declared -- [temp.inst]/3.1 instantiates
+    // the declarations of *all* non-deleted members -- but is never a
+    // viable candidate, so naming it is ill-formed and its definition is
+    // never instantiated.
+    //
+    // One implementation, consulted by every clone loop. What stood here
+    // was a single copy in the ordinary-class loop that dropped the whole
+    // member instead, so a call reported "call to unknown function",
+    // describing the compiler's own clone table rather than the program;
+    // and the variadic loop asked the question not at all, silently
+    // running an unsatisfied-constraint method's body
+    // (`Bag<int>::gated() requires HasDoubled<int>`).
+    [[nodiscard]] MethodConstraint unsatisfied_method_constraint(
+        const Function& method_tmpl, const std::vector<std::pair<std::string, Type>>& type_replacements) const {
+        if (method_tmpl.method_requires_concept.empty()) return {};
+        auto concept_it = concepts_by_name_.find(method_tmpl.method_requires_concept);
+        const Type* constrained_type = type_replacements.empty() ? nullptr : &type_replacements.front().second;
+        bool satisfied = constrained_type != nullptr && concept_it != concepts_by_name_.end() &&
+                         type_satisfies_concept(*constrained_type, *concept_it->second, program_);
+        if (satisfied) return {};
+        return MethodConstraint{method_tmpl.method_requires_concept,
+                                constrained_type == nullptr ? std::string() : describe_type_brief(*constrained_type)};
+    }
+
     [[nodiscard]] std::expected<void, DataflowError> clone_variadic_class_methods(const std::string& cache_key, const std::string& template_name,
                                       const std::string& owner_id, const std::vector<Function>& methods,
                                       const std::vector<GenericTypeParam>& template_params_copy,
@@ -1331,6 +1841,11 @@ private:
                                       const std::unordered_map<std::string, std::vector<Type>>& pack_replacements,
                                       const std::vector<int>& non_type_args) {
         for (const Function& method_tmpl : methods) {
+            if (MethodConstraint constraint = unsatisfied_method_constraint(method_tmpl, type_replacements);
+                constraint.is_unsatisfied()) {
+                record_constraint_excluded_member(cache_key, method_tmpl, template_name, owner_id, constraint);
+                continue;
+            }
             Function clone;
             clone.name = cache_key + method_suffix_after_owner_prefix(method_tmpl, template_name, owner_id);
             clone.loc = method_tmpl.loc;
@@ -1410,46 +1925,61 @@ private:
                 }
                 clone.params.push_back(std::move(np));
             }
-            if (auto _r = clone_member_initializers(
-                    method_tmpl, clone,
-                    [&](Expr& e) -> std::expected<void, DataflowError> {
-                        substitute_type_params_in_expr(e, type_replacements);
-                        substitute_type_packs_in_expr(e, pack_replacements);
-                        for (std::size_t i = 0; i < template_params_copy.size() && i < non_type_args.size(); i++) {
-                            if (!template_params_copy[i].is_non_type) continue;
-                            substitute_non_type_param_in_expr(e, template_params_copy[i].name, non_type_args[i]);
-                        }
-                        return resolve_generic_types_in_expr(e);
-                    });
-                !_r.has_value()) {
-                return std::unexpected(std::move(_r).error());
-            }
-            clone.body = method_tmpl.body ? deep_clone_stmt(*method_tmpl.body) : nullptr;
-            if (clone.body) {
-                substitute_type_params_in_stmt(*clone.body, type_replacements);
-                substitute_type_packs_in_stmt(*clone.body, pack_replacements);
-                for (std::size_t i = 0; i < template_params_copy.size() && i < non_type_args.size(); i++) {
-                    if (!template_params_copy[i].is_non_type) continue;
-                    substitute_non_type_param_in_stmt(*clone.body, template_params_copy[i].name, non_type_args[i]);
-                }
-                for (const auto& [class_pack_name, concrete_pack_types] : pack_replacements) {
-                    expand_explicit_template_arg_packs_in_stmt(*clone.body, class_pack_name, concrete_pack_types);
-                }
-                for (const auto& [pack_param_name, concrete_names] : pack_param_names) {
-                    if (auto _r = expand_pack_expansions_in_stmt(*clone.body, pack_param_name, concrete_names); !_r.has_value()) {
-                        return std::unexpected(std::move(_r).error());
-                    }
-                    if (auto _r = expand_pack_folds_in_stmt(*clone.body, pack_param_name, concrete_names); !_r.has_value()) {
-                        return std::unexpected(std::move(_r).error());
-                    }
-                }
-                if (auto _r = resolve_generic_types_in_stmt(*clone.body); !_r.has_value()) {
+            auto build_definition = [this, method_tmpl, type_replacements, pack_replacements, template_params_copy,
+                                     non_type_args,
+                                     pack_param_names](Function& into) -> std::expected<void, DataflowError> {
+                if (auto _r = clone_member_initializers(
+                        method_tmpl, into,
+                        [&](Expr& e) -> std::expected<void, DataflowError> {
+                            substitute_type_params_in_expr(e, type_replacements);
+                            substitute_type_packs_in_expr(e, pack_replacements);
+                            for (std::size_t i = 0; i < template_params_copy.size() && i < non_type_args.size(); i++) {
+                                if (!template_params_copy[i].is_non_type) continue;
+                                substitute_non_type_param_in_expr(e, template_params_copy[i].name, non_type_args[i]);
+                            }
+                            return resolve_generic_types_in_expr(e);
+                        });
+                    !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
+                into.body = method_tmpl.body ? deep_clone_stmt(*method_tmpl.body) : nullptr;
+                if (into.body) {
+                    substitute_type_params_in_stmt(*into.body, type_replacements);
+                    substitute_type_packs_in_stmt(*into.body, pack_replacements);
+                    for (std::size_t i = 0; i < template_params_copy.size() && i < non_type_args.size(); i++) {
+                        if (!template_params_copy[i].is_non_type) continue;
+                        substitute_non_type_param_in_stmt(*into.body, template_params_copy[i].name, non_type_args[i]);
+                    }
+                    for (const auto& [class_pack_name, concrete_pack_types] : pack_replacements) {
+                        expand_explicit_template_arg_packs_in_stmt(*into.body, class_pack_name, concrete_pack_types);
+                    }
+                    for (const auto& [pack_param_name, concrete_names] : pack_param_names) {
+                        if (auto _r = expand_pack_expansions_in_stmt(*into.body, pack_param_name, concrete_names); !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
+                        if (auto _r = expand_pack_folds_in_stmt(*into.body, pack_param_name, concrete_names); !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
+                    }
+                    if (auto _r = resolve_generic_types_in_stmt(*into.body); !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
+                return {};
+            };
+            bool defer_definition = member_definition_is_deferrable(method_tmpl);
+            if (!defer_definition) {
+                if (auto _r = build_definition(clone); !_r.has_value()) return std::unexpected(std::move(_r).error());
             }
             known_function_names_.insert(clone.name);
             program_.functions.push_back(std::move(clone));
-            if (auto _r = walk_new_concrete_function(program_.functions.size() - 1); !_r.has_value()) {
+            if (defer_definition) {
+                if (auto _r = register_deferred_member_definition(program_.functions.size() - 1,
+                                                                  std::move(build_definition));
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            } else if (auto _r = walk_new_concrete_function(program_.functions.size() - 1); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
             if (!program_.functions.back().template_params.empty()) {
@@ -2763,6 +3293,7 @@ private:
                 known_function_names_.erase(program_.functions[k].name);
                 generic_template_indices_.erase(program_.functions[k].name);
             }
+            forget_deferred_member_definitions_from(functions_before_instantiation);
             if (program_.functions.size() > functions_before_instantiation) {
                 program_.functions.resize(functions_before_instantiation);
             }
@@ -2944,14 +3475,14 @@ private:
             program_.classes.push_back(std::move(concrete));
             ordinary_generic_instance_info_[cache_key] = OrdinaryGenericInstanceInfo{template_name, named_concretes};
             for (const Function& method_tmpl : methods) {
-                if (!method_tmpl.method_requires_concept.empty()) {
-                    auto concept_it = concepts_by_name_.find(method_tmpl.method_requires_concept);
-                    const Type* constrained_type = class_selection.bindings.type_replacements.empty()
-                                                       ? nullptr
-                                                       : &class_selection.bindings.type_replacements.front().second;
-                    bool satisfied = constrained_type != nullptr && concept_it != concepts_by_name_.end() &&
-                                      type_satisfies_concept(*constrained_type, *concept_it->second, program_);
-                    if (!satisfied) continue;
+                // [temp.constr.decl], [over.match.viable]/1 -- one
+                // implementation, asked by every clone loop (see
+                // unsatisfied_method_constraint).
+                if (MethodConstraint constraint =
+                        unsatisfied_method_constraint(method_tmpl, class_selection.bindings.type_replacements);
+                    constraint.is_unsatisfied()) {
+                    record_constraint_excluded_member(cache_key, method_tmpl, template_name, tmpl_owner_id, constraint);
+                    continue;
                 }
                 Function clone;
                 clone.name = cache_key + method_suffix_after_owner_prefix(method_tmpl, template_name, tmpl_owner_id);
@@ -3038,31 +3569,52 @@ private:
                     }
                     clone.params.push_back(std::move(np));
                 }
-                if (auto _r = clone_member_initializers(
-                        method_tmpl, clone,
-                        [&](Expr& e) -> std::expected<void, DataflowError> {
-                            substitute_type_params_in_expr(e, class_selection.bindings.type_replacements);
-                            substitute_type_packs_in_expr(e, class_selection.bindings.type_pack_replacements);
-                            return resolve_generic_types_in_expr(e);
-                        });
-                    !_r.has_value()) {
-                    return fail(std::move(_r).error());
-                }
-                clone.body = method_tmpl.body ? deep_clone_stmt(*method_tmpl.body) : nullptr;
-                if (clone.body) {
-                    substitute_type_params_in_stmt(*clone.body, class_selection.bindings.type_replacements);
-                    for (const auto& [class_pack_name, concrete_pack_types] : class_selection.bindings.type_pack_replacements) {
-                        expand_explicit_template_arg_packs_in_stmt(*clone.body, class_pack_name, concrete_pack_types);
+                auto build_definition = [this, method_tmpl, type_replacements = class_selection.bindings.type_replacements,
+                                         pack_replacements = class_selection.bindings.type_pack_replacements,
+                                         pack_param_names](Function& into) -> std::expected<void, DataflowError> {
+                    if (auto _r = clone_member_initializers(
+                            method_tmpl, into,
+                            [&](Expr& e) -> std::expected<void, DataflowError> {
+                                substitute_type_params_in_expr(e, type_replacements);
+                                substitute_type_packs_in_expr(e, pack_replacements);
+                                return resolve_generic_types_in_expr(e);
+                            });
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
                     }
-                    for (const auto& [pack_param_name, concrete_names] : pack_param_names) {
-                        if (auto _r = expand_pack_expansions_in_stmt(*clone.body, pack_param_name, concrete_names); !_r.has_value()) return fail(std::move(_r).error());
-                        if (auto _r = expand_pack_folds_in_stmt(*clone.body, pack_param_name, concrete_names); !_r.has_value()) return fail(std::move(_r).error());
+                    into.body = method_tmpl.body ? deep_clone_stmt(*method_tmpl.body) : nullptr;
+                    if (into.body) {
+                        substitute_type_params_in_stmt(*into.body, type_replacements);
+                        for (const auto& [class_pack_name, concrete_pack_types] : pack_replacements) {
+                            expand_explicit_template_arg_packs_in_stmt(*into.body, class_pack_name, concrete_pack_types);
+                        }
+                        for (const auto& [pack_param_name, concrete_names] : pack_param_names) {
+                            if (auto _r = expand_pack_expansions_in_stmt(*into.body, pack_param_name, concrete_names); !_r.has_value()) {
+                                return std::unexpected(std::move(_r).error());
+                            }
+                            if (auto _r = expand_pack_folds_in_stmt(*into.body, pack_param_name, concrete_names); !_r.has_value()) {
+                                return std::unexpected(std::move(_r).error());
+                            }
+                        }
+                        if (auto _r = resolve_generic_types_in_stmt(*into.body); !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
                     }
-                    if (auto _r = resolve_generic_types_in_stmt(*clone.body); !_r.has_value()) return fail(std::move(_r).error());
+                    return {};
+                };
+                bool defer_definition = member_definition_is_deferrable(method_tmpl);
+                if (!defer_definition) {
+                    if (auto _r = build_definition(clone); !_r.has_value()) return fail(std::move(_r).error());
                 }
                 known_function_names_.insert(clone.name);
                 program_.functions.push_back(std::move(clone));
-                if (auto _r = walk_new_concrete_function(program_.functions.size() - 1); !_r.has_value()) {
+                if (defer_definition) {
+                    if (auto _r = register_deferred_member_definition(program_.functions.size() - 1,
+                                                                      std::move(build_definition));
+                        !_r.has_value()) {
+                        return fail(std::move(_r).error());
+                    }
+                } else if (auto _r = walk_new_concrete_function(program_.functions.size() - 1); !_r.has_value()) {
                     return fail(std::move(_r).error());
                 }
                 if (!program_.functions.back().template_params.empty()) {
@@ -3098,6 +3650,7 @@ private:
                 known_function_names_.erase(program_.functions[k].name);
                 generic_template_indices_.erase(program_.functions[k].name);
             }
+            forget_deferred_member_definitions_from(functions_before_instantiation);
             if (program_.functions.size() > functions_before_instantiation) {
                 program_.functions.resize(functions_before_instantiation);
             }
@@ -3158,6 +3711,18 @@ private:
 
             std::vector<Function> methods = method_templates_of_owner(owner_id_copy);
             for (const Function& method_tmpl : methods) {
+                // A class template reaching here has a *non-type* first
+                // template parameter, and a requires-clause may constrain
+                // only the first parameter and only when it is a type
+                // parameter (parse_optional_method_requires_clause), so
+                // this never fires -- asked through the shared predicate
+                // all the same, so the invariant is enforced rather than
+                // argued.
+                if (MethodConstraint constraint = unsatisfied_method_constraint(method_tmpl, {});
+                    constraint.is_unsatisfied()) {
+                    record_constraint_excluded_member(cache_key, method_tmpl, template_name, owner_id_copy, constraint);
+                    continue;
+                }
                 Function clone;
                 clone.name = cache_key + method_suffix_after_owner_prefix(method_tmpl, template_name, owner_id_copy);
                 clone.loc = method_tmpl.loc;
@@ -3200,26 +3765,40 @@ private:
                     }
                     clone.params.push_back(std::move(new_param));
                 }
-                if (auto _r = clone_member_initializers(method_tmpl, clone,
-                                                        [&](Expr& e) -> std::expected<void, DataflowError> {
-                                                            for (std::size_t i = 0; i < params_copy.size(); i++) {
-                                                                substitute_non_type_param_in_expr(e, params_copy[i].name,
-                                                                                                  non_type_args[i]);
-                                                            }
-                                                            return {};
-                                                        });
-                    !_r.has_value()) {
-                    return std::unexpected(std::move(_r).error());
-                }
-                clone.body = method_tmpl.body ? deep_clone_stmt(*method_tmpl.body) : nullptr;
-                if (clone.body) {
-                    for (std::size_t i = 0; i < params_copy.size(); i++) {
-                        substitute_non_type_param_in_stmt(*clone.body, params_copy[i].name, non_type_args[i]);
+                auto build_definition = [this, method_tmpl, params_copy,
+                                         non_type_args](Function& into) -> std::expected<void, DataflowError> {
+                    if (auto _r = clone_member_initializers(method_tmpl, into,
+                                                            [&](Expr& e) -> std::expected<void, DataflowError> {
+                                                                for (std::size_t i = 0; i < params_copy.size(); i++) {
+                                                                    substitute_non_type_param_in_expr(
+                                                                        e, params_copy[i].name, non_type_args[i]);
+                                                                }
+                                                                return {};
+                                                            });
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
                     }
+                    into.body = method_tmpl.body ? deep_clone_stmt(*method_tmpl.body) : nullptr;
+                    if (into.body) {
+                        for (std::size_t i = 0; i < params_copy.size(); i++) {
+                            substitute_non_type_param_in_stmt(*into.body, params_copy[i].name, non_type_args[i]);
+                        }
+                    }
+                    return {};
+                };
+                bool defer_definition = member_definition_is_deferrable(method_tmpl);
+                if (!defer_definition) {
+                    if (auto _r = build_definition(clone); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 }
                 known_function_names_.insert(clone.name);
                 program_.functions.push_back(std::move(clone));
-                if (auto _r = walk_new_concrete_function(program_.functions.size() - 1); !_r.has_value()) {
+                if (defer_definition) {
+                    if (auto _r = register_deferred_member_definition(program_.functions.size() - 1,
+                                                                      std::move(build_definition));
+                        !_r.has_value()) {
+                        return fail(std::move(_r).error());
+                    }
+                } else if (auto _r = walk_new_concrete_function(program_.functions.size() - 1); !_r.has_value()) {
                     return fail(std::move(_r).error());
                 }
                 if (!program_.functions.back().template_params.empty()) {
@@ -3281,6 +3860,7 @@ private:
                 known_function_names_.erase(program_.functions[k].name);
                 generic_template_indices_.erase(program_.functions[k].name);
             }
+            forget_deferred_member_definitions_from(functions_before_instantiation);
             if (program_.functions.size() > functions_before_instantiation) {
                 program_.functions.resize(functions_before_instantiation);
             }
@@ -4100,9 +4680,9 @@ private:
     // the same find_single_argument_converting_constructor_signature, so
     // the set of conversions this pass materializes cannot drift from
     // the set the checker accepts.
-    void instantiate_converting_constructor_template(Type destination_type, const Expr& source, Body& body,
-                                                     SourceLocation loc) {
-        if (destination_type.kind != TypeKind::Named) return;
+    [[nodiscard]] std::expected<void, DataflowError> instantiate_converting_constructor_template(
+        Type destination_type, const Expr& source, Body& body, SourceLocation loc) {
+        if (destination_type.kind != TypeKind::Named) return {};
         // The destination may still be spelled as an *uninstantiated*
         // generic (`Holder<std::string>` rather than the concrete
         // `Holder.std::string` this pass rewrites it to). Resolving it
@@ -4113,7 +4693,24 @@ private:
         // whose body cannot be checked at all ("class 'T' has no
         // constructor matching this call").
         Type concrete_destination = resolve_generic_type_optimistic(destination_type, loc);
-        if (concrete_destination.kind != TypeKind::Named) return;
+        if (concrete_destination.kind != TypeKind::Named) return {};
+        // ch06 §6.6(3)-(5): binding an argument to a by-value class
+        // parameter initializes the parameter object -- by the copy
+        // constructor when the argument is an lvalue of that type (6.6(4)),
+        // otherwise by whichever constructor the fresh value names. Either
+        // way it is a construction, so [temp.inst]/4 requires that
+        // constructor's definition; unlike a VarDecl or a `new`, nothing
+        // in the AST spells it, which is why it is required here, at the
+        // one place this pass already visits every argument/parameter
+        // pair.
+        {
+            std::vector<ExprPtr> single_argument;
+            single_argument.push_back(deep_clone_expr(source));
+            if (auto _r = require_constructor_definition(concrete_destination.name, single_argument, body);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
         // No conversion is involved when the source already *is* a
         // destination-typed value: that is a copy or a move, and the
         // constructor template must not be instantiated for it. Real
@@ -4129,14 +4726,15 @@ private:
                                                                                             : *source_type;
             Type compared = source_value_type;
             compared.is_const_qualified = false;
-            if (types_equal(compared, concrete_destination)) return;
+            if (types_equal(compared, concrete_destination)) return {};
         }
         const FunctionSignature* ctor =
             find_single_argument_converting_constructor_signature(concrete_destination, source, body, signatures_);
-        if (ctor == nullptr || !ctor->is_generic_template) return;
+        if (ctor == nullptr || !ctor->is_generic_template) return {};
         std::vector<ExprPtr> converting_args;
         converting_args.push_back(deep_clone_expr(source));
         maybe_instantiate_generic_constructor_overloads(concrete_destination.name, converting_args, body, loc);
+        return {};
     }
 
     // Every by-value class-typed parameter of `call`'s resolved callee,
@@ -4145,12 +4743,13 @@ private:
     // pointer, a name this pass has not rewritten yet), in which case
     // there is simply no destination type to convert to and nothing to
     // do -- check_moves reports any real problem later.
-    void instantiate_converting_constructor_templates_for_call_arguments(Expr& call, Body& body) {
-        if (call.kind != ExprKind::Call) return;
+    [[nodiscard]] std::expected<void, DataflowError> instantiate_converting_constructor_templates_for_call_arguments(
+        Expr& call, Body& body) {
+        if (call.kind != ExprKind::Call) return {};
         CalleeSignature callee = resolve_callee_signature(call, body, signatures_);
-        if (callee.key.empty()) return;
+        if (callee.key.empty()) return {};
         const FunctionSignature* sig = resolve_overload(call, callee, body, signatures_);
-        if (sig == nullptr) return;
+        if (sig == nullptr) return {};
         // Snapshot the destination types before instantiating anything.
         // Each instantiation appends to `signatures_`, which rehashes the
         // map and reallocates the overload vector `sig` points into, so
@@ -4162,27 +4761,34 @@ private:
             destination_types.push_back(sig->param_types[param_index]);
         }
         for (std::size_t i = 0; i < destination_types.size(); i++) {
-            instantiate_converting_constructor_template(destination_types[i], *call.args[i], body, call.loc);
+            if (auto _r = instantiate_converting_constructor_template(destination_types[i], *call.args[i], body, call.loc);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
+        return {};
     }
 
     // The constructor-argument boundary: an argument of an *explicit*
     // construction may itself need converting to the constructor's own
     // by-value class parameter type (`Holder h{"hi"};` where `Holder`
     // takes a `std::string`).
-    void instantiate_converting_constructor_templates_for_constructor_arguments(const std::string& class_name,
-                                                                                const std::vector<ExprPtr>& args, Body& body,
-                                                                                SourceLocation loc) {
+    [[nodiscard]] std::expected<void, DataflowError> instantiate_converting_constructor_templates_for_constructor_arguments(
+        const std::string& class_name, const std::vector<ExprPtr>& args, Body& body, SourceLocation loc) {
         const FunctionSignature* sig = find_ordinary_constructor_overload(class_name, args, body);
-        if (sig == nullptr) return;
+        if (sig == nullptr) return {};
         // Snapshot first -- see the call-argument boundary above for why.
         std::vector<Type> destination_types;
         for (std::size_t i = 0; i < args.size() && i + 1 < sig->param_types.size(); i++) {
             destination_types.push_back(sig->param_types[i + 1]);
         }
         for (std::size_t i = 0; i < destination_types.size(); i++) {
-            instantiate_converting_constructor_template(destination_types[i], *args[i], body, loc);
+            if (auto _r = instantiate_converting_constructor_template(destination_types[i], *args[i], body, loc);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
+        return {};
     }
 
     [[maybe_unused]] void maybe_instantiate_generic_constructor_overloads(const std::string& class_name,
@@ -5596,8 +6202,21 @@ private:
                     Type concrete_ctor_type = stmt.type;
                     maybe_mark_reference_wrapper_lifetime_source(concrete_ctor_type);
                     maybe_instantiate_generic_constructor_overloads(concrete_ctor_type.name, stmt.ctor_args, body, stmt.loc);
-                    instantiate_converting_constructor_templates_for_constructor_arguments(concrete_ctor_type.name,
-                                                                                           stmt.ctor_args, body, stmt.loc);
+                    if (auto _r = instantiate_converting_constructor_templates_for_constructor_arguments(
+                            concrete_ctor_type.name, stmt.ctor_args, body, stmt.loc);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
+                // Outside the `!ctor_args.empty()` guard above: `B b{};`
+                // and `B b;` construct just as much as `B b{7};` does,
+                // and each names a (different) constructor whose
+                // definition [temp.inst]/4 then requires.
+                if (allow_generic_monomorphization && stmt.type.kind == TypeKind::Named) {
+                    if (auto _r = require_constructor_definition(stmt.type.name, stmt.ctor_args, body);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }                // ch05 §5.12: `auto name = expr;` -- infer the concrete
                 // type from the (by-now-fully-resolved, e.g. a Lambda's
                 // own synthesized class) initializer. Must overwrite
@@ -5750,7 +6369,10 @@ private:
                 // above, which can only ever produce the initializer's
                 // own type and so never needs a conversion of its own).
                 if (stmt.init && stmt.type.kind == TypeKind::Named && stmt.type.name != "auto") {
-                    instantiate_converting_constructor_template(stmt.type, *stmt.init, body, stmt.loc);
+                    if (auto _r = instantiate_converting_constructor_template(stmt.type, *stmt.init, body, stmt.loc);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
                 return {};
             case StmtKind::Return:
@@ -5758,7 +6380,11 @@ private:
                     if (auto _r = walk_expr(*stmt.expr, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
-                    instantiate_converting_constructor_template(current_walk_return_type_, *stmt.expr, body, stmt.loc);
+                    if (auto _r = instantiate_converting_constructor_template(current_walk_return_type_, *stmt.expr,
+                                                                              body, stmt.loc);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
                 }
                 return {};
             case StmtKind::ExprStmt:
@@ -5971,8 +6597,17 @@ private:
             Type concrete_ctor_type = expr.type;
             maybe_mark_reference_wrapper_lifetime_source(concrete_ctor_type);
             maybe_instantiate_generic_constructor_overloads(concrete_ctor_type.name, expr.args, body, expr.loc);
-            instantiate_converting_constructor_templates_for_constructor_arguments(concrete_ctor_type.name, expr.args, body,
-                                                                                   expr.loc);
+            if (auto _r = instantiate_converting_constructor_templates_for_constructor_arguments(
+                    concrete_ctor_type.name, expr.args, body, expr.loc);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+            if (allow_generic_monomorphization) {
+                if (auto _r = require_constructor_definition(concrete_ctor_type.name, expr.args, body);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
         }
         if (expr.kind == ExprKind::Call && expr.lhs == nullptr) {
             if (auto _r = maybe_resolve_generic_type_constructor_call(expr, body); !_r.has_value()) {
@@ -6022,12 +6657,23 @@ private:
                 Type concrete_ctor_type = *direct_call_type;
                 maybe_mark_reference_wrapper_lifetime_source(concrete_ctor_type);
                 maybe_instantiate_generic_constructor_overloads(concrete_ctor_type.name, expr.args, body, expr.loc);
-                instantiate_converting_constructor_templates_for_constructor_arguments(concrete_ctor_type.name, expr.args, body,
-                                                                                       expr.loc);
+                if (auto _r = instantiate_converting_constructor_templates_for_constructor_arguments(
+                        concrete_ctor_type.name, expr.args, body, expr.loc);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+                if (allow_generic_monomorphization) {
+                    if (auto _r = require_constructor_definition(concrete_ctor_type.name, expr.args, body);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
             }
         }
         if (expr.kind == ExprKind::Call) {
-            instantiate_converting_constructor_templates_for_call_arguments(expr, body);
+            if (auto _r = instantiate_converting_constructor_templates_for_call_arguments(expr, body); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
 
         if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Deref && expr.lhs != nullptr) {
@@ -6052,6 +6698,18 @@ private:
             if (!_rewritten.has_value()) return std::unexpected(std::move(_rewritten).error());
             expr.lhs = std::move(_rewritten).value();
             expr.through_arrow = false;
+            // The receiver this just built is a *new* sub-expression --
+            // `p->x` becomes `(*p.operator_arrow()).x`, an `operator->`
+            // call that was never in the tree the recursion above walked.
+            // Walking it now is what makes every rewrite this pass
+            // performs -- including [temp.inst]/4's requirement of the
+            // `operator->` definition -- apply to it as well; leaving it
+            // unwalked linked against an `operator_arrow` symbol nothing
+            // defined.
+            if (auto _r = walk_expr(*expr.lhs, body, enclosing_this_type, allow_generic_monomorphization);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
         }
 
         if (expr.kind == ExprKind::Call && expr.lhs != nullptr && expr.name.empty()) {
@@ -6064,10 +6722,45 @@ private:
             }
         }
 
-        // Generic-call monomorphization is suppressed entirely while
-        // walking a generic template's own body (see run()'s own
-        // comment): a nested generic-to-generic call is left targeting
-        // the original, codegen-excluded template instead.
+        if (auto _r = monomorphize_generic_uses(expr, body, enclosing_this_type, allow_generic_monomorphization);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+        // [temp.inst]/4: this expression is a *reference* to whatever
+        // member it names, so any member definition still deferred
+        // (require_member_definition) is instantiated here, at the point
+        // of use -- the same question, asked through the same resolvers
+        // check_moves itself uses, so neither can name a member the other
+        // never built.
+        //
+        // Last, deliberately: every rewrite above has run (arrow
+        // receivers, `operator*`, bare-callable-to-`.call`) *and* so has
+        // generic-call monomorphization, so the callee this sees is the
+        // concrete one the later passes will call -- for
+        // `std::print("{}", 1)` that is `std::print.int`, whose
+        // `std::format_string.int` parameter is what actually names the
+        // consteval constructor the constant evaluator then runs. Asking
+        // before monomorphization saw only `std::format_string<Args>`,
+        // with `Args` unbound and no constructor to require.
+        //
+        // Skipped inside a generic template's own body for the same
+        // reason generic-call monomorphization is: the receiver there is
+        // an abstract witness, not a concrete instantiation.
+        if (!allow_generic_monomorphization) return {};
+        if (expr.kind == ExprKind::Call) {
+            if (auto _r = instantiate_converting_constructor_templates_for_call_arguments(expr, body); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        return require_definitions_referenced_by(expr, body);
+    }
+
+    // Generic-call monomorphization is suppressed entirely while walking
+    // a generic template's own body (see run()'s own comment): a nested
+    // generic-to-generic call is left targeting the original,
+    // codegen-excluded template instead.
+    [[nodiscard]] std::expected<void, DataflowError> monomorphize_generic_uses(
+        Expr& expr, Body& body, const std::optional<Type>& enclosing_this_type, bool allow_generic_monomorphization) {
         if (!allow_generic_monomorphization) return {};
         if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::AddressOf && expr.lhs &&
             expr.lhs->kind == ExprKind::Identifier && !expr.lhs->explicit_template_args.empty()) {
@@ -6624,11 +7317,7 @@ private:
         // (e.g. `auto p = [...](...) {...}; ... auto r = p(x);`) --
         // surfacing, confusingly, as an unrelated "cannot infer 'auto'
         // variable's type" error at that later call site instead.
-        {
-            auto _r = build_signatures(program_);
-            if (!_r.has_value()) return std::unexpected(std::move(_r).error());
-            signatures_ = std::move(_r).value();
-        }
+        if (auto _r = rebuild_signatures(); !_r.has_value()) return std::unexpected(std::move(_r).error());
 
         expr.name = class_name;
 
@@ -6684,9 +7373,7 @@ private:
                 // recorded for this closure's own "<ClassName>_call"; every
                 // later call site reads the return type from there, so the
                 // real one has to replace it.
-                auto _r = build_signatures(program_);
-                if (!_r.has_value()) return std::unexpected(std::move(_r).error());
-                signatures_ = std::move(_r).value();
+                if (auto _r = rebuild_signatures(); !_r.has_value()) return std::unexpected(std::move(_r).error());
             }
         }
 

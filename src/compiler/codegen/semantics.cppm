@@ -1144,6 +1144,19 @@ namespace {
     // requiring a match would reject valid calls -- and explicitly defers
     // to "codegen's own type checking". That deferral is sound; codegen
     // does the checking. It was only ever the *report* that was wrong.
+    // The record monomorphization left behind for `callee_name`, spelled
+    // `Class_member` here, when it excluded that member from the
+    // specialization for an unsatisfied requires-clause.
+    const ConstraintExcludedMember* Codegen::constraint_excluded_member_for(const std::string& callee_name)
+{
+        if (program_ == nullptr) return nullptr;
+        for (const ConstraintExcludedMember& excluded : program_->constraint_excluded_members) {
+            if (callee_name == excluded.class_name + "_" + excluded.member_name) return &excluded;
+        }
+        return nullptr;
+    }
+
+
     std::string Codegen::describe_candidate_signature(const Function& fn, const std::string& display_name,
                                                       std::size_t param_offset)
 {
@@ -1165,6 +1178,20 @@ namespace {
 {
         std::vector<const Function*> candidates = collect_call_candidates(callee_name, param_offset, receiver_expr);
         if (candidates.empty()) {
+            // [temp.constr.decl], [over.match.viable]/1: a member of a
+            // class-template specialization whose own requires-clause is
+            // not satisfied for that specialization is never a viable
+            // candidate, so monomorphization instantiates no declaration
+            // for it (Program::constraint_excluded_members). "No function
+            // with that name is declared here" is a name-lookup answer to
+            // a constraint question -- and a wrong one: the member is
+            // declared, in the template the reader wrote.
+            if (const ConstraintExcludedMember* excluded = constraint_excluded_member_for(callee_name);
+                excluded != nullptr) {
+                return "no viable '" + excluded->member_name + "' for '" + excluded->class_name +
+                       "': it requires '" + excluded->concept_name + "<" + excluded->argument_spelling +
+                       ">', which '" + excluded->argument_spelling + "' does not satisfy";
+            }
             return "call to unknown function '" + display_name + "': no function with that name is declared here";
         }
 

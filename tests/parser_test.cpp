@@ -4319,6 +4319,37 @@ void test_generic_class_method_requires_clause_parses() {
            "generic_class_method_requires_clause_parses: 'describe' should require 'Describable'");
 }
 
+// [temp.arg]/1: a concept's template parameter is a *type* parameter, so
+// `requires C<X>` needs `X` to name a type. A class template whose own
+// first parameter is a non-type one has no type to constrain, and this
+// clause was accepted and then silently ignored: `Fixed<3>::gated()
+// requires HasDoubled<N>` compiled and ran, while clang++-22 rejects it
+// with "template argument for template type parameter must be a type".
+void test_concept_constraint_on_a_non_type_template_parameter_is_rejected() {
+    auto result = scpp::parse(
+        "template<typename T>\n"
+        "concept Describable = requires(const T& t) {\n"
+        "    { t.magnitude() } -> std::same_as<int>;\n"
+        "};\n"
+        "template<int N>\n"
+        "class Fixed {\n"
+        "    int v;\n"
+        "public:\n"
+        "    int gated() requires Describable<N> { return this.v; }\n"
+        "};\n"
+        "int main() { return 0; }\n");
+    expect(!result.has_value(), "concept_constraint_on_a_non_type_template_parameter_is_rejected: expected a "
+                                "ParseError");
+    if (!result.has_value()) {
+        std::string message = result.error().what();
+        expect(message.find("non-type template parameter 'N'") != std::string::npos &&
+                   message.find("[temp.arg]/1") != std::string::npos,
+               "concept_constraint_on_a_non_type_template_parameter_is_rejected: expected the non-type-parameter "
+               "message, got '" +
+                   message + "'");
+    }
+}
+
 // ch05 §5.14: a generic struct's own type parameter must be concept-
 // constrained (`template<Concept T> struct Name { ... };`) -- a bare
 // one is a parse error, since struct field triviality (ch04 §4.1) is a
@@ -6769,6 +6800,7 @@ int main() {
     test_global_qualified_call_parses();
     test_class_partial_specialization_on_function_type_parses();
     test_generic_class_method_requires_clause_parses();
+    test_concept_constraint_on_a_non_type_template_parameter_is_rejected();
     test_generic_struct_concept_constrained_type_param_parses();
     test_generic_struct_bare_type_param_is_rejected();
     test_generic_type_instantiation_parses_with_template_args();
