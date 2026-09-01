@@ -649,14 +649,8 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
         // arity is a real filter even before argument types are
         // considered; codegen's own braced_init_list_can_initialize
         // resolves the overload exactly and rejects what does not match.
-        std::string ctor_name = type.name;
-        ctor_name += "_new";
-        for (const auto& [name, overloads] : signatures) {
-            if (name != ctor_name && !(!name.empty() && name.starts_with(ctor_name + "."))) continue;
-            for (const FunctionSignature& candidate : overloads) {
-                if (candidate.member_owner_class != type.name) continue;
-                if (signature_accepts_argument_count(candidate, args.size(), /*param_offset=*/1)) return true;
-            }
+        for (const FunctionSignature* candidate : constructor_overloads_of(type.name, signatures)) {
+            if (signature_accepts_argument_count(*candidate, args.size(), /*param_offset=*/1)) return true;
         }
         return args.empty();
     }
@@ -1024,27 +1018,19 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     };
     if (class_type.kind != TypeKind::Named) return nullptr;
     std::vector<const FunctionSignature*> matches;
-    std::string ctor_name = class_type.name + "_new";
-    auto is_constructor_clone_name = [&](std::string_view name) {
-        return name == ctor_name || (!name.empty() && name.starts_with(ctor_name + "."));
-    };
-    for (const auto& [name, overloads] : signatures) {
-        if (!is_constructor_clone_name(name)) continue;
-        for (const FunctionSignature& candidate : overloads) {
-            if (candidate.member_owner_class != class_type.name) continue;
-            if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-            if (candidate.param_types.size() != 2) continue;
-            Type ctor_param_type = normalized_ctor_param_type(candidate);
-            if (types_equal(ctor_param_type, class_type) ||
-                (is_reference(ctor_param_type) && ctor_param_type.pointee != nullptr &&
-                 types_equal(*ctor_param_type.pointee, class_type))) {
-                continue;
-            }
-            if (constructor_parameter_accepts_argument_directly(arg, ctor_param_type, body, signatures,
-                                                               /*allow_user_defined_conversion=*/false,
-                                                               /*require_usable_class_value_source=*/true)) {
-                matches.push_back(&candidate);
-            }
+    for (const FunctionSignature* candidate : constructor_overloads_of(class_type.name, signatures)) {
+        if (!compile_time_dependency_visible_in_body(*candidate, body)) continue;
+        if (candidate->param_types.size() != 2) continue;
+        Type ctor_param_type = normalized_ctor_param_type(*candidate);
+        if (types_equal(ctor_param_type, class_type) ||
+            (is_reference(ctor_param_type) && ctor_param_type.pointee != nullptr &&
+             types_equal(*ctor_param_type.pointee, class_type))) {
+            continue;
+        }
+        if (constructor_parameter_accepts_argument_directly(arg, ctor_param_type, body, signatures,
+                                                           /*allow_user_defined_conversion=*/false,
+                                                           /*require_usable_class_value_source=*/true)) {
+            matches.push_back(candidate);
         }
     }
     if (matches.empty()) return nullptr;
