@@ -2068,6 +2068,69 @@ void run_constexpr_engine_direct_api_tests() {
     }
 
     {
+        // The four spellings of an immediate invocation that
+        // fold_immediate_calls used to answer "not immediate" for
+        // without asking -- a non-static member call, an overloaded
+        // operator, a conversion function, and a call in a default
+        // argument. Each reached codegen, which never compiles a
+        // consteval function, and surfaced as `internal error: no
+        // generated code for resolved function ...`.
+        std::string shared_class =
+            "class Tagged {\n"
+            "public:\n"
+            "    constexpr Tagged() { return; }\n"
+            "    virtual ~Tagged() = default;\n"
+            "    consteval int four() const { return 4; }\n"
+            "    consteval int operator+(int x) const { return x + 3; }\n"
+            "    consteval operator int() const { return 4; }\n"
+            "};\n";
+        struct FoldCase {
+            std::string name;
+            std::string source;
+        };
+        std::vector<FoldCase> fold_cases{};
+        fold_cases.push_back(FoldCase{"non_static_member", "int main() { return Tagged{}.four(); }\n"});
+        fold_cases.push_back(FoldCase{"overloaded_operator", "int main() { return Tagged{} + 1; }\n"});
+        fold_cases.push_back(FoldCase{"conversion_function", "int main() { return (int)Tagged{}; }\n"});
+        fold_cases.push_back(
+            FoldCase{"default_argument", "int pick(int x = Tagged{}.four()) { return x; }\n"
+                                         "int main() { return pick(); }\n"});
+        for (const FoldCase& fold_case : fold_cases) {
+            std::string case_name = "fold_immediate_calls_folds_" + fold_case.name;
+            cases_run++;
+            scpp::Program program = parse_with_std_imports(shared_class + fold_case.source);
+            auto result = scpp::fold_immediate_calls(program);
+            expect(result.has_value(),
+                   case_name + ": expected fold_immediate_calls to fold this immediate invocation instead of "
+                               "leaving it for codegen");
+        }
+    }
+
+    {
+        // A consteval call that cannot be folded is ill-formed (spec ch09
+        // §9.1(4)), and has to say so. It used to be left alone here and
+        // reported by codegen as an `internal error`.
+        std::string case_name = "fold_immediate_calls_rejects_non_constant_member_call";
+        cases_run++;
+        scpp::Program program = parse_with_std_imports(
+            "class Tagged {\n"
+            "public:\n"
+            "    constexpr Tagged() { return; }\n"
+            "    virtual ~Tagged() = default;\n"
+            "    consteval int four() const { return 4; }\n"
+            "};\n"
+            "int main() { Tagged t{}; return t.four(); }\n");
+        auto result = scpp::fold_immediate_calls(program);
+        expect(!result.has_value(),
+               case_name + ": expected a non-constant immediate invocation to be reported here");
+        if (!result.has_value()) {
+            expect(std::string{result.error().what()}.find("internal error") == std::string::npos,
+                   case_name + ": a consteval call that cannot be folded must name the program's problem, "
+                               "not report an internal error");
+        }
+    }
+
+    {
         std::string case_name = "fold_immediate_calls_reports_error_for_runaway_consteval_recursion";
         cases_run++;
         scpp::Program program = parse_with_std_imports(

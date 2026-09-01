@@ -694,6 +694,31 @@ public:
                 functions_by_name_.emplace(function_name, std::move(overload_indices));
             }
         }
+        // Every spelling some *immediate* function answers to, so the
+        // question "could a consteval function be named here?" is a hash
+        // lookup instead of a walk over program_.functions. Both scans
+        // below set `any_immediate` only for a consteval function whose
+        // name satisfies the matching predicate, and these two sets
+        // contain exactly the strings for which such a function exists --
+        // so a miss means the scan would have found no immediate
+        // candidate and returned "not immediate", and a hit runs the
+        // original scan unchanged. Same answer, always.
+        for (const Function& fn : program_.functions) {
+            if (fn.eval_mode != FunctionEvalMode::Consteval) continue;
+            // A free call matches `fn.name == expr.name` or
+            // `fn.name.ends_with("::" + expr.name)`.
+            immediate_call_names_.insert(fn.name);
+            for (std::size_t at = 0; at + 1 < fn.name.size(); ++at) {
+                if (fn.name[at] == ':' && fn.name[at + 1] == ':') {
+                    immediate_call_names_.insert(fn.name.substr(at + 2));
+                }
+            }
+            // A member call matches `fn.name.ends_with("_" + member)`.
+            if (fn.member_owner_class.empty()) continue;
+            for (std::size_t at = 0; at < fn.name.size(); ++at) {
+                if (fn.name[at] == '_') immediate_member_names_.insert(fn.name.substr(at + 1));
+            }
+        }
         for (std::size_t i = 0; i < program_.classes.size(); ++i) classes_by_name_.emplace(program_.classes[i].name, i);
         for (std::size_t i = 0; i < program_.structs.size(); ++i) structs_by_name_.emplace(program_.structs[i].name, i);
     }
@@ -725,7 +750,9 @@ public:
     // has nothing else to choose. A *mixed* set is resolved for real,
     // through the same find_callable every other call in this file uses.
     [[nodiscard]] bool call_names_immediate_function(const Expr& expr) {
-        if (expr.kind != ExprKind::Call || expr.lhs) return false;
+        if (expr.kind != ExprKind::Call) return operator_expr_names_immediate_function(expr);
+        if (expr.lhs != nullptr) return method_call_names_immediate_function(expr);
+        if (!immediate_call_names_.contains(expr.name)) return false;
         std::string suffix{};
         suffix += "::";
         suffix += expr.name;
@@ -766,6 +793,158 @@ public:
                           make_expr_list_ref(expr.args), ignored_ambiguity);
         if (!callee.has_value()) return true;
         return callee->get().eval_mode == FunctionEvalMode::Consteval;
+    }
+
+    // The same question for `obj.m(args)`. `expr.lhs` -- the receiver --
+    // used to make the function above answer "not immediate" for every
+    // call that has one, without asking: a whole half of the call forms
+    // in the language, silently given the wrong answer. Codegen resolves
+    // such a call correctly, finds the `consteval` function it names, and
+    // finds no body for it (a consteval function is never compiled -- see
+    // orchestration.cppm's is_never_compiled), so `c.twice(1)` reported
+    // `internal error: no generated code for resolved function
+    // 'C_twice'`, and so did every `consteval` operator, conversion
+    // function and member called on a temporary.
+    //
+    // A method clone is named `<Class>_<method>` and takes the receiver
+    // as its first parameter, so the arity test is `args.size() + 1`.
+    // Deciding on that set alone is sound exactly where the free-function
+    // fast path above is sound -- if every candidate with this member
+    // name and arity is `consteval`, whichever one overload resolution
+    // picks is `consteval`. A mixed set is resolved for real, through the
+    // same find_method_callable every other method call in this file
+    // uses; a receiver that resolution cannot evaluate leaves the
+    // question unanswerable, and the immediate reading is kept so the
+    // call is diagnosed rather than handed to codegen.
+    // The fast path shared by every member spelling below: is some member
+    // named `member_name`, taking `this` plus `arg_count` parameters,
+    // `consteval`? Three answers -- no candidate is (not immediate),
+    // every candidate is (immediate, because whichever one overload
+    // resolution picks is), or the set is mixed and only resolution can
+    // say.
+    enum class MemberImmediacy { None, All, Mixed };
+    [[nodiscard]] MemberImmediacy member_immediacy(const std::string& member_name, std::size_t arg_count) const {
+        if (!immediate_member_names_.contains(member_name)) return MemberImmediacy::None;
+        std::string member_suffix{};
+        member_suffix += "_";
+        member_suffix += member_name;
+        bool any_immediate = false;
+        bool any_other = false;
+        for (const Function& fn : program_.functions) {
+            if (fn.member_owner_class.empty()) continue;
+            if (!fn.name.ends_with(member_suffix)) continue;
+            if (fn.params.size() != arg_count + 1) continue;
+            if (fn.eval_mode == FunctionEvalMode::Consteval) {
+                any_immediate = true;
+            } else {
+                any_other = true;
+            }
+        }
+        if (!any_immediate) return MemberImmediacy::None;
+        return any_other ? MemberImmediacy::Mixed : MemberImmediacy::All;
+    }
+
+    [[nodiscard]] bool method_call_names_immediate_function(const Expr& expr) {
+        MemberImmediacy immediacy = member_immediacy(expr.name, expr.args.size());
+        if (immediacy == MemberImmediacy::None) return false;
+        if (immediacy == MemberImmediacy::All) return true;
+        frames_.clear();
+        steps_ = 0;
+        call_depth_ = 0;
+        std::vector<std::shared_ptr<Cell>> arg_values{};
+        arg_values.reserve(expr.args.size());
+        for (const ExprPtr& arg : expr.args) {
+            if (arg != nullptr && arg->kind == ExprKind::BracedInitList) {
+                arg_values.push_back(nullptr);
+                continue;
+            }
+            auto arg_result = evaluate_expr(*arg);
+            if (!arg_result.has_value()) return true;
+            arg_values.push_back(std::move(arg_result).value());
+        }
+        std::vector<std::size_t> ignored_ambiguity{};
+        auto callee_result = find_method_callable(*expr.lhs, expr.name, arg_values, make_expr_list_ref(expr.args),
+                                                  ignored_ambiguity);
+        if (!callee_result.has_value()) return true;
+        OptionalFunctionRef callee = std::move(callee_result).value();
+        if (!callee.has_value()) return true;
+        return callee.value().get().eval_mode == FunctionEvalMode::Consteval;
+    }
+
+    // An overloaded operator and a conversion function are calls that the
+    // grammar does not spell as one: `c + 1` is a Binary, `!c` a Unary,
+    // `c[i]` a Subscript and `(int)c` a Cast, and each names a member
+    // through the *same* `<Class>_<member>` key typechecking and codegen
+    // use (ast.cppm's binary_operator_method_name /
+    // unary_operator_method_name / subscript_operator_method_name /
+    // conversion_function_method_name -- shared exactly so these three
+    // cannot look in three slightly different places). Asking only about
+    // ExprKind::Call therefore missed every `consteval` operator and
+    // every `consteval` conversion function, which reached codegen as
+    // `internal error: no generated code for resolved function
+    // 'C_operator_plus'`.
+    //
+    // Only the fast path applies here: resolving a mixed set needs the
+    // operand values, and an operator whose set is mixed keeps the
+    // immediate reading so the call is diagnosed rather than emitted.
+    [[nodiscard]] bool operator_expr_names_immediate_function(const Expr& expr) {
+        // Ahead of the switch: naming the member an operator expression
+        // would call allocates, and every Binary, Unary, Subscript and
+        // Cast in the program reaches here.
+        if (immediate_member_names_.empty()) return false;
+        std::string member_name{};
+        std::size_t arg_count = 0;
+        switch (expr.kind) {
+            case ExprKind::Binary:
+                member_name = binary_operator_method_name(expr.binary_op);
+                arg_count = 1;
+                break;
+            case ExprKind::Unary:
+                member_name = unary_operator_method_name(expr.unary_op);
+                arg_count = 0;
+                break;
+            case ExprKind::Subscript:
+                member_name = std::string{"operator_subscript"};
+                arg_count = 1;
+                break;
+            case ExprKind::Cast:
+                member_name = conversion_function_method_name(expr.type);
+                arg_count = 0;
+                break;
+            default:
+                return false;
+        }
+        if (member_name.empty() || expr.lhs == nullptr) return false;
+        // The name alone can only ever *reject* here. Unlike `c.m(args)`,
+        // which is a member call whatever `c` turns out to be, `x + 1`
+        // and `(int)x` are member calls only when `x` is class-typed --
+        // so a name-and-arity match is not evidence that this expression
+        // calls that member at all. Answering yes on the name made
+        // `(int)a[0]` in a program that happens to declare one
+        // `consteval operator int()` anywhere try to constant-fold an
+        // array element, and would have made a single `consteval
+        // operator+` force-fold every `+` in `libs/std`. So: no candidate
+        // means no, and anything else has to be resolved, which is what
+        // find_method_callable does -- it evaluates the operand and
+        // checks it is a record before looking up a member on it.
+        if (member_immediacy(member_name, arg_count) == MemberImmediacy::None) return false;
+        frames_.clear();
+        steps_ = 0;
+        call_depth_ = 0;
+        std::vector<std::shared_ptr<Cell>> operand_values{};
+        if (arg_count == 1) {
+            if (expr.kind == ExprKind::Cast || expr.rhs == nullptr) return false;
+            auto operand_result = evaluate_expr(*expr.rhs);
+            if (!operand_result.has_value()) return false;
+            operand_values.push_back(std::move(operand_result).value());
+        }
+        std::vector<std::size_t> ignored_ambiguity{};
+        auto callee_result =
+            find_method_callable(*expr.lhs, member_name, operand_values, no_expr_list_ref(), ignored_ambiguity);
+        if (!callee_result.has_value()) return false;
+        OptionalFunctionRef callee = std::move(callee_result).value();
+        if (!callee.has_value()) return false;
+        return callee.value().get().eval_mode == FunctionEvalMode::Consteval;
     }
 
     [[nodiscard]] std::expected<void, ConstexprError> validate_constexpr_locals(Function& fn) {
@@ -1034,6 +1213,10 @@ private:
     // See context_conversion_call.
     std::string pending_conversion_rejection_{};
     std::unordered_map<std::string, std::vector<std::size_t>> functions_by_name_{};
+    // See the constructor: the names a consteval function can be called
+    // by, free-call form and member form.
+    std::unordered_set<std::string> immediate_call_names_{};
+    std::unordered_set<std::string> immediate_member_names_{};
     std::unordered_map<std::string, std::size_t> classes_by_name_{};
     std::unordered_map<std::string, std::size_t> structs_by_name_{};
     std::unordered_set<std::string> incomplete_type_names_{};
@@ -4932,32 +5115,6 @@ private:
     }
 };
 
-[[nodiscard]] bool expr_depends_on_runtime_bindings(const Expr& expr) {
-    switch (expr.kind) {
-        case ExprKind::Identifier:
-            return true;
-        case ExprKind::IntegerLiteral:
-        case ExprKind::FloatLiteral:
-        case ExprKind::BoolLiteral:
-        case ExprKind::NullptrLiteral:
-        case ExprKind::CharLiteral:
-        case ExprKind::StringLiteral:
-        case ExprKind::TypeTrait:
-            break;
-        default:
-            break;
-    }
-    if (expr.lhs && expr_depends_on_runtime_bindings(*expr.lhs)) return true;
-    if (expr.rhs && expr_depends_on_runtime_bindings(*expr.rhs)) return true;
-    if (expr.third && expr_depends_on_runtime_bindings(*expr.third)) return true;
-    for (const ExprPtr& arg : expr.args) {
-        if (expr_depends_on_runtime_bindings(*arg)) return true;
-    }
-    for (const ExplicitTemplateArg& arg : expr.explicit_template_args) {
-        if (arg.value && expr_depends_on_runtime_bindings(*arg.value)) return true;
-    }
-    return false;
-}
 
 // Writes an immediate function's result back into the AST as the literal
 // that spells it. This used to enumerate `int`/`char`/`bool`/`double`
@@ -5105,14 +5262,17 @@ private:
 
 [[nodiscard]] std::expected<void, ConstexprError> collect_runtime_expr_rewrites(const Program& program, Expr& expr, ConstexprEngine& engine,
                                    std::vector<ExprRewrite>& expr_rewrites,
-                                   std::vector<std::reference_wrapper<Stmt>>& consteval_if_rewrites);
+                                   std::vector<std::reference_wrapper<Stmt>>& consteval_if_rewrites,
+                                   bool in_immediate_function_context);
 [[nodiscard]] std::expected<void, ConstexprError> collect_runtime_stmt_rewrites(const Program& program, Stmt& stmt, ConstexprEngine& engine,
                                    std::vector<ExprRewrite>& expr_rewrites,
-                                   std::vector<std::reference_wrapper<Stmt>>& consteval_if_rewrites);
+                                   std::vector<std::reference_wrapper<Stmt>>& consteval_if_rewrites,
+                                   bool in_immediate_function_context);
 
 [[nodiscard]] std::expected<void, ConstexprError> collect_runtime_stmt_rewrites(const Program& program, Stmt& stmt, ConstexprEngine& engine,
                                    std::vector<ExprRewrite>& expr_rewrites,
-                                   std::vector<std::reference_wrapper<Stmt>>& consteval_if_rewrites) {
+                                   std::vector<std::reference_wrapper<Stmt>>& consteval_if_rewrites,
+                                   bool in_immediate_function_context) {
     if (stmt.kind == StmtKind::If && stmt.if_mode != IfMode::Runtime) {
         std::optional<std::reference_wrapper<Stmt>> runtime_branch{};
         if (stmt.if_mode == IfMode::ConstevalFalse) {
@@ -5121,7 +5281,7 @@ private:
             runtime_branch = std::optional<std::reference_wrapper<Stmt>>{std::reference_wrapper<Stmt>{*stmt.else_branch}};
         }
         if (runtime_branch.has_value()) {
-            if (auto result = collect_runtime_stmt_rewrites(program, runtime_branch->get(), engine, expr_rewrites, consteval_if_rewrites);
+            if (auto result = collect_runtime_stmt_rewrites(program, runtime_branch->get(), engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
                 !result.has_value()) {
                 return result;
             }
@@ -5131,43 +5291,43 @@ private:
     }
 
     if (stmt.init) {
-        if (auto result = collect_runtime_expr_rewrites(program, *stmt.init, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_expr_rewrites(program, *stmt.init, engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
             !result.has_value()) {
             return result;
         }
     }
     for (ExprPtr& arg : stmt.ctor_args) {
-        if (auto result = collect_runtime_expr_rewrites(program, *arg, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_expr_rewrites(program, *arg, engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
             !result.has_value()) {
             return result;
         }
     }
     if (stmt.expr) {
-        if (auto result = collect_runtime_expr_rewrites(program, *stmt.expr, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_expr_rewrites(program, *stmt.expr, engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
             !result.has_value()) {
             return result;
         }
     }
     if (stmt.condition) {
-        if (auto result = collect_runtime_expr_rewrites(program, *stmt.condition, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_expr_rewrites(program, *stmt.condition, engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
             !result.has_value()) {
             return result;
         }
     }
     if (stmt.then_branch) {
-        if (auto result = collect_runtime_stmt_rewrites(program, *stmt.then_branch, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_stmt_rewrites(program, *stmt.then_branch, engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
             !result.has_value()) {
             return result;
         }
     }
     if (stmt.else_branch) {
-        if (auto result = collect_runtime_stmt_rewrites(program, *stmt.else_branch, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_stmt_rewrites(program, *stmt.else_branch, engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
             !result.has_value()) {
             return result;
         }
     }
     for (StmtPtr& nested : stmt.statements) {
-        if (auto result = collect_runtime_stmt_rewrites(program, *nested, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_stmt_rewrites(program, *nested, engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
             !result.has_value()) {
             return result;
         }
@@ -5177,39 +5337,66 @@ private:
 
 [[nodiscard]] std::expected<void, ConstexprError> collect_runtime_expr_rewrites(const Program& program, Expr& expr, ConstexprEngine& engine,
                                    std::vector<ExprRewrite>& expr_rewrites,
-                                   std::vector<std::reference_wrapper<Stmt>>& consteval_if_rewrites) {
-    if (!expr_depends_on_runtime_bindings(expr) && engine.call_names_immediate_function(expr)) {
+                                   std::vector<std::reference_wrapper<Stmt>>& consteval_if_rewrites,
+                                   bool in_immediate_function_context) {
+    // ch09 §9.1(4) / [expr.const]/13: a call to an immediate function
+    // *shall* produce a constant expression, and this is where that is
+    // decided. Whether the call *can* be folded is a different question,
+    // and asking it first was the defect: an `expr_depends_on_runtime_
+    // bindings` guard stood here, calling any expression that mentions
+    // an identifier anywhere "runtime" and skipping it. That is a
+    // capability answering an obligation. Every immediate invocation it
+    // skipped survived into codegen, which never compiles a consteval
+    // function, and became `internal error: no generated code for
+    // resolved function 'f' called here` -- for `freefn(r)` with a local
+    // `r`, for `c.twice(1)`, for a `consteval` operator, and for a
+    // `consteval` member of a class template. The obligation is now
+    // asked alone, and an immediate invocation that cannot be folded
+    // reports why it is not a constant expression, which is what §9.1(4)
+    // makes it.
+    //
+    // Inside an immediate function context there is no obligation --
+    // [expr.const]/13 does not escalate there, and the body of a
+    // consteval function routinely calls another immediate function with
+    // its own parameters, which have no value until the outer call is
+    // itself evaluated. Folding is still attempted there, because it
+    // succeeds for the calls that do not mention a parameter and this
+    // pass has always done it; only the *failure* is different, and there
+    // it means "not yet", not "ill-formed".
+    if (engine.call_names_immediate_function(expr)) {
         auto value_result = engine.evaluate_root_expr(expr);
-        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
-        expr_rewrites.push_back(ExprRewrite{expr, std::move(value_result).value()});
-        return {};
+        if (value_result.has_value()) {
+            expr_rewrites.push_back(ExprRewrite{expr, std::move(value_result).value()});
+            return {};
+        }
+        if (!in_immediate_function_context) return std::unexpected(std::move(value_result).error());
     }
     if (expr.lhs) {
-        if (auto result = collect_runtime_expr_rewrites(program, *expr.lhs, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_expr_rewrites(program, *expr.lhs, engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
             !result.has_value()) {
             return result;
         }
     }
     if (expr.rhs) {
-        if (auto result = collect_runtime_expr_rewrites(program, *expr.rhs, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_expr_rewrites(program, *expr.rhs, engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
             !result.has_value()) {
             return result;
         }
     }
     if (expr.third) {
-        if (auto result = collect_runtime_expr_rewrites(program, *expr.third, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_expr_rewrites(program, *expr.third, engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
             !result.has_value()) {
             return result;
         }
     }
     for (ExprPtr& arg : expr.args) {
-        if (auto result = collect_runtime_expr_rewrites(program, *arg, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_expr_rewrites(program, *arg, engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
             !result.has_value()) {
             return result;
         }
     }
     if (expr.lambda_body) {
-        if (auto result = collect_runtime_stmt_rewrites(program, *expr.lambda_body, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_stmt_rewrites(program, *expr.lambda_body, engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
             !result.has_value()) {
             return result;
         }
@@ -5871,6 +6058,31 @@ private:
     }
 };
 
+// Both spellings an Initializer can take (`= expr` and `{args...}`),
+// walked in place -- one implementation, so a mem-initializer and a
+// default member initializer cannot be visited differently.
+[[nodiscard]] std::expected<void, ConstexprError> collect_runtime_initializer_rewrites(
+    const Program& program, Initializer& initializer, ConstexprEngine& engine,
+    std::vector<ExprRewrite>& expr_rewrites, std::vector<std::reference_wrapper<Stmt>>& consteval_if_rewrites) {
+    if (initializer.expr != nullptr) {
+        if (auto result = collect_runtime_expr_rewrites(program, *initializer.expr, engine, expr_rewrites,
+                                                        consteval_if_rewrites,
+                                                        /*in_immediate_function_context=*/false);
+            !result.has_value()) {
+            return result;
+        }
+    }
+    for (ExprPtr& arg : initializer.brace_args) {
+        if (arg == nullptr) continue;
+        if (auto result = collect_runtime_expr_rewrites(program, *arg, engine, expr_rewrites, consteval_if_rewrites,
+                                                        /*in_immediate_function_context=*/false);
+            !result.has_value()) {
+            return result;
+        }
+    }
+    return {};
+}
+
 [[nodiscard]] std::expected<void, ConstexprError> fold_immediate_calls(Program& program, ConstexprLimits limits) {
     ConstexprEngine engine{program, limits};
     AlignmentResolver aligner{program, engine};
@@ -5885,7 +6097,8 @@ private:
     std::vector<std::reference_wrapper<Stmt>> consteval_if_rewrites{};
     for (Function& fn : program.functions) {
         if (!fn.body) continue;
-        if (auto result = collect_runtime_stmt_rewrites(program, *fn.body, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_stmt_rewrites(program, *fn.body, engine, expr_rewrites, consteval_if_rewrites,
+                                                        fn.eval_mode == FunctionEvalMode::Consteval);
             !result.has_value()) {
             return result;
         }
@@ -5902,9 +6115,60 @@ private:
     // initializer.
     for (GlobalVar& global : program.globals) {
         if (global.decl == nullptr || !global.decl->init) continue;
-        if (auto result = collect_runtime_expr_rewrites(program, *global.decl->init, engine, expr_rewrites, consteval_if_rewrites);
+        if (auto result = collect_runtime_expr_rewrites(program, *global.decl->init, engine, expr_rewrites, consteval_if_rewrites,
+                                                        /*in_immediate_function_context=*/false);
             !result.has_value()) {
             return result;
+        }
+    }
+    // ch09 §9.1(4) again, for the three remaining positions an expression
+    // can occupy without being inside any function body or global
+    // initializer. Each is a place a program can call an immediate
+    // function, and each was unwalked, so each produced the same
+    // `internal error: no generated code for resolved function 'f'` the
+    // namespace-scope loop above was added to stop.
+    //
+    // A default argument is evaluated at every call that omits it
+    // ([dcl.fct.default]/9), a default member initializer at every
+    // construction that does not override it ([class.base.init]/9), and a
+    // mem-initializer at the construction it belongs to
+    // ([class.base.init]/13) -- all three are potentially-evaluated calls.
+    for (Function& fn : program.functions) {
+        for (Param& param : fn.params) {
+            if (param.default_expr == nullptr) continue;
+            if (auto result = collect_runtime_expr_rewrites(program, *param.default_expr, engine, expr_rewrites,
+                                                            consteval_if_rewrites,
+                                                            /*in_immediate_function_context=*/false);
+                !result.has_value()) {
+                return result;
+            }
+        }
+        for (MemberInitializer& init : fn.member_initializers) {
+            if (auto result = collect_runtime_initializer_rewrites(program, init.initializer, engine, expr_rewrites,
+                                                                   consteval_if_rewrites);
+                !result.has_value()) {
+                return result;
+            }
+        }
+    }
+    for (ClassDef& def : program.classes) {
+        for (ClassField& field : def.fields) {
+            if (!field.default_initializer.has_value()) continue;
+            if (auto result = collect_runtime_initializer_rewrites(program, field.default_initializer.value(), engine,
+                                                                   expr_rewrites, consteval_if_rewrites);
+                !result.has_value()) {
+                return result;
+            }
+        }
+    }
+    for (StructDef& def : program.structs) {
+        for (StructField& field : def.fields) {
+            if (!field.default_initializer.has_value()) continue;
+            if (auto result = collect_runtime_initializer_rewrites(program, field.default_initializer.value(), engine,
+                                                                   expr_rewrites, consteval_if_rewrites);
+                !result.has_value()) {
+                return result;
+            }
         }
     }
     for (ExprRewrite& rewrite : expr_rewrites) {
