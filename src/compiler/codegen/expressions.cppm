@@ -499,9 +499,39 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         }
         llvm::LLVMValueRef callee = llvm::LLVMGetNamedFunction(module_, overload_names_.at(callee_def).c_str());
         if (callee == nullptr) {
-            // Not a user error at all: resolution succeeded, so the
-            // declaration exists, but no llvm::LLVM function was ever emitted
-            // for it. Say that, rather than blaming the call.
+            // ch09 §9.1(4), [expr.const]/13: an immediate function emits
+            // no code at all (is_never_compiled), so a call to one that
+            // still exists here is a call the constant evaluator could
+            // not fold -- which is exactly what §9.1(4) makes ill-formed,
+            // and it is the program's problem, not the compiler's. This
+            // said `internal error: no generated code for resolved
+            // function 'f' called here` instead, which named the
+            // compiler's own state and told the author nothing: it was
+            // how a `consteval` member call, a `consteval` operator, a
+            // `consteval` conversion function and a `consteval` call in
+            // a default argument, a default member initializer or a
+            // mem-initializer all surfaced, and how a plain
+            // `consteval f(x)` with a runtime `x` surfaced too.
+            if (callee_def->eval_mode == FunctionEvalMode::Consteval) {
+                // Spelled the way the program spells it: an overloaded
+                // operator's clone name is `C_operator_plus`, and naming
+                // that back at the author describes the compiler's own
+                // symbol table rather than their `+`.
+                std::string spelled = operator_function_display_spelling(callee_def->name);
+                if (spelled.empty()) spelled = call_display_name(expr, receiver_static_class_name);
+                else if (!callee_def->member_owner_class.empty()) {
+                    spelled = callee_def->member_owner_class + "::" + spelled;
+                }
+                return std::unexpected(CodegenError(
+                    "call to consteval function '" + spelled +
+                        "' is not a constant expression: every call to an immediate function must be evaluated at "
+                        "compile time (spec ch09 §9.1(4)), and this one reads a value that is not known until "
+                        "runtime",
+                    current_loc_));
+            }
+            // Resolution succeeded, so the declaration exists, but no
+            // llvm::LLVM function was ever emitted for it and nothing
+            // above explains why.
             return std::unexpected(CodegenError("internal error: no generated code for resolved function '" +
                                                     overload_names_.at(callee_def) + "' called here",
                 current_loc_));
