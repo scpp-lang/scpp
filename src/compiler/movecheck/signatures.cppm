@@ -160,6 +160,8 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 [[nodiscard]] bool param_can_outlive_call_for_lifetime_return(const Param& param);
 [[nodiscard]] std::expected<void, DataflowError> validate_lifetime_annotation_placement(const Function& fn);
 [[nodiscard]] std::expected<std::vector<std::size_t>, DataflowError> resolve_returned_lifetime_param_indices(const Function& fn);
+[[nodiscard]] std::vector<const FunctionSignature*> constructor_overloads_of(const std::string& class_name,
+                                                                            const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> add_function_signature(Signatures& signatures, const Function& fn);
 [[nodiscard]] std::expected<Signatures, DataflowError> build_signatures(const Program& program);
 
@@ -926,25 +928,17 @@ struct ConstructedOwner {
 [[nodiscard]] const FunctionSignature* resolve_constructor_signature(const std::string& class_name,
                                                                      const std::vector<ExprPtr>& ctor_args,
                                                                      const Body& body, const Signatures& signatures) {
-    auto is_constructor_clone_name = [&](std::string_view name) {
-        return name == class_name + "_new" ||
-               (!name.empty() && name.starts_with(class_name + "_new."));
-    };
     std::vector<const FunctionSignature*> matches;
-    for (const auto& [name, overloads] : signatures) {
-        if (!is_constructor_clone_name(name)) continue;
-        for (const FunctionSignature& candidate : overloads) {
-            if (candidate.member_owner_class != class_name) continue;
-            if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-            if (!signature_accepts_argument_count(candidate, ctor_args.size(), 1)) continue;
-            bool all_match = true;
-            for (std::size_t i = 0; all_match && i < ctor_args.size(); i++) {
-                all_match = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
-                                                                                 candidate.param_types[i + 1], body,
-                                                                                 signatures);
-            }
-            if (all_match) matches.push_back(&candidate);
+    for (const FunctionSignature* candidate : constructor_overloads_of(class_name, signatures)) {
+        if (!compile_time_dependency_visible_in_body(*candidate, body)) continue;
+        if (!signature_accepts_argument_count(*candidate, ctor_args.size(), 1)) continue;
+        bool all_match = true;
+        for (std::size_t i = 0; all_match && i < ctor_args.size(); i++) {
+            all_match = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
+                                                                             candidate->param_types[i + 1], body,
+                                                                             signatures);
         }
+        if (all_match) matches.push_back(candidate);
     }
     if (matches.empty()) return nullptr;
     if (matches.size() == 1) return matches[0];
@@ -1007,27 +1001,20 @@ struct ConstructedOwner {
     for (const ExprPtr& arg : ctor_args) {
         if (arg == nullptr || !infer_expr_type(*arg, body, signatures).has_value()) return std::nullopt;
     }
-    auto is_constructor_clone_name = [&](std::string_view name) {
-        return name == class_name + "_new" || (!name.empty() && name.starts_with(class_name + "_new."));
-    };
     std::vector<const FunctionSignature*> arity_candidates;
     std::vector<const FunctionSignature*> viable_candidates;
-    for (const auto& [name, overloads] : signatures) {
-        if (!is_constructor_clone_name(name)) continue;
-        for (const FunctionSignature& candidate : overloads) {
-            if (candidate.member_owner_class != class_name) continue;
-            if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-            if (!signature_accepts_argument_count(candidate, ctor_args.size(), 1)) continue;
-            if (candidate.is_generic_template) return std::nullopt;
-            arity_candidates.push_back(&candidate);
-            bool viable = true;
-            for (std::size_t i = 0; viable && i < ctor_args.size(); i++) {
-                viable = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
-                                                                             candidate.param_types[i + 1], body,
-                                                                             signatures);
-            }
-            if (viable) viable_candidates.push_back(&candidate);
+    for (const FunctionSignature* candidate : constructor_overloads_of(class_name, signatures)) {
+        if (!compile_time_dependency_visible_in_body(*candidate, body)) continue;
+        if (!signature_accepts_argument_count(*candidate, ctor_args.size(), 1)) continue;
+        if (candidate->is_generic_template) return std::nullopt;
+        arity_candidates.push_back(candidate);
+        bool viable = true;
+        for (std::size_t i = 0; viable && i < ctor_args.size(); i++) {
+            viable = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
+                                                                         candidate->param_types[i + 1], body,
+                                                                         signatures);
         }
+        if (viable) viable_candidates.push_back(candidate);
     }
     if (arity_candidates.empty()) return std::nullopt;
     if (viable_candidates.size() == 1) return std::nullopt;
@@ -1483,7 +1470,16 @@ struct ConstructedOwner {
         if (!elided_result.has_value()) return std::unexpected(std::move(elided_result).error());
         sig.elided_param_index = std::move(elided_result).value();
     }
-    sig.is_extern_c_declaration_only = fn.is_extern_c && fn.body == nullptr;
+    // [temp.inst]/3.1, /4: a deferred member clone is bodyless because
+    // nothing has referenced it yet, not because no definition exists --
+    // so it is not a declaration this compiler will never see the
+    // implementation of, which is the only thing this flag is asked
+    // (dataflow's "no scpp compiler ever sees its real implementation"
+    // diagnostic, and calls.cppm's is_unsafe_function_pointer). Without
+    // the third conjunct the answer would depend on *when* the table was
+    // built relative to materialization, which is precisely what lets
+    // the table be extended rather than rebuilt.
+    sig.is_extern_c_declaration_only = fn.is_extern_c && fn.body == nullptr && !fn.definition_is_deferred;
     sig.is_unsafe = fn.is_unsafe;
     sig.is_nodiscard = fn.is_nodiscard;
     sig.nodiscard_reason = fn.nodiscard_reason;
@@ -1517,6 +1513,40 @@ struct ConstructedOwner {
     }
     overloads.push_back(std::move(sig));
     return {};
+}
+
+// [class.ctor], [over.match.ctor]: every constructor overload
+// `class_name` declares -- the candidate set every constructor question
+// starts from, in the signature table's own iteration order so a caller
+// that takes the first match still takes the same one.
+//
+// A constructor clone is named `<class>_new`, or `<class>_new.<args>`
+// for a constructor template's specializations, and carries
+// `member_owner_class`; that pair of tests was written out six times
+// (resolve_constructor_signature, describe_constructor_selection_failure,
+// braced_init_list_can_initialize, find_single_argument_converting_constructor,
+// and monomorphize's find_ordinary_constructor_overload /
+// non_template_constructor_matches_arguments_exactly), four of them with
+// a verbatim copy of the same `is_constructor_clone_name` lambda -- and
+// each rebuilt both of its comparison strings once per entry in the
+// table, so asking "does this class have a constructor for these
+// arguments?" allocated two strings for every function in the program.
+// Every filter past this pair genuinely differs between the six and
+// stays with its caller.
+[[nodiscard]] std::vector<const FunctionSignature*> constructor_overloads_of(const std::string& class_name,
+                                                                            const Signatures& signatures) {
+    std::vector<const FunctionSignature*> overloads;
+    if (class_name.empty()) return overloads;
+    const std::string constructor_name = class_name + "_new";
+    const std::string specialization_prefix = constructor_name + ".";
+    for (const auto& [name, candidates] : signatures) {
+        if (name != constructor_name && !name.starts_with(specialization_prefix)) continue;
+        for (const FunctionSignature& candidate : candidates) {
+            if (candidate.member_owner_class != class_name) continue;
+            overloads.push_back(&candidate);
+        }
+    }
+    return overloads;
 }
 
 } // namespace scpp

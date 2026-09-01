@@ -554,7 +554,16 @@ private:
         // A concrete clone is created during this pass, after the
         // program-wide resolution ran, so it is bound here.
         resolve_locals(fn);
-        if (auto _r = rebuild_signatures(); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        // The clone this is called for, and anything instantiated on the
+        // way to it, are the only functions the table can be missing --
+        // none of the three rewrites just above touches a signature.
+        // This used to rebuild the whole table, which is O(program) and
+        // ran once per concrete clone: 602 rebuilds and 4.1 s of a 7.9 s
+        // `libs/scpp/scpp.scpp` compile, over 600 tables that differed
+        // from their predecessor by a handful of entries.
+        if (auto _r = sync_appended_function_signatures(); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
         Body body = build_mir(fn);
         body.program = &program_;
         WalkReturnTypeScope return_type_scope(current_walk_return_type_, fn.return_type);
@@ -1536,11 +1545,16 @@ private:
     // already in the table.
     //
     // Equivalent to a rebuild exactly when no earlier function's
-    // signature has changed and none has been removed. The two places
-    // that change one already call rebuild_signatures immediately after,
-    // and a removal (the `fail` lambdas' rollback) is announced by
-    // forget_deferred_member_definitions_from, which invalidates the
-    // watermark -- so the next sync rebuilds instead.
+    // signature has changed and none has been removed. Three things can
+    // change one, and all three are accounted for: resolve_generic_types
+    // rewriting a return type, and a closure's inferred return type
+    // replacing its `void` placeholder, both call rebuild_signatures
+    // immediately after; materializing a member definition sets `body`,
+    // which only `is_extern_c_declaration_only` reads, and that now
+    // reads `definition_is_deferred` alongside it so its value is the
+    // same before and after. A removal (the `fail` lambdas' rollback) is
+    // announced by forget_deferred_member_definitions_from, which
+    // invalidates the watermark, so the next sync rebuilds instead.
     [[nodiscard]] std::expected<void, DataflowError> sync_appended_function_signatures() {
         if (signatures_function_count_ > program_.functions.size()) return rebuild_signatures();
         for (std::size_t i = signatures_function_count_; i < program_.functions.size(); i++) {
@@ -1569,6 +1583,10 @@ private:
         deferred.declaration_loc = program_.functions[function_index].loc;
         deferred.function_index = function_index;
         deferred.build_definition = std::move(build);
+        // Before the signature entry is made, since add_function_signature
+        // reads it: a bodyless clone whose definition is merely deferred
+        // is not a declaration-only `extern "C"` function.
+        program_.functions[function_index].definition_is_deferred = true;
         remember_deferred_family_bases(deferred.function_name);
         deferred_by_function_name_[deferred.function_name].push_back(deferred_member_definitions_.size());
         deferred_member_definitions_.push_back(std::move(deferred));
@@ -1594,6 +1612,9 @@ private:
     // rebuilds the table outright.
     void forget_deferred_member_definitions_from(std::size_t first_function_index) {
         signatures_function_count_ = std::numeric_limits<std::size_t>::max();
+        for (std::size_t i = first_function_index; i < program_.functions.size(); i++) {
+            program_.functions[i].definition_is_deferred = false;
+        }
         for (DeferredMemberDefinition& deferred : deferred_member_definitions_) {
             if (deferred.function_index < first_function_index) continue;
             deferred.materialized = true;
@@ -1623,6 +1644,7 @@ private:
         if (auto _r = build(scratch); !_r.has_value()) return std::unexpected(std::move(_r).error());
         program_.functions[function_index].member_initializers = std::move(scratch.member_initializers);
         program_.functions[function_index].body = std::move(scratch.body);
+        program_.functions[function_index].definition_is_deferred = false;
         return walk_new_concrete_function(function_index);
     }
 
@@ -4552,21 +4574,16 @@ private:
     [[nodiscard]] const FunctionSignature* find_ordinary_constructor_overload(const std::string& class_name,
                                                                              const std::vector<ExprPtr>& args,
                                                                              const Body& body) {
-        std::string ctor_name = class_name + "_new";
-        for (const auto& [name, overloads] : signatures_) {
-            if (!(name == ctor_name || name.starts_with(ctor_name + "."))) continue;
-            for (const FunctionSignature& candidate : overloads) {
-                if (candidate.member_owner_class != class_name) continue;
-                if (candidate.is_generic_template) continue;
-                if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-                if (!signature_accepts_argument_count(candidate, args.size(), 1)) continue;
-                bool all_match = true;
-                for (std::size_t i = 0; all_match && i < args.size(); i++) {
-                    all_match = argument_matches_parameter_for_constructor_selection(*args[i], candidate.param_types[i + 1],
-                                                                                     body, signatures_);
-                }
-                if (all_match) return &candidate;
+        for (const FunctionSignature* candidate : constructor_overloads_of(class_name, signatures_)) {
+            if (candidate->is_generic_template) continue;
+            if (!compile_time_dependency_visible_in_body(*candidate, body)) continue;
+            if (!signature_accepts_argument_count(*candidate, args.size(), 1)) continue;
+            bool all_match = true;
+            for (std::size_t i = 0; all_match && i < args.size(); i++) {
+                all_match = argument_matches_parameter_for_constructor_selection(*args[i], candidate->param_types[i + 1],
+                                                                                 body, signatures_);
             }
+            if (all_match) return candidate;
         }
         return nullptr;
     }
@@ -4616,30 +4633,26 @@ private:
     // inferred value type against a by-reference parameter needs.
     [[nodiscard]] bool non_template_constructor_matches_arguments_exactly(const std::string& class_name,
                                                                          const std::vector<ExprPtr>& args, const Body& body) {
-        std::string ctor_name = class_name + "_new";
-        for (const auto& [name, overloads] : signatures_) {
-            if (!(name == ctor_name || name.starts_with(ctor_name + "."))) continue;
-            for (const FunctionSignature& candidate : overloads) {
-                if (candidate.member_owner_class != class_name) continue;
-                if (candidate.is_generic_template) continue;
-                if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-                if (!signature_accepts_argument_count(candidate, args.size(), 1)) continue;
-                bool all_match = true;
-                for (std::size_t i = 0; all_match && i < args.size(); i++) {
-                    std::optional<Type> arg_type = infer_expr_type(*args[i], body, signatures_);
-                    if (!arg_type.has_value()) {
-                        all_match = false;
-                        break;
-                    }
-                    Type argument = is_reference(*arg_type) && arg_type->pointee != nullptr ? *arg_type->pointee : *arg_type;
-                    Type parameter = candidate.param_types[i + 1];
-                    if (is_reference(parameter) && parameter.pointee != nullptr) parameter = *parameter.pointee;
-                    argument.is_const_qualified = false;
-                    parameter.is_const_qualified = false;
-                    all_match = types_equal(argument, parameter);
+        for (const FunctionSignature* candidate_ptr : constructor_overloads_of(class_name, signatures_)) {
+            const FunctionSignature& candidate = *candidate_ptr;
+            if (candidate.is_generic_template) continue;
+            if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
+            if (!signature_accepts_argument_count(candidate, args.size(), 1)) continue;
+            bool all_match = true;
+            for (std::size_t i = 0; all_match && i < args.size(); i++) {
+                std::optional<Type> arg_type = infer_expr_type(*args[i], body, signatures_);
+                if (!arg_type.has_value()) {
+                    all_match = false;
+                    break;
                 }
-                if (all_match) return true;
+                Type argument = is_reference(*arg_type) && arg_type->pointee != nullptr ? *arg_type->pointee : *arg_type;
+                Type parameter = candidate.param_types[i + 1];
+                if (is_reference(parameter) && parameter.pointee != nullptr) parameter = *parameter.pointee;
+                argument.is_const_qualified = false;
+                parameter.is_const_qualified = false;
+                all_match = types_equal(argument, parameter);
             }
+            if (all_match) return true;
         }
         return false;
     }
@@ -7306,18 +7319,23 @@ private:
         }
         // ch05 §5.9/§5.12: unlike lambda_ctor just above (whose own
         // resolution goes through walk_new_concrete_function, which
-        // already rebuilds signatures_ unconditionally), this "call"
-        // method's own body is walked directly, below, with no such
-        // rebuild -- so without this, signatures_ still would not carry
-        // this closure's own "<ClassName>_call" signature by the time
+        // already syncs signatures_), this "call" method's own body is
+        // walked directly, below, with no such sync -- so without this,
+        // signatures_ still would not carry this closure's own
+        // "<ClassName>_call" signature by the time
         // resolve_callee_signature's bare-call-redirect (`f(args)` ->
         // `f.call(args)`, just above) needs it for *any* call site whose
         // callee is this same lambda-typed local variable, including
         // ones textually later in the very same enclosing function body
         // (e.g. `auto p = [...](...) {...}; ... auto r = p(x);`) --
         // surfacing, confusingly, as an unrelated "cannot infer 'auto'
-        // variable's type" error at that later call site instead.
-        if (auto _r = rebuild_signatures(); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        // variable's type" error at that later call site instead. The
+        // closure's two methods were built as local Function values and
+        // only then appended, so appending their entries is all this
+        // needs -- no existing entry changed.
+        if (auto _r = sync_appended_function_signatures(); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
 
         expr.name = class_name;
 

@@ -5337,6 +5337,11 @@ struct SwitchCaseKey {
         // statements to run the dataflow analysis over -- it's already
         // registered in `signatures` above (so call sites into it are
         // still checked normally), but there's nothing here to check.
+        // Since [temp.inst]/4 instantiation became lazy, a class-template
+        // member whose definition nothing referenced is bodyless here
+        // too, and is skipped for the same reason and by the same rule:
+        // an uninstantiated definition is not a definition this
+        // translation unit checks.
         if (!fn.body) continue;
         if (fn.skip_imported_body_verification) continue;
         // ch05 §5.11: a full-header-form generic function's own

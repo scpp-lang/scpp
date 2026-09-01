@@ -1920,11 +1920,28 @@ class Function {
     LifetimeAnnotation return_lifetime;
     // Null for a bodyless `extern "C"` declaration (ch02 §2.1) or a bare
     // `extern` module-linkage declaration (ch11 §11.6) -- defined
-    // elsewhere, linked in externally. Always non-null for every other
-    // function (an ordinary definition, or an `extern "C"` *definition*
-    // with a body). Nothing outside parsing/movecheck/codegen's
-    // extern-declaration handling should assume this is always non-null.
+    // elsewhere, linked in externally -- and, since [temp.inst]/4
+    // instantiation became lazy, for a class-template member whose
+    // declaration has been instantiated and whose definition has not
+    // (`definition_is_deferred` below distinguishes the two: the second
+    // kind *has* a definition, in the template it was cloned from).
+    // Always non-null for every other function (an ordinary definition,
+    // or an `extern "C"` *definition* with a body). Nothing outside
+    // parsing/movecheck/codegen's extern-declaration handling should
+    // assume this is always non-null.
     StmtPtr body;
+    // [temp.inst]/3.1: this function is a class-template member clone
+    // whose *declaration* has been instantiated and whose definition has
+    // not been instantiated yet -- so `body == nullptr` here does not
+    // mean "no definition exists", it means "nobody has referenced it in
+    // a context requiring one" ([temp.inst]/4). Set by monomorphize's
+    // register_deferred_member_definition and cleared by
+    // materialize_member_definition; it exists because `body == nullptr`
+    // stopped being able to answer "does scpp have an implementation of
+    // this to check?" on its own, and is_extern_c_declaration_only asks
+    // exactly that. Never serialized into a `.scppm`: a deferral lives
+    // and dies inside one monomorphization pass.
+    bool definition_is_deferred = false;
     // ch02 §2.1: requests C linkage. A bodyless `extern "C"` declaration
     // is always implicitly unchecked (no scpp compiler ever sees its
     // real implementation), so calling it always requires
@@ -3329,6 +3346,7 @@ inline Function::Function(const Function& other)
       params{other.params},
       return_lifetime{other.return_lifetime},
       body{},
+      definition_is_deferred{other.definition_is_deferred},
       is_extern_c{other.is_extern_c},
       is_module_extern{other.is_module_extern},
       is_unsafe{other.is_unsafe},
