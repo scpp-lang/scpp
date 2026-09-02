@@ -1,0 +1,52 @@
+// docs/spec/en/07-constexpr-and-consteval.md (ch09) §9.1(4): every
+// potentially-evaluated call to an immediate function shall produce a
+// constant expression. Inside an immediate function context that requirement
+// is already met by the enclosing evaluation ([expr.const.imm]/1, adopted
+// unchanged via §9.1(1)/(2) and front-matter §1(2)), so a receiver that is an
+// ordinary local *reference* is admissible: the reference is bound during the
+// same constant evaluation that performs the member call.
+// docs/spec/en/06-constant-evaluation.md (ch06) §7.2(5.2) requires local
+// declarations to be supported during required constant evaluation, and
+// §7.2(6.2) requires the `consteval` calls themselves.
+//
+// Call position: inside another `consteval` function. Callee: `consteval`
+// non-static member function. Receiver: a reference.
+//
+// Expected value derived from the spec text above and independently confirmed
+// with `clang++-22 -std=c++26`, which compiles this exact source and exits 42.
+//
+// CURRENT STATUS (scpp @ a59ffce): FAILS. scpp reports "error: references,
+// functions and function pointers are not supported during constant
+// evaluation". §7.2(5.2) lists "local declarations" among the constructs the
+// implementation shall support during required constant evaluation, and §7.3
+// does not list reference binding among the unsupported operations, so
+// §7.1(3)'s "permitted by 7.2" test is met. (Reported alongside this case:
+// §7.2(1)'s constexpr-compatible list omits reference types, which may be the
+// source of the disagreement -- if the intent really is to exclude
+// references, §7.2/§7.3 need to say so.) The expectation above comes from the
+// spec and from clang; do not weaken it to match the implementation.
+class Counter {
+public:
+    virtual ~Counter() = default;
+public:
+    int value{};
+
+    consteval Counter(int v) {
+        this->value = v;
+        return;
+    }
+
+    consteval int doubled() const {
+        return this->value * 2;
+    }
+};
+
+consteval int compute() {
+    Counter c{21};
+    const Counter& alias = c;
+    return alias.doubled();
+}
+
+int main() {
+    return compute();
+}

@@ -1,0 +1,29 @@
+// docs/spec/en/07-constexpr-and-consteval.md (ch09) §9.1(4): every
+// potentially-evaluated call to an immediate function shall produce a
+// constant expression. A default argument is a potentially-evaluated
+// expression that belongs to the call site ([dcl.fct.default]), so the
+// immediate call here is evaluated -- and folded -- once per call site.
+// docs/spec/en/06-constant-evaluation.md (ch06) §7.2(6.2) requires the
+// implementation to support the call.
+//
+// Call position: default argument. Callee: free `consteval` function.
+//
+// Expected value derived from the spec text above and independently confirmed
+// with `clang++-22 -std=c++26`, which compiles this exact source and exits 42.
+//
+// CURRENT STATUS (scpp @ a59ffce): FAILS. scpp reports at the call site
+// `return take();` -- "error: internal error: no generated code for resolved
+// function 'twice' called here", i.e. the default argument is lowered as a
+// runtime call instead of being folded. The expectation above comes from the
+// spec and from clang; do not weaken it to match the implementation.
+consteval int twice(int x) {
+    return x * 2;
+}
+
+int take(int value = twice(21)) {
+    return value;
+}
+
+int main() {
+    return take();
+}

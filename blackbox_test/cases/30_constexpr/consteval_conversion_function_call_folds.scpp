@@ -1,0 +1,46 @@
+// docs/spec/en/07-constexpr-and-consteval.md (ch09) §9.1(5) forbids
+// `consteval` only on "a destructor, allocation function, or deallocation
+// function". A conversion function is none of those, so it may be declared
+// `consteval`; §9.1(1)/(2) and front-matter §1(2) adopt [dcl.constexpr]/1-2
+// and [class.conv.fct] unchanged, and those permit it too.
+// §9.1(4) then requires the conversion -- an *implicit* invocation of the
+// immediate function ([expr.const.imm]/1 counts implicit invocations) -- to
+// produce a constant expression. The receiver is a named `constexpr` object,
+// so it does.
+// docs/spec/en/06-constant-evaluation.md (ch06) §7.2(6.2) requires the
+// implementation to support the call.
+//
+// Call position: block scope, invoked implicitly by copy-initialization.
+// Callee: `consteval` conversion function. Receiver: named object.
+//
+// Expected value derived from the spec text above and independently confirmed
+// with `clang++-22 -std=c++26`, which compiles this exact source and exits 42.
+//
+// CURRENT STATUS (scpp @ a59ffce): FAILS -- but not because conversion
+// functions are missing: scpp resolves this one to
+// `Wrapped_operator_convert_int` and then reports "error: internal error: no
+// generated code for resolved function 'Wrapped_operator_convert_int' called
+// here", i.e. the implicit immediate invocation is lowered as a runtime call
+// instead of being folded. The expectation above comes from the spec and from
+// clang; do not weaken it to match the implementation.
+class Wrapped {
+public:
+    virtual ~Wrapped() = default;
+public:
+    int value{};
+
+    constexpr Wrapped(int v) {
+        this->value = v;
+        return;
+    }
+
+    consteval operator int() const {
+        return this->value * 2;
+    }
+};
+
+int main() {
+    constexpr Wrapped w{21};
+    int folded = w;
+    return folded;
+}

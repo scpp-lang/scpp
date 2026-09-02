@@ -1,0 +1,45 @@
+// docs/spec/en/07-constexpr-and-consteval.md (ch09) §9.1(4)/(5): a
+// `consteval` non-static member function is an immediate function, and one
+// immediate member function may call another on its own `this`. Inside an
+// immediate function the call is *not* an immediate invocation at all
+// ([expr.const.imm]/1, adopted unchanged via §9.1(1)/(2) and front-matter
+// §1(2)): it is an ordinary subexpression of the enclosing immediate
+// evaluation. Only the outermost call from `main` has to satisfy §9.1(4).
+// docs/spec/en/06-constant-evaluation.md (ch06) §7.2(6.2) requires the
+// implementation to support both calls.
+//
+// Call position: inside another `consteval` function. Callee: `consteval`
+// non-static member function. Receiver: `this`.
+//
+// Expected value derived from the spec text above and independently confirmed
+// with `clang++-22 -std=c++26`, which compiles this exact source and exits 42.
+//
+// CURRENT STATUS (scpp @ a59ffce): FAILS. scpp resolves the member call but
+// then reports "error: internal error: no generated code for resolved
+// function 'Counter_report' called here" -- the immediate member call is
+// lowered as a runtime call instead of being folded. The expectation above
+// comes from the spec and from clang; do not weaken it to match the
+// implementation.
+class Counter {
+public:
+    virtual ~Counter() = default;
+public:
+    int value{};
+
+    consteval Counter(int v) {
+        this->value = v;
+        return;
+    }
+
+    consteval int half() const {
+        return this->value / 2;
+    }
+
+    consteval int report() const {
+        return this->half() + 1;
+    }
+};
+
+int main() {
+    return Counter{82}.report();
+}

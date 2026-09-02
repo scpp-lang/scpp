@@ -1,0 +1,23 @@
+// docs/spec/en/07-constexpr-and-consteval.md (ch09) §9.1(4): "A function or
+// constructor declared `consteval` is an immediate function. Every
+// potentially-evaluated call to it shall produce a constant expression."
+// docs/spec/en/06-constant-evaluation.md (ch06) §7.2(6.2): during required
+// constant evaluation "the implementation shall support ... calls to
+// `consteval` functions and constructors".
+//
+// Call position: namespace-scope initializer. A namespace-scope `constexpr`
+// initializer *requires* a constant expression ([dcl.constexpr]/6), so this
+// position cannot be satisfied by a runtime evaluation at all -- the value
+// must be folded during translation.
+//
+// Expected value derived from the spec text above and independently confirmed
+// with `clang++-22 -std=c++26`, which compiles this exact source and exits 42.
+consteval int twice(int x) {
+    return x * 2;
+}
+
+constexpr int folded = twice(21);
+
+int main() {
+    return folded;
+}

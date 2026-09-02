@@ -1,0 +1,25 @@
+// docs/spec/en/07-constexpr-and-consteval.md (ch09) §9.1(4): every
+// potentially-evaluated call to an immediate function shall produce a
+// constant expression. An array bound is a constant-expression
+// (docs/spec/en/05-unions-and-packed-layout.md (ch05) §9.4(2)), so an
+// immediate call is a legal bound and, like the namespace-scope initializer
+// case, this position cannot be satisfied by a runtime evaluation at all.
+// docs/spec/en/06-constant-evaluation.md (ch06) §7.2(6.2) requires the
+// implementation to support the call; §7.2(6.4) covers the `sizeof` query
+// used to observe the resulting bound.
+//
+// Call position: array bound. Callee: free `consteval` function.
+//
+// Expected value derived from the spec text above and independently confirmed
+// with `clang++-22 -std=c++26`, which compiles this exact source and exits 42.
+consteval int twice(int x) {
+    return x * 2;
+}
+
+int main() {
+    char buffer[twice(21)];
+    if (sizeof(buffer) != 42) {
+        return 1;
+    }
+    return 42;
+}

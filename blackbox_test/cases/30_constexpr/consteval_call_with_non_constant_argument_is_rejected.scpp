@@ -1,0 +1,35 @@
+// docs/spec/en/07-constexpr-and-consteval.md (ch09) §9.1(4): "Every
+// potentially-evaluated call to it shall produce a constant expression. If it
+// does not, the program is ill-formed." Reading a non-`constexpr` local
+// variable is not a constant expression ([expr.const.core]), so the call
+// below is ill-formed. Note that §9.1(4) makes *the program* ill-formed --
+// the call is not silently demoted to a runtime call, and (unlike
+// [expr.const.imm]/3-4 in C++) `main` does not escalate to an immediate
+// function.
+//
+// This is the reason-pinned counterpart of
+// 30_constant_evaluation/consteval_call_with_runtime_argument_is_rejected.scpp,
+// which asserts only that *some* diagnostic is produced. The accompanying
+// .stderr file additionally requires the diagnostic to name the immediate
+// function and to state the constant-expression reason, and refuses to accept
+// an `internal error`.
+//
+// Rejection independently confirmed with `clang++-22 -std=c++26`, which
+// reports: "error: call to consteval function 'twice' is not a constant
+// expression" / "note: read of non-const variable 'runtime' is not allowed in
+// a constant expression".
+//
+// CURRENT STATUS (scpp @ a59ffce): FAILS the .stderr pin. scpp does reject
+// the program, but with "error: internal error: no generated code for
+// resolved function 'twice' called here" -- an internal-compiler-error
+// report, not a diagnosis of §9.1(4). The unpinned 30_constant_evaluation
+// case named above passes on exactly that internal error today, which is what
+// this case exists to expose. Do not relax the pin to admit `internal error`.
+consteval int twice(int x) {
+    return x * 2;
+}
+
+int main() {
+    int runtime = 21;
+    return twice(runtime);
+}

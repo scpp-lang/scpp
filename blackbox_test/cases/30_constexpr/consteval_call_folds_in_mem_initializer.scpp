@@ -1,0 +1,41 @@
+// docs/spec/en/07-constexpr-and-consteval.md (ch09) §9.1(4): every
+// potentially-evaluated call to an immediate function shall produce a
+// constant expression. A mem-initializer is potentially evaluated whenever
+// the enclosing constructor runs ([class.base.init]), so the immediate call
+// in the mem-initializer-list must fold even though the constructor that
+// contains it is an ordinary runtime constructor.
+// docs/spec/en/06-constant-evaluation.md (ch06) §7.2(6.2) requires the
+// implementation to support the call.
+//
+// Call position: mem-initializer. Callee: free `consteval` function.
+//
+// Expected value derived from the spec text above and independently confirmed
+// with `clang++-22 -std=c++26`, which compiles this exact source and exits 42.
+//
+// CURRENT STATUS (scpp @ a59ffce): FAILS. scpp reports at `Box() :
+// value{twice(21)}` -- "error: internal error: no generated code for resolved
+// function 'twice' called here", i.e. the mem-initializer is lowered as a
+// runtime call instead of being folded. The expectation above comes from the
+// spec and from clang; do not weaken it to match the implementation.
+consteval int twice(int x) {
+    return x * 2;
+}
+
+class Box {
+public:
+    virtual ~Box() = default;
+private:
+    int value;
+public:
+    Box() : value{twice(21)} {
+        return;
+    }
+    int get() const {
+        return this->value;
+    }
+};
+
+int main() {
+    Box b{};
+    return b.get();
+}

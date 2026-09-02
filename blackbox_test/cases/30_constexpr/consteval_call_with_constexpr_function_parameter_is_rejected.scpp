@@ -1,0 +1,40 @@
+// docs/spec/en/07-constexpr-and-consteval.md (ch09) §9.1(4): "Every
+// potentially-evaluated call to it shall produce a constant expression. If it
+// does not, the program is ill-formed." A `constexpr` function's own
+// parameter has no known value while the function is being checked, so
+// `twice(x)` is not a constant expression and the program is ill-formed --
+// even though `outer` is itself `constexpr` and even though the single call
+// site passes a literal.
+//
+// The C++ rule that would otherwise rescue this, immediate escalation, does
+// not apply: an immediate-escalating function is only a lambda call operator,
+// a non-user-provided defaulted function, or a function instantiated from a
+// templated entity defined `constexpr` ([expr.const.imm]/3). A non-templated
+// `constexpr` function is none of those, so the immediate-escalating
+// expression `twice(x)` has nowhere to escalate to. §9.1(4) reaches the same
+// conclusion directly, without needing the escalation machinery.
+//
+// The positive half of this rule -- the same shape with a literal argument --
+// is covered by consteval_call_inside_constexpr_function_folds.scpp.
+//
+// Rejection independently confirmed with `clang++-22 -std=c++26`, which
+// reports: "error: call to consteval function 'twice' is not a constant
+// expression" / "note: function parameter 'x' with unknown value cannot be
+// used in a constant expression".
+//
+// CURRENT STATUS (scpp @ a59ffce): FAILS the .stderr pin. scpp does reject
+// the program, but with "error: internal error: no generated code for
+// resolved function 'twice' called here" -- an internal-compiler-error
+// report, not a diagnosis of §9.1(4). Do not relax the pin to admit
+// `internal error`.
+consteval int twice(int x) {
+    return x * 2;
+}
+
+constexpr int outer(int x) {
+    return twice(x);
+}
+
+int main() {
+    return outer(21);
+}

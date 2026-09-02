@@ -1,0 +1,43 @@
+// docs/spec/en/07-constexpr-and-consteval.md (ch09) §9.1(4): every
+// potentially-evaluated call to an immediate function shall produce a
+// constant expression. A non-type template argument must be a converted
+// constant expression ([temp.arg.nontype]), so this is another position that
+// no runtime evaluation could satisfy: the argument is consumed during
+// template argument substitution, before any code exists.
+// docs/spec/en/06-constant-evaluation.md (ch06) §7.2(6.2) requires the
+// implementation to support the call. Non-type template parameters of scalar
+// type are the language surface exercised by
+// 21_generic_types/non_type_template_parameter_scalar.scpp (ch05 §5.14).
+//
+// Call position: template argument. Callee: free `consteval` function.
+//
+// Expected value derived from the spec text above and independently confirmed
+// with `clang++-22 -std=c++26`, which compiles this exact source and exits 42.
+//
+// CURRENT STATUS (scpp @ a59ffce): FAILS, and for a reason that is *not*
+// consteval-specific: scpp reports "error: unsupported non-type template
+// argument expression (ch05 §5.14 only supports an integer literal, a bare
+// parameter name, or a '+' of the two)". No clause of docs/spec/ restricts a
+// non-type template argument that way, so front-matter §1(2) leaves
+// [temp.arg.nontype]'s converted-constant-expression rule in force. This cell
+// therefore needs both the general non-type-template-argument restriction
+// lifted and immediate-call folding to work. The expectation above comes from
+// the spec and from clang; do not weaken it to match the implementation.
+consteval int twice(int x) {
+    return x * 2;
+}
+
+template<int N>
+class FixedValue {
+public:
+    virtual ~FixedValue() { return; }
+public:
+    int get_n() {
+        return N;
+    }
+};
+
+int main() {
+    FixedValue<twice(21)> v{};
+    return v.get_n();
+}

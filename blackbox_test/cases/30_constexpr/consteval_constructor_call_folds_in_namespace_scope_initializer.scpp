@@ -1,0 +1,41 @@
+// docs/spec/en/07-constexpr-and-consteval.md (ch09) §9.1(4)/(6): a
+// `consteval` constructor is an immediate constructor, and it "may
+// participate in required constant evaluation only for a class type
+// satisfying 7.2(2)". `Box`'s only non-static data member is `int`
+// (docs/spec/en/06-constant-evaluation.md (ch06) §7.2(1.1)), nothing is
+// `mutable`, the constructor whose evaluation is required is itself
+// `consteval`, and the destructor is compiler-provided -- so §7.2(2.1)
+// through (2.4) are all satisfied.
+// The namespace-scope `constexpr` initializer requires a constant expression
+// ([dcl.constexpr]/6), so the constructor call cannot be deferred to run
+// time; §7.2(6.2) requires the implementation to support it.
+//
+// Call position: namespace-scope initializer. Callee: `consteval`
+// constructor.
+//
+// Expected value derived from the spec text above and independently confirmed
+// with `clang++-22 -std=c++26`, which compiles this exact source and exits 42.
+//
+// CURRENT STATUS (scpp @ a59ffce): FAILS. scpp reports "error: global
+// constructor-call initialization is not supported in this version". §7.2(6.2)
+// nevertheless requires calls to `consteval` constructors to be supported
+// during required constant evaluation, and a namespace-scope `constexpr`
+// initializer is required constant evaluation. The expectation above comes
+// from the spec and from clang; do not weaken it to match the implementation.
+class Box {
+public:
+    virtual ~Box() = default;
+public:
+    int value{};
+
+    consteval Box(int v) {
+        this->value = v * 2;
+        return;
+    }
+};
+
+constexpr Box folded{21};
+
+int main() {
+    return folded.value;
+}
