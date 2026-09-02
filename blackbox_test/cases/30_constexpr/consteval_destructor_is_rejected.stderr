@@ -1,0 +1,1 @@
+REGEX:^(?![\s\S]*internal error)[\s\S]*error:[\s\S]*(destructor[\s\S]*consteval|consteval[\s\S]*destructor)[\s\S]*$

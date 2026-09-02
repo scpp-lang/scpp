@@ -1,0 +1,31 @@
+// docs/spec/en/07-constexpr-and-consteval.md (ch09) §9.1(3)/(4): a
+// `constexpr` function body may contain a call to an immediate function, and
+// that call must itself produce a constant expression. Here the argument is a
+// literal, so it does. Note that a non-templated `constexpr` function is not
+// an immediate-escalating function ([expr.const.imm]/3, adopted unchanged via
+// §9.1(1)/(2) and front-matter §1(2)), so nothing escalates here -- the call
+// simply folds where it is written, and `outer()` remains an ordinary
+// `constexpr` function.
+// docs/spec/en/06-constant-evaluation.md (ch06) §7.2(6.1)/(6.2) require the
+// implementation to support both the `constexpr` and the `consteval` call.
+//
+// Call position: inside a `constexpr` function. Callee: free `consteval`
+// function.
+//
+// The negative half of this rule -- the same call with the enclosing
+// `constexpr` function's own parameter as the argument -- is covered by
+// consteval_call_with_constexpr_function_parameter_is_rejected.scpp.
+//
+// Expected value derived from the spec text above and independently confirmed
+// with `clang++-22 -std=c++26`, which compiles this exact source and exits 42.
+consteval int twice(int x) {
+    return x * 2;
+}
+
+constexpr int outer() {
+    return twice(21);
+}
+
+int main() {
+    return outer();
+}

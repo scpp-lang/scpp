@@ -1,0 +1,1 @@
+REGEX:^(?![\s\S]*internal error)[\s\S]*error:[\s\S]*(consteval|immediate)[\s\S]*twice[\s\S]*(not a constant expression|must be a constant expression|does not produce a constant expression|is not constant)[\s\S]*$

@@ -1,0 +1,35 @@
+// docs/spec/en/07-constexpr-and-consteval.md (ch09) §9.1(2) gives `consteval`
+// its C++ meaning, and §9.1(1) plus front-matter §1(2) adopt the C++ rules for
+// immediate functions unchanged. Forming a pointer to an immediate function
+// outside an immediate invocation or immediate function context is therefore
+// ill-formed: the only thing an id-expression naming an immediate function may
+// do is be called ([expr.const.imm]).
+//
+// This is the closest the black-box harness can get to the defining property
+// of `consteval` -- that *no code is emitted* for an immediate function. The
+// harness observes only compiler exit status/stderr and the produced
+// program's exit code/stdout; it cannot inspect the object file's symbol
+// table, so the absence of a `twice` symbol cannot be asserted directly (see
+// blackbox_test/README.md, "Testing philosophy"). What *is* assertable is the
+// language-level consequence: an immediate function has no address a running
+// program could use, so asking for one must be rejected.
+//
+// Rejection independently confirmed with `clang++-22 -std=c++26`, which
+// reports: "error: cannot take address of consteval function 'twice' outside
+// of an immediate invocation".
+//
+// CURRENT STATUS (scpp @ a59ffce): FAILS the .stderr pin. scpp does reject
+// the program, but with "error: use of undeclared variable 'twice'" -- which
+// states a false reason: `twice` is declared, it merely has no address. (The
+// same `int (*fp)(int) = &name;` form is accepted for an ordinary function by
+// 24_function_pointers/address_of_overloaded_function_selects_matching_overload_by_target_type.scpp,
+// so the name-lookup failure is specific to immediate functions.) Do not
+// relax the pin to admit an undeclared-name diagnostic.
+consteval int twice(int x) {
+    return x * 2;
+}
+
+int main() {
+    int (*fp)(int) = &twice;
+    return fp(21);
+}

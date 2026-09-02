@@ -1,0 +1,46 @@
+// docs/spec/en/07-constexpr-and-consteval.md (ch09) §9.1(5) forbids
+// `consteval` only on "a destructor, allocation function, or deallocation
+// function". An overloaded operator function is none of those, so it may be
+// declared `consteval`; §9.1(1)/(2) and front-matter §1(2) adopt
+// [dcl.constexpr]/1-2 unchanged, and those permit it too.
+// §9.1(4) then requires the operator call -- which is a call to an immediate
+// function, spelled with operator notation ([over.match.oper]) -- to produce
+// a constant expression. Both operands are named `constexpr` objects, so the
+// implicit object argument and the explicit argument are both constant.
+// docs/spec/en/06-constant-evaluation.md (ch06) §7.2(6.2) requires the
+// implementation to support the call.
+//
+// Call position: block scope, written in operator notation. Callee:
+// `consteval` overloaded operator. Receiver: named object.
+//
+// Expected value derived from the spec text above and independently confirmed
+// with `clang++-22 -std=c++26`, which compiles this exact source and exits 42.
+//
+// CURRENT STATUS (scpp @ a59ffce): FAILS -- but not because `operator+` is
+// missing: scpp resolves it to `Offset_operator_plus` and then reports
+// "error: internal error: no generated code for resolved function
+// 'Offset_operator_plus' called here", i.e. the immediate operator call is
+// lowered as a runtime call instead of being folded. The expectation above
+// comes from the spec and from clang; do not weaken it to match the
+// implementation.
+class Offset {
+public:
+    virtual ~Offset() = default;
+public:
+    int value{};
+
+    constexpr Offset(int v) {
+        this->value = v;
+        return;
+    }
+
+    consteval int operator+(const Offset& other) const {
+        return this->value + other.value;
+    }
+};
+
+int main() {
+    constexpr Offset a{20};
+    constexpr Offset b{22};
+    return a + b;
+}

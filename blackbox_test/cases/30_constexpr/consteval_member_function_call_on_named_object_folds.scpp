@@ -1,0 +1,46 @@
+// docs/spec/en/07-constexpr-and-consteval.md (ch09) §9.1(5) lists exactly
+// what shall not be declared `consteval`: "A destructor, allocation function,
+// or deallocation function". An ordinary *non-static* member function is not
+// in that list, so it may be declared `consteval`; §9.1(1)/(2) and
+// front-matter §1(2) adopt [dcl.constexpr]/1-2 unchanged, and those permit it
+// too.
+// §9.1(4) then requires the call to produce a constant expression. The
+// implicit object argument is part of the call, so the receiver must itself
+// be usable in a constant expression -- here a named `constexpr` object,
+// whose class satisfies docs/spec/en/06-constant-evaluation.md (ch06)
+// §7.2(2) as required by §9.1(6).
+// §7.2(6.1)/(6.2) require the implementation to support the `constexpr`
+// constructor call and the `consteval` member call.
+//
+// Call position: block scope. Callee: `consteval` non-static member function.
+// Receiver: named object.
+//
+// Expected value derived from the spec text above and independently confirmed
+// with `clang++-22 -std=c++26`, which compiles this exact source and exits 42.
+//
+// CURRENT STATUS (scpp @ a59ffce): FAILS. scpp resolves the member call but
+// then reports "error: internal error: no generated code for resolved
+// function 'Counter_doubled' called here" -- the immediate member call is
+// lowered as a runtime call instead of being folded. The expectation above
+// comes from the spec and from clang; do not weaken it to match the
+// implementation.
+class Counter {
+public:
+    virtual ~Counter() = default;
+public:
+    int value{};
+
+    constexpr Counter(int v) {
+        this->value = v;
+        return;
+    }
+
+    consteval int doubled() const {
+        return this->value * 2;
+    }
+};
+
+int main() {
+    constexpr Counter c{21};
+    return c.doubled();
+}

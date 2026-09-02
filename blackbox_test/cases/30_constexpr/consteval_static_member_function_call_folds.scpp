@@ -1,0 +1,29 @@
+// docs/spec/en/07-constexpr-and-consteval.md (ch09) §9.1(5): "A destructor,
+// allocation function, or deallocation function shall not be declared
+// `consteval`." An ordinary member function is deliberately *not* in that
+// list, so a `static` member function may be declared `consteval` -- which
+// matches [dcl.constexpr]/1-2 unchanged, adopted here via §9.1(1)/(2) and
+// front-matter §1(2).
+// docs/spec/en/07-constexpr-and-consteval.md (ch09) §9.1(4) then requires the
+// call to produce a constant expression, and
+// docs/spec/en/06-constant-evaluation.md (ch06) §7.2(6.2) requires the
+// implementation to support it.
+//
+// Call position: block scope. Callee: `consteval` static member function.
+// There is no receiver -- a static member function is called on the class,
+// not on an object.
+//
+// Expected value derived from the spec text above and independently confirmed
+// with `clang++-22 -std=c++26`, which compiles this exact source and exits 42.
+class Units {
+public:
+    virtual ~Units() = default;
+public:
+    static consteval int scaled(int x) {
+        return x * 2;
+    }
+};
+
+int main() {
+    return Units::scaled(21);
+}

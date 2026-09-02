@@ -1,0 +1,43 @@
+// docs/spec/en/07-constexpr-and-consteval.md (ch09) §9.1(4): "Every
+// potentially-evaluated call to it shall produce a constant expression. If it
+// does not, the program is ill-formed." The implicit object argument is part
+// of the call, so a receiver that is not usable in a constant expression
+// makes the call ill-formed even when every explicit argument is a constant:
+// `c` here is an ordinary non-`constexpr` local, and reading it is not a
+// constant expression ([expr.const.core]).
+//
+// This is the receiver-side counterpart of
+// consteval_call_with_non_constant_argument_is_rejected.scpp. Compare
+// consteval_member_function_call_on_named_object_folds.scpp, which is the
+// same program with `constexpr` on the receiver and is accepted.
+//
+// Rejection independently confirmed with `clang++-22 -std=c++26`, which
+// reports: "error: call to consteval function 'Counter::doubled' is not a
+// constant expression" / "note: read of non-constexpr variable 'c' is not
+// allowed in a constant expression".
+//
+// CURRENT STATUS (scpp @ a59ffce): FAILS the .stderr pin. scpp does reject
+// the program, but with "error: internal error: no generated code for
+// resolved function 'Counter_doubled' called here" -- an internal-compiler-
+// error report, not a diagnosis of §9.1(4). Do not relax the pin to admit
+// `internal error`.
+class Counter {
+public:
+    virtual ~Counter() = default;
+public:
+    int value{};
+
+    constexpr Counter(int v) {
+        this->value = v;
+        return;
+    }
+
+    consteval int doubled() const {
+        return this->value * 2;
+    }
+};
+
+int main() {
+    Counter c{21};
+    return c.doubled();
+}

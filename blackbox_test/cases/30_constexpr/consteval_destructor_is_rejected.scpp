@@ -1,0 +1,32 @@
+// docs/spec/en/07-constexpr-and-consteval.md (ch09) §9.1(5): "A destructor,
+// allocation function, or deallocation function shall not be declared
+// `consteval`." This is the exact rule [dcl.constexpr]/2 states -- "A
+// destructor, an allocation function, or a deallocation function shall not be
+// declared with the consteval specifier" -- restated normatively in the scpp
+// spec, and it is the boundary of the permissive reading used by
+// consteval_static_member_function_call_folds.scpp and
+// consteval_member_function_call_on_named_object_folds.scpp: ordinary member
+// functions are absent from the list and are therefore allowed, while
+// destructors are named and are therefore not.
+//
+// `struct` is used deliberately: docs/spec/en/11-inheritance-and-interfaces.md
+// (ch11) §11.5(1) requires every *class* to declare a virtual destructor, and
+// §11.1(2.3) forbids a `struct` from declaring one, so `struct` is the only
+// construct in which a plain, non-virtual destructor can be written -- which
+// isolates the §9.1(5) violation from any virtual-destructor rule. §11.1(4)
+// confirms a `struct` may otherwise declare members "exactly as the ordinary
+// C++ rules permit".
+//
+// Rejection independently confirmed with `clang++-22 -std=c++26`, which
+// reports: "error: destructor cannot be declared consteval".
+struct Box {
+    int value;
+
+    consteval ~Box() {
+        return;
+    }
+};
+
+int main() {
+    return 0;
+}

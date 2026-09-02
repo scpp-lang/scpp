@@ -1,0 +1,1 @@
+REGEX:^(?![\s\S]*internal error)[\s\S]*error:[\s\S]*address[\s\S]*(consteval|immediate)[\s\S]*twice[\s\S]*$

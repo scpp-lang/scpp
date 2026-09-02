@@ -27,14 +27,32 @@ scpp's internal compiler modules.
      normalized to `128+signum`, e.g. SIGABRT -> 134). Anything after the
      first line is the expected stdout, compared byte-for-byte.
   2. **`COMPILE_ERROR`**: `scpp` must fail with a clean, positive exit
-     status (a real diagnostic, not a crash). The exact message text is
-     never checked -- the spec doesn't pin down wording.
+     status (a real diagnostic, not a crash). On its own this form checks
+     only *that* the program was rejected, never *why* -- add a `.stderr`
+     sidecar (see below) whenever the reason matters, which for a
+     spec-driven negative case it almost always does.
   3. **`NO_ABORT`**: used only for the handful of cases where a
      scpp-inserted runtime check (span bounds, overflow) is deliberately
      *skipped* inside an `[[scpp::unsafe]] { }` block (ch01 §1.1), so the resulting
      value is genuine, unspecified garbage that can't be pinned down --
      but the process must still terminate normally, not be killed by a
      signal.
+- `<name>.stderr` / `main.stderr` -- expected stderr from the `scpp`
+  invocation. **Not CLI-only**: the runner compares it for every case
+  form, including a plain `COMPILE_ERROR` case, so this is the mechanism
+  a negative case uses to pin *why* it was rejected. `$TEMP` expands to
+  the per-case temp directory. Two matching modes:
+  - **exact** -- the file's contents must equal the captured stderr
+    byte-for-byte;
+  - **`REGEX:`-prefixed** -- the remainder is an ECMAScript regular
+    expression (`std::regex_match`, so it must match the *whole* stderr;
+    use `[\s\S]*` for "anything, including newlines"). This is the
+    preferred form: it pins the substantive claim the diagnostic must
+    make while leaving wording free. Starting the pattern with
+    `(?![\s\S]*internal error)` additionally refuses to accept an
+    internal compiler error as a valid rejection -- without that guard, a
+    bare `COMPILE_ERROR` case happily passes on the very crash it was
+    written to catch.
 - **Optional CLI-case sidecars** for black-boxing the CLI surface itself:
   - `<name>.argv` / `main.argv` -- one argv token per non-blank line,
     passed to `scpp` after placeholder substitution (`$INPUT`, `$OUTPUT`,
@@ -47,8 +65,6 @@ scpp's internal compiler modules.
   - `<name>.artifacts` / `main.artifacts` -- relative paths that must exist
     after the CLI command succeeds; prefix a path with `!` to assert that
     it must *not* exist
-  - `<name>.stderr` / `main.stderr` -- exact expected stderr from the CLI
-    command; `$TEMP` expands to the per-case temp directory
 - **Multi-file (ch11 module) cases**: some rules (import/export across
   files, partitions, ...) genuinely need more than one source file. A
   directory containing a `main.scpp` file is instead treated as one
@@ -128,6 +144,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `28_cli_invocation` | CLI surface: direct `scpp file.scpp` builds, default/custom output names, removed `build` keyword, and surviving `lex`/`parse`/`build-module` subcommands |
 | `29_project_build` | manifest-based project builds: single-package `build`, workspace/path dependencies, direct-dependency visibility, package selection, and rejection of deferred manifest features |
 | `30_constant_evaluation` | formal-spec-driven `constexpr`/`consteval` coverage: required constant evaluation, `if consteval` / `if !consteval`, unsupported v1 operations, and the later-pack-to-earlier-parameter deduction rule |
+| `30_constexpr` | immediate (`consteval`) invocation coverage driven by ch09 §9.1 and ch06 §7.2: the callee kinds §9.1(5) permits (free function, static member, non-static member, constructor, overloaded operator, conversion function) crossed with the positions an immediate call can appear in (block scope, namespace-scope initializer, default argument, default member initializer, mem-initializer, array bound, template argument, inside another `consteval` function, inside a `constexpr` function) and the receiver forms (named object, temporary, `this`, a reference); plus the §9.1(5) destructor prohibition, the reason-pinned §9.1(4) rejections for a non-constant argument and a non-constant receiver, and the address-of-an-immediate-function rejection; also `std::format` compile-time format-string checking |
 | `31_enum_class` | scoped enumerations: `enum class` declaration, scoped enumerator access, enum-type separation, explicit casts, and explicit underlying types/values |
 | `32_sizeof_storage_lifetime` | `sizeof(type)` / `sizeof(expr)`, the `alignas`-qualified raw-`char`-array idiom for max-sized/aligned storage (replacing the removed `std::storage_for<T, ...>` builtin), placement-new, explicit destructor-call syntax, and polymorphic-class `sizeof`/`alignof` accounting for the implicit vtable pointer |
 | `33_nodiscard` | `[[nodiscard]]` / `[[nodiscard("reason")]]` on functions and types, including discard diagnostics and allowed non-discarding uses |
@@ -162,6 +179,22 @@ Pass `--scpp-bin <path>` to point at a different build.
   `tests/test_source` (e.g. `print_int`/`print_bool`/`print_char`) is
   deliberately **not** used here since it isn't part of the documented
   language surface.
+- **The harness cannot observe the emitted object file's symbol table.**
+  Everything it sees is the `scpp` invocation's exit status/stderr, the
+  existence of named output files (`.artifacts`), and the produced
+  program's exit code/stdout/stderr. There is no hook for running `nm`
+  or `objdump` over the result. That matters for one property in
+  particular: the defining property of an immediate function is that
+  **no code is emitted for it** ([expr.const.imm]), and that cannot be
+  asserted here. `30_constexpr` therefore covers the observable half --
+  that the call is *folded to the right value*, in positions such as a
+  namespace-scope `constexpr` initializer and an array bound where a
+  runtime evaluation could not satisfy the context at all -- plus the
+  language-level consequence that an immediate function has no usable
+  address
+  (`30_constexpr/consteval_function_address_cannot_be_taken.scpp`).
+  Asserting symbol absence directly needs a different harness; it is
+  deliberately *not* faked here.
 - Every function body (including `void`-returning ones) needs an explicit
   `return` statement -- scpp currently has no implicit fall-off-the-end
   return, even though this isn't called out explicitly in `docs/book/`.
@@ -237,8 +270,50 @@ Pass `--scpp-bin <path>` to point at a different build.
 Current maintained baseline, rebuilt locally with CMake + Ninja and
 re-run via `./build/run_tests`:
 
-- **534 cases total**
-- **534/534 passing**
+- **646 cases total**
+- **631/646 passing**
+- **15 known-red cases, all in `30_constexpr`, all deliberate.** They are
+  the immediate-invocation coverage described in the category table
+  above. Each one's expected outcome was derived from ch09 §9.1 / ch06
+  §7.2 and independently confirmed against `clang++-22 -std=c++26`
+  compiling the identical source (an scpp case that uses no
+  `scpp::`-namespaced attribute is already valid C++26 text, front-matter
+  §3.1/§4(2)), so each is a spec-vs-implementation divergence for the
+  `src/` maintainer, not a broken test. Every one carries a
+  `CURRENT STATUS` note recording the diagnostic scpp currently produces.
+  Three clusters:
+  - **Immediate calls are not folded outside a few positions.** A
+    `consteval` call reached through a default argument, a default member
+    initializer, a mem-initializer, a non-static member function (named,
+    temporary or `this` receiver), an overloaded operator, or a
+    conversion function is lowered as a runtime call and then reported as
+    `internal error: no generated code for resolved function '...' called
+    here`. The same internal error is what the *rejection* cases see, so
+    scpp currently "rejects" a §9.1(4) violation by crashing rather than
+    by diagnosing it -- which is why those cases carry `.stderr` pins
+    that refuse `internal error`.
+  - **Positions that work today**: block scope, namespace-scope
+    `constexpr` initializer, array bound, `static` member callee, and a
+    `consteval` call inside a `constexpr` function -- the five green
+    cases.
+  - **Adjacent gaps surfaced by the matrix**: `constexpr Box b{...};` at
+    namespace scope is rejected outright ("global constructor-call
+    initialization is not supported in this version"); a local reference
+    inside a `consteval` function is rejected ("references, functions and
+    function pointers are not supported during constant evaluation")
+    although §7.2(5.2) permits local declarations and §7.3 does not list
+    reference binding; a non-type template argument is restricted to "an
+    integer literal, a bare parameter name, or a '+' of the two" although
+    no spec clause narrows [temp.arg.nontype]; and `&consteval_fn` is
+    rejected as `use of undeclared variable`, a false reason for a
+    correct rejection.
+- **Related fossil, still green, left untouched**:
+  `30_constant_evaluation/consteval_call_with_runtime_argument_is_rejected.scpp`
+  asserts only `COMPILE_ERROR` and therefore currently *passes* on the
+  `internal error: no generated code for resolved function 'twice' called
+  here` above -- it is green on the very defect it was written to catch.
+  `30_constexpr/consteval_call_with_non_constant_argument_is_rejected.scpp`
+  is the same rule with the reason pinned, and is red.
 - **`24_function_pointers`: 14/14 meaningfully verified** -- the parser
   now accepts real function-pointer declarators and the suite covers both
   the positive-path runtime cases and the `COMPILE_ERROR` safety rules
