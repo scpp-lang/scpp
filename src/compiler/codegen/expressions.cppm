@@ -2718,6 +2718,28 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         if (std::optional<Type> fn_type = resolve_function_designator_type(expr)) {
                             if (llvm::LLVMValueRef fn = codegen_function_pointer_value_for_target(expr, *fn_type)) return fn;
                         }
+                        // [expr.const.imm], ch09 §9.1(4): an immediate
+                        // function emits no code, so there is no address to
+                        // take -- outside an immediate function context,
+                        // naming one other than to call it is ill-formed.
+                        // Falling through to codegen_lvalue reported "use of
+                        // undeclared variable 'twice'", which described the
+                        // absence of a symbol this compiler deliberately
+                        // never emits rather than what the program did.
+                        if (expr.lhs != nullptr && expr.lhs->kind == ExprKind::Identifier) {
+                            for (const Function& candidate : program_->functions) {
+                                if (candidate.eval_mode != FunctionEvalMode::Consteval) continue;
+                                if (candidate.name != expr.lhs->name &&
+                                    !candidate.name.ends_with("::" + expr.lhs->name)) {
+                                    continue;
+                                }
+                                return std::unexpected(CodegenError(
+                                    "cannot take the address of consteval function '" + expr.lhs->name +
+                                        "': an immediate function is only ever called, never referred to, because no "
+                                        "code is emitted for it (spec ch09 §9.1(4))",
+                                    current_loc_));
+                            }
+                        }
                         // `&expr` (ch05 §5.7) -- the mirror image of Deref
                         // just above: codegen_lvalue already resolves
                         // expr.lhs's address (its `.ptr`); returning that
