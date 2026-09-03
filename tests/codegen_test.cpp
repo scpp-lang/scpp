@@ -3605,6 +3605,13 @@ void run_constexpr_string_literal_byte_tests() {
 // cases is that the reassembly kept every message byte-identical -- including
 // the "line:column: " prefix, which had to move into a free function since a
 // base-class mem-initializer cannot bind a temporary.
+//
+// The four cases whose source calls `bad()` from `main` now carry the
+// "call to consteval function 'bad' is not a constant expression: " prefix
+// as well: `bad()` is an immediate invocation, and ch09 §9.1(4) makes the
+// failure a failure *of that call*, which the diagnostic has to name.
+// Reporting only the inner reason told the author a field was unknown
+// without saying which immediate call could therefore not be made.
 void run_constexpr_diagnostic_text_tests() {
     struct DiagnosticCase {
         std::string case_name;
@@ -3616,17 +3623,19 @@ void run_constexpr_diagnostic_text_tests() {
          "struct Point { int x = 1; };\n"
          "consteval int bad() { Point p{}; return p.missing; }\n"
          "int main() { return bad(); }\n",
-         "unknown constexpr field 'missing'"},
+         "call to consteval function 'bad' is not a constant expression: unknown constexpr field 'missing'"},
         {"diagnostic_no_overload_matches_immediate_call",
          "consteval int f(int a) { return a; }\n"
          "consteval int bad() { return f(1, 2); }\n"
          "int main() { return bad(); }\n",
-         "no constexpr/consteval overload of 'f' matches this immediate call"},
+         "call to consteval function 'bad' is not a constant expression: no constexpr/consteval overload of "
+         "'f' matches this immediate call"},
         {"diagnostic_no_method_overload_matches_immediate_call",
          "class C {\n  public:\n    consteval int m(int a) { return a; }\n};\n"
          "consteval int bad() { C c{}; return c.m(1, 2); }\n"
          "int main() { return bad(); }\n",
-         "no constexpr/consteval overload of method 'm' matches this immediate call"},
+         "call to consteval function 'bad' is not a constant expression: no constexpr/consteval overload of "
+         "method 'm' matches this immediate call"},
         {"diagnostic_no_constructor_matches_for_type",
          "class Holder {\n"
          "  public:\n"
@@ -3635,7 +3644,8 @@ void run_constexpr_diagnostic_text_tests() {
          "};\n"
          "consteval int bad() { Holder h{1}; return h.v; }\n"
          "int main() { return bad(); }\n",
-         "no constexpr/consteval constructor matches for type 'Holder'"},
+         "call to consteval function 'bad' is not a constant expression: no constexpr/consteval constructor "
+         "matches for type 'Holder'"},
         // The two cases below are the ones whose message tail is appended from
         // a parameter rather than a literal: 'sizeof' arrives as a `const
         // char*` and "variable 'x'" as a `const std::string&`, so together

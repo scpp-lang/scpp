@@ -110,6 +110,12 @@ struct ConstexprLimits {
     return formatted;
 }
 
+// The message a ConstexprError carries without the `line:column: ` prefix
+// format_constexpr_error_message puts in front of it -- for a caller that
+// is composing one diagnostic out of another and would otherwise print
+// the same location twice.
+[[nodiscard]] std::string constexpr_error_reason(const std::runtime_error& error);
+
 // `class`, not `struct`: scpp only lets a `struct` hold scalars, pointers,
 // trivial structs/unions and fixed-size arrays of those (spec ch04), and
 // `struct X : Base` is not spellable at all -- a base clause requires
@@ -132,6 +138,18 @@ public:
 
     SourceLocation loc{};
 };
+
+[[nodiscard]] std::string constexpr_error_reason(const std::runtime_error& error) {
+    std::string text{error.what()};
+    std::size_t colon = text.find(": ");
+    if (colon == std::string::npos) return text;
+    for (std::size_t at = 0; at < colon; at++) {
+        char c = text[at];
+        bool is_location_char = (c >= '0' && c <= '9') || c == ':';
+        if (!is_location_char) return text;
+    }
+    return text.substr(colon + 2);
+}
 
 enum class ConstexprValueKind {
     Void,
@@ -731,6 +749,19 @@ public:
         return evaluate_expr(expr);
     }
 
+    // The same, for a caller that has already opened a local-constant
+    // scope (begin_local_constant_scope) and is evaluating an expression
+    // written *inside* that scope: the step and depth budgets restart,
+    // the bindings stay. Clearing them is what made
+    // `constexpr Counter c{21}; return c.doubled();` report "identifier
+    // 'c' is not available" -- the local was bound and then thrown away
+    // one call before it was read.
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> evaluate_expr_in_scope(const Expr& expr) {
+        steps_ = 0;
+        call_depth_ = 0;
+        return evaluate_expr(expr);
+    }
+
     // [expr.const]/13: an immediate invocation is a call that *names* an
     // immediate function -- and which function a call names is settled by
     // overload resolution ([over.match]/3), never by scanning
@@ -749,6 +780,118 @@ public:
     // every arity-matching candidate is `consteval`, where resolution
     // has nothing else to choose. A *mixed* set is resolved for real,
     // through the same find_callable every other call in this file uses.
+    // The reject half of call_names_immediate_function, and only that: a
+    // pair of hash lookups, no evaluation and no overload resolution. If
+    // this is false the full question is false too, so a body in which it
+    // is false for every expression can fold nothing -- which is what lets
+    // the walk below skip binding that body's local constants at all.
+    [[nodiscard]] bool expression_may_name_immediate_function(const Expr& expr) const {
+        if (expr.kind == ExprKind::Call) {
+            if (expr.lhs == nullptr) return immediate_call_names_.contains(expr.name);
+            return immediate_member_names_.contains(expr.name);
+        }
+        if (immediate_member_names_.empty()) return false;
+        switch (expr.kind) {
+            case ExprKind::Binary:
+                return immediate_member_names_.contains(binary_operator_method_name(expr.binary_op));
+            case ExprKind::Unary:
+                return immediate_member_names_.contains(unary_operator_method_name(expr.unary_op));
+            case ExprKind::Subscript:
+                return immediate_member_names_.contains(std::string{"operator_subscript"});
+            case ExprKind::Cast:
+                return immediate_member_names_.contains(conversion_function_method_name(expr.type));
+            default:
+                return false;
+        }
+    }
+
+    // The same question for the destination of an initialization, which
+    // fold_immediate_conversion_to answers implicitly.
+    [[nodiscard]] bool destination_may_convert_immediately(const Type& destination) const {
+        if (destination.kind != TypeKind::Named) return false;
+        return immediate_member_names_.contains(conversion_function_method_name(destination));
+    }
+
+    // How the program spells the immediate function an expression calls,
+    // for the diagnostic when the call does not fold: `f`, `C::m`, and
+    // the operator/conversion spellings rather than their `C_operator_plus`
+    // clone names.
+    // [class.conv.fct], [dcl.init]/17.6: initializing a scalar from a
+    // class-typed operand calls that class's conversion function, and the
+    // grammar spells none of it -- `int folded = w;` has no Cast node, no
+    // Call node, nothing for call_names_immediate_function to be asked
+    // about. When the conversion function is `consteval` that is still an
+    // immediate invocation (ch09 §9.1(4)), and it was reaching codegen
+    // unfolded. Returns the folded value, or nothing if this
+    // initialization is not an immediate conversion at all.
+    //
+    // The candidate is found through conversion_function_call_for -- the
+    // same builder evaluate_contextual_bool and the operator paths use --
+    // so an implicit conversion cannot resolve here to a different
+    // function from the one those select.
+    [[nodiscard]] std::optional<std::expected<std::shared_ptr<Cell>, ConstexprError>>
+    fold_immediate_conversion_to(const Expr& operand, const Type& destination) {
+        if (destination.kind != TypeKind::Named) return std::nullopt;
+        // Asked before anything else, and before any type inference: does
+        // *some* consteval conversion function to this destination exist
+        // at all? If not, no initialization to it can be an immediate
+        // invocation, so there is nothing here to fold and the operand's
+        // type never needs inferring. Cheap, exact (immediate_member_names_
+        // holds every `_`-suffix of every consteval member's clone name,
+        // and a conversion function's is `<Class>_operator_convert_<T>`),
+        // and it keeps this off the path of every ordinary declaration in
+        // the program.
+        if (!immediate_member_names_.contains(conversion_function_method_name(destination))) return std::nullopt;
+        Type operand_storage{};
+        OptionalTypeRef operand_class = operator_operand_class_type(operand, operand_storage);
+        if (!operand_class.has_value()) return std::nullopt;
+        std::string key = conversion_function_key(operand_class->get().name, destination);
+        if (!functions_by_name_.contains(key)) return std::nullopt;
+        const std::vector<std::size_t>& overloads = functions_by_name_.at(key);
+        if (overloads.empty()) return std::nullopt;
+        if (program_.functions[overloads[0]].eval_mode != FunctionEvalMode::Consteval) return std::nullopt;
+        ExprPtr conversion_call =
+            conversion_function_call_for(operand, operand_class->get(), destination, /*allow_explicit=*/true);
+        if (conversion_call == nullptr) return std::nullopt;
+        return evaluate_expr_in_scope(*conversion_call);
+    }
+
+    [[nodiscard]] std::string immediate_callee_display_name(const Expr& expr) const {
+        std::string spelled_free{};
+        if (expr.kind == ExprKind::Call && expr.lhs == nullptr) {
+            spelled_free += expr.name;
+            return spelled_free;
+        }
+        std::string member_name{};
+        if (expr.kind == ExprKind::Call) {
+            member_name = expr.name;
+        } else if (expr.kind == ExprKind::Binary) {
+            member_name = binary_operator_method_name(expr.binary_op);
+        } else if (expr.kind == ExprKind::Unary) {
+            member_name = unary_operator_method_name(expr.unary_op);
+        } else if (expr.kind == ExprKind::Subscript) {
+            member_name = std::string{"operator_subscript"};
+        } else if (expr.kind == ExprKind::Cast) {
+            member_name = conversion_function_method_name(expr.type);
+        }
+        if (member_name.empty()) {
+            std::string fallback{};
+            fallback += expr.name;
+            return fallback;
+        }
+        std::string member_suffix{};
+        member_suffix += "_";
+        member_suffix += member_name;
+        for (const Function& fn : program_.functions) {
+            if (fn.eval_mode != FunctionEvalMode::Consteval) continue;
+            if (fn.member_owner_class.empty() || !fn.name.ends_with(member_suffix)) continue;
+            std::string spelled = operator_function_display_spelling(fn.name);
+            if (spelled.empty()) spelled = member_name;
+            return fn.member_owner_class + "::" + spelled;
+        }
+        return member_name;
+    }
+
     [[nodiscard]] bool call_names_immediate_function(const Expr& expr) {
         if (expr.kind != ExprKind::Call) return operator_expr_names_immediate_function(expr);
         if (expr.lhs != nullptr) return method_call_names_immediate_function(expr);
@@ -769,7 +912,6 @@ public:
         }
         if (!any_immediate) return false;
         if (!any_other) return true;
-        frames_.clear();
         steps_ = 0;
         call_depth_ = 0;
         std::vector<std::shared_ptr<Cell>> arg_values{};
@@ -848,7 +990,6 @@ public:
         MemberImmediacy immediacy = member_immediacy(expr.name, expr.args.size());
         if (immediacy == MemberImmediacy::None) return false;
         if (immediacy == MemberImmediacy::All) return true;
-        frames_.clear();
         steps_ = 0;
         call_depth_ = 0;
         std::vector<std::shared_ptr<Cell>> arg_values{};
@@ -928,7 +1069,6 @@ public:
         // find_method_callable does -- it evaluates the operand and
         // checks it is a record before looking up a member on it.
         if (member_immediacy(member_name, arg_count) == MemberImmediacy::None) return false;
-        frames_.clear();
         steps_ = 0;
         call_depth_ = 0;
         std::vector<std::shared_ptr<Cell>> operand_values{};
@@ -1150,8 +1290,8 @@ public:
     // enclosing or the same block is visible to a later array bound, one
     // from a later statement or an unrelated sibling block is not, and an
     // inner declaration correctly shadows an outer one of the same name.
-    void begin_local_array_bound_scope(const std::vector<std::string>& namespace_path) {
-        saved_array_bound_namespace_path_ = enter_namespace(namespace_path);
+    void begin_local_constant_scope(const std::vector<std::string>& namespace_path) {
+        saved_local_constant_namespace_path_ = enter_namespace(namespace_path);
         frames_.clear();
         steps_ = 0;
         call_depth_ = 0;
@@ -1159,13 +1299,13 @@ public:
         frames_.emplace_back();
     }
 
-    void end_local_array_bound_scope() {
+    void end_local_constant_scope() {
         frames_.pop_back();
-        leave_namespace(saved_array_bound_namespace_path_);
+        leave_namespace(saved_local_constant_namespace_path_);
     }
 
-    void push_local_array_bound_scope() { frames_.emplace_back(); }
-    void pop_local_array_bound_scope() { frames_.pop_back(); }
+    void push_local_constant_scope() { frames_.emplace_back(); }
+    void pop_local_constant_scope() { frames_.pop_back(); }
 
     // Mirrors validate_constexpr_stmt_tree's own VarDecl handling below
     // (is_constexpr required-strict; is_const-with-init best-effort,
@@ -1177,7 +1317,7 @@ public:
     // `frames_.back()[var_name] = ...` binding) so a later sibling/nested
     // array-bound expression in the same function can look it up, exactly
     // like it already could as an `alignas` operand.
-    [[nodiscard]] std::expected<void, ConstexprError> bind_local_constant_for_array_bounds(const Stmt& stmt) {
+    [[nodiscard]] std::expected<void, ConstexprError> bind_local_constant(const Stmt& stmt) {
         if (stmt.is_constexpr) {
             auto result = execute_stmt(stmt, named_type("void"));
             if (!result.has_value()) return std::unexpected(std::move(result).error());
@@ -1248,7 +1388,7 @@ private:
     // its body runs -- so lookup never depends on which reference
     // happened to trigger the evaluation.
     std::vector<std::string> lookup_namespace_path_{};
-    std::vector<std::string> saved_array_bound_namespace_path_{};
+    std::vector<std::string> saved_local_constant_namespace_path_{};
 
     // ch05 §9.4(6): `struct Self { char buf[sizeof(Self)]; };` -- Self is
     // incomplete at this point, so evaluating its size/alignment must be
@@ -1388,7 +1528,7 @@ private:
                         ignore_result(rewrite_expr_as_constant(*stmt.init, binding_result.value().cell));
                     }
                 } else if (stmt.is_const && (stmt.init || stmt.has_ctor_args)) {
-                    // Best-effort, matching bind_local_constant_for_array_bounds
+                    // Best-effort, matching bind_local_constant
                     // above and the original catch(const ConstexprError&) {}: a
                     // local `const` whose initializer is not a constant
                     // expression simply does not become one, which is not an
@@ -1752,7 +1892,7 @@ private:
     // therefore cannot be read by an array bound".
     //
     // The `const` arm is *best-effort*, exactly as
-    // bind_local_constant_for_array_bounds and
+    // bind_local_constant and
     // validate_constexpr_stmt_tree's VarDecl case already make it for a
     // local: a `const` global whose initializer is not a constant
     // expression simply does not become one, which is not an error at the
@@ -4835,6 +4975,43 @@ private:
                                                                 stmt.is_const || stmt.is_constexpr};
                         return ExecOutcome{};
                     }
+                    // ch06 §7.2(5.2): a local declaration is one of the
+                    // forms required constant evaluation must support, and
+                    // a reference declaration is one -- `const Counter&
+                    // alias = c;`. §7.2(1)'s constexpr-compatible list
+                    // does not reach this: it is consulted only for what
+                    // an array element, a struct field, a class member or
+                    // a `std::span`'s element may *be* ((1.3), (1.4),
+                    // (2.1), (4.3)), never for what a name may be bound
+                    // to. §7.2(6.1)/(6.2) settle it from the other side --
+                    // they require constructor and member calls to work,
+                    // and a method's own `this` parameter is
+                    // reference-typed, so a reference binding is already
+                    // being made on every such call. A reference is an
+                    // alias, so it shares the referent's cell rather than
+                    // getting one of its own; make_default_cell has no
+                    // reference case and rejected the declaration outright
+                    // ("references, functions and function pointers are
+                    // not supported during constant evaluation").
+                    if (stmt.type.kind == TypeKind::Reference) {
+                        if (!stmt.init) {
+                            return std::unexpected(ConstexprError(stmt.loc, "a reference must be initialized during constant evaluation"));
+                        }
+                        bool binds_read_only = !stmt.type.is_mutable_ref;
+                        auto referent = resolve_lvalue(*stmt.init);
+                        if (referent.has_value()) {
+                            LValue bound = std::move(referent).value();
+                            frames_.back()[stmt.var_name] = Binding{bound.cell, binds_read_only || bound.read_only};
+                            return ExecOutcome{};
+                        }
+                        // A `const T&` may bind a temporary
+                        // ([dcl.init.ref]/5), which has no lvalue to
+                        // resolve; the materialized value is the referent.
+                        auto materialized = evaluate_expr(*stmt.init);
+                        if (!materialized.has_value()) return std::unexpected(std::move(materialized).error());
+                        frames_.back()[stmt.var_name] = Binding{std::move(materialized).value(), binds_read_only};
+                        return ExecOutcome{};
+                    }
                     if (auto result = reject_user_defined_destructor_execution(stmt.type, stmt.loc); !result.has_value()) {
                         return std::unexpected(std::move(result).error());
                     }
@@ -5264,10 +5441,51 @@ private:
                                    std::vector<ExprRewrite>& expr_rewrites,
                                    std::vector<std::reference_wrapper<Stmt>>& consteval_if_rewrites,
                                    bool in_immediate_function_context);
+[[nodiscard]] bool stmt_may_fold_immediately(const Stmt& stmt, const ConstexprEngine& engine);
 [[nodiscard]] std::expected<void, ConstexprError> collect_runtime_stmt_rewrites(const Program& program, Stmt& stmt, ConstexprEngine& engine,
                                    std::vector<ExprRewrite>& expr_rewrites,
                                    std::vector<std::reference_wrapper<Stmt>>& consteval_if_rewrites,
                                    bool in_immediate_function_context);
+
+// Whether anything in this body could be an immediate invocation at all,
+// asked with nothing but hash lookups (see
+// ConstexprEngine::expression_may_name_immediate_function). A body for
+// which this is false folds nothing, so binding its local constants --
+// which means *executing* every `constexpr` initializer in it -- is pure
+// waste. Doing it unconditionally cost 2.9% of the whole blackbox suite
+// and made 45 cases more than 0.1 s slower, because the overwhelming
+// majority of functions in any program contain no immediate invocation.
+[[nodiscard]] bool expr_may_fold_immediately(const Expr& expr, const ConstexprEngine& engine) {
+    if (engine.expression_may_name_immediate_function(expr)) return true;
+    if (expr.lhs && expr_may_fold_immediately(*expr.lhs, engine)) return true;
+    if (expr.rhs && expr_may_fold_immediately(*expr.rhs, engine)) return true;
+    if (expr.third && expr_may_fold_immediately(*expr.third, engine)) return true;
+    for (const ExprPtr& arg : expr.args) {
+        if (arg && expr_may_fold_immediately(*arg, engine)) return true;
+    }
+    if (expr.lambda_body && stmt_may_fold_immediately(*expr.lambda_body, engine)) return true;
+    return false;
+}
+
+[[nodiscard]] bool stmt_may_fold_immediately(const Stmt& stmt, const ConstexprEngine& engine) {
+    // ch09 §9.2: an `if consteval` is rewritten by this same walk, and it
+    // needs no immediate *invocation* to be there. Skipping a body that
+    // has one would leave the statement unrewritten.
+    if (stmt.kind == StmtKind::If && stmt.if_mode != IfMode::Runtime) return true;
+    if (stmt.kind == StmtKind::VarDecl && engine.destination_may_convert_immediately(stmt.type)) return true;
+    if (stmt.init && expr_may_fold_immediately(*stmt.init, engine)) return true;
+    if (stmt.expr && expr_may_fold_immediately(*stmt.expr, engine)) return true;
+    if (stmt.condition && expr_may_fold_immediately(*stmt.condition, engine)) return true;
+    for (const ExprPtr& arg : stmt.ctor_args) {
+        if (arg && expr_may_fold_immediately(*arg, engine)) return true;
+    }
+    if (stmt.then_branch && stmt_may_fold_immediately(*stmt.then_branch, engine)) return true;
+    if (stmt.else_branch && stmt_may_fold_immediately(*stmt.else_branch, engine)) return true;
+    for (const StmtPtr& nested : stmt.statements) {
+        if (nested && stmt_may_fold_immediately(*nested, engine)) return true;
+    }
+    return false;
+}
 
 [[nodiscard]] std::expected<void, ConstexprError> collect_runtime_stmt_rewrites(const Program& program, Stmt& stmt, ConstexprEngine& engine,
                                    std::vector<ExprRewrite>& expr_rewrites,
@@ -5315,22 +5533,46 @@ private:
         }
     }
     if (stmt.then_branch) {
-        if (auto result = collect_runtime_stmt_rewrites(program, *stmt.then_branch, engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
-            !result.has_value()) {
-            return result;
-        }
+        engine.push_local_constant_scope();
+        auto result = collect_runtime_stmt_rewrites(program, *stmt.then_branch, engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
+        engine.pop_local_constant_scope();
+        if (!result.has_value()) return result;
     }
     if (stmt.else_branch) {
-        if (auto result = collect_runtime_stmt_rewrites(program, *stmt.else_branch, engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
-            !result.has_value()) {
-            return result;
-        }
+        engine.push_local_constant_scope();
+        auto result = collect_runtime_stmt_rewrites(program, *stmt.else_branch, engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
+        engine.pop_local_constant_scope();
+        if (!result.has_value()) return result;
     }
-    for (StmtPtr& nested : stmt.statements) {
-        if (auto result = collect_runtime_stmt_rewrites(program, *nested, engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
-            !result.has_value()) {
-            return result;
+    if (!stmt.statements.empty()) {
+        engine.push_local_constant_scope();
+        for (StmtPtr& nested : stmt.statements) {
+            if (auto result = collect_runtime_stmt_rewrites(program, *nested, engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
+                !result.has_value()) {
+                engine.pop_local_constant_scope();
+                return result;
+            }
         }
+        engine.pop_local_constant_scope();
+    }
+    // ch06 §7.2(5.2): a local declaration is one of the things required
+    // constant evaluation must support, and an immediate invocation
+    // written later in the same function reads the locals declared before
+    // it. Two other walks over exactly this domain -- AlignmentResolver's
+    // array-bound pre-pass and validate_constexpr_stmt_tree -- already did
+    // this frame bookkeeping; this one, the walk that decides whether an
+    // immediate invocation folds, did not, so `constexpr Counter c{21};
+    // return c.doubled();` reported "identifier 'c' is not available"
+    // while the identical local was readable as an array bound one line
+    // later. Binding is what the other two already call it.
+    if (stmt.kind == StmtKind::VarDecl) {
+        if (stmt.init != nullptr && !in_immediate_function_context) {
+            if (auto folded = engine.fold_immediate_conversion_to(*stmt.init, stmt.type); folded.has_value()) {
+                if (!folded->has_value()) return std::unexpected(std::move(folded)->error());
+                expr_rewrites.push_back(ExprRewrite{*stmt.init, std::move(folded)->value()});
+            }
+        }
+        return engine.bind_local_constant(stmt);
     }
     return {};
 }
@@ -5364,12 +5606,31 @@ private:
     // pass has always done it; only the *failure* is different, and there
     // it means "not yet", not "ill-formed".
     if (engine.call_names_immediate_function(expr)) {
-        auto value_result = engine.evaluate_root_expr(expr);
+        auto value_result = engine.evaluate_expr_in_scope(expr);
         if (value_result.has_value()) {
             expr_rewrites.push_back(ExprRewrite{expr, std::move(value_result).value()});
             return {};
         }
-        if (!in_immediate_function_context) return std::unexpected(std::move(value_result).error());
+        if (!in_immediate_function_context) {
+            // ch09 §9.1(4): this call is ill-formed *because it is a call
+            // to an immediate function that did not produce a constant
+            // expression*, and the message has to say so. Reporting only
+            // the inner reason ("identifier 'runtime' is not available")
+            // named a symptom of the obligation without naming the
+            // obligation, so the author was told a variable was missing
+            // rather than that the `consteval` call around it cannot be
+            // made at runtime.
+            const ConstexprError& why = value_result.error();
+            std::string message{};
+            message += "call to consteval function '";
+            message += engine.immediate_callee_display_name(expr);
+            message += "' is not a constant expression: ";
+            // what() already carries `line:column: ` (see
+            // format_constexpr_error_message) and the driver prints the
+            // location again, so only the reason itself belongs here.
+            message += constexpr_error_reason(why);
+            return std::unexpected(ConstexprError(why.loc, message));
+        }
     }
     if (expr.lhs) {
         if (auto result = collect_runtime_expr_rewrites(program, *expr.lhs, engine, expr_rewrites, consteval_if_rewrites, in_immediate_function_context);
@@ -5487,15 +5748,15 @@ public:
             if (fn.body) {
                 // ch05 §9.4 (local-constexpr-as-array-bound gap fix):
                 // opens this function's own local constant-evaluation
-                // frame (see ConstexprEngine::begin_local_array_bound_scope)
+                // frame (see ConstexprEngine::begin_local_constant_scope)
                 // so a local `constexpr`/const-with-init declaration seen
                 // while walking this body below becomes visible to a
                 // later array bound in the same function, exactly like it
                 // already is for `alignas` via validate_constexpr_locals.
                 // Reset fresh per function -- never leaks across functions.
-                engine_.begin_local_array_bound_scope(fn.namespace_path);
+                engine_.begin_local_constant_scope(fn.namespace_path);
                 auto result = resolve_array_bounds_in_stmt(*fn.body);
-                engine_.end_local_array_bound_scope();
+                engine_.end_local_constant_scope();
                 if (!result.has_value()) return result;
             }
         }
@@ -5617,7 +5878,7 @@ private:
     // collect_runtime_expr_rewrites's own traversal shape (the two
     // functions this pass exists specifically to run ahead of). Also
     // mirrors validate_constexpr_stmt_tree's own frame-scoping shape (see
-    // ConstexprEngine::push_local_array_bound_scope's comment): a nested
+    // ConstexprEngine::push_local_constant_scope's comment): a nested
     // frame per Block/If-branch/While-body keeps a local constexpr's
     // visibility scoped exactly like ordinary C++ block scoping.
     [[nodiscard]] std::expected<void, ConstexprError> resolve_array_bounds_in_stmt(Stmt& stmt) {
@@ -5648,7 +5909,7 @@ private:
                 // sibling/nested array-bound expression in this same
                 // function, exactly like it's already visible as an
                 // `alignas` operand.
-                return engine_.bind_local_constant_for_array_bounds(stmt);
+                return engine_.bind_local_constant(stmt);
             case StmtKind::Return:
             case StmtKind::ExprStmt:
                 if (stmt.expr) return resolve_array_bounds_in_expr(*stmt.expr);
@@ -5658,15 +5919,15 @@ private:
                     if (auto result = resolve_array_bounds_in_expr(*stmt.condition); !result.has_value()) return result;
                 }
                 if (stmt.then_branch) {
-                    engine_.push_local_array_bound_scope();
+                    engine_.push_local_constant_scope();
                     auto result = resolve_array_bounds_in_stmt(*stmt.then_branch);
-                    engine_.pop_local_array_bound_scope();
+                    engine_.pop_local_constant_scope();
                     if (!result.has_value()) return result;
                 }
                 if (stmt.else_branch) {
-                    engine_.push_local_array_bound_scope();
+                    engine_.push_local_constant_scope();
                     auto result = resolve_array_bounds_in_stmt(*stmt.else_branch);
-                    engine_.pop_local_array_bound_scope();
+                    engine_.pop_local_constant_scope();
                     if (!result.has_value()) return result;
                 }
                 return {};
@@ -5675,9 +5936,9 @@ private:
                     if (auto result = resolve_array_bounds_in_expr(*stmt.condition); !result.has_value()) return result;
                 }
                 if (stmt.then_branch) {
-                    engine_.push_local_array_bound_scope();
+                    engine_.push_local_constant_scope();
                     auto result = resolve_array_bounds_in_stmt(*stmt.then_branch);
-                    engine_.pop_local_array_bound_scope();
+                    engine_.pop_local_constant_scope();
                     if (!result.has_value()) return result;
                 }
                 return {};
@@ -5689,25 +5950,25 @@ private:
                     if (switch_case.value) {
                         if (auto result = resolve_array_bounds_in_expr(*switch_case.value); !result.has_value()) return result;
                     }
-                    engine_.push_local_array_bound_scope();
+                    engine_.push_local_constant_scope();
                     std::expected<void, ConstexprError> result{};
                     for (StmtPtr& nested : switch_case.statements) {
                         result = resolve_array_bounds_in_stmt(*nested);
                         if (!result.has_value()) break;
                     }
-                    engine_.pop_local_array_bound_scope();
+                    engine_.pop_local_constant_scope();
                     if (!result.has_value()) return result;
                 }
                 return {};
             }
             case StmtKind::Block: {
-                engine_.push_local_array_bound_scope();
+                engine_.push_local_constant_scope();
                 std::expected<void, ConstexprError> result{};
                 for (StmtPtr& nested : stmt.statements) {
                     result = resolve_array_bounds_in_stmt(*nested);
                     if (!result.has_value()) break;
                 }
-                engine_.pop_local_array_bound_scope();
+                engine_.pop_local_constant_scope();
                 return result;
             }
             case StmtKind::Break:
@@ -6097,11 +6358,16 @@ private:
     std::vector<std::reference_wrapper<Stmt>> consteval_if_rewrites{};
     for (Function& fn : program.functions) {
         if (!fn.body) continue;
-        if (auto result = collect_runtime_stmt_rewrites(program, *fn.body, engine, expr_rewrites, consteval_if_rewrites,
-                                                        fn.eval_mode == FunctionEvalMode::Consteval);
-            !result.has_value()) {
-            return result;
-        }
+        // One root frame per function, exactly as the array-bound
+        // pre-pass and validate_constexpr_locals each open one, so a
+        // `constexpr`/constant-`const` local declared earlier in this body
+        // is visible to an immediate invocation written later in it.
+        if (!stmt_may_fold_immediately(*fn.body, engine)) continue;
+        engine.begin_local_constant_scope(fn.namespace_path);
+        auto result = collect_runtime_stmt_rewrites(program, *fn.body, engine, expr_rewrites, consteval_if_rewrites,
+                                                    fn.eval_mode == FunctionEvalMode::Consteval);
+        engine.end_local_constant_scope();
+        if (!result.has_value()) return result;
     }
     // ch09 §9.1(4): *every* potentially-evaluated call to an immediate
     // function shall produce a constant expression -- a global's
