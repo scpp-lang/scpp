@@ -528,73 +528,8 @@ namespace scpp {
                         if (!scope_stack_.empty()) {
                             scope_stack_.back().push_back(declared_local_of(stmt));
                         }
-                        if (stmt.type.kind != TypeKind::Named || !structs_.contains(stmt.type.name)) {
-                            if (auto r = initialize_storage_from_brace_args(LValue{slot, stmt.type, declared_alignment}, stmt.ctor_args); !r.has_value()) return std::unexpected(std::move(r).error());
-                            return {};
-                        }
-                        auto same_type_result = try_initialize_class_storage_from_same_type_source(LValue{slot, stmt.type, declared_alignment},
-                                                                               stmt.ctor_args);
-                        if (!same_type_result.has_value()) return std::unexpected(std::move(same_type_result).error());
-                        if (std::move(same_type_result).value()) {
-                            return {};
-                        }
-                        std::string ctor_name = stmt.type.name + "_new";
-                        // ch05 §5.10: a class may declare multiple
-                        // constructors (all synthesized as "ClassName_new"),
-                        // resolved by exact argument-type match exactly like
-                        // any other overloaded name.
-                        const Function* ctor_def = stmt.type.name == "std::thread"
-                                                       ? resolve_constructor_overload_exact(stmt.type.name, stmt.ctor_args)
-                                                       : resolve_overload_by_type(ctor_name, stmt.ctor_args, /*param_offset=*/1);
-                        if (ctor_def == nullptr) {
-                            if (stmt.ctor_args.empty() && record_is_implicitly_default_initializable(stmt.type.name)) {
-                                if (auto r = emit_default_initializers_for_record_storage(slot, stmt.type.name, /*initialize_virtual_interface_bases=*/true); !r.has_value()) return std::unexpected(std::move(r).error());
-                                return {};
-                            }
-                            if (stmt.ctor_args.empty() && find_class_def(stmt.type.name) == nullptr &&
-                                find_struct_def(stmt.type.name) == nullptr) {
-                                return {};
-                            }
-                            if (!stmt.ctor_args.empty() && find_struct_def(stmt.type.name) != nullptr &&
-                                find_class_def(stmt.type.name) == nullptr) {
-                                // See the static-local path's own note: one
-                                // routine decides what a braced list on a
-                                // struct means, reached from every position.
-                                return initialize_storage_from_brace_args(
-                                    LValue{slot, stmt.type, declared_alignment}, stmt.ctor_args);
-                            }
-                            // spec §6.5: `ClassName y{x};` with no matching
-                            // user-declared constructor found by ordinary
-                            // resolution just above (which would already
-                            // have found a user-declared copy constructor,
-                            // if one exists, since it's registered like any
-                            // other overload) -- if this is a bare (non-
-                            // move) same-type single argument and the class
-                            // is copy-constructible, synthesize the
-                            // compiler-provided recursive memberwise copy
-                            // directly, exactly like move construction's own
-                            // analogous fallback above.
-                            return std::unexpected(CodegenError(
-                                describe_constructor_resolution_failure(stmt.type.name, stmt.ctor_args), current_loc_));
-                        }
-                        if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
-                            auto value_result = codegen_constructed_class_value(stmt.type.name, stmt.ctor_args, ctor_def);
-                            if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
-                            create_store(std::move(value_result).value(), slot, declared_alignment);
-                            return {};
-                        }
-                        llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(ctor_def).c_str());
-                        if (ctor == nullptr) {
-                            return std::unexpected(CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
-                                current_loc_));
-                        }
-                        auto args_result =
-                            emit_constructor_arguments_and_virtual_bases(stmt.type.name, ctor_def, stmt.ctor_args, slot);
-                        if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
-                        std::vector<llvm::LLVMValueRef> args = std::move(args_result).value();
-                        args.insert(args.begin(), slot);
-                        build_call(ctor, args);
-                        return {};
+                        return construct_record_in_place(LValue{slot, stmt.type, declared_alignment}, stmt.type,
+                                                        stmt.ctor_args);
                     }
                     if (stmt.init) {
                         if (stmt.type.kind == TypeKind::Named && structs_.contains(stmt.type.name) &&
@@ -1270,5 +1205,78 @@ namespace scpp {
             emit_one_scope_cleanup(scope_stack_[depth - 1], scope_temporaries_[depth - 1]);
         }
     }
+
+
+    [[nodiscard]] std::expected<void, CodegenError> Codegen::construct_record_in_place(
+        const LValue& target, const Type& type, const std::vector<ExprPtr>& ctor_args)
+{
+    if (type.kind != TypeKind::Named || !structs_.contains(type.name)) {
+        if (auto r = initialize_storage_from_brace_args(target, ctor_args); !r.has_value()) return std::unexpected(std::move(r).error());
+        return {};
+    }
+    auto same_type_result = try_initialize_class_storage_from_same_type_source(target,
+                   ctor_args);
+    if (!same_type_result.has_value()) return std::unexpected(std::move(same_type_result).error());
+    if (std::move(same_type_result).value()) {
+        return {};
+    }
+    std::string ctor_name = type.name + "_new";
+    // ch05 §5.10: a class may declare multiple
+    // constructors (all synthesized as "ClassName_new"),
+    // resolved by exact argument-type match exactly like
+    // any other overloaded name.
+    const Function* ctor_def = type.name == "std::thread"
+               ? resolve_constructor_overload_exact(type.name, ctor_args)
+               : resolve_overload_by_type(ctor_name, ctor_args, /*param_offset=*/1);
+    if (ctor_def == nullptr) {
+        if (ctor_args.empty() && record_is_implicitly_default_initializable(type.name)) {
+            if (auto r = emit_default_initializers_for_record_storage(target.ptr, type.name, /*initialize_virtual_interface_bases=*/true); !r.has_value()) return std::unexpected(std::move(r).error());
+            return {};
+        }
+        if (ctor_args.empty() && find_class_def(type.name) == nullptr &&
+            find_struct_def(type.name) == nullptr) {
+            return {};
+        }
+        if (!ctor_args.empty() && find_struct_def(type.name) != nullptr &&
+            find_class_def(type.name) == nullptr) {
+            // See the static-local path's own note: one
+            // routine decides what a braced list on a
+            // struct means, reached from every position.
+            return initialize_storage_from_brace_args(
+                target, ctor_args);
+        }
+        // spec §6.5: `ClassName y{x};` with no matching
+        // user-declared constructor found by ordinary
+        // resolution just above (which would already
+        // have found a user-declared copy constructor,
+        // if one exists, since it's registered like any
+        // other overload) -- if this is a bare (non-
+        // move) same-type single argument and the class
+        // is copy-constructible, synthesize the
+        // compiler-provided recursive memberwise copy
+        // directly, exactly like move construction's own
+        // analogous fallback above.
+        return std::unexpected(CodegenError(
+            describe_constructor_resolution_failure(type.name, ctor_args), current_loc_));
+    }
+    if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
+        auto value_result = codegen_constructed_class_value(type.name, ctor_args, ctor_def);
+        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+        create_store(std::move(value_result).value(), target.ptr, target.alignment);
+        return {};
+    }
+    llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(ctor_def).c_str());
+    if (ctor == nullptr) {
+        return std::unexpected(CodegenError("class '" + type.name + "' has no constructor matching this call",
+            current_loc_));
+    }
+    auto args_result =
+        emit_constructor_arguments_and_virtual_bases(type.name, ctor_def, ctor_args, target.ptr);
+    if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
+    std::vector<llvm::LLVMValueRef> args = std::move(args_result).value();
+    args.insert(args.begin(), target.ptr);
+    build_call(ctor, args);
+    return {};
+}
 
 } // namespace scpp

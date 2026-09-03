@@ -766,7 +766,34 @@ namespace scpp {
             if (it == globals_.end()) continue;
             current_global_namespace_path_ = global.namespace_path;
             if (global.decl->has_ctor_args) {
-                return std::unexpected(CodegenError("global constructor-call initialization is not supported in this version", global.decl->loc));
+                // `Box b{21};` at namespace scope is the same construction
+                // a block-scope declaration performs, into storage that
+                // happens to be a global rather than an alloca --
+                // construct_record_in_place is that one implementation.
+                // This used to refuse outright, and the refusal named the
+                // compiler's release history rather than the program.
+                // ch06 §7.2(3.3) already presupposes the feature: it
+                // permits, during required constant evaluation, a pointer
+                // to "a subobject ... of an object with static storage
+                // duration that is constant-initialized", and a subobject
+                // of a static-storage object is a class object built by
+                // exactly this. `docs/spec/` modifies neither
+                // [basic.start.static] nor [dcl.init], so front-matter
+                // §1(2) makes them apply unchanged.
+                //
+                // The storage is already zero-initialized: define_global
+                // gives every global a zeroinitializer, which is what the
+                // block-scope path spells with zero_initialize_storage
+                // before running the constructor.
+                LValue target{it->second.global, global.decl->type,
+                              global.decl->resolved_alignment != 0
+                                  ? std::optional<unsigned>(global.decl->resolved_alignment)
+                                  : alignment_for_type(global.decl->type)};
+                if (auto r = construct_record_in_place(target, global.decl->type, global.decl->ctor_args);
+                    !r.has_value()) {
+                    return std::unexpected(std::move(r).error());
+                }
+                continue;
             }
             if (global.decl->init == nullptr) continue;
             if (global.decl->type.kind == TypeKind::Reference) {
