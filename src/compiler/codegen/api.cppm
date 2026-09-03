@@ -1014,6 +1014,16 @@ private:
     [[nodiscard]] std::expected<bool, CodegenError> try_initialize_array_from_string_literal(const LValue& target, const Expr& expr);
 
     [[nodiscard]] std::expected<void, CodegenError> initialize_storage_from_brace_args(const LValue& target, const std::vector<ExprPtr>& args);
+    // ch04 §4.2, spec ch06 §6.1: `ClassName name{args};` -- direct
+    // initialization of already-allocated, already-zeroed storage by the
+    // constructor the arguments select. One implementation, because a
+    // block-scope declaration, a static local and a namespace-scope
+    // declaration are the same construction into different storage; the
+    // namespace-scope one used to have no implementation at all and
+    // reported "global constructor-call initialization is not supported
+    // in this version".
+    [[nodiscard]] std::expected<void, CodegenError> construct_record_in_place(const LValue& target, const Type& type,
+                                                                             const std::vector<ExprPtr>& ctor_args);
 
     [[nodiscard]] std::expected<void, CodegenError> initialize_storage(const LValue& target, const Initializer& init);
 
