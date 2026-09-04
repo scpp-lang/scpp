@@ -1621,11 +1621,32 @@ std::optional<std::filesystem::path> current_executable_path_local() {
     return normalized_path(exe);
 }
 
+// Every cache signature in this file -- module, object, link, custom step,
+// package metadata -- names the compiler that produced the artifact, so
+// that upgrading the compiler rebuilds everything. The name is a digest of
+// the compiler's own executable, and this used to re-read and re-hash that
+// executable at each of the ten places a signature is built. The
+// executable is 82 MB, so one digest costs ~440 ms, and a *no-op* rebuild
+// of a one-file package paid it three times -- once before deciding the
+// module was current, once before the object, once before the link --
+// which was 1.32 s of the 1.75 s such a build took, doing nothing.
+//
+// Memoized per process, which is the same answer as computing it each
+// time: the digest is of the running process's own image, and a process
+// cannot be replaced by a different executable while it is running. Every
+// caller therefore still gets the digest of the compiler that is actually
+// producing the artifacts.
+//
+// `static` function-local initialization is thread-safe, which matters
+// because build_modules_for_target runs targets through std::async.
 std::string compiler_version_key() {
-    if (std::optional<std::filesystem::path> exe = current_executable_path_local(); exe.has_value()) {
-        return digest_file(*exe);
-    }
-    return "unknown-compiler";
+    static const std::string key = []() -> std::string {
+        if (std::optional<std::filesystem::path> exe = current_executable_path_local(); exe.has_value()) {
+            return digest_file(*exe);
+        }
+        return std::string{"unknown-compiler"};
+    }();
+    return key;
 }
 
 std::vector<std::filesystem::path> manifests_upward(const std::filesystem::path& start_dir) {
