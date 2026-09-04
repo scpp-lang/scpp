@@ -17,4 +17,4 @@ target_sources(scpp_movecheck
             monomorphize.cppm
     PRIVATE
             movecheck.cpp)
-target_link_libraries(scpp_movecheck PUBLIC scpp_ast scpp_mir)
+target_link_libraries(scpp_movecheck PUBLIC scpp_ast scpp_mir scpp_constexpr)
