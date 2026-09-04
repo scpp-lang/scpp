@@ -12,6 +12,7 @@ import :calls;
 import :threadsafety;
 import :generics_support;
 import :lambdas;
+import scpp.constexpression;
 
 namespace scpp {
 
@@ -4105,43 +4106,64 @@ private:
         return cache_key;
     }
 
-    // ch05 §5.14: evaluates a variadic generic type's own non-type
-    // argument expression down to a concrete int -- restricted to a
-    // small, purpose-scoped shape (an integer literal; a bare
-    // identifier, looked up in `param_values`, e.g. an enclosing
-    // specialization's own non-type parameter name; or a `+` of the
-    // two, e.g. "Idx + 1"), not a general compile-time constant-
-    // expression evaluator (ch05 §5.14's own scoping: non-type
-    // parameters are a narrow, purpose-built feature for a variadic
-    // type's own recursive indexing, not a general `consteval`
-    // mechanism). Throws a precise DataflowError for any other shape,
-    // or an identifier not found in `param_values`.
+    // [temp.arg.nontype]/2: a non-type template argument is a *converted
+    // constant expression* of the parameter's type. `docs/spec/` adopts
+    // no clause about template arguments at all -- ch13 covers only
+    // deduction from a function call -- so front-matter §1(2) makes that
+    // rule apply unchanged, and the value of a constant expression is
+    // whatever the one constant evaluator says it is.
+    //
+    // What stood here was a fourth evaluator, accepting an integer
+    // literal, a bare parameter name, or a `+` of the two, and blaming a
+    // section that does not exist in either docs/spec/en/ or
+    // docs/book/en/. It was wrong in both directions: `f(21)` and even
+    // `21 - 0` were rejected though ch06 §7.2(6.1) requires calls to
+    // `constexpr` functions during required constant evaluation, while
+    // `FixedValue<3000000000>` was accepted and silently truncated to
+    // -1294967296 by its own `static_cast<int>`, and `FixedValue<
+    // 2147483647 + 1>` was accepted by adding two `int`s with no check at
+    // all -- which ch06 §7.4(2.1) makes ill-formed, and which the real
+    // evaluator has always diagnosed.
+    //
+    // One thing survives, because the evaluator cannot know it: an
+    // *enclosing* specialization's own non-type parameter (`Idx` in
+    // `TupleImpl<Idx + 1, Tail...>`) is not a declaration anywhere in the
+    // program -- it is a substitution this pass is in the middle of
+    // performing, and it exists only in `param_values`. Applying those
+    // bindings first, through the same substitute_non_type_param_in_expr
+    // the clone loops use, hands the evaluator a closed expression; it is
+    // a substitution, not a second way of evaluating anything.
     [[nodiscard]] std::expected<int, DataflowError> evaluate_non_type_arg(const Expr& expr, const std::unordered_map<std::string, int>& param_values) {
-        switch (expr.kind) {
-            case ExprKind::IntegerLiteral: return static_cast<int>(expr.int_value);
-            case ExprKind::Identifier: {
-                auto it = param_values.find(expr.name);
-                if (it == param_values.end()) {
-                    return std::unexpected(DataflowError("'" + expr.name +
-                                         "' does not name a known non-type template parameter here (ch05 §5.14)",
-                        expr.loc));
-                }
-                return it->second;
-            }
-            case ExprKind::Binary:
-                if (expr.binary_op == BinaryOp::Add) {
-                    auto lhs_val = evaluate_non_type_arg(*expr.lhs, param_values);
-                    if (!lhs_val.has_value()) return std::unexpected(std::move(lhs_val).error());
-                    auto rhs_val = evaluate_non_type_arg(*expr.rhs, param_values);
-                    if (!rhs_val.has_value()) return std::unexpected(std::move(rhs_val).error());
-                    return lhs_val.value() + rhs_val.value();
-                }
-                [[fallthrough]];
-            default:
-                return std::unexpected(DataflowError("unsupported non-type template argument expression (ch05 §5.14 only supports "
-                                     "an integer literal, a bare parameter name, or a '+' of the two)",
-                    expr.loc));
+        ExprPtr closed = deep_clone_expr(expr);
+        for (const auto& [param_name, param_value] : param_values) {
+            substitute_non_type_param_in_expr(*closed, param_name, param_value);
         }
+        auto evaluated = evaluate_immediate_expr(program_, *closed);
+        if (!evaluated.has_value()) {
+            std::string message{};
+            message += "non-type template argument is not a constant expression ([temp.arg.nontype]/2): ";
+            message += constexpr_error_reason(evaluated.error());
+            return std::unexpected(DataflowError(message, expr.loc));
+        }
+        ConstexprValue value = std::move(evaluated).value();
+        if (value.kind != ConstexprValueKind::Integer && value.kind != ConstexprValueKind::Bool) {
+            return std::unexpected(DataflowError(
+                "non-type template argument must have integral type ([temp.arg.nontype]/2)", expr.loc));
+        }
+        std::int64_t widened = value.kind == ConstexprValueKind::Bool ? (value.bool_value ? 1 : 0) : value.int_value;
+        // [temp.arg.nontype]/2's "converted constant expression" forbids a
+        // narrowing conversion that changes the value, which is exactly
+        // what the `static_cast<int>` here used to perform in silence.
+        std::int64_t narrowed = static_cast<std::int64_t>(static_cast<int>(widened));
+        if (narrowed != widened) {
+            std::string message{};
+            message += "non-type template argument ";
+            message += std::to_string(widened);
+            message += " does not fit the parameter's type ([temp.arg.nontype]/2 requires a converted constant "
+                       "expression, and this conversion changes the value)";
+            return std::unexpected(DataflowError(message, expr.loc));
+        }
+        return static_cast<int>(widened);
     }
 
     // ch05 §5.14: given `pattern` (a generic function's own base-class-
