@@ -1,0 +1,17 @@
+// [temp.arg.nontype]/2 makes a non-type template argument a converted
+// constant expression *of the parameter's type*, and `docs/spec/` adopts
+// no clause about template arguments, so front-matter §1(2) applies that
+// rule unchanged. Which type that is, is then spec §16.2/§16.3's
+// question: §16.2(4) gives `true` type `bool`, which is exactly the
+// parameter's type, so nothing has to be converted.
+template<bool B>
+class Flag {
+public:
+    virtual ~Flag() { return; }
+    int get() { return 5; }
+};
+
+int main() {
+    Flag<true> v{};
+    return v.get();
+}

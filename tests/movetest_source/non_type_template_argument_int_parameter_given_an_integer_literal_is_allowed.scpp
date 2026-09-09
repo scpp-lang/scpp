@@ -1,0 +1,17 @@
+// [temp.arg.nontype]/2 makes a non-type template argument a converted
+// constant expression *of the parameter's type*, and `docs/spec/` adopts
+// no clause about template arguments, so front-matter §1(2) applies that
+// rule unchanged. Which type that is, is then spec §16.2/§16.3's
+// question: §16.2(1)-(2) let an integer-literal take the `int` its context
+// requires, and 42 is one of `int`'s values.
+template<int N>
+class FixedValue {
+public:
+    virtual ~FixedValue() { return; }
+    int get_n() { return N; }
+};
+
+int main() {
+    FixedValue<42> v{};
+    return v.get_n();
+}
