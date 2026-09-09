@@ -4537,7 +4537,24 @@ private:
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> report_pending_conversion_rejection(
         const SourceLocation& loc) {
         std::string message = std::move(pending_conversion_rejection_);
-        pending_conversion_rejection_.clear();
+        // ch02 §6.2(3) already emptied the mailbox: `std::move(E)` places
+        // the object in the moved-out state, and §6.2(6) makes any
+        // subsequent use of it ill-formed until it is reinitialized. The
+        // only reinitializing operation §6.2(4) defines is an assignment
+        // -- "or another operation this document defines elsewhere as
+        // reinitializing *obj*", and no clause anywhere in docs/spec
+        // defines one -- so `.clear()`, whose receiver is a use under
+        // §6.2(5), is not it.
+        //
+        // The reset is not redundant: evaluate_expr_in_context tests
+        // `pending_conversion_rejection_.empty()` to decide whether a
+        // rejection is pending, and C++ leaves a moved-from
+        // `std::string` valid but unspecified ([lib.types.movedfrom]),
+        // so without it a later call could observe a stale non-empty
+        // mailbox in the C++ build. Assigning an empty string says the
+        // same thing in both languages, and says it with the operation
+        // §6.2(4) names.
+        pending_conversion_rejection_ = std::string{};
         return std::unexpected(ConstexprError(loc, message));
     }
 

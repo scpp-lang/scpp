@@ -1,0 +1,50 @@
+// ch02 §6.2(4): "An assignment to *obj* ([expr.assign]) ... discards
+// *obj*'s current state and value -- whether initialized or moved-out --
+// and places *obj* in the initialized state holding the newly assigned
+// value." A subobject is part of that value, so assigning the complete
+// object reinitializes every member of it, `left` included.
+//
+// Two places can name the object written to through a reference, and the
+// *move* side records into whichever one it can form. For a reference
+// bound to a statically known place (`Box& r = b;`) the referent
+// resolves and both sides agreed. For a reference *parameter*, whose
+// referent belongs to the caller, it does not resolve -- yet
+// `std::move(b.left)` still records under the binding's own place tree,
+// and only the resolved referent was ever reinitialized. So this exact
+// body was rejected through a `Box&` and accepted over a local `Box`:
+// one clause, two answers, told apart by nothing the clause mentions.
+//
+// src/compiler/constexpression.cppm's rewrite_consteval_if_for_runtime
+// is the shape that found it: `selected = std::move(stmt.else_branch);`
+// followed by `stmt = std::move(*selected);` for a `Stmt& stmt`.
+import std;
+
+class Node {
+public:
+    int v;
+
+    Node() : v{0} { return; }
+    virtual ~Node() { return; }
+};
+
+class Box {
+public:
+    std::unique_ptr<Node> left{};
+    std::unique_ptr<Node> right{};
+
+    Box() { return; }
+    virtual ~Box() { return; }
+};
+
+void drain_and_reset(Box& b) {
+    std::unique_ptr<Node> taken = std::move(b.left);
+    b = Box{};
+    return;
+}
+
+int main() {
+    Box b{};
+    drain_and_reset(b);
+    drain_and_reset(b);
+    return 0;
+}

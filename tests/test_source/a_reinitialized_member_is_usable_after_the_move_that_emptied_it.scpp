@@ -1,0 +1,98 @@
+// ch02 §6.2(3) puts `b.left` in the moved-out state; §6.2(4)'s assignment
+// to the complete object discards that state "whether initialized or
+// moved-out" and puts every member back in the initialized state. This
+// file observes the values on both sides of that transition, so the
+// acceptance is not the only evidence: the moved-to pointer really holds
+// the node, and the reinitialized member really is empty and then really
+// is writable again.
+//
+// The mailbox at the bottom is src/compiler/constexpression.cppm's own
+// report_pending_conversion_rejection, reduced. `.clear()` on a
+// moved-out `std::string` is a use under §6.2(5) -- §6.2(4) defines
+// reinitialization as an assignment and nothing in docs/spec defines any
+// other operation as reinitializing -- so the drain has to be spelled as
+// the assignment it is. C++ needs the reset too, for a different reason:
+// a moved-from `std::string` is valid but unspecified, and `empty()` is
+// what decides whether a rejection is pending.
+//
+// The same program transliterated to C++ and built with
+// clang++-22 -std=c++26 prints the same seven lines -- with one declared
+// difference: `Box` has a user-declared destructor, which suppresses
+// C++'s implicit move assignment operator, so the transliteration must
+// spell `Box& operator=(Box&&) = default;` for `b = Box{}` to compile.
+// ch02 §6.4(3) gives SCPP26 that operator "irrespective of whether the
+// C++ standard's own conditions for implicitly declaring one
+// ([class.copy.assign]) are met", which is why this file does not.
+import std;
+
+class Node {
+public:
+    int v;
+
+    Node() : v{0} { return; }
+    virtual ~Node() { return; }
+};
+
+class Box {
+public:
+    std::unique_ptr<Node> left{};
+    std::unique_ptr<Node> right{};
+
+    Box() { return; }
+    virtual ~Box() { return; }
+};
+
+int drain_and_reset(Box& b) {
+    std::unique_ptr<Node> taken = std::move(b.left);
+    int carried = 0;
+    if (taken != nullptr) carried = taken->v;
+    b = Box{};
+    return carried;
+}
+
+class Mailbox {
+private:
+    std::string pending_{};
+
+public:
+    Mailbox() { return; }
+
+    void post(const std::string& text) {
+        this->pending_ = text;
+        return;
+    }
+
+    bool has_message() const {
+        return !this->pending_.empty();
+    }
+
+    std::string drain() {
+        std::string message = std::move(this->pending_);
+        this->pending_ = std::string{};
+        return message;
+    }
+
+    virtual ~Mailbox() { return; }
+};
+
+int main() {
+    Box b{};
+    b.left = std::make_unique<Node>();
+    b.left->v = 9;
+
+    std::print("carried {}\n", drain_and_reset(b));
+    std::print("left_empty_after_reset {}\n", b.left == nullptr ? 1 : 0);
+
+    // The reinitialized member is writable, and a second round works.
+    b.left = std::make_unique<Node>();
+    b.left->v = 4;
+    std::print("carried_again {}\n", drain_and_reset(b));
+    std::print("left_empty_again {}\n", b.left == nullptr ? 1 : 0);
+
+    Mailbox m{};
+    std::print("pending_before {}\n", m.has_message() ? 1 : 0);
+    m.post(std::string{"rejected"});
+    std::print("drained {}\n", m.drain());
+    std::print("pending_after {}\n", m.has_message() ? 1 : 0);
+    return 0;
+}
