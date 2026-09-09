@@ -1,0 +1,40 @@
+// The other direction of ch02 §6.2(4). Assigning a *member* reinitializes
+// that member and nothing else, so a sibling that was moved out stays
+// moved out and §6.3(1) still rejects the function for returning with a
+// moved-out subobject its owner will destroy. Recognizing that a
+// whole-object assignment through a reference parameter reinitializes
+// what it contains must not widen into "any write through that reference
+// reinitializes everything".
+//
+// Rejected both before and after that fix: this is a guard on its blast
+// radius, not a case it changes.
+import std;
+
+class Node {
+public:
+    int v;
+
+    Node() : v{0} { return; }
+    virtual ~Node() { return; }
+};
+
+class Box {
+public:
+    std::unique_ptr<Node> left{};
+    std::unique_ptr<Node> right{};
+
+    Box() { return; }
+    virtual ~Box() { return; }
+};
+
+void drain_left_reset_right(Box& b) {
+    std::unique_ptr<Node> taken = std::move(b.left);
+    b.right = std::unique_ptr<Node>{};
+    return;
+}
+
+int main() {
+    Box b{};
+    drain_left_reset_right(b);
+    return 0;
+}

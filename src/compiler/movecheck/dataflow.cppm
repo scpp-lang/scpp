@@ -3812,9 +3812,32 @@ struct ConvertingConstructorBinding {
         }
     }
     // spec §6.2(4): the assignment reinitializes the object written to,
-    // which through a reference is the *referent*. Recording it against
-    // the binding alone (BindReference already does that) left the
-    // referent moved-out forever.
+    // which through a reference is the *referent* -- "discards *obj*'s
+    // current state and value -- whether initialized or moved-out",
+    // every subobject's included, since a subobject is part of the value
+    // being discarded.
+    //
+    // Two places can name that referent, and both have to be
+    // reinitialized because the *move* side records into whichever one
+    // it can form. When the binding's referent is a statically known
+    // place (`Box& r = b;`), place_root_resolver yields it and the move
+    // and the assignment agree on `b.left`. When it is not -- a
+    // reference *parameter*, whose referent belongs to the caller --
+    // place_root_resolver yields nullopt, yet `std::move(b.left)` still
+    // records a moved-out entry under the binding's own place tree.
+    // Reinitializing only the resolved referent therefore left that
+    // entry standing forever: `void f(Box& b) { auto t =
+    // std::move(b.left); b = Box{}; }` was rejected for returning with
+    // `b.left` moved out, while the identical body over a *local* `Box`
+    // was accepted. One clause, two answers, told apart by nothing the
+    // clause mentions.
+    //
+    // Erasing under the binding is not broader than §6.2(4) licenses:
+    // every entry under it denotes a subobject of the referent, which is
+    // exactly what this whole-object write reinitializes. Assigning to a
+    // single member goes through the member-write path instead and still
+    // leaves its siblings alone.
+    reinitialize_place(state.locals, whole_local_place(stmt.local));
     if (std::optional<Place> written = place_root_resolver(state)(stmt.local); written.has_value()) {
         reinitialize_place(state.locals, *written);
     }
