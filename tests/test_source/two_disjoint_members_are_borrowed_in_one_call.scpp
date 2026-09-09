@@ -1,0 +1,88 @@
+// ch02 §6.2(7) makes a new binding a reborrow only "if it aliases the
+// same underlying object or range through that existing binding", and
+// §6.6(10) says a `const T&` parameter is a reborrow only "if that direct
+// binding aliases an already-existing reference or span binding". The
+// in-call borrow check collapsed every argument to its *root local*
+// instead, so two arguments naming provably disjoint objects were
+// reported as one binding used twice.
+//
+// ch02 §6.2(23) is what settles that this coarseness was not the intended
+// reading: a member call "supplies an implicit object parameter of
+// reference type: `C&` for a non-`const` member function", and "any
+// borrow or reborrow through that implicit object parameter is governed
+// by 6.2(7)-(12)". `h.mix_mut(h.path)` is therefore a whole-object
+// mutable borrow alongside a mutable borrow of one of its members, on one
+// call, through one root -- and it was accepted, while two *disjoint*
+// members were not. One clause, two answers, and the accepting one was
+// for the strictly more aliasing-prone shape.
+//
+// src/compiler/constexpression.cppm's resolve_array_bounds is the shape
+// that found it: `resolve_array_bounds_type_dependencies(global.decl->
+// type, global.namespace_path)`, whose first argument does not even alias
+// `global`'s storage -- it reaches an object `global` owns a pointer to.
+//
+// Every line prints the value the borrow actually saw; the same program
+// transliterated to C++ and built with clang++-22 -std=c++26 prints the
+// same five lines.
+import std;
+
+class Payload {
+public:
+    int n;
+
+    Payload() : n{0} { return; }
+    virtual ~Payload() { return; }
+};
+
+class Holder {
+public:
+    std::unique_ptr<Payload> owned{};
+    std::vector<int> path{};
+    std::vector<int> other{};
+
+    Holder() { return; }
+    virtual ~Holder() { return; }
+};
+
+// Two disjoint members of one object, one mutably and one by const ref.
+int append_size_of(std::vector<int>& dst, const std::vector<int>& src) {
+    dst[0] = static_cast<int>(src.size());
+    return static_cast<int>(dst.size());
+}
+
+// An object reached *through* a member pointer, alongside a member: the
+// first argument aliases none of `h`'s own storage at all.
+int bump_and_count(Payload& p, const std::vector<int>& v) {
+    p.n = p.n + static_cast<int>(v.size());
+    return p.n;
+}
+
+int add_into(int& dst, const int& src) {
+    dst = dst + src;
+    return dst;
+}
+
+int main() {
+    Holder h{};
+    h.owned = std::make_unique<Payload>();
+    int zero = 0;
+    h.path.resize(1, zero);
+    h.other.resize(2, zero);
+
+    std::print("dst_size {}\n", append_size_of(h.path, h.other));
+    std::print("dst_holds {}\n", h.path[0]);
+    std::print("through_owned {}\n", bump_and_count(*h.owned, h.other));
+
+    // A plain local struct: no reference or span binding exists, so
+    // §6.2(7)/§6.6(10) never engage.
+    int first = 1;
+    int second = 2;
+    std::print("add_into {}\n", add_into(first, second));
+
+    // Two constant array elements are distinct objects too.
+    int cells[2];
+    cells[0] = 10;
+    cells[1] = 5;
+    std::print("elements {}\n", add_into(cells[0], cells[1]));
+    return 0;
+}

@@ -98,7 +98,7 @@ namespace scpp {
                                                                       const Signatures& signatures,
                                                                       bool report_errors);
 [[nodiscard]] std::expected<void, DataflowError> apply_reference_argument(const Expr& arg, const Type& param_type, DataflowState& state,
-                              BorrowMap& in_call_borrows, const Body& body,
+                              InCallBorrows& in_call_borrows, const Body& body,
                               const Signatures& signatures, bool report_errors);
 [[nodiscard]] std::expected<void, DataflowError> check_constructor_arguments(const Type& constructed_type, const std::vector<ExprPtr>& ctor_args,
                                  DataflowState& state, const Body& body, const Signatures& signatures,
@@ -1431,7 +1431,7 @@ namespace scpp {
 // root; see the Call/apply_reference_argument handling for how the
 // caller-side place is checked instead, at each call site).
 [[nodiscard]] std::expected<void, DataflowError> apply_reference_argument(const Expr& arg, const Type& param_type, DataflowState& state,
-                               BorrowMap& in_call_borrows, const Body& body, const Signatures& signatures,
+                               InCallBorrows& in_call_borrows, const Body& body, const Signatures& signatures,
                                bool report_errors) {
     // ch05 §5.x: a *const* reference parameter bound directly to a fresh
     // rvalue argument (a literal, std::move/std::make_unique, a lambda
@@ -1558,25 +1558,46 @@ namespace scpp {
     // not name a reference at all. Keying on the lender still catches a
     // genuine duplicate: `f(r, r)` lends the same access twice and both
     // arguments land on the same key.
-    RootSet in_call_keys = tracked_reborrow ? RootSet{*lender} : roots;
-    for (LocalId root : in_call_keys) {
-        auto in_call_it = in_call_borrows.find(root);
-        bool in_call_conflict =
-            in_call_it != in_call_borrows.end() &&
-            (is_mutable ? (in_call_it->second.mutable_borrow || in_call_it->second.shared_count > 0)
-                        : in_call_it->second.mutable_borrow);
-        if (in_call_conflict) {
-            return std::unexpected(DataflowError("cannot pass " + format_root(body, root) + " by " + std::string(is_mutable ? "mutable " : "") +
+    //
+    // The place is what decides the conflict, because ch02 §6.2(7) makes
+    // aliasing the condition: two arguments conflict when the objects
+    // they name overlap -- one is the other or a subobject of it -- not
+    // when they merely reach the same root variable. `f(h.path, h.other)`
+    // names two disjoint objects and is well-formed; `f(h.path, h.path)`
+    // and `f(v, v)` name one and are not. tracked_place_of answers this
+    // for every argument shape that has a statically identifiable place;
+    // for one that does not (a runtime index, a call result) the root's
+    // whole-local place is used, which is exactly the coarse answer
+    // every argument used to get, so nothing that was rejected for
+    // genuine overlap stops being.
+    std::vector<Place> borrowed_places;
+    if (std::optional<Place> exact = tracked_place_of(arg, state, body, nullptr, PlacePrecision::Exact);
+        exact.has_value()) {
+        // The place is preferred over the lender even for a tracked
+        // reborrow. Keying on the lender local is the right answer for
+        // §6.2(8)'s *liveness* question -- which binding is being
+        // re-lent -- but not for this one, which §6.2(7) puts in terms
+        // of what is aliased. It still catches the genuine duplicate the
+        // lender key was there for: `f(r, r)` resolves both arguments
+        // through ref_targets to the one place `r` is bound to, and they
+        // collide on it.
+        borrowed_places.push_back(*std::move(exact));
+    } else if (tracked_reborrow) {
+        borrowed_places.push_back(whole_local_place(*lender));
+    } else {
+        for (LocalId root : roots) borrowed_places.push_back(whole_local_place(root));
+    }
+    for (const Place& place : borrowed_places) {
+        for (const InCallBorrow& held : in_call_borrows) {
+            bool overlaps = place.is_at_or_under(held.place) || held.place.is_at_or_under(place);
+            if (!overlaps) continue;
+            if (!is_mutable && !held.mutable_borrow) continue;
+            return std::unexpected(DataflowError("cannot pass " + format_root(body, place.local) + " by " +
+                                    std::string(is_mutable ? "mutable " : "") +
                                     "reference more than once in the same call",
                                 state.current_loc));
         }
-
-        BorrowState& borrow = in_call_borrows[root];
-        if (is_mutable) {
-            borrow.mutable_borrow = true;
-        } else {
-            borrow.shared_count++;
-        }
+        in_call_borrows.push_back(InCallBorrow{place, is_mutable});
     }
     return {};
 }
@@ -1873,10 +1894,10 @@ struct ConvertingConstructorBinding {
                              "caller can guarantee (spec §5.1(1.2), §5.1(5.7), §5.1(6))",
             state.current_loc));
     }
-    // Scratch borrow-map shared by every reference argument of *this*
+    // Scratch borrow record shared by every reference argument of *this*
     // call only (see apply_reference_argument) -- never merged into
     // `state`, since none of these transient borrows outlive the call.
-    BorrowMap in_call_borrows;
+    InCallBorrows in_call_borrows;
     auto apply_one_argument = [&](const Expr& arg, std::size_t param_index) -> std::expected<void, DataflowError> {
         Type effective_param_type;
         bool have_effective_param_type = false;
@@ -2300,7 +2321,7 @@ struct ConvertingConstructorBinding {
                              "caller can guarantee (spec §5.1(1.2), §5.1(5.7), §5.1(6))",
             state.current_loc));
     }
-    BorrowMap in_call_borrows;
+    InCallBorrows in_call_borrows;
     bool constructed_state_can_carry_lifetimes =
         report_errors && body.program != nullptr &&
         type_contains_lifetime_carrying_state(constructed_type, *body.program) &&

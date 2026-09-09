@@ -1,0 +1,46 @@
+// Replaces passing_two_fields_of_same_struct_by_mixed_reference_in_same_
+// call_conflicts, which asserted this exact program is ill-formed and
+// cited no clause for it. Two clauses say otherwise, and both scope
+// reborrowing to an *existing reference or span binding* -- of which this
+// function has none:
+//
+//   ch02 §6.2(7): "If a local variable or parameter of reference type,
+//   `std::span<T>`, or `std::span<const T>` is used to initialize another
+//   local variable of reference or span type, or to satisfy a parameter
+//   of reference or span type, the new binding is a reborrow if it
+//   aliases the same underlying object or range through that existing
+//   binding."
+//
+//   ch02 §6.6(10): "a function parameter of type `const T&` binds
+//   directly to the argument's designated object under the ordinary
+//   rules for reference binding. If that direct binding aliases an
+//   already-existing reference or span binding, it is a reborrow
+//   governed by §6.2(7)-(10)."
+//
+// `p` is a plain local struct, not a reference or span binding, so
+// neither `p.x` nor `p.y` is a reborrow of anything, and §6.2(9.2)'s
+// "further reborrow formed from that existing binding" has no existing
+// binding to be formed from. `p.x` and `p.y` are also distinct objects
+// ([intro.object]/1: "A subobject is an object"), so they alias nothing
+// of each other's.
+//
+// borrow_whole_struct_conflicts_with_borrow_of_its_field, next door, is
+// the case §6.2(7) *does* reach -- it binds `Point& whole = p;` first --
+// and it still fails.
+struct Point {
+    int x;
+    int y;
+};
+
+int add_into(int& dst, const int& src) {
+    dst = dst + src;
+    return 0;
+}
+
+int f() {
+    Point p{};
+    p.x = 1;
+    p.y = 2;
+    add_into(p.x, p.y);
+    return p.x;
+}
