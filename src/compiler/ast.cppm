@@ -2082,6 +2082,23 @@ class Function {
     // it. Empty for every ordinary function/method, preserving today's
     // behavior unchanged.
     std::string access_context_class;
+    // ch05 §5.14 with ch04's access control: non-empty only for the
+    // synthetic per-method check copy monomorphize.cppm's
+    // check_generic_type_methods_once builds for a generic class's own
+    // method body, naming the *user-facing* class template that copy
+    // stands for.
+    //
+    // That copy rewrites only `this` to the synthetic check class; every
+    // other parameter is witness-substituted and then instantiated
+    // normally, so a same-class parameter (`bool operator==(const It<T>&
+    // other) const`) arrives typed as `It.__generic_bare_witness` while
+    // `this` is a `__genchk7`. Two spellings of one class, and
+    // [class.access]/1 grants access by class, not by object -- so
+    // `other.field_` inside that method was rejected as access "from
+    // outside its own methods" for a class whose own method it is. This
+    // records the identity the two spellings share, so
+    // grants_private_access can see it.
+    std::string witness_check_owner_class;
     // Constructors only: `Ctor(...) : Base{...}, field{...}, other{...}
     // { ... }` parsed exactly as written (still in source order). Entries
     // may name the direct base class itself or a direct field. Codegen
@@ -3362,6 +3379,7 @@ inline Function::Function(const Function& other)
       generic_method_owner_id{other.generic_method_owner_id},
       member_owner_class{other.member_owner_class},
       access_context_class{other.access_context_class},
+      witness_check_owner_class{other.witness_check_owner_class},
       member_initializers{other.member_initializers},
       receiver_ref_qualifier{other.receiver_ref_qualifier},
       is_static{other.is_static},

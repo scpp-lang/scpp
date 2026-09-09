@@ -137,6 +137,16 @@ struct DataflowState {
     // unrelated synthetic class). grants_private_access (dataflow.cppm)
     // is the only reader; every ordinary function leaves this empty.
     std::string lexical_access_context_class;
+    // Function::witness_check_owner_class, carried through so
+    // grants_private_access can recognize a generic class's own
+    // witness-instantiated spelling from inside that class's synthetic
+    // per-method check copy. Empty for every ordinary function.
+    //
+    // A pointer to the Function's own field, not a copy of it, for the
+    // same reason class_names below is one: this struct is copied and
+    // compared once per basic block per fixpoint iteration, and this
+    // value is a per-function constant that the Function outlives.
+    const std::string* witness_check_owner_class = nullptr;
     const std::unordered_set<std::string>* class_names = nullptr;
     const ClassFieldTypes* class_field_types = nullptr;
     const ClassFieldAccess* class_field_access = nullptr;
@@ -201,6 +211,7 @@ bool DataflowState::operator==(const DataflowState& other) const {
            closure_capture_borrows == other.closure_capture_borrows &&
            unsafe_depth == other.unsafe_depth && current_class == other.current_class &&
            lexical_access_context_class == other.lexical_access_context_class &&
+           witness_check_owner_class == other.witness_check_owner_class &&
            class_names == other.class_names && class_field_types == other.class_field_types &&
            class_field_access == other.class_field_access &&
            classes_with_copy_ctor == other.classes_with_copy_ctor &&
@@ -335,6 +346,7 @@ DataflowState join_states(const DataflowState& a, const DataflowState& b) {
         // Same "set once per function, never changes" reasoning as
         // current_class just above.
         a.lexical_access_context_class,
+        a.witness_check_owner_class,
         a.class_names,
         a.class_field_types,
         a.class_field_access,

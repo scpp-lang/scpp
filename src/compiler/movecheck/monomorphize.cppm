@@ -2623,6 +2623,16 @@ private:
                 // belongs to that group" even though the real,
                 // untransformed method is perfectly valid.
                 check_fn.member_owner_class = check_class_name;
+                // ch04's access control is granted to the *class*
+                // ([class.access]/1), and this copy's `this` is the only
+                // thing rewritten to `check_class_name` -- a same-class
+                // parameter is witness-substituted and instantiated
+                // instead, arriving as `Owner.__generic_bare_witness`.
+                // Recording which user-facing class this copy stands for
+                // lets grants_private_access recognize the two spellings
+                // as one class, instead of rejecting `other.field_`
+                // inside the very method that declares `field_`.
+                check_fn.witness_check_owner_class = class_name_copy;
                 check_fn.return_type = substitute_type_params(method_tmpl.return_type, type_replacements);
                 check_fn.return_type = resolve_generic_type_optimistic(check_fn.return_type, method_tmpl.loc);
                 // Preserves the original method template's own

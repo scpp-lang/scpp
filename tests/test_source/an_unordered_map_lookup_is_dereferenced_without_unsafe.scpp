@@ -1,0 +1,47 @@
+// ch01 §5.1(5.1) makes "indirection through, or pointer arithmetic on, a
+// value of pointer type" a gated operation, and ch03 §7.3(1) says that
+// `E1->E2` for an `E1` of pointer type "is equivalent to `(*E1).E2`" --
+// that same indirection. So a `find()` that hands back a raw
+// `unordered_map_entry<K, V>*` made `it->second`, the most ordinary use
+// of a lookup result there is, ill-formed outside `[[scpp::unsafe]] { }`.
+//
+// [unord.map.overview] declares `iterator find(const key_type& k);` and
+// `const_iterator find(const key_type& k) const;` -- class types. ch03
+// §7.2 and §7.3(2) are the mechanism that makes those safe: a class that
+// declares `operator->` gets the arrow-expression protocol, and §7.3(2.2)
+// completes the access through the returned pointer rather than leaving
+// the caller to perform a pointer indirection. `std::unique_ptr<T>` in
+// this same library already relies on exactly that, and `p->field` needs
+// no `unsafe` at any call site.
+//
+// Not one line of this file is inside `[[scpp::unsafe]] { }`. Before the
+// fix, every `->` below required it -- as src/compiler/parser.cppm's own
+// resolve_visible_local_type_name did, and no longer does.
+//
+// The same program transliterated to C++ and built with
+// clang++-22 -std=c++26 prints the same six lines.
+import std;
+
+int main() {
+    std::unordered_map<std::string, int> ages{};
+    ages.emplace(std::string{"ada"}, 36);
+    ages.emplace(std::string{"alan"}, 41);
+
+    auto found = ages.find(std::string{"ada"});
+    std::print("found_is_not_end {}\n", found == ages.end() ? 0 : 1);
+    std::print("found_key {}\n", found->first);
+    std::print("found_value {}\n", found->second);
+
+    // `*it` goes through ch03 §7.1's class `operator*`, likewise safe.
+    std::print("deref_value {}\n", (*found).second);
+
+    auto missing = ages.find(std::string{"grace"});
+    std::print("missing_is_end {}\n", missing == ages.end() ? 1 : 0);
+
+    // The const overload hands back the const_iterator half of the same
+    // clause, and it is just as safe to arrow through.
+    const std::unordered_map<std::string, int>& readable = ages;
+    auto readonly = readable.find(std::string{"alan"});
+    std::print("const_value {}\n", readonly->second);
+    return 0;
+}

@@ -1595,8 +1595,31 @@ namespace scpp {
 // directly, so a lambda body's access to *either* of its two relevant
 // classes is recognized uniformly.
 [[nodiscard]] bool grants_private_access(const DataflowState& state, std::string_view target_class) {
-    return state.current_class == target_class ||
-           (!state.lexical_access_context_class.empty() && state.lexical_access_context_class == target_class);
+    if (state.current_class == target_class) return true;
+    if (!state.lexical_access_context_class.empty() && state.lexical_access_context_class == target_class) return true;
+    // [class.access]/1 grants access to the *class*, not to one object of
+    // it: a member of `C` reads any `C`'s private members, which is what
+    // makes `bool operator==(const C& other) const { return p_ ==
+    // other.p_; }` -- how every comparable handle in a standard library
+    // is written -- legal C++.
+    //
+    // Inside monomorphize.cppm's synthetic per-method check copy of a
+    // *generic* class's method, that one class has two spellings: `this`
+    // is rewritten to the check class (`__genchk7`) while a same-class
+    // parameter is witness-substituted and instantiated
+    // (`C.__generic_bare_witness`). Comparing names alone therefore
+    // reported a class's own method as being "outside its own methods".
+    // Owner-name normalization is the same one callee_name_spells_type
+    // already performs for the same reason ("a generic class is
+    // monomorphized to `Holder.std::string` while the call is still
+    // spelled `Holder`"), and this arm is reachable only from a check
+    // copy, which is never codegen'd.
+    if (state.witness_check_owner_class == nullptr || state.witness_check_owner_class->empty()) return false;
+    std::string_view target_base = target_class;
+    if (std::size_t suffix = target_base.find('.'); suffix != std::string_view::npos) {
+        target_base = target_base.substr(0, suffix);
+    }
+    return target_base == *state.witness_check_owner_class;
 }
 
 // The result of asking "may `source` initialize a by-value destination of
@@ -5210,6 +5233,7 @@ struct SwitchCaseKey {
     // function leaves it empty, in which case that second alternative
     // simply never matches (no class is ever named "").
     entry_state.lexical_access_context_class = fn.access_context_class;
+    entry_state.witness_check_owner_class = &fn.witness_check_owner_class;
     entry_state.class_names = &class_names;
     entry_state.class_field_types = &class_field_types;
     entry_state.class_field_access = &class_field_access;

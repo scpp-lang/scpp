@@ -2133,9 +2133,7 @@ private:
             const std::unordered_map<std::string, std::string>& scope = local_type_name_scopes_[i - 1];
             auto local_it = scope.find(spelled_name);
             if (local_it != scope.end()) {
-                [[scpp::unsafe]] {
-                    return local_it->second;
-                }
+                return local_it->second;
             }
         }
         return std::optional<std::string>{};

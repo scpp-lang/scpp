@@ -1,0 +1,52 @@
+// [class.access]/1 grants access to the *class*, not to one object of it:
+// a member of `C` may name any `C`'s private members. That is what makes
+// `bool operator==(const C& other) const { return p_ == other.p_; }` --
+// how every comparable handle in a standard library is written -- legal
+// C++, and clang++-22 -std=c++26 accepts the transliteration of this file.
+//
+// monomorphize.cppm's synthetic per-method check copy of a generic
+// class's method rewrites only `this` to the check class (`__genchk7`);
+// every other parameter is witness-substituted and instantiated instead,
+// arriving as `C.__generic_bare_witness`. Two spellings of one class, and
+// grants_private_access compared names -- so a class's own method was
+// reported as accessing `other.p_` "from outside its own methods".
+// Non-generic classes were unaffected, which is what pins this to the
+// witness-check copy rather than to the access rule itself.
+//
+// This is what stood between `std::unordered_map` and an iterator that
+// can be compared against `end()`.
+import std;
+
+template<typename T>
+class Handle {
+private:
+    T* target_{};
+
+public:
+    Handle() { return; }
+
+    Handle(T* target) {
+        this->target_ = target;
+        return;
+    }
+
+    bool operator==(const Handle<T>& other) const {
+        return this->target_ == other.target_;
+    }
+
+    bool operator!=(const Handle<T>& other) const {
+        return this->target_ != other.target_;
+    }
+
+    virtual ~Handle() { return; }
+};
+
+int main() {
+    int value = 1;
+    Handle<int> a{&value};
+    Handle<int> b{&value};
+    Handle<int> none{};
+    if (a != b) return 1;
+    if (a == none) return 2;
+    return 0;
+}
