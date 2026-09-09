@@ -56,16 +56,113 @@ class unordered_map_entry {
     virtual ~unordered_map_entry() { return; }
 };
 
+// [unord.req.general] and [unord.map.overview] declare `find`, `end` and
+// `emplace`'s first result in terms of `iterator`/`const_iterator` --
+// class types -- never as a pointer to an element. That difference is
+// not cosmetic in SCPP26: ch01 §5.1(5.1) makes "indirection through, or
+// pointer arithmetic on, a value of pointer type" a gated operation, and
+// ch03 §7.3(1) says `E1->E2` for an `E1` of pointer type "is equivalent
+// to `(*E1).E2`" -- exactly that indirection. Handing callers a raw
+// `unordered_map_entry<K, V>*` therefore made `it->second`, the most
+// ordinary thing anyone does with a `find()` result, ill-formed outside
+// `[[scpp::unsafe]] { }`.
+//
+// ch03 §7.2 and §7.3(2) are the mechanism the library was declining to
+// use: a class that declares `operator->` gets the arrow-expression
+// protocol, and §7.3(2.2) completes `E1->E2` by member access through
+// the returned pointer rather than by the caller performing a pointer
+// indirection of their own. `std::unique_ptr<T>::operator->` in this
+// same library already relies on precisely that -- `p->field` needs no
+// `unsafe` at any call site -- so the shape is settled, and this is the
+// container that had not adopted it.
+//
+// The `[[scpp::unsafe]]` inside `operator*` is the same one
+// `std::unique_ptr<T>::operator*` carries, and for the same reason: the
+// library primitive is where the raw indirection is performed once, so
+// that no caller has to.
+export template<typename K, typename V>
+class unordered_map_iterator {
+private:
+    unordered_map_entry<K, V>* entry_{};
+
+public:
+    unordered_map_iterator() { return; }
+
+    unordered_map_iterator(unordered_map_entry<K, V>* entry) {
+        this->entry_ = entry;
+        return;
+    }
+
+    unordered_map_entry<K, V>* operator->() const [[scpp::lifetime(self)]] {
+        return this->entry_;
+    }
+
+    unordered_map_entry<K, V>& operator*() const {
+        [[scpp::unsafe]] {
+            return *this->entry_;
+        }
+    }
+
+    bool operator==(const std::unordered_map_iterator<K, V>& other) const {
+        return this->entry_ == other.entry_;
+    }
+
+    bool operator!=(const std::unordered_map_iterator<K, V>& other) const {
+        return this->entry_ != other.entry_;
+    }
+
+    virtual ~unordered_map_iterator() { return; }
+};
+
+// The `const_iterator` half of the same clause: `find() const` and
+// `end() const` return it, and it reaches a `const unordered_map_entry
+// <K, V>` exactly as the mutable one above reaches a mutable entry.
+export template<typename K, typename V>
+class unordered_map_const_iterator {
+private:
+    const unordered_map_entry<K, V>* entry_{};
+
+public:
+    unordered_map_const_iterator() { return; }
+
+    unordered_map_const_iterator(const unordered_map_entry<K, V>* entry) {
+        this->entry_ = entry;
+        return;
+    }
+
+    const unordered_map_entry<K, V>* operator->() const [[scpp::lifetime(self)]] {
+        return this->entry_;
+    }
+
+    const unordered_map_entry<K, V>& operator*() const {
+        [[scpp::unsafe]] {
+            return *this->entry_;
+        }
+    }
+
+    bool operator==(const std::unordered_map_const_iterator<K, V>& other) const {
+        return this->entry_ == other.entry_;
+    }
+
+    bool operator!=(const std::unordered_map_const_iterator<K, V>& other) const {
+        return this->entry_ != other.entry_;
+    }
+
+    virtual ~unordered_map_const_iterator() { return; }
+};
+
 // Returned by unordered_map::emplace: `first` points at the existing-or-
 // newly-inserted entry, `second` is true iff a new entry was actually
 // inserted -- mirrors real std::unordered_map::emplace's own
-// `pair<iterator, bool>`. This project's self-hosting compiler doesn't
-// support structured bindings (`auto [it, inserted] = ...`) yet, so callers
-// access `.first`/`.second` directly instead.
+// `pair<iterator, bool>`, whose `first` is an *iterator*, for the same
+// ch03 §7.2/§7.3(2) reason the iterators above exist. This project's
+// self-hosting compiler doesn't support structured bindings
+// (`auto [it, inserted] = ...`) yet, so callers access `.first`/`.second`
+// directly instead.
 export template<typename K, typename V>
 class unordered_map_emplace_result {
   public:
-    unordered_map_entry<K, V>* first{};
+    std::unordered_map_iterator<K, V> first{};
     bool second{};
 
     virtual ~unordered_map_emplace_result() { return; }
@@ -436,22 +533,28 @@ public:
         return;
     }
 
-    unordered_map_entry<K, V>* find(const K& key) {
-        return this->__find_entry(key);
+    // [unord.map.overview]: `iterator find(const key_type& k);` and
+    // `const_iterator find(const key_type& k) const;`, and the same pair
+    // for `end()`. See the iterator classes above for why the class type
+    // and not the entry pointer is what these have to hand back.
+    std::unordered_map_iterator<K, V> find(const K& key) {
+        std::unordered_map_iterator<K, V> found{this->__find_entry(key)};
+        return found;
     }
 
-    const unordered_map_entry<K, V>* find(const K& key) const {
-        return this->__find_entry(key);
+    std::unordered_map_const_iterator<K, V> find(const K& key) const {
+        std::unordered_map_const_iterator<K, V> found{this->__find_entry(key)};
+        return found;
     }
 
-    unordered_map_entry<K, V>* end() {
-        unordered_map_entry<K, V>* empty{};
-        return empty;
+    std::unordered_map_iterator<K, V> end() {
+        std::unordered_map_iterator<K, V> past_the_end{};
+        return past_the_end;
     }
 
-    const unordered_map_entry<K, V>* end() const {
-        const unordered_map_entry<K, V>* empty{};
-        return empty;
+    std::unordered_map_const_iterator<K, V> end() const {
+        std::unordered_map_const_iterator<K, V> past_the_end{};
+        return past_the_end;
     }
 
     bool contains(const K& key) const {
@@ -526,7 +629,8 @@ public:
         unordered_map_entry<K, V>* empty{};
         unordered_map_emplace_result<K, V> result{};
         if (existing != empty) {
-            result.first = existing;
+            std::unordered_map_iterator<K, V> found{existing};
+            result.first = std::move(found);
             result.second = false;
             return result;
         }
@@ -534,7 +638,8 @@ public:
         [[scpp::unsafe]] {
             fresh = new unordered_map_entry<K, V>(key, value);
         }
-        result.first = this->__insert_new_entry(fresh);
+        std::unordered_map_iterator<K, V> inserted{this->__insert_new_entry(fresh)};
+        result.first = std::move(inserted);
         result.second = true;
         return result;
     }
@@ -544,7 +649,8 @@ public:
         unordered_map_entry<K, V>* empty{};
         unordered_map_emplace_result<K, V> result{};
         if (existing != empty) {
-            result.first = existing;
+            std::unordered_map_iterator<K, V> found{existing};
+            result.first = std::move(found);
             result.second = false;
             return result;
         }
@@ -552,7 +658,8 @@ public:
         [[scpp::unsafe]] {
             fresh = new unordered_map_entry<K, V>(key, std::move(value));
         }
-        result.first = this->__insert_new_entry(fresh);
+        std::unordered_map_iterator<K, V> inserted{this->__insert_new_entry(fresh)};
+        result.first = std::move(inserted);
         result.second = true;
         return result;
     }

@@ -1,0 +1,42 @@
+// The other direction of the same rule. Recognizing a generic class's own
+// witness-instantiated spelling as itself must not widen access to any
+// *other* class -- and, in particular, not to another class template,
+// whose witness instantiation shares nothing with this one but the
+// synthetic-name shape. [class.access]/1 grants access to the class that
+// declares the member and to nothing else; clang++-22 -std=c++26 rejects
+// the transliteration of this file.
+//
+// This case is rejected both before and after the fix that made
+// a_generic_class_method_reads_another_instances_private_member compile:
+// it is a guard against that fix loosening more than the one identity it
+// is about, not a case the fix changes.
+import std;
+
+template<typename T>
+class Other {
+private:
+    int hidden_{};
+
+public:
+    Other() { return; }
+
+    virtual ~Other() { return; }
+};
+
+template<typename T>
+class Peeker {
+public:
+    Peeker() { return; }
+
+    int peek(const Other<T>& o) const {
+        return o.hidden_;
+    }
+
+    virtual ~Peeker() { return; }
+};
+
+int main() {
+    Other<int> o{};
+    Peeker<int> p{};
+    return p.peek(o);
+}
