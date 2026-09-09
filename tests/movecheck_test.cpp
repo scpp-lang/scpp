@@ -2079,6 +2079,60 @@ void test_nullptr_return_is_not_treated_as_a_borrow() {
                (error.has_value() ? std::string(", got '") + *error + "'" : ""));
 }
 
+// One question, one message. "May this pointer value initialize that
+// pointer-typed destination?" is answered by check_raw_pointer_assignment
+// for a declaration, an assignment, a by-value parameter and a `return`.
+// A `T&&` parameter used to answer it with the *fresh-value* diagnostic
+// instead -- which is factually wrong here twice over: the argument is a
+// call returning by value, so it is a fresh value, and the actual defect
+// (dropping `const`, [conv.qual]/3) is the one thing the message did not
+// mention. Pinned as a message test rather than an accept/reject one
+// because both spellings reject this program; only the message says
+// whether the right rule did it.
+void test_rvalue_reference_pointer_argument_reports_the_pointer_rule() {
+    cases_run++;
+    std::optional<std::string> message = move_error_message(
+        "struct Expr { int v; };\n"
+        "using ExprPtr = Expr*;\n"
+        "const Expr* read_only_view() { return nullptr; }\n"
+        "int take(ExprPtr&& p) { return 0; }\n"
+        "int main() {\n"
+        "    return take(read_only_view());\n"
+        "}\n");
+    expect(message.has_value(),
+           "rvalue_reference_pointer_argument_reports_the_pointer_rule: expected the const-dropping "
+           "argument to be rejected");
+    expect(message.value_or("").find("would drop 'const'") != std::string::npos,
+           "rvalue_reference_pointer_argument_reports_the_pointer_rule: expected the same const-dropping "
+           "diagnostic every other binding position gives, got " +
+               message.value_or("<accepted>"));
+    expect(message.value_or("").find("must be a fresh value") == std::string::npos,
+           "rvalue_reference_pointer_argument_reports_the_pointer_rule: a call returning by value is a "
+           "fresh value, so the fresh-value rule must not be the one reported, got " +
+               message.value_or("<accepted>"));
+}
+
+// The other half of the same question: [dcl.init.ref]/5.4.2 converts the
+// argument to a prvalue of the referenced type before materializing the
+// temporary, so adding `const` -- the direction [conv.qual]/3 permits --
+// is well-formed at exactly this boundary, as it already was for the
+// by-value spelling of the same parameter.
+void test_rvalue_reference_pointer_parameter_takes_a_qualification_conversion() {
+    cases_run++;
+    std::optional<std::string> error = move_error_message(
+        "struct Expr { int v; };\n"
+        "using ConstExprPtr = const Expr*;\n"
+        "Expr* mutable_view() { return nullptr; }\n"
+        "int take(ConstExprPtr&& p) { return 0; }\n"
+        "int main() {\n"
+        "    return take(mutable_view());\n"
+        "}\n");
+    expect(!error.has_value(),
+           "rvalue_reference_pointer_parameter_takes_a_qualification_conversion: expected the added-const "
+           "binding to be accepted" +
+               (error.has_value() ? std::string(", got '") + *error + "'" : ""));
+}
+
 
 // spec §6: the diagnostic has to name both types and point at the cast
 // that fixes it -- these conversions are rejected on purpose, so the
@@ -3388,6 +3442,8 @@ int main() {
     test_nullptr_cannot_initialize_a_non_pointer_and_says_why();
     test_nullptr_initializes_every_pointer_shaped_destination();
     test_nullptr_return_is_not_treated_as_a_borrow();
+    test_rvalue_reference_pointer_argument_reports_the_pointer_rule();
+    test_rvalue_reference_pointer_parameter_takes_a_qualification_conversion();
 
     test_scalar_conversion_diagnostic_names_both_types_and_the_cast();
     test_scalar_conversion_return_diagnostic_names_the_function();
