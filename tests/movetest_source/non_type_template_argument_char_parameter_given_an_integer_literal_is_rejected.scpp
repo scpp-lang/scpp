@@ -1,0 +1,19 @@
+// [temp.arg.nontype]/2 makes a non-type template argument a converted
+// constant expression *of the parameter's type*, and `docs/spec/` adopts
+// no clause about template arguments, so front-matter §1(2) applies that
+// rule unchanged. Which type that is, is then spec §16.2/§16.3's
+// question: §16.2(2) allows an integer-literal to take any type in Table 1
+// except `bool` and `char`, exactly as it refuses `char c = 300;`. It
+// used to be accepted, binding C to 300 and letting codegen truncate it
+// to 44.
+template<char C>
+class Ch {
+public:
+    virtual ~Ch() { return; }
+    int get() { return 6; }
+};
+
+int main() {
+    Ch<300> v{};
+    return v.get();
+}

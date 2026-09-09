@@ -2029,11 +2029,7 @@ std::expected<void, DataflowError> check_scalar_conversion(const Type& target_ty
     if (source_operand.kind != TypeKind::Named || !is_scalar_type_name(source_operand.name)) return {};
     if (source_operand.name == target_operand.name) return {};
     return std::unexpected(DataflowError(
-        "cannot convert a '" + source_operand.name + "' value to '" + target_operand.name + "' for " + target_name +
-            ": scpp has no implicit conversion between distinct scalar types, not even between two of the same width "
-            "(spec ch16 §16.3(1)) -- use an explicit 'static_cast<" +
-            target_operand.name + ">(...)' if the conversion is intended",
-        loc));
+        scalar_conversion_error_message(source_operand.name, target_operand.name, target_name), loc));
 }
 
 // Where the field a Member expression names was declared, so a

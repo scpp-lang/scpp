@@ -4259,6 +4259,33 @@ public:
     return message;
 }
 
+// spec §16.3(1): "There is no implicit conversion between any two
+// distinct scalar types. Where a value of a scalar type is required, the
+// value shall have exactly that type." The note adds that the rule holds
+// "however small the difference between the two types and whether or not
+// the conversion would preserve the value", and §16.3(2) names the
+// explicit form that does work.
+//
+// Worded here, beside the rule it reports, so that every position that
+// requires a scalar value -- §16.3(1)'s own (1.1)-(1.6), and a non-type
+// template argument, which [temp.arg.nontype]/2 makes a converted
+// constant expression *of the parameter's type* -- says the same thing.
+[[nodiscard]] inline std::string scalar_conversion_error_message(const std::string& source_type_name,
+                                                                 const std::string& target_type_name,
+                                                                 const std::string& target_description) {
+    std::string message{"cannot convert a '"};
+    message += source_type_name;
+    message += "' value to '";
+    message += target_type_name;
+    message += "' for ";
+    message += target_description;
+    message += ": scpp has no implicit conversion between distinct scalar types, not even between two of the same "
+               "width (spec ch16 §16.3(1)) -- use an explicit 'static_cast<";
+    message += target_type_name;
+    message += ">(...)' if the conversion is intended";
+    return message;
+}
+
 [[nodiscard]] inline bool literal_adopts_type(const Expr& literal, const Type& type, int pointer_bit_width) {
     const Type& target = literal_adoption_target(type);
     if (literal.kind == ExprKind::Unary && literal.unary_op == UnaryOp::Neg && literal.lhs != nullptr) {
