@@ -1,0 +1,48 @@
+// ch02 §6.4(2): "Every class type has an implicitly-defined move
+// constructor with exactly one parameter, of type rvalue reference to the
+// class type, irrespective of whether the C++ standard's own conditions
+// for implicitly declaring one ([class.copy.ctor]) are met." It is not a
+// declaration, so it is absent from the signature database -- and
+// monomorphization's "a non-template constructor already accepts these
+// arguments" guard consulted only that database. For the one argument
+// list §6.4(2) is about, a single argument of the class's own type, the
+// guard therefore reported no non-template candidate and instantiated the
+// constructor *template* as well. Constructor selection does not agree:
+// it picks the implicit move constructor, as §6.4(2) requires.
+//
+// The specialization is not harmless. A member template's body is
+// type-checked once the specialization exists, so this one was checked
+// with `U` = `Holder`, and `int probe = value.tag;` was rejected for
+// naming a field `Holder` does not have -- in a constructor no call in
+// this program ever selects. `std::expected<T, E>`, whose value
+// constructor is exactly this shape, could not be constructed from
+// another `std::expected<T, E>` at all.
+import std;
+
+struct Tagged {
+    int tag;
+};
+
+template<typename T>
+class Holder {
+public:
+    int origin;
+
+    Holder() : origin{0} { return; }
+
+    template<typename U>
+    Holder(U value) : origin{1} {
+        this->origin = value.tag;
+        return;
+    }
+
+    virtual ~Holder() { return; }
+};
+
+int main() {
+    Holder<int> a{};
+    Holder<int> b{std::move(a)};
+    Tagged t{3};
+    Holder<int> c{std::move(t)};
+    return b.origin + c.origin - 3;
+}

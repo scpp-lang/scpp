@@ -1,0 +1,62 @@
+// [optional.ctor]/23-24: `std::optional<T>`'s value constructor is
+// `template<class U = remove_cv_t<T>> constexpr explicit(see below)
+// optional(U&& v)`, constrained on `is_constructible_v<T, U>`, and it
+// "direct-non-list-initializes val with std::forward<U>(v)". libs/std
+// declared it on the concrete `T` alone, so a `U` reached the contained
+// object only through a *second* user-defined conversion -- which
+// [over.best.ics]/4 restricts to standard conversion sequences. A
+// hand-written class declaring only `Opt(const T&)`/`Opt(T&&)` is
+// rejected by clang++-22 -std=c++26 on this same program, which is
+// exactly what `std::optional` was.
+//
+// This is src/compiler/constexpression.cppm's own
+// evaluate_binary_operator_function, reduced: it returns
+// `std::optional<std::expected<std::shared_ptr<Cell>, ConstexprError>>`
+// and says `return std::unexpected(ConstexprError{...});`.
+//
+// ch02 §6.4(2) is the other half: "Every class type has an
+// implicitly-defined move constructor ... irrespective of whether the
+// C++ standard's own conditions for implicitly declaring one are met."
+// Because it is not a *declaration*, monomorphization's own
+// "a non-template constructor already accepts these arguments" guard
+// could not see it, and instantiated the constructor *template* for an
+// argument of the class's own type -- a specialization selection never
+// asks for, whose body was then type-checked with `U` = the class.
+// `std::expected<int, E> b{std::move(a)};` failed on that alone.
+//
+// The same program transliterated to C++ and built with
+// clang++-22 -std=c++26 prints the same five lines.
+import std;
+
+struct Err {
+    int code;
+};
+
+std::optional<std::expected<int, Err>> classify(int n) {
+    if (n < 0) {
+        Err e{7};
+        return std::unexpected(std::move(e));
+    }
+    if (n == 0) return std::optional<std::expected<int, Err>>{};
+    return std::expected<int, Err>{n};
+}
+
+int main() {
+    // A fresh `std::unexpected<Err>` reaching an
+    // `optional<expected<int, Err>>` return: [optional.ctor]/24
+    // direct-initializes the contained `expected` from it.
+    std::optional<std::expected<int, Err>> failed = classify(-1);
+    std::print("failed_engaged {}\n", failed.has_value() ? 1 : 0);
+    std::print("failed_holds_error {}\n", failed.value().has_value() ? 0 : 1);
+    std::print("failed_code {}\n", failed.value().error().code);
+
+    // The disengaged path still works: a default-constructed optional is
+    // not a `U` the new constructor may swallow.
+    std::optional<std::expected<int, Err>> absent = classify(0);
+    std::print("absent_engaged {}\n", absent.has_value() ? 1 : 0);
+
+    // And the plain `U = T` path still goes through `optional(T&&)`.
+    std::optional<std::expected<int, Err>> ok = classify(4);
+    std::print("ok_value {}\n", ok.value().value());
+    return 0;
+}

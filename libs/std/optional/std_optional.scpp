@@ -1,6 +1,7 @@
 export module std:optional;
 
 import :cstdlib;
+import :concepts;
 
 namespace std {
 
@@ -10,7 +11,18 @@ private:
     bool has_value_{};
     alignas(T) char storage_[sizeof(T)]{};
 
-    void __construct_value(const T& value) {
+    // [optional.ctor]/23.1, /28.1 and [optional.assign]/14.3 all state
+    // the same Constraints: `is_constructible_v<T, ...>`. A `T` that
+    // cannot be copied therefore *removes* the copying members from
+    // overload resolution; it does not make `optional<T>` itself
+    // ill-formed. Unconstrained, and because scpp instantiates every
+    // member of a class specialization, these bodies were diagnosed for
+    // every `optional<T>` with a non-copyable `T` -- including
+    // `std::optional<std::expected<T, E>>`, which
+    // src/compiler/constexpression.cppm returns. Same clause, same
+    // concept and same fix as `std::vector`'s own `vector(const
+    // std::vector<T>&) requires std::copy_constructible<T>`.
+    void __construct_value(const T& value) requires std::copy_constructible<T> {
         [[scpp::unsafe]] {
             new ((T*)&this->storage_) T(value);
         }
@@ -26,7 +38,20 @@ private:
         return;
     }
 
-    void __copy_from(const std::optional<T>& other) {
+    // [optional.ctor]/24 and [optional.assign]/15 both say what the
+    // value-taking members do with a `U`: "direct-non-list-initializes
+    // val with std::forward<U>(v)". One place, since the constructor and
+    // the assignment ask the identical question and must not drift.
+    template<typename U>
+    void __construct_converted(U value) {
+        [[scpp::unsafe]] {
+            new ((T*)&this->storage_) T(std::move(value));
+        }
+        this->has_value_ = true;
+        return;
+    }
+
+    void __copy_from(const std::optional<T>& other) requires std::copy_constructible<T> {
         if (!other.has_value()) {
             this->has_value_ = false;
             return;
@@ -41,7 +66,7 @@ private:
 public:
     optional() { return; }
 
-    optional(const T& value) {
+    optional(const T& value) requires std::copy_constructible<T> {
         this->__construct_value(value);
         return;
     }
@@ -51,12 +76,42 @@ public:
         return;
     }
 
-    optional(const std::optional<T>& other) {
+    // [optional.ctor]/23-24: the value-taking constructor is
+    // `template<class U = remove_cv_t<T>> constexpr explicit(see below)
+    // optional(U&& v)`, constrained on `is_constructible_v<T, U>`, whose
+    // effect is to direct-initialize the contained `T` from the `U`. It
+    // was declared here on the concrete `T` alone, so a `U` that is not
+    // spelled `T` had to reach the contained object through a *second*
+    // user-defined conversion -- the argument of a user-defined
+    // conversion, which [over.best.ics]/4 restricts to standard
+    // conversion sequences. `std::optional<std::expected<T, E>> f() {
+    // return std::unexpected(e); }` is ordinary C++ for that reason and
+    // for no other: real `std::optional` deduces `U = std::unexpected<E>`
+    // and performs the `expected` construction *inside* the constructor,
+    // where it is a direct-initialization and not part of any conversion
+    // sequence. A hand-written class declaring only `Opt(const T&)` and
+    // `Opt(T&&)` is rejected by clang++-22 -std=c++26 on the identical
+    // program, which is what this member was.
+    //
+    // Deliberately the same shape `std::expected`'s own
+    // `template<typename U> expected(U value)` already has for
+    // [expected.object.ctor]'s identical requirement -- the two
+    // `T`-spelled overloads above stay because they are the `U = T` case
+    // that [over.match.best]/2.5 prefers anyway, and because only they
+    // can take a `const T&` borrow: an `optional<T>` built from a named
+    // lvalue must not start requiring `T` to be movable.
+    template<typename U>
+    optional(U value) {
+        this->__construct_converted(std::move(value));
+        return;
+    }
+
+    optional(const std::optional<T>& other) requires std::copy_constructible<T> {
         this->__copy_from(other);
         return;
     }
 
-    void operator=(const T& value) {
+    void operator=(const T& value) requires std::copy_constructible<T> {
         this->reset();
         this->__construct_value(value);
         return;
@@ -68,7 +123,7 @@ public:
         return;
     }
 
-    void operator=(const std::optional<T>& other) {
+    void operator=(const std::optional<T>& other) requires std::copy_constructible<T> {
         this->reset();
         this->__copy_from(other);
         return;
