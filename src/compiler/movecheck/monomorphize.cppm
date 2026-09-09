@@ -4764,6 +4764,43 @@ private:
         return base_name(callee_name) == base_name(class_name);
     }
 
+    // Whether the implicitly-provided copy or move constructor of
+    // `class_name` -- neither of which is a *declaration*, so neither
+    // appears in `signatures_` -- already accepts `args`.
+    //
+    // ch02 §6.4(2): "Every class type has an implicitly-defined move
+    // constructor with exactly one parameter, of type rvalue reference
+    // to the class type, irrespective of whether the C++ standard's own
+    // conditions for implicitly declaring one ([class.copy.ctor]) are
+    // met." §6.5(2) says the same for the copy constructor whenever its
+    // own conditions hold. Both are non-template constructors, so
+    // [over.match.best]/2.5 ranks them above a constructor template for
+    // the one argument list they are about: a single argument of the
+    // class's own type.
+    //
+    // The guard below asked only `signatures_`, so for exactly that
+    // argument list it concluded there was no non-template candidate and
+    // instantiated the template anyway. check_constructor_arguments does
+    // not agree -- it selects the implicit move constructor, as §6.4(2)
+    // requires -- so the specialization created here is one selection
+    // never asks for. It is not harmless: a member template's body is
+    // type-checked once the specialization exists, so an unconstrained
+    // `template<typename U> C(U value)` whose body builds a `T` out of
+    // the `U` was checked with `U` = `C` itself. `std::expected<int, E>
+    // b{std::move(a)};` -- ordinary C++, and what a
+    // `std::optional<std::expected<T, E>>` does internally -- was
+    // rejected inside `new ((T*)&this->storage_) T(std::move(value))`
+    // for not converting an `expected` to an `int`.
+    [[nodiscard]] bool implicit_copy_or_move_constructor_matches_arguments(const std::string& class_name,
+                                                                          const std::vector<ExprPtr>& args,
+                                                                          const Body& body) {
+        if (args.size() != 1 || args[0] == nullptr) return false;
+        std::optional<Type> arg_type = infer_expr_type(*args[0], body, signatures_);
+        if (!arg_type.has_value()) return false;
+        const Type& argument = is_reference(*arg_type) && arg_type->pointee != nullptr ? *arg_type->pointee : *arg_type;
+        return argument.kind == TypeKind::Named && !argument.name.empty() && argument.name == class_name;
+    }
+
     // Whether a *non-template* constructor of `class_name` matches
     // `args` exactly by type -- the suppression guard's question, which
     // is deliberately narrower than find_ordinary_constructor_overload's.
@@ -4984,6 +5021,7 @@ private:
         // `expected(const std::unexpected<E>&)` swallowed by the
         // template and could never be given an error at all.
         if (non_template_constructor_matches_arguments_exactly(class_name, args, body)) return;
+        if (implicit_copy_or_move_constructor_matches_arguments(class_name, args, body)) return;
         // By index, and re-read through `program_.functions` each time,
         // because the body below *appends* the clone it builds to that
         // same vector. Range-iterating it while it grows is a
