@@ -1,0 +1,25 @@
+// The other direction, and the reason the check above narrowed rather
+// than disappeared: naming the *same* object twice in one call, once
+// mutably, is exactly the aliasing exclusivity is about, and it stays
+// ill-formed. `dst` and `src` would designate one `int`, so
+// `dst = dst + src` reads through a binding it is writing through.
+//
+// Rejected before and after the narrowing that made
+// passing_two_fields_of_same_struct_by_mixed_reference_in_same_call_is_
+// allowed compile: this is the guard on its blast radius.
+struct Point {
+    int x;
+    int y;
+};
+
+int add_into(int& dst, const int& src) {
+    dst = dst + src;
+    return 0;
+}
+
+int f() {
+    Point p{};
+    p.x = 1;
+    add_into(p.x, p.x);
+    return p.x;
+}

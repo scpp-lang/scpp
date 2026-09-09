@@ -35,6 +35,27 @@ struct BorrowState {
 
 using BorrowMap = std::unordered_map<LocalId, BorrowState>;
 
+// One reference argument's borrow, for the duration of a single call --
+// or one lambda capture's, for the duration of one closure construction.
+//
+// Keyed by *place*, not by root local, because ch02 §6.2(7) makes
+// aliasing the condition: a new binding is a reborrow only "if it
+// aliases the same underlying object or range through that existing
+// binding", and §6.2(9.2) then constrains a further reborrow from that
+// binding. Collapsing every argument to its root local answered a
+// different question -- "does this argument reach the same *variable*"
+// -- and so rejected two arguments naming provably disjoint objects.
+//
+// A vector rather than a map: the conflict is *overlap*, not key
+// equality (a whole object conflicts with any of its members), and one
+// call has a handful of reference arguments.
+struct InCallBorrow {
+    Place place;
+    bool mutable_borrow = false;
+};
+
+using InCallBorrows = std::vector<InCallBorrow>;
+
 struct RefTarget {
     RootSet roots;
     // Set only when this reference was tracked by suspending a
