@@ -1659,6 +1659,65 @@ struct ConvertingConstructorBinding {
     return binding;
 }
 
+// The one place that answers "may this argument initialize a `T&&`
+// parameter?", so the four argument positions that ask it -- a function's
+// own parameter and its converting constructor's, and a constructor's own
+// parameter and *its* converting constructor's -- cannot answer it or
+// word it differently.
+//
+// Two independent questions hide behind the single predicate
+// produces_rvalue_of_type. The first is value category: [dcl.init.ref]/5.3
+// binds an rvalue reference only to an rvalue (or an lvalue of function
+// type), and /5.4 requires T1 not be reference-related to T2 otherwise --
+// which is why a bare named variable needs an explicit `std::move`. That
+// is the half "must be a fresh value" (ch02 §6.6(1)) describes, and it is
+// plain C++, unmodified by this project's spec.
+//
+// The second is type: [dcl.init.ref]/5.4.2 converts the initializer
+// expression to a prvalue of the referenced type and materializes a
+// temporary, so a *fresh* value whose type merely needs a standard
+// conversion is well-formed. Reporting that as a freshness failure said
+// the wrong thing entirely -- there is nothing stale about `f(p.get())`
+// for a `const T*&&` parameter -- and it said it in a message no other
+// binding position uses. When the argument is a prvalue (the complement
+// of expression_designates_a_place, the same [basic.lval] partition
+// produces_rvalue_of_type is itself written against), the type question
+// is therefore handed to check_raw_pointer_assignment, which already owns
+// it, with one wording, for a declaration, an assignment, a by-value
+// parameter and a `return`.
+[[nodiscard]] std::expected<void, DataflowError> check_rvalue_reference_argument(
+    const Expr& arg, const Type& param_referent, const std::string& argument_name, const Body& body,
+    const Signatures& signatures, SourceLocation loc, bool report_errors) {
+    if (!report_errors || produces_rvalue_of_type(arg, param_referent, body, signatures)) return {};
+    if (!expression_designates_a_place(arg, body, signatures)) {
+        if (auto _r = check_raw_pointer_assignment(param_referent, arg, body, signatures, loc, argument_name, report_errors);
+            !_r.has_value()) {
+            return _r;
+        }
+        // Still a prvalue, still not a raw-pointer soundness problem:
+        // the value category rule is satisfied and what is left is a
+        // plain type mismatch, so say that instead of describing a fresh
+        // value as stale. Only said when there is a type to name --
+        // infer_expr_type is deliberately partial (see its own comment),
+        // and "no type" is not evidence of a mismatch.
+        std::optional<Type> actual = infer_expr_type(arg, body, signatures);
+        if (actual.has_value()) {
+            return std::unexpected(DataflowError(
+                "cannot initialize " + argument_name + " (of type '" + describe_type_brief(param_referent) +
+                    "') from '" + describe_type_brief(*actual) +
+                    "': an rvalue-reference ('T&&') parameter binds a temporary of its own type, implicitly "
+                    "converted from the argument ([dcl.init.ref]/5.4.2), and no such conversion exists between "
+                    "these two types",
+                loc));
+        }
+    }
+    return std::unexpected(DataflowError(
+        "argument to an rvalue-reference ('T&&') parameter must be a fresh value -- "
+        "std::move(x), std::make_unique<T>(...), a literal, or a call returning by value; "
+        "an existing named variable must be moved explicitly (spec ch02 §6.6(1), [dcl.init.ref]/5.3)",
+        loc));
+}
+
 // Checks every argument of a Call expression against its callee's
 // signature (if known), exactly the same way regardless of context --
 // shared by apply_expr's own Call case (a call used as a plain
@@ -1829,12 +1888,16 @@ struct ConvertingConstructorBinding {
             // walked via apply_expr (exactly like a by-value/unique_ptr
             // argument below) for its own side effects -- e.g.
             // std::move(x) marking x moved-out in `state`.
-            if (report_errors && !produces_rvalue_of_type(arg, *effective_param_type.pointee, body, signatures)) {
-                return std::unexpected(DataflowError(
-                    "argument to an rvalue-reference ('T&&') parameter must be a fresh value -- "
-                    "std::move(x), std::make_unique<T>(...), a literal, or a call returning by value; "
-                    "an existing named variable must be moved explicitly (spec ch03/ch05 §5.11)",
-                    state.current_loc));
+            if (report_errors) {
+                std::string argument_name{"parameter "};
+                argument_name += std::to_string(param_index + 1);
+                argument_name += " of ";
+                argument_name += callee_display;
+                if (auto _r = check_rvalue_reference_argument(arg, *effective_param_type.pointee, argument_name, body,
+                                                              signatures, state.current_loc, report_errors);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
             }
             if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
@@ -1963,12 +2026,16 @@ struct ConvertingConstructorBinding {
             if (converting_ctor != nullptr) {
                 Type ctor_param_type = converting_ctor_param_type;
                 if (is_reference(ctor_param_type) && ctor_param_type.is_rvalue_ref) {
-                    if (report_errors && !produces_rvalue_of_type(arg, *ctor_param_type.pointee, body, signatures)) {
-                        return std::unexpected(DataflowError(
-                            "argument to an rvalue-reference ('T&&') parameter must be a fresh value -- "
-                            "std::move(x), std::make_unique<T>(...), a literal, or a call returning by value; "
-                            "an existing named variable must be moved explicitly (spec ch03/ch05 §5.11)",
-                            state.current_loc));
+                    if (report_errors) {
+                        std::string argument_name{"the converting constructor's parameter for parameter "};
+                        argument_name += std::to_string(param_index + 1);
+                        argument_name += " of ";
+                        argument_name += callee_display;
+                        if (auto _r = check_rvalue_reference_argument(arg, *ctor_param_type.pointee, argument_name, body,
+                                                                      signatures, state.current_loc, report_errors);
+                            !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
                     }
                     if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
@@ -2243,13 +2310,17 @@ struct ConvertingConstructorBinding {
             param_is_reference && !effective_param_type.is_mutable_ref &&
             const_reference_binds_materialized_temporary(arg, effective_param_type, body, signatures);
         if (param_is_rvalue_reference) {
-            if (report_errors &&
-                !produces_rvalue_of_type(arg, *effective_param_type.pointee, body, signatures)) {
-                return std::unexpected(DataflowError(
-                    "argument to an rvalue-reference ('T&&') parameter must be a fresh value -- "
-                    "std::move(x), std::make_unique<T>(...), a literal, or a call returning by value; "
-                    "an existing named variable must be moved explicitly (spec ch03/ch05 §5.11)",
-                    state.current_loc));
+            if (report_errors) {
+                std::string argument_name{"parameter "};
+                argument_name += std::to_string(param_index + 1);
+                argument_name += " of ";
+                argument_name += class_name;
+                argument_name += "'s constructor";
+                if (auto _r = check_rvalue_reference_argument(arg, *effective_param_type.pointee, argument_name, body,
+                                                              signatures, state.current_loc, report_errors);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
             }
             if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
@@ -2292,13 +2363,17 @@ struct ConvertingConstructorBinding {
             }
             if (converting_ctor != nullptr) {
                 if (is_reference(converting_ctor_param_type) && converting_ctor_param_type.is_rvalue_ref) {
-                    if (report_errors &&
-                        !produces_rvalue_of_type(arg, *converting_ctor_param_type.pointee, body, signatures)) {
-                        return std::unexpected(DataflowError(
-                            "argument to an rvalue-reference ('T&&') parameter must be a fresh value -- "
-                            "std::move(x), std::make_unique<T>(...), a literal, or a call returning by value; "
-                            "an existing named variable must be moved explicitly (spec ch03/ch05 §5.11)",
-                            state.current_loc));
+                    if (report_errors) {
+                        std::string argument_name{"the converting constructor's parameter for parameter "};
+                        argument_name += std::to_string(param_index + 1);
+                        argument_name += " of ";
+                        argument_name += class_name;
+                        argument_name += "'s constructor";
+                        if (auto _r = check_rvalue_reference_argument(arg, *converting_ctor_param_type.pointee, argument_name,
+                                                                      body, signatures, state.current_loc, report_errors);
+                            !_r.has_value()) {
+                            return std::unexpected(std::move(_r).error());
+                        }
                     }
                     if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
                         !_r.has_value()) {

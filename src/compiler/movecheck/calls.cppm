@@ -2456,6 +2456,45 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
     }
 }
 
+// "May a prvalue of type `source` initialize an object of type `target`?"
+// -- the type half of produces_rvalue_of_type's question, kept apart from
+// the value-category half above.
+//
+// [dcl.init.ref]/2 makes argument passing an initialization, and
+// [dcl.init.ref]/5.4.2 says that when the reference does not bind
+// directly "the initializer expression is implicitly converted to a
+// prvalue of type 'T1'. The temporary materialization conversion is
+// applied [...] and the reference is bound to the result." So a `T&&`
+// parameter needs a value the destination type can be *initialized* from,
+// not one whose type is spelled identically to it. ch13 §16.5(3) states
+// the same thing from the other side -- the conversions it defines apply
+// "at every boundary at which a value is given to a declared type: [...]
+// an argument of a function call" -- and §16.5(1.1) names "a pointer to a
+// const-qualified type" among the destinations, so the spec is written
+// assuming this boundary converts. Nothing in docs/spec narrows either
+// rule for a parameter of rvalue-reference type, and front matter §1(2)
+// leaves an unmodified C++ rule in force.
+//
+// The relation is the one every *other* binding position in this pass
+// already uses for the same question: argument_type_matches_parameter for
+// a by-value parameter, check_raw_pointer_assignment for a declaration,
+// an assignment and a `return`. Answering it with bare type identity here
+// made a `T*` rvalue viable for a by-value `const T*` parameter and, for
+// the identical question, not viable for a `const T*&&` one -- and
+// rejected `Derived*` against `Base*&&` where `Base*` accepted it.
+[[nodiscard]] bool rvalue_type_initializes(const Type& source, const Type& target, const Body& body) {
+    if (types_equal(source, target)) return true;
+    // Every conversion below is a pointer or reference one, and
+    // types_compatible_with_base_conversion's own first step is the
+    // types_equal just performed -- so for the overwhelmingly common
+    // named/scalar target there is nothing left for it to find, and
+    // asking it anyway would repeat that comparison (and an
+    // enclosing_class_name lookup) once per rejected overload candidate.
+    if (target.kind != TypeKind::Pointer && target.kind != TypeKind::Reference) return false;
+    return body.program != nullptr &&
+           types_compatible_with_base_conversion(source, target, *body.program, enclosing_class_name(body));
+}
+
 [[nodiscard]] bool produces_rvalue_of_type(const Expr& expr, const Type& expected_type, const Body& body,
                                             const Signatures& signatures) {
     bool call_receiver_is_move = false;
@@ -2650,6 +2689,23 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             // default so that the two halves of [basic.lval]'s
             // dichotomy are both written down here.
             return false;
+        case ExprKind::NullptrLiteral:
+            // ch13 §16.5(1.1)/(1.2): a `nullptr_t` prvalue implicitly
+            // converts to "a pointer type, including a pointer to `void`
+            // and a pointer to a const-qualified type" and to a function
+            // pointer type, and §16.5(3) applies those conversions at
+            // "an argument of a function call". A `T*&&` parameter is
+            // such an argument, and the literal is as fresh as any other
+            // literal. argument_matches_parameter already answers this
+            // for the by-value spelling of the same parameter (its own
+            // is_nullptr_literal guard); this is the same answer for the
+            // by-move spelling. Any other destination -- `nullptr_t`
+            // itself (§16.5(1.3)), or a class declaring a `nullptr_t`
+            // constructor (§16.5(1.4)) -- is left to the shared check
+            // below and to the converting-constructor machinery, exactly
+            // as before.
+            if (expected_type.kind == TypeKind::Pointer || expected_type.kind == TypeKind::FunctionPointer) return true;
+            break;
         default:
             // [basic.lval]: every remaining kind -- a `static_cast`, a
             // `sizeof`, a fold, `nullptr`, a built-in `a + b` or `-n`,
@@ -2671,7 +2727,7 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
     }
     std::optional<Type> actual_type = infer_expr_type(expr, body, signatures);
     if (!actual_type.has_value()) return false;
-    if (types_equal(*actual_type, expected_type)) return true;
+    if (rvalue_type_initializes(*actual_type, expected_type, body)) return true;
     // A resolved method call's return type is used as-is (not unwrapped)
     // by infer_expr_type's own Call case above -- so a reference return
     // just licensed as fresh by the switch's own Call case above (a
@@ -2683,15 +2739,15 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
     if (expected_type.is_const_qualified) {
         Type unqualified_expected = expected_type;
         unqualified_expected.is_const_qualified = false;
-        if (types_equal(*actual_type, unqualified_expected)) return true;
+        if (rvalue_type_initializes(*actual_type, unqualified_expected, body)) return true;
         if (needs_pointee_unwrap && actual_type->kind == TypeKind::Reference &&
             actual_type->pointee != nullptr) {
-            return types_equal(*actual_type->pointee, unqualified_expected);
+            return rvalue_type_initializes(*actual_type->pointee, unqualified_expected, body);
         }
     }
     if (needs_pointee_unwrap && actual_type->kind == TypeKind::Reference &&
         actual_type->pointee != nullptr) {
-        return types_equal(*actual_type->pointee, expected_type);
+        return rvalue_type_initializes(*actual_type->pointee, expected_type, body);
     }
     return false;
 }

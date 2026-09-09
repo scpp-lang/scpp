@@ -1,0 +1,27 @@
+// [dcl.init.ref]/2 makes argument passing an initialization and
+// [dcl.init.ref]/5.4.2 converts the argument to a prvalue of the
+// referenced type before materializing the temporary the reference binds
+// to, so a fresh `Expr*` initializes a `const Expr*&&` parameter through
+// the qualification conversion of [conv.qual]. ch13 §16.5(3) states the
+// same from the other side: the conversions it defines apply "at every
+// boundary at which a value is given to a declared type: ... an argument
+// of a function call", and §16.5(1.1) names "a pointer to a
+// const-qualified type" among the destinations. The move checker used to
+// demand type identity here, which is the self-hosting probe's own
+// blocker in src/compiler/constexpression.cppm:
+// `arg_views.push_back(arg.get())`.
+import std;
+
+struct Expr {
+    int v;
+};
+
+using ConstExprPtr = const Expr*;
+
+Expr* mutable_view() { return nullptr; }
+
+int take(ConstExprPtr&& p) { return 0; }
+
+int main() {
+    return take(mutable_view());
+}

@@ -555,14 +555,45 @@ namespace {
                 if (op == nullptr || op->return_type.kind == TypeKind::Reference) return false;
                 break;
             }
+            case ExprKind::NullptrLiteral:
+                // ch13 §16.5(1.1)/(1.2) with §16.5(3): a `nullptr_t`
+                // prvalue converts to any pointer or function pointer
+                // type at "an argument of a function call". Mirrors
+                // movecheck's produces_rvalue_of_type, which gained the
+                // same arm for the same reason, and argument_matches_
+                // parameter's own is_nullptr_literal guard, which
+                // already gave this answer for the by-value spelling of
+                // the same parameter.
+                if (expected_type.kind == TypeKind::Pointer || expected_type.kind == TypeKind::FunctionPointer) return true;
+                break;
             default:
                 return false;
         }
         std::optional<Type> arg_type = infer_type(arg);
         if (!arg_type.has_value()) return false;
-        if (types_equal(*arg_type, expected_type)) return true;
+        // [dcl.init.ref]/5.4.2: a reference that does not bind directly
+        // binds to a temporary of the referenced type, implicitly
+        // converted from the initializer expression -- so the type
+        // question at this boundary is "may this value initialize that
+        // type?", not "is this type spelled identically?". Asked with the
+        // same relation argument_type_matches_or_converts uses just below
+        // for every other parameter kind, so codegen cannot answer it one
+        // way for `f(const T* p)` and another for `f(const T*&& p)`;
+        // movecheck's own produces_rvalue_of_type was changed in step.
+        //
+        // Only a pointer or reference destination can add anything to the
+        // types_equal already performed (see
+        // types_compatible_with_base_conversion, whose own first step is
+        // that same comparison), and this runs once per rejected overload
+        // candidate, so the common named/scalar target stops here.
+        auto initializes = [this](const Type& source, const Type& target) {
+            if (types_equal(source, target)) return true;
+            if (target.kind != TypeKind::Pointer && target.kind != TypeKind::Reference) return false;
+            return types_compatible_with_base_conversion(source, target, current_enclosing_class_name());
+        };
+        if (initializes(*arg_type, expected_type)) return true;
         if (arg.kind == ExprKind::Move && arg_type->kind == TypeKind::Reference && arg_type->pointee != nullptr) {
-            return types_equal(*arg_type->pointee, expected_type);
+            return initializes(*arg_type->pointee, expected_type);
         }
         return false;
     }

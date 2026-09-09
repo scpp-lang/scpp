@@ -1,0 +1,108 @@
+// [dcl.init.ref]/2 makes argument passing an initialization, and
+// [dcl.init.ref]/5.4.2 says that where the reference does not bind
+// directly "the initializer expression is implicitly converted to a
+// prvalue of type `T1`. The temporary materialization conversion is
+// applied ... and the reference is bound to the result." So a `T&&`
+// parameter takes any *fresh* value its own type can be initialized from,
+// not only one whose type is spelled identically. docs/spec never narrows
+// that for an rvalue-reference parameter, and ch13 §16.5(3) is written
+// assuming the same boundary converts: the conversions it defines apply
+// "at every boundary at which a value is given to a declared type: ... an
+// argument of a function call", with "a pointer to a const-qualified
+// type" among the destinations (§16.5(1.1)).
+//
+// The implementation matched the argument's type against the parameter's
+// by identity alone, so exactly the conversions a *by-value* `const T*`
+// parameter already accepted were rejected for the `const T*&&` spelling
+// of the same parameter -- one question with two answers. This is the
+// self-hosting probe's own blocker: `arg_views.push_back(arg.get())`, for
+// a `std::vector<const Expr*>` and a `std::unique_ptr<Expr>`.
+//
+// Each line prints the value the binding actually saw; the same program
+// transliterated to C++ and built with clang++-22 -std=c++26 prints the
+// same seven lines.
+import std;
+
+class Base {
+public:
+    int b;
+
+    Base(int v) : b{v} {}
+    virtual int tag() { return 1; }
+    virtual ~Base() {}
+};
+
+class Derived : public Base {
+public:
+    int d;
+
+    Derived(int v, int w) : Base{v}, d{w} {}
+    int tag() override { return 2; }
+    ~Derived() override {}
+};
+
+struct Expr {
+    int v;
+};
+
+using ExprPtr = Expr*;
+using ConstExprPtr = const Expr*;
+using BasePtr = Base*;
+using DerivedPtr = Derived*;
+
+// [conv.qual]: `Expr*` -> `const Expr*`.
+int read_const(ConstExprPtr&& p) {
+    int r = 0;
+    [[scpp::unsafe]] { r = p->v; }
+    return r;
+}
+
+// [conv.ptr]/3: `Derived*` -> `Base*`.
+int read_base(BasePtr&& p) {
+    int r = 0;
+    [[scpp::unsafe]] { r = p->b; }
+    return r;
+}
+
+int dispatch_base(BasePtr&& p) {
+    int r = 0;
+    [[scpp::unsafe]] { r = p->tag(); }
+    return r;
+}
+
+// ch13 §16.5(1.1)/(3): `nullptr_t` -> any pointer type, at a call argument.
+int null_argument(ExprPtr&& p) {
+    Expr* q = p;
+    return q == nullptr ? 7 : 0;
+}
+
+// [over.ics.rank]/3.2.1 still prefers the shorter conversion sequence:
+// accepting the converted binding must not make the exact one lose.
+int which(BasePtr&& p) { return 1; }
+int which(DerivedPtr&& p) { return 2; }
+
+Expr* expr_address(Expr& e) { return &e; }
+Derived* derived_address(Derived& d) { return &d; }
+
+int main() {
+    Expr e{41};
+    Derived d{5, 9};
+    std::unique_ptr<Expr> owned = std::make_unique<Expr>();
+
+    std::print("qualification {}\n", read_const(expr_address(e)));
+    std::print("derived_to_base {}\n", read_base(derived_address(d)));
+    std::print("virtual_dispatch {}\n", dispatch_base(derived_address(d)));
+    std::print("nullptr {}\n", null_argument(nullptr));
+    std::print("exact_overload_wins {}\n", which(derived_address(d)));
+
+    // The probe's own construct, reduced: a `std::unique_ptr<Expr>`'s
+    // `get()` is a call returning `Expr*` by value, pushed into a
+    // `std::vector<const Expr*>` whose push_back takes `const Expr*&&`.
+    std::vector<ConstExprPtr> views{};
+    views.reserve(1);
+    views.push_back(owned.get());
+    int seen = 0;
+    [[scpp::unsafe]] { seen = views[0] == nullptr ? 1 : 2; }
+    std::print("smart_pointer_get {}\n", seen);
+    return 0;
+}
