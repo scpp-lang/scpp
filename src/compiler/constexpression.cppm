@@ -482,6 +482,20 @@ public:
 // find_enum already use, and it keeps the found-object accesses inside the
 // safety checker rather than escaping it.
 using OptionalExprRef = std::optional<std::reference_wrapper<const Expr>>;
+// A borrowed view of one argument expression, for the argument *lists*
+// this file assembles rather than owns -- the same "reference, never a
+// raw `T*`" the aliases around it spell, for a position that is never
+// absent and so needs no `std::optional` around it.
+//
+// These lists were `std::vector<const Expr*>`, and the only way to read
+// an element was `*args[i]`: precisely the raw-pointer indirection ch01
+// §5.1(5.1) makes a gated operation and ch03 §7.3(1)/§7.1(4) restate for
+// `*E`, so every read had to sit inside `[[scpp::unsafe]] { }` or not
+// compile at all. `std::reference_wrapper` is a class, so `.get()` is an
+// ordinary member call and the checker keeps seeing the borrow -- which
+// is the whole reason the comment above says this file returns optional
+// references instead of raw pointers.
+using ExprView = std::reference_wrapper<const Expr>;
 // The argument-expression list an overload resolver may or may not have
 // been given. It was a `const std::vector<ExprPtr>*`, which is the same
 // "optional reference" every alias here exists to spell -- and the only
@@ -503,6 +517,15 @@ using OptionalClassDefRef = std::optional<std::reference_wrapper<ClassDef>>;
 // case is a bare `return {}`.
 [[nodiscard]] OptionalExprRef make_expr_ref(const Expr& expr) {
     return std::optional<std::reference_wrapper<const Expr>>{std::reference_wrapper<const Expr>{expr}};
+}
+
+// The same helper for a plain (never-absent) argument view: the alias
+// cannot be used as a constructor for the reason just above, and writing
+// `ExprView{*arg}` instead deduces `reference_wrapper<Expr>` from the
+// `Expr&` that `std::unique_ptr<Expr>::operator*` returns, which is a
+// different specialization from the `const` one these lists hold.
+[[nodiscard]] ExprView make_expr_view(const Expr& expr) {
+    return std::reference_wrapper<const Expr>{expr};
 }
 
 
@@ -3636,14 +3659,14 @@ private:
         return make_default_cell(fn.return_type, loc);
     }
 
-    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> call_with_expr_arg_views(const Function& fn, const std::vector<const Expr*>& args,
+    [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> call_with_expr_arg_views(const Function& fn, const std::vector<ExprView>& args,
                                                                  const SourceLocation& loc) {
         std::vector<Binding> bindings{};
         bindings.reserve(fn.params.size());
         for (std::size_t i = 0; i < fn.params.size(); ++i) {
             auto bind_result = [&, this]() -> std::expected<void, ConstexprError> {
                 const Param& param = fn.params[i];
-                const Expr& arg_expr = *args[i];
+                const Expr& arg_expr = args[i].get();
                 if (param.type.kind == TypeKind::Reference) {
                     if (param.type.is_rvalue_ref) {
                         auto value_result = evaluate_expr_in_context(arg_expr, make_type_ref(param.type));
@@ -3757,9 +3780,9 @@ private:
 
     [[nodiscard]] std::expected<std::shared_ptr<Cell>, ConstexprError> call_with_expr_args(const Function& fn, const std::vector<ExprPtr>& args,
                                                             const SourceLocation& loc) {
-        std::vector<const Expr*> arg_views{};
+        std::vector<ExprView> arg_views{};
         arg_views.reserve(args.size());
-        for (const ExprPtr& arg : args) arg_views.push_back(arg.get());
+        for (const ExprPtr& arg : args) arg_views.push_back(make_expr_view(*arg));
         return call_with_expr_arg_views(fn, arg_views, loc);
     }
 
@@ -4221,10 +4244,10 @@ private:
                     message += "' matches this immediate call";
                     return std::unexpected(ConstexprError(expr.loc, message));
                 }
-                std::vector<const Expr*> all_args{};
+                std::vector<ExprView> all_args{};
                 all_args.reserve(expr.args.size() + 1);
-                all_args.push_back(expr.lhs.get());
-                for (const ExprPtr& arg : expr.args) all_args.push_back(arg.get());
+                all_args.push_back(make_expr_view(*expr.lhs));
+                for (const ExprPtr& arg : expr.args) all_args.push_back(make_expr_view(*arg));
                 return call_with_expr_arg_views(method_ref->get(), all_args, expr.loc);
             }();
         if (is_record_name(expr.name)) return evaluate_constructor_expr(expr);

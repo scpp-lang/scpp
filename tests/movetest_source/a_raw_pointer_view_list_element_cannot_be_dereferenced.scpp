@@ -1,0 +1,38 @@
+// The rule that made the reference-view model mandatory, pinned on its
+// own. ch01 §5.1(5) lists as a gated operation "(5.1) indirection
+// through, or pointer arithmetic on, a value of pointer type
+// ([expr.unary.op], [expr.add])", and ch03 §7.1(4) restates it for `*E`.
+// A `std::vector<const T*>` element is a value of pointer type, so
+// `*views[0]` is that indirection and is ill-formed outside
+// `[[scpp::unsafe]] { }` -- which is what
+// src/compiler/constexpression.cppm's call_with_expr_arg_views was doing
+// with `const Expr& arg_expr = *args[i];`, and why its argument-view
+// lists now hold `std::reference_wrapper<const Expr>` instead, as that
+// file's own header comment already said every borrowed view here must.
+//
+// Note that this is *not* the lambda: the same dereference is rejected
+// identically outside one, which is what tells the raw pointer apart
+// from a capture that merely looks like one.
+//
+// Rejected before and after that source migration -- the compiler rule is
+// unchanged by it. This exists so the rule that forced the model cannot
+// quietly stop holding.
+import std;
+
+class Node {
+public:
+    int v;
+
+    Node() : v{0} { return; }
+    virtual ~Node() { return; }
+};
+
+int read_first(const std::vector<const Node*>& views) {
+    const Node& node = *views[0];
+    return node.v;
+}
+
+int main() {
+    std::vector<const Node*> views{};
+    return read_first(views);
+}
