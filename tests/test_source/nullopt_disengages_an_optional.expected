@@ -1,0 +1,10 @@
+0
+returned true false
+constructed false false
+compare false true
+assigned false true false
+held 1
+destroy 1
+released false
+idempotent ok
+unchanged false true 7

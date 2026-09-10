@@ -1,0 +1,56 @@
+import std;
+
+// [optional.nullopt]/1: "The struct nullopt_t is an empty class type used
+// as a unique type to indicate the state of not containing a value for
+// optional objects. In particular, optional<T> has a constructor with
+// nullopt_t as a single argument". Neither the type nor the constant
+// existed in libs/std, so `return std::nullopt;` -- what
+// src/compiler/constexpression.cppm writes to leave an optional
+// disengaged -- was "use of undeclared variable 'std::nullopt'".
+// [optional.ctor]/2, [optional.assign]/1 and [optional.nullops]/1 supply
+// the rest. Cross-checked against clang++-22 -std=c++26: same values.
+class Noisy {
+  public:
+    int id;
+    Noisy(int i) : id{i} { return; }
+    Noisy(const Noisy& other) : id{other.id} { return; }
+    virtual ~Noisy() {
+        std::print("destroy {}\n", this->id);
+        return;
+    }
+};
+
+std::optional<int> pick(int n) {
+    if (n < 0) return std::nullopt;
+    return n * 2;
+}
+
+int main() {
+    std::print("returned {} {}\n", pick(3).has_value(), pick(-1).has_value());
+
+    std::optional<int> copy_init = std::nullopt;
+    std::optional<int> brace_init{std::nullopt};
+    std::print("constructed {} {}\n", copy_init.has_value(), brace_init.has_value());
+
+    std::optional<int> o{5};
+    std::print("compare {} {}\n", o == std::nullopt, o != std::nullopt);
+    o = std::nullopt;
+    std::print("assigned {} {} {}\n", o.has_value(), o == std::nullopt, o != std::nullopt);
+
+    // [optional.assign]/1: assigning nullopt destroys the contained
+    // value, and doing it twice is no effect the second time.
+    std::optional<Noisy> held{Noisy{1}};
+    std::print("held {}\n", held.value().id);
+    held = std::nullopt;
+    std::print("released {}\n", held.has_value());
+    held = std::nullopt;
+    std::print("idempotent ok\n");
+
+    // Neither of the two constructors that were already here changed
+    // meaning: `optional<T>{}` is still disengaged, `optional<T>{v}` is
+    // still engaged.
+    std::optional<int> empty{};
+    std::optional<int> value{7};
+    std::print("unchanged {} {} {}\n", empty.has_value(), value.has_value(), value.value());
+    return 0;
+}
