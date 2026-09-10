@@ -1,0 +1,15 @@
+import std;
+
+// [vector.modifiers]: none of the modifiers is const-qualified -- they
+// change the sequence. A read-only handle cannot insert through.
+void append(const std::vector<int>& v, const std::vector<int>& source) {
+    v.insert(v.end(), source.begin(), source.end());
+    return;
+}
+
+int main() {
+    std::vector<int> v{};
+    std::vector<int> source{};
+    append(v, source);
+    return 0;
+}

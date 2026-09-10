@@ -1,0 +1,14 @@
+import std;
+
+// The same for erase.
+void drop_first(const std::vector<int>& v) {
+    v.erase(v.begin());
+    return;
+}
+
+int main() {
+    std::vector<int> v{};
+    v.push_back(1);
+    drop_first(v);
+    return 0;
+}
