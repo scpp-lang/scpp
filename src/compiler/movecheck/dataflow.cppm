@@ -3123,9 +3123,27 @@ struct ConvertingConstructorBinding {
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
+                // [expr.type]/1 again, on the condition this time: an
+                // expression whose type is "reference to T" has that type
+                // adjusted to T "prior to any further analysis". A
+                // `bool`-returning accessor that hands back `bool&` --
+                // `std::expected<bool, E>::value()`, for one -- is a
+                // `bool` condition, and asking for the declared type
+                // instead reported it as not being one. The arms below go
+                // through conditional_arm_types_agree, which now makes
+                // the same adjustment; this is the same clause on the
+                // same expression's other operand.
+                // Read through literal_adoption_target rather than copying
+                // the adjusted type into a second optional: this runs for
+                // every conditional expression in the program, and `Type`
+                // carries a name and template-argument vectors, so the
+                // copy is not free.
                 std::optional<Type> condition_type = infer_expr_type(*expr.lhs, body, signatures);
-                bool condition_is_bool = condition_type.has_value() && condition_type->kind == TypeKind::Named &&
-                                         condition_type->name == "bool";
+                bool condition_is_bool = false;
+                if (condition_type.has_value()) {
+                    const Type& condition_value = literal_adoption_target(*condition_type);
+                    condition_is_bool = condition_value.kind == TypeKind::Named && condition_value.name == "bool";
+                }
                 if (!condition_is_bool) {
                     auto converted = apply_contextual_bool_conversion(
                         *expr.lhs, state, body, signatures, report_errors,
