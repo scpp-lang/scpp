@@ -116,6 +116,8 @@ using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature
 
 [[nodiscard]] bool has_user_declared_copy_ctor(const std::string& class_name, const Program& program);
 [[nodiscard]] bool has_user_declared_copy_assign(const std::string& class_name, const Program& program);
+[[nodiscard]] const Function* find_converting_assign(const std::string& class_name, const Type& source_type,
+                                                    const Program& program);
 [[nodiscard]] bool has_user_declared_dtor(const std::string& class_name, const Program& program);
 [[nodiscard]] bool is_field_copy_constructible(const Type& type, const Program& program);
 [[nodiscard]] bool is_field_copy_assignable(const Type& type, const Program& program);
@@ -197,6 +199,44 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
         if (is_copy_assignment_function(fn) && fn.member_owner_class == class_name) {
             return &fn;
         }
+    }
+    return nullptr;
+}
+
+// [expr.assign]/1 with [over.oper]/1: for a class operand, `a = b` is a
+// call to `operator=` selected by overload resolution -- not only to the
+// copy and move assignment operators §6.5(3)/§6.4(3) describe. Those two
+// clauses say which operators a class *has implicitly*; ch02 §6.5(1)
+// separately says "A program may declare a copy constructor
+// ([class.copy.ctor]) or a copy assignment operator ([class.copy.assign])
+// for a class type", and no clause of docs/spec restricts what else
+// `operator=` may take, so front matter §1(2) leaves the C++ rule in
+// force.
+//
+// find_user_declared_copy_assign just above deliberately recognizes only
+// the `const C&` shape, noting that "an operator= overload taking any
+// other shape is simply an ordinary, unrelated overload of the name".
+// Ordinary, and until now uncallable: the assignment check rejected every
+// source that was not the variable's own type, so `std::optional<T>`'s own
+// `operator=(const T&)`/`operator=(T&&)` -- declared in libs/std, matching
+// exactly, and the reason `o = value;` is ordinary C++ -- could never be
+// selected. This finds those overloads, so the pass that decides whether
+// an assignment is well-formed asks the same question overload resolution
+// would.
+[[nodiscard]] const Function* find_converting_assign(const std::string& class_name, const Type& source_type,
+                                                    const Program& program) {
+    if (class_name.empty()) return nullptr;
+    std::string suffix{"_operator_assign"};
+    for (const Function& fn : program.functions) {
+        if (fn.member_owner_class != class_name || fn.params.size() != 2) continue;
+        if (!fn.name.ends_with(suffix)) continue;
+        if (fn.is_generic_template) continue;
+        // The copy and move assignment operators are already handled by
+        // §6.5(3)/§6.4(3)'s own branches; this is only about the rest.
+        if (is_copy_assignment_function(fn) || is_move_assignment_function(fn)) continue;
+        const Type& param = fn.params[1].type;
+        const Type& wanted = is_reference(param) && param.pointee != nullptr ? *param.pointee : param;
+        if (types_equal_ignoring_top_level_const(wanted, source_type)) return &fn;
     }
     return nullptr;
 }

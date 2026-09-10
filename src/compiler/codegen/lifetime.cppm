@@ -155,6 +155,29 @@ namespace scpp {
         return nullptr;
     }
 
+    // The converting-assignment counterpart: an `operator=` overload whose
+    // sole non-`this` parameter is neither `const C&` nor `C&&`, which
+    // [expr.assign]/1 with [over.oper]/1 makes an ordinary overload the
+    // assignment may select. movecheck's find_converting_assign asks the
+    // identical question of the same declarations, so the pass that
+    // licenses the assignment and the pass that emits it cannot disagree
+    // about which operator was chosen.
+    [[nodiscard]] const Function* Codegen::find_converting_assign_ast(const std::string& class_name,
+                                                                     const Type& source_type)
+{
+        if (class_name.empty()) return nullptr;
+        for (const Function& fn : program_->functions) {
+            if (fn.member_owner_class != class_name || fn.params.size() != 2) continue;
+            if (!fn.name.ends_with("_operator_assign")) continue;
+            if (fn.is_generic_template) continue;
+            if (is_copy_assignment_function(fn) || is_move_assignment_function(fn)) continue;
+            const Type& param = fn.params[1].type;
+            const Type& wanted = param.kind == TypeKind::Reference && param.pointee != nullptr ? *param.pointee : param;
+            if (types_equal_ignoring_top_level_const(wanted, source_type)) return &fn;
+        }
+        return nullptr;
+    }
+
 
     [[nodiscard]] bool Codegen::has_user_declared_dtor(const std::string& class_name)
 {
