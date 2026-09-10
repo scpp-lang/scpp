@@ -410,7 +410,10 @@ namespace {
                 // both operands before the composite type is determined.
                 then_type = decay_array_to_pointer(*then_type);
                 else_type = decay_array_to_pointer(*else_type);
-                return types_equal(*then_type, *else_type) ? then_type : std::nullopt;
+                if (types_equal(*then_type, *else_type)) return then_type;
+                // /4's composite when the arms differ: the conversion is
+                // applied and that type is the expression's own.
+                return conditional_composite_type(*expr.rhs, *expr.third);
             }
 
             case ExprKind::Fold:

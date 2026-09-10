@@ -3156,7 +3156,10 @@ struct ConvertingConstructorBinding {
                 std::optional<Type> then_type = infer_expr_type(*expr.rhs, body, signatures);
                 std::optional<Type> else_type = infer_expr_type(*expr.third, body, signatures);
                 if (then_type.has_value() && else_type.has_value() &&
-                    !conditional_arm_types_agree(*expr.rhs, *then_type, *expr.third, *else_type)) {
+                    !conditional_arm_types_agree(*expr.rhs, *then_type, *expr.third, *else_type) &&
+                    conditional_composite_by_conversion(*expr.rhs, *then_type, *expr.third, *else_type, body,
+                                                        signatures)
+                            .constructor == nullptr) {
                     return std::unexpected(DataflowError("conditional operator requires both arms to have the same type",
                                         state.current_loc));
                 }

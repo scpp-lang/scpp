@@ -412,6 +412,7 @@ private:
 
 
     [[nodiscard]] const Function* resolve_converting_constructor_by_type(const std::string& class_name, const Expr& arg);
+    [[nodiscard]] std::optional<Type> conditional_composite_type(const Expr& then_arm, const Expr& else_arm);
 
     [[nodiscard]] std::expected<void, CodegenError> store_constexpr_value_into(llvm::LLVMValueRef dest_ptr, const Type& dest_type, const ConstexprValue& value);
 
