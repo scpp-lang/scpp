@@ -1,0 +1,29 @@
+import std;
+
+// [expected.void.assign]: the `expected<void, E>` specialization gets the
+// same treatment, minus the value assignment there is no value for.
+std::expected<void, std::string> run(int n) {
+    std::expected<void, std::string> result{};
+    if (n < 0) {
+        result = std::unexpected(std::string{"neg"});
+    }
+    return result;
+}
+
+int main() {
+    std::expected<void, std::string> ok = run(1);
+    std::expected<void, std::string> bad = run(-1);
+    std::print("ok {}\n", ok.has_value());
+    std::print("bad {} {}\n", bad.has_value(), bad.error());
+
+    std::expected<void, std::string> copy{};
+    copy = bad;
+    std::print("copy {} {}\n", copy.has_value(), copy.error());
+    copy = ok;
+    std::print("recopy {}\n", copy.has_value());
+
+    std::expected<void, std::string> moved{};
+    moved = std::move(bad);
+    std::print("moved {} {}\n", moved.has_value(), moved.error());
+    return 0;
+}

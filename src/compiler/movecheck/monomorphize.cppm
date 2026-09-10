@@ -1890,6 +1890,7 @@ private:
                                       const std::vector<std::pair<std::string, Type>>& type_replacements,
                                       const std::unordered_map<std::string, std::vector<Type>>& pack_replacements,
                                       const std::vector<int>& non_type_args) {
+        std::vector<std::size_t> eagerly_defined_clones;
         for (const Function& method_tmpl : methods) {
             if (MethodConstraint constraint = unsatisfied_method_constraint(method_tmpl, type_replacements);
                 constraint.is_unsatisfied()) {
@@ -2030,11 +2031,30 @@ private:
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
-            } else if (auto _r = walk_new_concrete_function(program_.functions.size() - 1); !_r.has_value()) {
-                return std::unexpected(std::move(_r).error());
+            } else {
+                // Collected, and walked only once the whole member
+                // loop is done: [class.mem.general]/10.1 makes a
+                // member function body a complete-class context and
+                // /11 makes the class complete there, so a member body
+                // may name a member declared *later* in the class.
+                // Walking an eagerly-defined clone the instant it is
+                // pushed resolves its body against a member set that
+                // stops at itself, so a call to a later sibling raised
+                // no require_member_definition for that sibling: it
+                // stayed declaration-only, and the call left the object
+                // file as an undefined reference -- a link failure with
+                // nothing reported at compile time.
+                // `std::expected`'s destructor calling its own
+                // `__destroy_held` is exactly that shape.
+                eagerly_defined_clones.push_back(program_.functions.size() - 1);
             }
             if (!program_.functions.back().template_params.empty()) {
                 generic_template_indices_[program_.functions.back().name].push_back(program_.functions.size() - 1);
+            }
+        }
+        for (std::size_t clone_index : eagerly_defined_clones) {
+            if (auto _r = walk_new_concrete_function(clone_index); !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
             }
         }
         return {};
@@ -3553,6 +3573,7 @@ private:
             }
             program_.classes.push_back(std::move(concrete));
             ordinary_generic_instance_info_[cache_key] = OrdinaryGenericInstanceInfo{template_name, named_concretes};
+            std::vector<std::size_t> eagerly_defined_clones;
             for (const Function& method_tmpl : methods) {
                 // [temp.constr.decl], [over.match.viable]/1 -- one
                 // implementation, asked by every clone loop (see
@@ -3694,11 +3715,21 @@ private:
                         !_r.has_value()) {
                         return fail(std::move(_r).error());
                     }
-                } else if (auto _r = walk_new_concrete_function(program_.functions.size() - 1); !_r.has_value()) {
-                    return fail(std::move(_r).error());
+                } else {
+                    // Collected and walked after the loop, for the
+                    // reason clone_variadic_class_methods' own copy of
+                    // this spells out: a member body may name a member
+                    // declared later in the class
+                    // ([class.mem.general]/10.1, /11).
+                    eagerly_defined_clones.push_back(program_.functions.size() - 1);
                 }
                 if (!program_.functions.back().template_params.empty()) {
                     generic_template_indices_[program_.functions.back().name].push_back(program_.functions.size() - 1);
+                }
+            }
+            for (std::size_t clone_index : eagerly_defined_clones) {
+                if (auto _r = walk_new_concrete_function(clone_index); !_r.has_value()) {
+                    return fail(std::move(_r).error());
                 }
             }
             return cache_key;
@@ -3790,6 +3821,7 @@ private:
             program_.classes.push_back(std::move(concrete));
 
             std::vector<Function> methods = method_templates_of_owner(owner_id_copy);
+            std::vector<std::size_t> eagerly_defined_clones;
             for (const Function& method_tmpl : methods) {
                 // A class template reaching here has a *non-type* first
                 // template parameter, and a requires-clause may constrain
@@ -3879,11 +3911,21 @@ private:
                         !_r.has_value()) {
                         return fail(std::move(_r).error());
                     }
-                } else if (auto _r = walk_new_concrete_function(program_.functions.size() - 1); !_r.has_value()) {
-                    return fail(std::move(_r).error());
+                } else {
+                    // Collected and walked after the loop, for the
+                    // reason clone_variadic_class_methods' own copy of
+                    // this spells out: a member body may name a member
+                    // declared later in the class
+                    // ([class.mem.general]/10.1, /11).
+                    eagerly_defined_clones.push_back(program_.functions.size() - 1);
                 }
                 if (!program_.functions.back().template_params.empty()) {
                     generic_template_indices_[program_.functions.back().name].push_back(program_.functions.size() - 1);
+                }
+            }
+            for (std::size_t clone_index : eagerly_defined_clones) {
+                if (auto _r = walk_new_concrete_function(clone_index); !_r.has_value()) {
+                    return fail(std::move(_r).error());
                 }
             }
             return cache_key;
