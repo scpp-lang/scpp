@@ -2020,6 +2020,22 @@ class Function {
     // template definition (see ClassDef/StructDef::template_params).
     std::string method_requires_concept;
 
+    // The name of the enclosing generic type's own template parameter
+    // that method_requires_concept constrains -- `V` for
+    // `unordered_map<K, V>::operator[]() requires
+    // std::default_initializable<V>`. Empty exactly when
+    // method_requires_concept is.
+    //
+    // A *requires-clause* constrains any template parameter in scope,
+    // not merely the first: [basic.scope.temp]/2 makes every parameter of the
+    // enclosing template visible throughout the member, and [temp.constr.decl]
+    // places no positional restriction on which of them a constraint may
+    // mention. Nothing in docs/spec/ adopts a narrower rule, so the
+    // ordinary C++ one applies (front matter §1(2)). Both the parser and
+    // monomorphization used to hard-code parameter 0, which made this
+    // exact declaration unspellable for a two-parameter container.
+    std::string method_requires_param;
+
     // ch05 §5.11: true when at least one parameter has a non-empty
     // Param::generic_concept -- this is the generic function's own
     // *template* definition, checked once abstractly against each
@@ -3350,6 +3366,7 @@ inline Function::Function(const Function& other)
       eval_mode{other.eval_mode},
       has_varargs{other.has_varargs},
       method_requires_concept{other.method_requires_concept},
+      method_requires_param{other.method_requires_param},
       is_generic_template{other.is_generic_template},
       template_params{other.template_params},
       generic_method_owner_id{other.generic_method_owner_id},

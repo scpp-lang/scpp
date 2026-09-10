@@ -2839,6 +2839,7 @@ private:
         comparable.template_params = declared.template_params;
         comparable.is_generic_template = declared.is_generic_template;
         if (comparable.method_requires_concept.empty()) comparable.method_requires_concept = declared.method_requires_concept;
+        if (comparable.method_requires_param.empty()) comparable.method_requires_param = declared.method_requires_param;
         if (!comparable.return_lifetime.present()) comparable.return_lifetime = declared.return_lifetime;
         comparable.namespace_path = declared.namespace_path;
         comparable.is_exported = declared.is_exported;
@@ -4597,6 +4598,7 @@ private:
         clone.eval_mode = fn.eval_mode;
         clone.has_varargs = fn.has_varargs;
         clone.method_requires_concept = fn.method_requires_concept;
+        clone.method_requires_param = fn.method_requires_param;
         clone.is_generic_template = fn.is_generic_template;
         clone.template_params = fn.template_params;
         clone.generic_method_owner_id = fn.generic_method_owner_id;
@@ -7102,9 +7104,21 @@ private:
     // ch05 §5.14: parses a generic method (or constructor)'s own,
     // optional `requires ConceptName<T>` clause -- real C++20 syntax
     // verbatim, appearing after the parameter list (and, for a method,
-    // its trailing `const`) and before the body. `T` must name the
-    // enclosing generic type's own single template parameter exactly
-    // (this version has only one to match). `ConceptName` may be
+    // its trailing `const`) and before the body. `T` must name one of
+    // the enclosing generic type's own template parameters -- any of
+    // them, not just the first: [basic.scope.temp]/2 makes every parameter of
+    // the enclosing template visible throughout the member, and
+    // [temp.constr.decl] places no positional restriction on which one a
+    // constraint may mention, so the ordinary C++ rule applies unchanged
+    // (front matter §1(2)). This accepted only `template_params[0]`,
+    // with a note reading "this version has only one to match" -- true
+    // of the single-parameter templates that existed when it was
+    // written, and false since. It made
+    // `unordered_map<K, V>::operator[]() requires
+    // std::default_initializable<V>` -- [unord.map.elem]/1's
+    // insert-a-default-constructed-mapped-value subscript, whose
+    // constraint necessarily falls on the *second* parameter --
+    // unspellable. `ConceptName` may be
     // namespace-qualified (e.g. `std::copy_constructible`) -- resolved
     // via resolve_visible_concept_name exactly like an ordinary type
     // name would be, so a concept declared inside `namespace std { ...
@@ -7115,7 +7129,15 @@ private:
     // present -- always empty when `template_params` itself is empty (an
     // ordinary, non-generic class/struct's member can never have one,
     // since there's no type parameter left to constrain).
+    // Set by parse_optional_method_requires_clause to the template
+    // parameter its clause constrained; read immediately afterwards by
+    // each of that function's four call sites into
+    // Function::method_requires_param. Cleared on every entry, so it is
+    // empty exactly when the returned concept name is.
+    std::string last_method_requires_param_{};
+
     [[nodiscard]] std::expected<std::string, ParseError> parse_optional_method_requires_clause(const std::vector<GenericTypeParam>& template_params) {
+        last_method_requires_param_.clear();
         if (template_params.empty() || !check(TokenKind::KwRequires)) { std::string empty_result{}; return empty_result; }
         advance(); // 'requires'
         const Token& concept_tok = peek();
@@ -7144,30 +7166,39 @@ private:
         // silently ignored: `Fixed<3>::gated() requires HasDoubled<N>`
         // compiled and ran, where clang++-22 rejects it with "template
         // argument for template type parameter must be a type".
-        if (template_params[0].is_non_type) {
-            std::string _msg_5715{"'requires "};
-            _msg_5715 += concept_name;
-            _msg_5715 += "<";
-            _msg_5715 += arg_name;
-            _msg_5715 += ">' names the non-type template parameter '";
-            _msg_5715 += template_params[0].name;
-            _msg_5715 += "'; a concept constrains a type ([temp.arg]/1)";
-            return std::unexpected(ParseError(param_tok.line, param_tok.column, _msg_5715));
+        std::size_t constrained_index = template_params.size();
+        for (std::size_t i = 0; i < template_params.size(); ++i) {
+            if (template_params[i].name == arg_name) { constrained_index = i; break; }
         }
-        if (arg_name != template_params[0].name) {
+        if (constrained_index == template_params.size()) {
             {
                 std::string _msg_5720{"'requires "};
                 _msg_5720 += concept_name;
                 _msg_5720 += "<";
                 _msg_5720 += arg_name;
-                _msg_5720 += ">' does not name this generic type's own template parameter '";
-                _msg_5720 += template_params[0].name;
-                _msg_5720 += "' (ch05 §5.14)";
-                return std::unexpected(ParseError(param_tok.line, param_tok.column,
-                              _msg_5720));
+                _msg_5720 += ">' does not name any of this generic type's own template parameters (";
+                for (std::size_t i = 0; i < template_params.size(); ++i) {
+                    if (i != 0) _msg_5720 += ", ";
+                    _msg_5720 += "'";
+                    _msg_5720 += template_params[i].name;
+                    _msg_5720 += "'";
+                }
+                _msg_5720 += ") ([temp.constr.decl])";
+                return std::unexpected(ParseError(param_tok.line, param_tok.column, _msg_5720));
             }
         }
+        if (template_params[constrained_index].is_non_type) {
+            std::string _msg_5715{"'requires "};
+            _msg_5715 += concept_name;
+            _msg_5715 += "<";
+            _msg_5715 += arg_name;
+            _msg_5715 += ">' names the non-type template parameter '";
+            _msg_5715 += template_params[constrained_index].name;
+            _msg_5715 += "'; a concept constrains a type ([temp.arg]/1)";
+            return std::unexpected(ParseError(param_tok.line, param_tok.column, _msg_5715));
+        }
         if (auto _r = expect(TokenKind::Greater, "'>'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        last_method_requires_param_ = template_params[constrained_index].name;
         return concept_name;
     }
 
@@ -8564,6 +8595,7 @@ private:
                 auto fn_requires_result = parse_optional_method_requires_clause(template_params);
                 if (!fn_requires_result.has_value()) return std::unexpected(std::move(fn_requires_result).error());
                 fn.method_requires_concept = std::move(fn_requires_result).value();
+                fn.method_requires_param = last_method_requires_param_;
                 if (!check(TokenKind::Semicolon) && !check(TokenKind::Assign)) {
                     auto fn_member_initializers_result = parse_constructor_member_initializer_list();
                     if (!fn_member_initializers_result.has_value()) return std::unexpected(std::move(fn_member_initializers_result).error());
@@ -8673,6 +8705,7 @@ private:
                 auto fn_requires_result = parse_optional_method_requires_clause(template_params);
                 if (!fn_requires_result.has_value()) return std::unexpected(std::move(fn_requires_result).error());
                 fn.method_requires_concept = std::move(fn_requires_result).value();
+                fn.method_requires_param = last_method_requires_param_;
                 auto fn_body_result = parse_member_function_suffix(fn);
                 if (!fn_body_result.has_value()) return std::unexpected(std::move(fn_body_result).error());
                 fn.body = std::move(fn_body_result).value();
@@ -8786,6 +8819,7 @@ private:
                 auto fn_requires_result = parse_optional_method_requires_clause(template_params);
                 if (!fn_requires_result.has_value()) return std::unexpected(std::move(fn_requires_result).error());
                 fn.method_requires_concept = std::move(fn_requires_result).value();
+                fn.method_requires_param = last_method_requires_param_;
                 auto fn_body_result = parse_member_function_suffix(fn);
                 if (!fn_body_result.has_value()) return std::unexpected(std::move(fn_body_result).error());
                 fn.body = std::move(fn_body_result).value();
@@ -8889,6 +8923,7 @@ private:
                 auto fn_requires_result = parse_optional_method_requires_clause(template_params);
                 if (!fn_requires_result.has_value()) return std::unexpected(std::move(fn_requires_result).error());
                 fn.method_requires_concept = std::move(fn_requires_result).value();
+                fn.method_requires_param = last_method_requires_param_;
                 if (match(TokenKind::Assign)) {
                     if (auto _rv = parse_deleted_defaulted_or_pure_suffix(fn, /*allow_default=*/true, /*allow_pure=*/true,
                                                                           "a member declaration");

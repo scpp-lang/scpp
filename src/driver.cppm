@@ -1921,6 +1921,7 @@ void write_function(std::ostream& out, const Function& fn) {
     write_enum(out, fn.eval_mode);
     write_u8(out, fn.has_varargs ? 1u : 0u);
     write_string(out, fn.method_requires_concept);
+    write_string(out, fn.method_requires_param);
     write_u8(out, fn.is_generic_template ? 1u : 0u);
     write_u32_le(out, static_cast<std::uint32_t>(fn.template_params.size()));
     for (const GenericTypeParam& param : fn.template_params) write_generic_type_param(out, param);
@@ -2001,6 +2002,9 @@ void write_function(std::ostream& out, const Function& fn) {
     auto method_requires_concept_r = read_string(in, context + " method_requires_concept");
     if (!method_requires_concept_r.has_value()) return std::unexpected(std::move(method_requires_concept_r).error());
     fn.method_requires_concept = std::move(method_requires_concept_r).value();
+    auto method_requires_param_r = read_string(in, context + " method_requires_param");
+    if (!method_requires_param_r.has_value()) return std::unexpected(std::move(method_requires_param_r).error());
+    fn.method_requires_param = std::move(method_requires_param_r).value();
     auto is_generic_template_r = read_u8(in, context + " is_generic_template");
     if (!is_generic_template_r.has_value()) return std::unexpected(std::move(is_generic_template_r).error());
     fn.is_generic_template = is_generic_template_r.value() != 0u;

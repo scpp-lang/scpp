@@ -1,0 +1,19 @@
+import std;
+
+// [unord.map.elem]/1: `mapped_type& operator[](const key_type& k)` --
+// "Effects: Equivalent to: return try_emplace(k).first->second;", so an
+// absent key is inserted with a default-constructed mapped value and the
+// reference is writable either way. Cross-checked against clang++-22
+// -std=c++26 on the identical program: same four lines.
+int main() {
+    std::unordered_map<std::string, int> m{};
+    m[std::string{"a"}] = 5;
+    m[std::string{"b"}] = 7;
+    m[std::string{"a"}] = m[std::string{"a"}] + 1;
+    std::print("a {}\n", m[std::string{"a"}]);
+    std::print("b {}\n", m[std::string{"b"}]);
+    std::print("absent {}\n", m[std::string{"zz"}]);
+    std::print("size {}\n", static_cast<int>(m.size()));
+    std::print("at {}\n", m.at(std::string{"a"}));
+    return 0;
+}
