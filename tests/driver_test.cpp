@@ -1801,6 +1801,78 @@ void run_generic_function_overload_tests() {
 // int)` to select), so it is unreachable through movetest_source's
 // movecheck-only harness -- the same reason run_generic_type_tests gives
 // for its own constraint cases.
+// ch06 §7.4(2.1): required constant evaluation that "would evaluate ...
+// arithmetic overflow in a checked arithmetic operation" makes the
+// program ill-formed. The evaluator diagnosed it through
+// `__builtin_add_overflow` and its two siblings, a GCC/Clang extension
+// scpp does not have; these three lock the behaviour in on the operands
+// the replacement checks reason about, at each end of the range and on
+// the `min * -1` case that has no representable result at all. Reported
+// by the constant evaluator rather than by check_moves, so unreachable
+// through movetest_source's movecheck-only harness -- the addition case
+// in particular is accepted there.
+void run_constexpr_overflow_tests() {
+    {
+        std::string case_name = "constexpr_int64_addition_overflow_is_rejected";
+        cases_run++;
+        std::string source =
+            "int main() {\n"
+            "    constexpr int64_t max_value = 9223372036854775807;\n"
+            "    constexpr int64_t past_the_end = max_value + 1;\n"
+            "    return past_the_end == 0 ? 0 : 1;\n"
+            "}\n";
+        bool threw = full_pipeline_fails(source);
+        expect(threw, case_name + ": expected constant evaluation past int64's maximum to fail");
+    }
+
+    {
+        std::string case_name = "constexpr_int64_subtraction_overflow_is_rejected";
+        cases_run++;
+        std::string source =
+            "int main() {\n"
+            "    constexpr int64_t min_value = -9223372036854775807 - 1;\n"
+            "    constexpr int64_t before_the_start = min_value - 1;\n"
+            "    return before_the_start == 0 ? 0 : 1;\n"
+            "}\n";
+        bool threw = full_pipeline_fails(source);
+        expect(threw, case_name + ": expected constant evaluation past int64's minimum to fail");
+    }
+
+    {
+        std::string case_name = "constexpr_int64_multiplication_overflow_is_rejected";
+        cases_run++;
+        std::string source =
+            "int main() {\n"
+            "    constexpr int64_t min_value = -9223372036854775807 - 1;\n"
+            "    constexpr int64_t negated = min_value * -1;\n"
+            "    return negated == 0 ? 0 : 1;\n"
+            "}\n";
+        bool threw = full_pipeline_fails(source);
+        expect(threw, case_name + ": expected negating int64's minimum to fail");
+    }
+
+    {
+        std::string case_name = "constexpr_int64_arithmetic_one_step_inside_the_limits_folds";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int main() {
+    constexpr int64_t max_value = 9223372036854775807;
+    constexpr int64_t min_value = -9223372036854775807 - 1;
+    constexpr int64_t add_edge = (max_value - 1) + 1;
+    constexpr int64_t sub_edge = (min_value + 1) - 1;
+    constexpr int64_t mul_edge = 4611686018427387903 * 2;
+    if (add_edge != max_value) return 1;
+    if (sub_edge != min_value) return 2;
+    if (mul_edge != max_value - 1) return 3;
+    return (min_value * 0) == 0 ? 0 : 4;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+}
+
 void run_struct_expression_construction_tests() {
     {
         std::string source =
@@ -12106,6 +12178,7 @@ int main() {
     run_generic_pack_deduction_tests();
     run_generic_function_overload_tests();
     run_struct_expression_construction_tests();
+    run_constexpr_overflow_tests();
     run_reference_overload_forwarding_tests();
     run_functional_tests();
     run_thread_tests();
