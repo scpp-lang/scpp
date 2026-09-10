@@ -1,0 +1,18 @@
+import std;
+
+// [expected.object.assign]/1's Constraints include
+// is_copy_constructible_v<T>: a `T` that has none leaves the copy
+// assignment non-viable, rather than instantiating a body that copies it.
+class NoCopy {
+  public:
+    int v;
+    NoCopy(int x) : v{x} {}
+    virtual ~NoCopy() { return; }
+};
+
+int main() {
+    std::expected<NoCopy, std::string> a{NoCopy{1}};
+    std::expected<NoCopy, std::string> b{NoCopy{2}};
+    a = b;
+    return a.value().v;
+}

@@ -1,0 +1,36 @@
+import std;
+
+// [expected.object.assign]: `expected` declares assignment from a value
+// ([expected.object.assign]/8-10), from an `unexpected` (/14-16) and
+// from another `expected` (/1-4). libs/std declared none of them, so
+// every one of these statements was "cannot be reassigned from this
+// expression". Cross-checked against clang++-22 -std=c++26 on the
+// equivalent program: same values.
+int main() {
+    std::expected<int, std::string> r{0};
+    r = 7;
+    std::print("value {} {}\n", r.has_value(), r.value());
+    r = std::unexpected(std::string{"bad"});
+    std::print("err {} {}\n", r.has_value(), r.error());
+
+    std::expected<int, std::string> a{1};
+    std::expected<int, std::string> b{2};
+    a = b;
+    std::print("copy {} {}\n", a.has_value(), a.value());
+    a = r;
+    std::print("copyerr {} {}\n", a.has_value(), a.error());
+
+    // §6.4(3)'s implicit move assignment, which was always available --
+    // the point being that declaring the three above does not displace it.
+    std::expected<int, std::string> m{0};
+    m = std::move(b);
+    std::print("moved {} {}\n", m.has_value(), m.value());
+
+    std::string owned{"lvalue"};
+    std::expected<std::string, int> s{std::string{"start"}};
+    s = owned;
+    std::print("lvalue {}\n", s.value());
+    s = std::string{"rvalue"};
+    std::print("rvalue {}\n", s.value());
+    return 0;
+}

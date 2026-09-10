@@ -83,18 +83,72 @@ public:
         return;
     }
 
-    virtual ~expected() {
-        if (this->has_value_) {
+    // [expected.object.assign]/1-4: `constexpr expected& operator=(const
+    // expected& rhs)`. The wording's Constraints name four traits across
+    // *both* parameters (is_copy_constructible_v<T> &&
+    // is_copy_assignable_v<T> && is_copy_constructible_v<E> &&
+    // is_copy_assignable_v<E>); a member's requires-clause here can name
+    // one template parameter, so `T` is the one spelled. `E` is covered
+    // in practice because `expected(const unexpected<E>&)` and
+    // `operator=(const unexpected<E>&)` below already copy an `E`, so no
+    // `expected<T, E>` with a non-copyable `E` is usable at all.
+    void operator=(const std::expected<T, E>& other) requires std::copy_constructible<T> {
+        this->__destroy_held();
+        this->has_value_ = other.has_value();
+        if (other.has_value()) {
             [[scpp::unsafe]] {
-                ((T*)&this->storage_)->~T();
+                new ((T*)&this->storage_) T(other.value());
             }
         } else {
             [[scpp::unsafe]] {
-                ((E*)&this->storage_)->~E();
+                new ((E*)&this->storage_) E(other.error());
             }
         }
         return;
     }
+
+    // [expected.object.assign]/8-10: `template<class U> constexpr
+    // expected& operator=(U&& v)` -- destroy whatever is held and
+    // re-hold a value, leaving has_value() true. Split into the
+    // const-lvalue and rvalue overloads `std::optional` already uses for
+    // the same operator ([optional.assign]/13-15), rather than one
+    // forwarding template.
+    void operator=(const T& value) requires std::copy_constructible<T> {
+        this->__destroy_held();
+        this->has_value_ = true;
+        [[scpp::unsafe]] {
+            new ((T*)&this->storage_) T(value);
+        }
+        return;
+    }
+
+    void operator=(T&& value) {
+        this->__destroy_held();
+        this->has_value_ = true;
+        [[scpp::unsafe]] {
+            new ((T*)&this->storage_) T(std::move(value));
+        }
+        return;
+    }
+
+    // [expected.object.assign]/14-16: `template<class G> constexpr
+    // expected& operator=(const unexpected<G>& e)` -- destroy whatever
+    // is held and re-hold the error, leaving has_value() false.
+    void operator=(const std::unexpected<E>& error) {
+        this->__destroy_held();
+        this->has_value_ = false;
+        [[scpp::unsafe]] {
+            new ((E*)&this->storage_) E(error.error());
+        }
+        return;
+    }
+
+    virtual ~expected() {
+        this->__destroy_held();
+        return;
+    }
+
+
 
     bool has_value() const {
         return this->has_value_;
@@ -167,6 +221,25 @@ public:
             return std::move(source);
         }
     }
+
+  private:
+    // Called by the destructor and by every assignment operator above --
+    // all of which are declared *before* it, which
+    // [class.mem.general]/10.1 and /11 allow: a member function body is a
+    // complete-class context, in which the class is complete, so a body
+    // may name a member declared later in the class.
+    void __destroy_held() {
+        if (this->has_value_) {
+            [[scpp::unsafe]] {
+                ((T*)&this->storage_)->~T();
+            }
+        } else {
+            [[scpp::unsafe]] {
+                ((E*)&this->storage_)->~E();
+            }
+        }
+        return;
+    }
 };
 
 // A dedicated partial specialization for `expected<void, E>` --
@@ -198,14 +271,39 @@ public:
         return;
     }
 
-    virtual ~expected() {
-        if (!this->has_value_) {
+    // [expected.void.assign]/1-3: the copy assignment. Unlike the
+    // primary template's, this one's Constraints fall entirely on `E`
+    // (there is no `T` to copy), so the clause spells exactly what the
+    // wording requires.
+    void operator=(const std::expected<void, E>& other) requires std::copy_constructible<E> {
+        this->__destroy_held();
+        this->has_value_ = other.has_value();
+        if (!other.has_value()) {
             [[scpp::unsafe]] {
-                ((E*)&this->storage_)->~E();
+                new ((E*)&this->storage_) E(other.error());
             }
         }
         return;
     }
+
+    // See the identically-motivated overload on the primary
+    // `expected<T, E>` template above; [expected.void.assign]/5-7 is the
+    // `expected<void, E>` wording for the same operator.
+    void operator=(const std::unexpected<E>& error) {
+        this->__destroy_held();
+        this->has_value_ = false;
+        [[scpp::unsafe]] {
+            new ((E*)&this->storage_) E(error.error());
+        }
+        return;
+    }
+
+    virtual ~expected() {
+        this->__destroy_held();
+        return;
+    }
+
+
 
     bool has_value() const {
         return this->has_value_;
@@ -253,6 +351,17 @@ public:
             E& source = ((E*)&this->storage_)[0];
             return std::move(source);
         }
+    }
+
+  private:
+    // See the primary template's own helper above.
+    void __destroy_held() {
+        if (!this->has_value_) {
+            [[scpp::unsafe]] {
+                ((E*)&this->storage_)->~E();
+            }
+        }
+        return;
     }
 };
 

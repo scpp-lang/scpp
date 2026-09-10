@@ -1,0 +1,8 @@
+0
+value true 7
+err false bad
+copy true 2
+copyerr false bad
+moved true 2
+lvalue lvalue
+rvalue rvalue

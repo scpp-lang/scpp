@@ -1,0 +1,61 @@
+import std;
+
+// [class.mem.general]/10.1 and /11: a member function body is a
+// complete-class context in which the class is complete, so a member may
+// call one declared later in the class. Monomorphization walked each
+// eagerly-defined clone the instant it was pushed -- against a member set
+// that stopped at that member -- so a call to a later sibling raised no
+// definition requirement for it. The sibling stayed declaration-only and
+// the call left the object file as an undefined reference: a *link*
+// failure, with nothing wrong reported at compile time.
+enum class Color : uint8_t { red = 1, green = 2, blue = 3 };
+
+template<typename T>
+class Recorder {
+  public:
+    virtual ~Recorder() {
+        this->__note(9);
+    }
+
+    Recorder(T seed) : held{std::move(seed)} {
+        this->__note(1);
+    }
+
+    int seen() const {
+        return this->__doubled();
+    }
+
+    T held;
+    int notes{};
+
+  private:
+    void __note(int weight) {
+        this->notes = this->notes + weight;
+        return;
+    }
+
+    int __doubled() const {
+        return this->notes * 2;
+    }
+};
+
+int main() {
+    Recorder<Color> r{Color::green};
+    std::print("seen {}\n", r.seen());
+    std::print("held {}\n", static_cast<int>(r.held));
+
+    // The shape the standard library hit: a generic class instantiated on
+    // a user type by a *library* generic function, whose destructor calls
+    // a private helper declared after it.
+    auto color = scpp_enum_like(Color::blue);
+    std::print("cast {}\n", color.has_value() ? static_cast<int>(color.value()) : -1);
+    return 0;
+}
+
+std::expected<Color, std::string> scpp_enum_like(Color c) {
+    std::expected<Color, std::string> out{c};
+    if (c == Color::red) {
+        out = std::unexpected(std::string{"red"});
+    }
+    return out;
+}

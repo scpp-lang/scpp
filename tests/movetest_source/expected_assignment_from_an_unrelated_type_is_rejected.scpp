@@ -1,0 +1,12 @@
+import std;
+
+// Declaring assignment operators does not make an `expected` assignable
+// from anything at all: [expr.assign]/1 with [over.oper]/1 still needs an
+// `operator=` that matches, and none of the declared ones takes a
+// `std::expected<double, int>`.
+int main() {
+    std::expected<int, std::string> r{0};
+    std::expected<double, int> other{1.5};
+    r = other;
+    return r.has_value() ? 0 : 1;
+}
