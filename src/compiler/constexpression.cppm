@@ -220,6 +220,49 @@ constexpr std::int64_t uint32_max_value = 4294967295;
 constexpr std::int64_t int64_max_value = 9223372036854775807;
 constexpr std::int64_t int64_min_value = -int64_max_value - 1;
 
+// ch06 §7.4(2.1) requires this evaluator to diagnose "arithmetic
+// overflow in a checked arithmetic operation" and make the program
+// ill-formed. The behaviour is required; the *spelling* was a
+// `__builtin_..._overflow` call, a GCC/Clang extension that scpp does
+// not have. `docs/spec/` names exactly two builtins --
+// `scpp::is_thread_movable`/`is_thread_shareable`, ch04 §4 -- and no
+// builtin *function* surface at all, so those three calls were this
+// file relying on the host compiler rather than on the language it is
+// written in.
+//
+// The test has to come *before* the arithmetic, not after: scpp's own
+// `+`/`-`/`*` on integers outside an unsafe context is itself checked
+// (codegen_checked_arith emits llvm.sadd.with.overflow and calls
+// abort()), so there is no overflowed result left to inspect -- the
+// process would already be gone. Each check below is arranged so that
+// every operation it performs is itself in range: `max - right` only
+// for a positive `right`, `min / left` only for a positive `left`, and
+// the two `-1` cases taken before any division that could be
+// `min / -1`.
+[[nodiscard]] bool int64_add_overflows(std::int64_t left, std::int64_t right) {
+    if (right > 0 && left > int64_max_value - right) return true;
+    if (right < 0 && left < int64_min_value - right) return true;
+    return false;
+}
+
+[[nodiscard]] bool int64_sub_overflows(std::int64_t left, std::int64_t right) {
+    if (right < 0 && left > int64_max_value + right) return true;
+    if (right > 0 && left < int64_min_value + right) return true;
+    return false;
+}
+
+[[nodiscard]] bool int64_mul_overflows(std::int64_t left, std::int64_t right) {
+    if (left == 0 || right == 0) return false;
+    if (left == -1) return right == int64_min_value;
+    if (right == -1) return left == int64_min_value;
+    if (left > 0) {
+        if (right > 0) return left > int64_max_value / right;
+        return right < int64_min_value / left;
+    }
+    if (right > 0) return left < int64_min_value / right;
+    return left < int64_max_value / right;
+}
+
 // Inclusive value range of an integer type. Replaces the
 // std::pair<std::int64_t, std::int64_t> integer_bounds_for_type returned;
 // scpp has no <utility>/std::pair, and no structured bindings to unpack one.
@@ -3550,19 +3593,22 @@ private:
             Type result_type = types_equal(lhs->type, rhs->type) ? lhs->type : named_type("int");
             switch (expr.binary_op) {
                 case BinaryOp::Add: {
-                    std::int64_t result{};
-                    if (__builtin_add_overflow(left, right, &result)) return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
-                    return make_checked_int_cell_as(result_type, result, expr.loc);
+                    if (int64_add_overflows(left, right)) {
+                        return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
+                    }
+                    return make_checked_int_cell_as(result_type, left + right, expr.loc);
                 }
                 case BinaryOp::Sub: {
-                    std::int64_t result{};
-                    if (__builtin_sub_overflow(left, right, &result)) return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
-                    return make_checked_int_cell_as(result_type, result, expr.loc);
+                    if (int64_sub_overflows(left, right)) {
+                        return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
+                    }
+                    return make_checked_int_cell_as(result_type, left - right, expr.loc);
                 }
                 case BinaryOp::Mul: {
-                    std::int64_t result{};
-                    if (__builtin_mul_overflow(left, right, &result)) return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
-                    return make_checked_int_cell_as(result_type, result, expr.loc);
+                    if (int64_mul_overflows(left, right)) {
+                        return std::unexpected(ConstexprError(expr.loc, "constexpr integer overflow"));
+                    }
+                    return make_checked_int_cell_as(result_type, left * right, expr.loc);
                 }
                 case BinaryOp::Div:
                     if (right == 0) return std::unexpected(ConstexprError(expr.loc, "constexpr division by zero"));

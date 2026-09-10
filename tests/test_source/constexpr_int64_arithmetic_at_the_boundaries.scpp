@@ -1,0 +1,30 @@
+import std;
+
+// ch06 §7.4(2.1): required constant evaluation that "would evaluate ...
+// arithmetic overflow in a checked arithmetic operation" makes the
+// program ill-formed. The evaluator did that through
+// `__builtin_add_overflow` and its two siblings -- a GCC/Clang
+// extension `docs/spec/` never defines (its only builtins are ch04 §4's
+// `scpp::is_thread_movable`/`is_thread_shareable` traits), so the file
+// was leaning on the host compiler rather than on the language it is
+// written in. These are the boundary cases that must still fold, at one
+// step below each limit and on both signs.
+int main() {
+    constexpr std::int64_t max_value = 9223372036854775807;
+    constexpr std::int64_t min_value = -9223372036854775807 - 1;
+
+    constexpr std::int64_t add_edge = (max_value - 1) + 1;
+    constexpr std::int64_t sub_edge = (min_value + 1) - 1;
+    std::print("edges {} {}\n", add_edge == max_value, sub_edge == min_value);
+
+    constexpr std::int64_t mul_edge = 4611686018427387903 * 2;
+    constexpr std::int64_t negate_max = max_value * -1;
+    std::print("mul {} {}\n", mul_edge == max_value - 1, negate_max == min_value + 1);
+
+    // Zero short-circuits before any division is attempted, which is what
+    // keeps `min * 0` from reaching a `min / 0`.
+    constexpr std::int64_t zeroed = min_value * 0;
+    constexpr std::int64_t both_negative = -2000000000 * -3;
+    std::print("signs {} {}\n", zeroed == 0, both_negative == 6000000000);
+    return 0;
+}
