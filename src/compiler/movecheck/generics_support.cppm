@@ -39,6 +39,7 @@ namespace scpp {
     clone.is_compile_time_dependency = fn.is_compile_time_dependency;
     clone.has_varargs = fn.has_varargs;
     clone.method_requires_concept = fn.method_requires_concept;
+    clone.method_requires_param = fn.method_requires_param;
     clone.is_generic_template = fn.is_generic_template;
     clone.template_params = fn.template_params;
     clone.generic_method_owner_id = fn.generic_method_owner_id;

@@ -1867,7 +1867,16 @@ private:
         const Function& method_tmpl, const std::vector<std::pair<std::string, Type>>& type_replacements) const {
         if (method_tmpl.method_requires_concept.empty()) return {};
         auto concept_it = concepts_by_name_.find(method_tmpl.method_requires_concept);
-        const Type* constrained_type = type_replacements.empty() ? nullptr : &type_replacements.front().second;
+        // The clause constrains method_requires_param, which is not
+        // necessarily the first parameter -- `unordered_map<K, V>::
+        // operator[]() requires std::default_initializable<V>`
+        // ([unord.map.elem]/1) constrains the second. This read
+        // type_replacements.front() unconditionally, so such a clause
+        // was checked against the wrong argument entirely.
+        const Type* constrained_type = nullptr;
+        for (const std::pair<std::string, Type>& replacement : type_replacements) {
+            if (replacement.first == method_tmpl.method_requires_param) { constrained_type = &replacement.second; break; }
+        }
         bool satisfied = constrained_type != nullptr && concept_it != concepts_by_name_.end() &&
                          type_satisfies_concept(*constrained_type, *concept_it->second, program_);
         if (satisfied) return {};
@@ -1902,6 +1911,7 @@ private:
             clone.is_generic_template = method_tmpl.is_generic_template;
             clone.template_params = method_tmpl.template_params;
             clone.method_requires_concept = method_tmpl.method_requires_concept;
+            clone.method_requires_param = method_tmpl.method_requires_param;
             clone.member_owner_class = cache_key;
             clone.receiver_ref_qualifier = method_tmpl.receiver_ref_qualifier;
             clone.is_static = method_tmpl.is_static;
@@ -2535,7 +2545,7 @@ private:
                     const GenericTypeParam& param = template_params[param_index];
                     if (param.is_non_type) continue;
                     std::string witness_name;
-                    if (param_index == 0 && !method_tmpl.method_requires_concept.empty()) {
+                    if (param.name == method_tmpl.method_requires_param && !method_tmpl.method_requires_concept.empty()) {
                         witness_name = method_tmpl.method_requires_concept;
                     } else if (!param.concept_name.empty()) {
                         witness_name = param.concept_name;
@@ -3570,6 +3580,7 @@ private:
                 clone.is_generic_template = method_tmpl.is_generic_template;
                 clone.template_params = method_tmpl.template_params;
                 clone.method_requires_concept = method_tmpl.method_requires_concept;
+                clone.method_requires_param = method_tmpl.method_requires_param;
                 clone.member_owner_class = cache_key;
                 clone.receiver_ref_qualifier = method_tmpl.receiver_ref_qualifier;
                 clone.is_static = method_tmpl.is_static;
@@ -3807,6 +3818,7 @@ private:
                 clone.is_generic_template = method_tmpl.is_generic_template;
                 clone.template_params = method_tmpl.template_params;
                 clone.method_requires_concept = method_tmpl.method_requires_concept;
+                clone.method_requires_param = method_tmpl.method_requires_param;
                 clone.member_owner_class = cache_key;
                 clone.receiver_ref_qualifier = method_tmpl.receiver_ref_qualifier;
                 clone.is_static = method_tmpl.is_static;

@@ -1,0 +1,19 @@
+import std;
+
+// [temp.constr.decl]: a *requires-clause* may name any of the enclosing
+// template's own parameters, but only those. `W` is not one of them.
+template<typename K, typename V>
+class Holder {
+  public:
+    virtual ~Holder() = default;
+    V value{};
+    V fresh() requires std::default_initializable<W> {
+        V made{};
+        return made;
+    }
+};
+
+int main() {
+    Holder<int, int> h{};
+    return h.fresh();
+}

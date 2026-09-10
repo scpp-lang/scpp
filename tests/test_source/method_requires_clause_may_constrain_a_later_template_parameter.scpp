@@ -1,0 +1,49 @@
+import std;
+
+// [basic.scope.temp]/2 makes every parameter of the enclosing template visible
+// throughout a member, and [temp.constr.decl] places no positional
+// restriction on which one a *requires-clause* names -- so a two-
+// parameter class template may constrain its second parameter. Both the
+// parser and monomorphization used to assume parameter 0: the parser
+// rejected the declaration outright, and the constraint check read the
+// first template argument regardless of which parameter was named.
+class NoDefault {
+  public:
+    virtual ~NoDefault() = default;
+    int value;
+    NoDefault(int v) : value{v} {}
+};
+
+template<typename K, typename V>
+class Pair2 {
+  public:
+    virtual ~Pair2() = default;
+    K first{};
+    V second{};
+
+    Pair2(K k, V v) : first{std::move(k)}, second{std::move(v)} {}
+
+    V fresh_second() requires std::default_initializable<V> {
+        V made{};
+        return made;
+    }
+
+    K first_copy() requires std::copy_constructible<K> {
+        K copied{this->first};
+        return copied;
+    }
+};
+
+int main() {
+    Pair2<int, int> both{3, 9};
+    std::print("second {}\n", both.fresh_second());
+    std::print("first {}\n", both.first_copy());
+
+    // V is not default-initializable here: `fresh_second` is declared but
+    // never a viable candidate, and -- the point of the constraint -- its
+    // body is never instantiated, so naming the class at all still works.
+    Pair2<int, NoDefault> only_first{4, NoDefault{11}};
+    std::print("first {}\n", only_first.first_copy());
+    std::print("held {}\n", only_first.second.value);
+    return 0;
+}

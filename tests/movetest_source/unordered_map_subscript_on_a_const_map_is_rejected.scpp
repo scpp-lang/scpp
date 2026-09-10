@@ -1,0 +1,13 @@
+import std;
+
+// [unord.map.elem]/1 declares `operator[]` non-const only: it may insert,
+// so there is no const overload to select on a read-only map.
+int count_of(const std::unordered_map<std::string, int>& m) {
+    return m[std::string{"a"}];
+}
+
+int main() {
+    std::unordered_map<std::string, int> m{};
+    m[std::string{"a"}] = 1;
+    return count_of(m);
+}

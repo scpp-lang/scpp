@@ -1375,6 +1375,76 @@ int main() {
                                   "argument doesn't satisfy to fail");
     }
 
+    // [basic.scope.temp]/2 makes every parameter of the enclosing template visible
+    // throughout a member and [temp.constr.decl] puts no positional
+    // restriction on which one a *requires-clause* names, so a clause may
+    // constrain a *later* parameter -- and must then be checked against
+    // that parameter's own argument. Both halves were positional: the
+    // parser rejected any clause not naming parameter 0 outright, and
+    // unsatisfied_method_constraint read type_replacements.front()
+    // regardless of which parameter the clause named. With the parser half
+    // alone, `requires std::default_initializable<V>` on
+    // `Holder<int, NoDefault>` was answered by `K` = `int` -- which *is*
+    // default-initializable -- so the clause was judged satisfied and the
+    // body instantiated, failing with "type 'NoDefault' has no default
+    // constructor" from inside a member that [over.match.viable]/1 says was
+    // never a viable candidate to begin with. Both directions below.
+    {
+        std::string source =
+            "class NoDefault {\n"
+            "public:\n"
+            "    virtual ~NoDefault() = default;\n"
+            "    NoDefault(int v) : value{v} { return; }\n"
+            "    int value;\n"
+            "};\n"
+            "template<typename K, typename V>\n"
+            "class Holder {\n"
+            "public:\n"
+            "    virtual ~Holder() = default;\n"
+            "    Holder(V v) : value{std::move(v)} { return; }\n"
+            "    V value;\n"
+            "    V fresh() requires std::default_initializable<V> {\n"
+            "        V made{};\n"
+            "        return made;\n"
+            "    }\n"
+            "};\n"
+            "int main() {\n"
+            "    Holder<int, NoDefault> h{NoDefault{7}};\n"
+            "    return h.fresh().value;\n"
+            "}\n";
+        std::string case_name = "generic_class_requires_clause_on_a_later_parameter_rejects_unsatisfying_argument";
+        cases_run++;
+        bool threw = full_pipeline_fails(source);
+        expect(threw, case_name + ": expected calling a method whose requires-clause names the *second* template "
+                                  "parameter, unsatisfied by the second argument, to fail");
+    }
+
+    {
+        std::string case_name = "generic_class_requires_clause_on_a_later_parameter_accepts_satisfying_argument";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+template<typename K, typename V>
+class Holder {
+public:
+    virtual ~Holder() = default;
+    Holder(V v) : value{std::move(v)} { return; }
+    V value;
+    V fresh() requires std::default_initializable<V> {
+        V made{};
+        return made;
+    }
+};
+int main() {
+    Holder<bool, int> h{7};
+    if (h.value != 7) return 1;
+    return h.fresh() == 0 ? 0 : 2;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
     {
         std::string source =
             "template<typename... Ts>\n"

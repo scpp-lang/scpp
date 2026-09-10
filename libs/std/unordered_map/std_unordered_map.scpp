@@ -1,6 +1,7 @@
 export module std:unordered_map;
 
 import :cstdlib;
+import :concepts;
 import :memory;
 import :functional;
 
@@ -562,16 +563,59 @@ public:
         return this->__find_entry(key) != empty;
     }
 
-    // Note: this container intentionally has no `operator[]` -- the
-    // self-hosting compiler doesn't support user-defined subscript
-    // operator overloads at all yet (declaring one hits an unrelated
-    // "arrays of references are not supported" parse error, and even if
-    // parsing were fixed, `codegen/expressions.cppm`'s `Subscript` case
-    // is hard-restricted to `std::vector`/span/pointer/array with no
-    // operator-overload-resolution fallback for arbitrary classes --
-    // adding general support would be a wide-reaching, multi-file
-    // compiler feature, not a bounded bug fix). `insert_or_assign`
-    // below covers the same "insert-or-overwrite" use case explicitly.
+    // [unord.map.elem]/1: `mapped_type& operator[](const key_type& k);`
+    // -- "Effects: Equivalent to: return try_emplace(k).first->second;",
+    // which inserts a default-constructed mapped value when the key is
+    // absent and hands back a reference either way.
+    //
+    // This container carried a note saying it "intentionally has no
+    // `operator[]`" because "the self-hosting compiler doesn't support
+    // user-defined subscript operator overloads at all yet", that
+    // declaring one "hits an unrelated 'arrays of references are not
+    // supported' parse error", and that codegen's `Subscript` case had
+    // "no operator-overload-resolution fallback for arbitrary classes".
+    // None of the three is true any longer: a class declaring
+    // `int& operator[](const std::string&)` parses, resolves and runs
+    // today, and the compiler's own diagnostic for a class subscript now
+    // says to "declare 'std::unordered_map<...>::operator[]'
+    // ([over.sub]/1)" -- instructing the reader to do the thing this note
+    // said was impossible. The note outlived what it described.
+    //
+    // Constrained on `std::default_initializable<V>` for the reason
+    // `std::expected`'s own `expected() requires
+    // std::default_initializable<T>` and `std::vector`'s
+    // `emplace_back()` are: scpp instantiates every member of a class
+    // specialization, so an unconstrained body naming `V{}` would be
+    // diagnosed for every `unordered_map<K, V>` whose `V` has no default
+    // constructor, including ones that never subscript.
+    V& operator[](const K& key) requires std::default_initializable<V> {
+        unordered_map_entry<K, V>* existing = this->__find_entry(key);
+        unordered_map_entry<K, V>* empty{};
+        if (existing != empty) {
+            [[scpp::unsafe]] {
+                return existing->second;
+            }
+        }
+        V fresh_value{};
+        unordered_map_entry<K, V>* fresh{};
+        [[scpp::unsafe]] {
+            fresh = new unordered_map_entry<K, V>(key, std::move(fresh_value));
+        }
+        this->__insert_new_entry(fresh);
+        // Re-find rather than return __insert_new_entry's own result:
+        // that helper's return is lifetime-tied to its `entry` argument
+        // ([[scpp::lifetime(entry_group)]]), so a reference derived from
+        // it has no provable relationship to `*this`, while
+        // __find_entry's does -- exactly the provenance `at()` above
+        // relies on. Same complexity class, and the reference genuinely
+        // does borrow from the map, which is what the returned
+        // reference's lifetime has to be tied to.
+        unordered_map_entry<K, V>* created = this->__find_entry(key);
+        [[scpp::unsafe]] {
+            return created->second;
+        }
+    }
+
     void insert_or_assign(const K& key, const V& value) {
         unordered_map_entry<K, V>* existing = this->__find_entry(key);
         unordered_map_entry<K, V>* empty{};
