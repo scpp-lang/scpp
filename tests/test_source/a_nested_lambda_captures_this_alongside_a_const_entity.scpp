@@ -1,0 +1,62 @@
+// ch05 §5.12: what a nested closure captures from the closure it sits in
+// is that closure object's *field*, and whether that re-borrow may be
+// mutable is whether the field is writable. movecheck asked
+// place_is_read_only of the captured *declaration* on the ordinary path
+// and hard-coded `false` on the chained one, so a closure field holding a
+// `const T&` was re-borrowed mutably by any lambda nested inside it.
+//
+// The rejection then named the wrong thing: resolve_borrow_source_root
+// reports the *enclosing closure* as the root of `this.field`, so the
+// message read "cannot pass 'this' by mutable reference: it is only
+// reachable through a read-only (const) reference (the field 'tag' is
+// read-only)" -- `this` blamed for a sibling capture's constness. A
+// nested lambda capturing `this` alongside any const entity was rejected
+// on account of the const entity.
+//
+// src/compiler/constexpression.cppm's evaluate_expr_in_context is that
+// shape: `[&, this] { ... [&, this] { ... expr ... } ... }` over a
+// `const Expr& expr`.
+//
+// The same program transliterated to C++ and built with
+// clang++-22 -std=c++26 prints the same six lines.
+import std;
+class Holder {
+public:
+    int n;
+    Holder() : n{0} { return; }
+    int bump() { this->n = this->n + 1; return this->n; }
+    int peek() const { return this->n; }
+    int nested_mutating(const std::string& tag) {
+        return [&, this]() -> int {
+            return [&, this]() -> int { return this->bump() + static_cast<int>(tag.size()); }();
+        }();
+    }
+    int nested_const_method(const std::string& tag) {
+        return [&, this]() -> int {
+            return [&, this]() -> int { return this->peek() + static_cast<int>(tag.size()); }();
+        }();
+    }
+    int nested_member(const std::string& tag) {
+        return [&, this]() -> int {
+            return [&, this]() -> int { return this->n + static_cast<int>(tag.size()); }();
+        }();
+    }
+    int nested_writes_mutable(const std::string& tag, int& m) {
+        return [&, this]() -> int {
+            return [&, this]() -> int { m = m + static_cast<int>(tag.size()); return m; }();
+        }();
+    }
+    virtual ~Holder() { return; }
+};
+int main() {
+    Holder h{};
+    std::string tag{"abc"};
+    int m = 10;
+    std::print("mutating {}\n", h.nested_mutating(tag));
+    std::print("after_bump {}\n", h.peek());
+    std::print("const_method {}\n", h.nested_const_method(tag));
+    std::print("member {}\n", h.nested_member(tag));
+    std::print("writes {}\n", h.nested_writes_mutable(tag, m));
+    std::print("m_after {}\n", m);
+    return 0;
+}

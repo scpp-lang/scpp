@@ -1,0 +1,34 @@
+// The other direction. Deriving a chained capture's mutability from the
+// field instead of hard-coding it must not lose the constness it was
+// hard-coding *away*: a closure field holding a `const T&` stays
+// read-only for every lambda nested inside that closure, so binding a
+// mutable reference to it is still ill-formed.
+//
+// Rejected before and after that change -- the guard on its blast radius,
+// not a case it changes.
+import std;
+
+class Holder {
+public:
+    int n;
+
+    Holder() : n{0} { return; }
+
+    int run(const std::string& tag) {
+        return [&, this]() -> int {
+            return [&, this]() -> int {
+                std::string& writable = tag;
+                writable = std::string{"y"};
+                return 0;
+            }();
+        }();
+    }
+
+    virtual ~Holder() { return; }
+};
+
+int main() {
+    Holder h{};
+    std::string t{"x"};
+    return h.run(t);
+}
