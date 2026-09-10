@@ -1,0 +1,31 @@
+import std;
+
+// `std::string_view` is a `struct` precisely so it stays trivially
+// copyable (see its own declaration's comment), which is why every
+// spelling of constructing one outside a variable declaration was
+// rejected -- including `std::string_view{value->type.name}` in
+// src/compiler/constexpression.cppm, the self-hosting probe's blocker.
+void take(std::string_view v) { std::print("argument {}\n", static_cast<int>(v.size())); }
+
+std::string_view mk(const std::string& s) { return std::string_view{s}; }
+
+int main() {
+    std::string s{"hello"};
+
+    std::string_view direct{s};
+    std::print("direct {}\n", static_cast<int>(direct.size()));
+
+    std::string_view assigned{};
+    assigned = std::string_view{s};
+    std::print("assign {}\n", static_cast<int>(assigned.size()));
+
+    take(std::string_view{s});
+    std::print("return {}\n", static_cast<int>(mk(s).size()));
+
+    std::string_view copy_init = std::string_view{"abc"};
+    std::print("copy-init {}\n", static_cast<int>(copy_init.size()));
+
+    std::print("compare {}\n", direct == std::string_view{"hello"});
+    std::print("two-arg {}\n", static_cast<int>(std::string_view{s.c_str(), static_cast<std::size_t>(2)}.size()));
+    return 0;
+}

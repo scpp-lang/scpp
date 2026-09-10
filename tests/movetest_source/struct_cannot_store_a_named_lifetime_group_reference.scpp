@@ -1,0 +1,23 @@
+import std;
+
+// ch02 §6.2(24): "Constructing an object, closure, or other stored state
+// from a reference, pointer, or span derived from a named lifetime group
+// does not erase that group's lifetime obligation ... This includes
+// returning `Holder{x}` where `Holder` contains a reference member
+// initialized from `x`". type_contains_lifetime_carrying_state walked
+// class fields only, so every struct answered "carries no lifetime
+// state" and all three places that ask skipped it.
+struct Holder {
+    const int& ref;
+};
+
+Holder bad(const int& x [[scpp::lifetime(a)]]) {
+    Holder h{x};
+    return h;
+}
+
+int main() {
+    int x = 1;
+    Holder h = bad(x);
+    return h.ref;
+}

@@ -406,6 +406,52 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                 return CallResult{std::move(value_result).value(), nullptr};
             }
+            // [expr.type.conv]/1: a simple-type-specifier "followed by
+            // ... a braced-init-list (the initializer) constructs a
+            // value of the specified type given the initializer" -- an
+            // expression, usable wherever a value of that type is. The
+            // spec modifies neither it nor [dcl.init.list], so it
+            // applies unchanged (front matter §1(2)); what ch02 §6.1(7)
+            // *does* modify is which spelling an object definition's
+            // initializer may take, and its own Note says so: "This rule
+            // affects object definitions only". And §6.1(2), (3.1) and
+            // (4) each say "class or struct" in as many words -- the
+            // spec's own construction rules presuppose that a struct has
+            // constructors and is constructed exactly as a class is.
+            // The class branch just above says
+            // as much, and lists "every other spelling of construct a
+            // ClassName": the VarDecl form, `return {}`, and the
+            // constant evaluator. All of those already handle a
+            // *struct* too, through construct_record_in_place, whose own
+            // comment reads "one routine decides what a braced list on a
+            // struct means, reached from every position". This position
+            // was the exception: gated on find_class_def alone, a struct
+            // name fell through to ordinary function-call resolution and
+            // came back "call to unknown function 'Pt'". `Pt p{7};`
+            // compiled; `return Pt{7};`, `take(Pt{7});`, `p = Pt{7};`
+            // and `Pt p = Pt{7};` did not, and neither did any of them
+            // for `std::string_view`, which is a struct precisely so it
+            // can stay trivially copyable (see its own declaration).
+            //
+            // Routed through the same one routine rather than a second
+            // copy of the decision: the temporary is materialized here,
+            // constructed there.
+            if (find_struct_def(expr.name) != nullptr) {
+                Type struct_type = named_type(expr.name);
+                auto struct_llvm_type_result = to_llvm_type(struct_type);
+                if (!struct_llvm_type_result.has_value()) return std::unexpected(std::move(struct_llvm_type_result).error());
+                llvm::LLVMTypeRef struct_llvm_type = std::move(struct_llvm_type_result).value();
+                std::optional<unsigned> struct_align = alignment_for_type(struct_type);
+                llvm::LLVMValueRef struct_temp = create_entry_block_alloca(struct_llvm_type, "structtmp", struct_align);
+                if (auto r = zero_initialize_storage(struct_temp, struct_type, struct_align); !r.has_value()) {
+                    return std::unexpected(std::move(r).error());
+                }
+                if (auto r = construct_record_in_place(LValue{struct_temp, struct_type, struct_align}, struct_type, expr.args);
+                    !r.has_value()) {
+                    return std::unexpected(std::move(r).error());
+                }
+                return CallResult{llvm::LLVMBuildLoad2(builder_, struct_llvm_type, struct_temp, "structtmp.value"), nullptr};
+            }
             const LocalSlot* callee_local = find_local(expr);
             if (callee_local != nullptr && callee_local->type.kind == TypeKind::FunctionPointer) {
                 auto local_llvm_type_result = to_llvm_type(callee_local->type);

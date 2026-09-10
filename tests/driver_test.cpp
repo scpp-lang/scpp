@@ -1793,6 +1793,58 @@ void run_generic_function_overload_tests() {
     }
 }
 
+// [expr.type.conv]/1: a struct name followed by a braced-init-list is an
+// expression, usable wherever a value of that type is -- codegen gated
+// that on find_class_def alone, so only `Pt p{7};` worked. Making the
+// name resolve as a construction does not make it accept any argument
+// list, and the rejection is codegen's own (there is no `Pt(int, int,
+// int)` to select), so it is unreachable through movetest_source's
+// movecheck-only harness -- the same reason run_generic_type_tests gives
+// for its own constraint cases.
+void run_struct_expression_construction_tests() {
+    {
+        std::string source =
+            "struct Pt {\n"
+            "    int x;\n"
+            "    int y;\n"
+            "    Pt(int a) : x{a}, y{a + 1} { return; }\n"
+            "};\n"
+            "int main() {\n"
+            "    Pt p = Pt{1, 2, 3};\n"
+            "    return p.x;\n"
+            "}\n";
+        std::string case_name = "struct_brace_construction_with_no_matching_constructor_is_rejected";
+        cases_run++;
+        bool threw = full_pipeline_fails(source);
+        expect(threw, case_name + ": expected a struct construction with no matching constructor to fail");
+    }
+
+    {
+        std::string case_name = "struct_brace_construction_is_usable_in_every_expression_position";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+struct Pt {
+    int x;
+    int y;
+    Pt(int a) : x{a}, y{a + 1} { return; }
+};
+Pt mk() { return Pt{7}; }
+int sum(Pt p) { return p.x + p.y; }
+int main() {
+    if (mk().x != 7) return 1;
+    if (sum(Pt{7}) != 15) return 2;
+    Pt p{1};
+    p = Pt{7};
+    if (p.y != 8) return 3;
+    return Pt{7}.x == 7 ? 0 : 4;
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+}
+
 void run_reference_overload_forwarding_tests() {
     {
         std::string case_name = "reference_typed_local_forwards_to_overloaded_mutable_reference_parameter";
@@ -12053,6 +12105,7 @@ int main() {
     run_generic_type_tests();
     run_generic_pack_deduction_tests();
     run_generic_function_overload_tests();
+    run_struct_expression_construction_tests();
     run_reference_overload_forwarding_tests();
     run_functional_tests();
     run_thread_tests();

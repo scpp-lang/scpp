@@ -1,0 +1,19 @@
+import std;
+
+// The negative control for the two above: §6.2(24) forbids storing a
+// reference, pointer or span derived from a named group -- not storing a
+// *value* read through one. A struct with no reference member carries no
+// lifetime obligation, and this must keep compiling.
+struct Plain {
+    int v;
+};
+
+Plain fine(const int& x [[scpp::lifetime(a)]]) {
+    return Plain{x};
+}
+
+int main() {
+    int x = 1;
+    Plain p = fine(x);
+    return p.v - 1;
+}
