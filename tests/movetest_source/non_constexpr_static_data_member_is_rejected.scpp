@@ -1,0 +1,12 @@
+import std;
+
+// [class.static.data]/3: the declaration of a non-inline static data
+// member in its class definition is not a definition, and needs a
+// namespace-scope one this version has no grammar for.
+class C {
+  public:
+    virtual ~C() = default;
+    static int count = 0;
+};
+
+int main() { return C::count; }

@@ -5,10 +5,6 @@ import :string;
 
 namespace std {
 
-[[nodiscard]] size_t __string_view_not_found() {
-    return static_cast<size_t>(-1);
-}
-
 [[nodiscard]] size_t __string_view_strlen(const char* s) {
     const char* empty{};
     if (s == empty) return 0;
@@ -35,6 +31,12 @@ namespace std {
 // own `Token`), since a struct field must itself be trivial (spec ch04)
 // and a `class` never is, regardless of its own fields.
 export struct [[scpp::thread_movable, scpp::thread_shareable]] string_view {
+public:
+    // [string.view.template.general]: `static constexpr size_type npos =
+    // size_type(-1);`. Replaces the free stand-in this carried while
+    // static data members could not be declared.
+    static constexpr size_t npos = static_cast<size_t>(-1);
+
 private:
     const char* data_{};
     size_t size_{};
@@ -104,7 +106,7 @@ public:
 
     size_t rfind(const std::string_view& needle) const {
         if (needle.size_ == 0) return this->size_;
-        if (needle.size_ > this->size_) return std::__string_view_not_found();
+        if (needle.size_ > this->size_) return std::string_view::npos;
         size_t i = this->size_ - needle.size_ + 1;
         while (i > 0) {
             i = i - 1;
@@ -119,7 +121,7 @@ public:
             }
             if (matches) return i;
         }
-        return std::__string_view_not_found();
+        return std::string_view::npos;
     }
 
     size_t rfind(const char* needle) const {

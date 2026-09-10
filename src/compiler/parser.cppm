@@ -6268,10 +6268,13 @@ private:
     // two are simple and small enough that duplicating this one loop
     // body is lower-risk than threading varargs-specific logic through a
     // shared helper.
-    static constexpr const char* kUnnamedDefaultedSingleParam() { return "__defaulted_single_param"; }
+    // [class.static.data]/1 with [dcl.constexpr]/1: a class-scope
+    // constant. Spelled as a static member *function* returning the
+    // literal while a static data member could not be declared at all.
+    static constexpr const char* kUnnamedDefaultedSingleParam = "__defaulted_single_param";
 
     [[nodiscard]] bool has_unnamed_defaulted_single_param(const std::vector<Param>& params) const {
-        return params.size() == 1 && params[0].name == kUnnamedDefaultedSingleParam();
+        return params.size() == 1 && params[0].name == Parser::kUnnamedDefaultedSingleParam;
     }
 
     [[nodiscard]] std::expected<std::vector<Param>, ParseError> parse_param_list(bool allow_unnamed_single_parameter = false) {
@@ -6305,7 +6308,7 @@ private:
                 Type param_type{};
 
                 if (allow_unnamed_single_parameter && params.empty() && !param.is_parameter_pack && check(TokenKind::RParen)) {
-                    param.name = std::string(kUnnamedDefaultedSingleParam());
+                    param.name = std::string(Parser::kUnnamedDefaultedSingleParam);
                     param_type = std::move(base_type);
                 } else {
                     auto param_type_result = parse_named_declarator(std::move(base_type), param.name, "parameter name");
@@ -8860,7 +8863,8 @@ private:
                 }
                 if (member_is_static) {
                     return std::unexpected(ParseError(member_loc.line, member_loc.column,
-                                      "static data members are not supported in this version"));
+                                      "a static data member of function-pointer type is not supported in this "
+                                      "version: only a 'static constexpr' one of ordinary type is"));
                 }
                 if (member_is_virtual) {
                     return std::unexpected(ParseError(member_loc.line, member_loc.column,
@@ -8944,10 +8948,6 @@ private:
                 continue;
             }
 
-            if (member_eval_mode != FunctionEvalMode::RuntimeOnly) {
-                return std::unexpected(ParseError(member_loc.line, member_loc.column,
-                                  "only a member function or constructor may be declared constexpr or consteval"));
-            }
             if (member_requested_unsafe) {
                 {
                     std::string _msg_7163{"'[[scpp::unsafe]]' cannot appertain to a member variable -- only to a "};
@@ -8956,9 +8956,80 @@ private:
                                   _msg_7163));
                 }
             }
+            // [class.static.data]/1: a static data member is not part of
+            // the subobjects of the class -- there is one, shared,
+            // reached through the class's name rather than an object's.
+            // [dcl.constexpr]/1 makes a `constexpr` one implicitly an
+            // inline variable, so it needs no out-of-line definition and
+            // no storage of its own: it is
+            // a constant, and a constant qualified by a class name is
+            // exactly what a namespace-scope `constexpr` variable
+            // already is here, down to being usable in an array bound.
+            // So one is recorded as precisely that -- a GlobalVar whose
+            // name is the class's own qualified name, `::`, the member's
+            // -- and every later phase (name lookup, constant folding,
+            // codegen, module export) reaches it through the machinery
+            // it already has for `namespace ns { constexpr int k = 2; }`.
+            //
+            // This was rejected outright, "static data members are not
+            // supported in this version", which is why `std::string` and
+            // `std::string_view` each carried a `__string_not_found()`
+            // free function in place of the `static constexpr size_type
+            // npos = size_type(-1)` that [basic.string.general] and
+            // [string.view.template.general] declare.
             if (member_is_static) {
+                if (member_eval_mode != FunctionEvalMode::Constexpr) {
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                      "only a 'static constexpr' data member is supported in this version: a "
+                                      "non-constexpr one is not a definition in its class ([class.static.data]/3) "
+                                      "and needs the namespace-scope definition this version has no grammar for"));
+                }
+                if (!template_params.empty()) {
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                      "a static data member of a class template is not supported in this version: there is one "
+                                      "per specialization ([temp.static]/1's own example declares "
+                                      "'template<class T> class X { static T s; };'), which this version does not instantiate"));
+                }
+                if (member_is_template) {
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                      "a member template declaration must declare a constructor or method, not a field"));
+                }
+                auto static_type_result = parse_array_suffix(std::move(member_type));
+                if (!static_type_result.has_value()) return std::unexpected(std::move(static_type_result).error());
+                auto static_initializer_result = parse_optional_default_initializer(
+                    std::string(member_decl_context.data(), member_decl_context.size()));
+                if (!static_initializer_result.has_value()) return std::unexpected(std::move(static_initializer_result).error());
+                std::optional<Initializer> static_initializer = std::move(static_initializer_result).value();
+                if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                if (!static_initializer.has_value()) {
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                      "a 'static constexpr' data member must have an initializer: [dcl.constexpr]/6 says such an object 'shall be initialized'"));
+                }
+                auto static_decl = std::make_unique<Stmt>();
+                static_decl->kind = StmtKind::VarDecl;
+                static_decl->loc = member_loc;
+                static_decl->var_name = qualified_owner_name;
+                static_decl->var_name += "::";
+                static_decl->var_name += member_name;
+                static_decl->type = std::move(static_type_result).value();
+                static_decl->type.is_const_qualified = true;
+                static_decl->is_const = true;
+                static_decl->is_constexpr = true;
+                static_decl->init = std::move(static_initializer->expr);
+                static_decl->has_ctor_args = static_initializer->has_brace_args;
+                for (ExprPtr& brace_arg : static_initializer->brace_args) {
+                    static_decl->ctor_args.push_back(std::move(brace_arg));
+                }
+                GlobalVar static_member{};
+                static_member.decl = std::move(static_decl);
+                static_member.namespace_path = namespace_stack_;
+                static_member.is_exported = is_exported;
+                program.globals.push_back(std::move(static_member));
+                continue;
+            }
+            if (member_eval_mode != FunctionEvalMode::RuntimeOnly) {
                 return std::unexpected(ParseError(member_loc.line, member_loc.column,
-                                  "static data members are not supported in this version"));
+                                  "only a member function or constructor may be declared constexpr or consteval"));
             }
             if (member_is_virtual) {
                 return std::unexpected(ParseError(member_loc.line, member_loc.column,
