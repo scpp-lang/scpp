@@ -256,6 +256,20 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
             if (type_contains_lifetime_carrying_state(field.type, program, visiting)) return true;
         }
     }
+    // ch02 §6.2(24) is about "a class, struct, union, array, closure, or
+    // other object type", and names this exact example: "returning
+    // `Holder{x}` where `Holder` contains a reference member initialized
+    // from `x`". Only class fields were walked, so every struct answered
+    // "carries no lifetime state" and the three places that ask -- a
+    // construction's arguments, an assignment's source, a closure's
+    // captures -- all skipped it. `struct Holder { const int& ref; };`
+    // stored a named-group reference and was accepted, in the returned
+    // form and in the plain `Holder h{x};` form alike.
+    if (const StructDef* struct_def = find_struct_def(program, type.name)) {
+        for (const StructField& field : struct_def->fields) {
+            if (type_contains_lifetime_carrying_state(field.type, program, visiting)) return true;
+        }
+    }
     return false;
 }
 [[nodiscard]] std::string named_type_name(const Type& type) {

@@ -1,0 +1,56 @@
+import std;
+
+// [expr.type.conv]/1: a simple-type-specifier "followed by ... a
+// braced-init-list (the initializer) constructs a value of the specified
+// type given the initializer" -- an expression, usable wherever a value
+// of that type is. `docs/spec/`'s own construction rules say "class or
+// struct" in as many words (ch02 §6.1(2), (3.1), (4)), and the one rule
+// that does narrow initialization -- §6.1(7), braces rather than parens
+// -- says in its own Note that it "affects object definitions only".
+//
+// Codegen gated this on find_class_def alone, so a *struct* name in
+// expression position fell through to ordinary function-call resolution
+// and came back "call to unknown function 'Pt'". Only `Pt p{7};` worked.
+// Cross-checked against clang++-22 -std=c++26: same nine lines.
+struct Pt {
+    int x;
+    int y;
+    Pt(int a) : x{a}, y{a + 1} { return; }
+};
+
+struct Agg {
+    int x;
+    int y;
+};
+
+Pt mk() { return Pt{7}; }
+
+void take(Pt p) { std::print("argument {} {}\n", p.x, p.y); }
+
+int main() {
+    std::print("return {} {}\n", mk().x, mk().y);
+    take(Pt{7});
+
+    Pt p{1};
+    p = Pt{7};
+    std::print("assign {} {}\n", p.x, p.y);
+
+    Pt q = Pt{7};
+    std::print("copy-init {} {}\n", q.x, q.y);
+
+    std::print("subexpr {}\n", Pt{7}.x);
+    std::print("aggregate {} {}\n", Agg{7, 8}.x, Agg{7, 8}.y);
+
+    bool c = true;
+    Pt r = c ? Pt{7} : Pt{1};
+    std::print("ternary {} {}\n", r.x, r.y);
+
+    std::vector<Pt> v{};
+    v.push_back(Pt{7});
+    std::print("vector {} {}\n", v[0].x, v[0].y);
+
+    auto f = []() { return Pt{7}; };
+    Pt l = f();
+    std::print("lambda {} {}\n", l.x, l.y);
+    return 0;
+}
