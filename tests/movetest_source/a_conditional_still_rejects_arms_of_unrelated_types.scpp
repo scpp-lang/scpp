@@ -1,0 +1,35 @@
+// The other direction. Applying [expr.type]/1's reference adjustment
+// before comparing the arms must not make the comparison itself go away:
+// two genuinely different types still disagree, and ch13 §16.3(1)/(1.6)
+// still says so for scalars ("There is no implicit conversion between any
+// two distinct scalar types ... both arms of a conditional expression").
+//
+// Rejected before and after that adjustment -- the guard on its blast
+// radius, not a case it changes.
+import std;
+
+class Ty {
+public:
+    int kind;
+
+    Ty() : kind{0} { return; }
+    virtual ~Ty() { return; }
+};
+
+class Other {
+public:
+    int z;
+
+    Other() : z{0} { return; }
+    virtual ~Other() { return; }
+};
+
+int pick(bool c, Ty& a, Other& b) {
+    return (c ? a : b).kind;
+}
+
+int main() {
+    Ty t{};
+    Other o{};
+    return pick(true, t, o);
+}

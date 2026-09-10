@@ -1,0 +1,76 @@
+// [expr.type]/1: "If an expression initially has the type 'reference to
+// T' ([dcl.ref], [dcl.init.ref]), the type is adjusted to T prior to any
+// further analysis; the value category of the expression is not altered."
+// Reference-ness is therefore never part of an expression's type, so
+// `c ? *sp : v` for a `std::shared_ptr<T> sp` and a `T v` -- both lvalues
+// of type `T` -- has arms of one type, and `e.value() ? a : b` for an
+// `std::expected<bool, E>` has a `bool` condition.
+//
+// The conditional's own check compared the *declared* types instead, so
+// every mixed reference/value pairing was rejected as having "different"
+// types. It was already making the adjustment on one path only: the
+// scalar branch went through binary_operand_type (= literal_adoption_
+// target, which strips exactly this), so `c ? int_ref : int_value` was
+// accepted while `c ? T_ref : T_value` was not -- one clause, two
+// answers, told apart by nothing the clause mentions.
+//
+// ch13 §16.3(1) is the only clause of docs/spec about conditional arms
+// and it is scoped to scalar types: "There is no implicit conversion
+// between any two distinct *scalar* types ... (1.6) both arms of a
+// conditional expression". It never reached a class arm, so front matter
+// §1(2) leaves [expr.cond] in force there.
+//
+// src/compiler/constexpression.cppm's infer_unevaluated_expr_type is the
+// shape that found it: `field.type.kind == TypeKind::Reference ?
+// *field.type.pointee : field.type`.
+//
+// The same program transliterated to C++ and built with
+// clang++-22 -std=c++26 prints the same six lines.
+import std;
+
+class Ty {
+public:
+    int kind;
+
+    Ty() : kind{0} { return; }
+    virtual ~Ty() { return; }
+};
+
+// Two reference arms, then a reference arm against a value arm.
+int pick(bool c, Ty& ref, Ty& other) {
+    return (c ? ref : other).kind;
+}
+
+// The blocker's own shape: a smart pointer's `operator*` returns `T&`,
+// the other arm is a `T` lvalue.
+int pick_shared(bool c, Ty& v) {
+    std::shared_ptr<Ty> sp = std::make_shared<Ty>();
+    sp->kind = 9;
+    return (c ? *sp : v).kind;
+}
+
+// Differing cv-qualification across the two arms.
+int pick_const(bool c, const Ty& r, Ty& v) {
+    return (c ? r : v).kind;
+}
+
+// [expr.type]/1 on the *condition*: `std::expected<bool, E>::value()`
+// hands back `bool&`, which is a `bool` condition.
+int cond_from_ref(std::expected<bool, int>& e, int a, int b) {
+    return e.value() ? a : b;
+}
+
+int main() {
+    Ty x{};
+    x.kind = 3;
+    Ty y{};
+    y.kind = 7;
+    std::print("ref_then {}\n", pick(true, x, y));
+    std::print("ref_else {}\n", pick(false, x, y));
+    std::print("shared_then {}\n", pick_shared(true, x));
+    std::print("shared_else {}\n", pick_shared(false, x));
+    std::print("const_then {}\n", pick_const(true, x, y));
+    std::expected<bool, int> e = true;
+    std::print("cond_ref {}\n", cond_from_ref(e, 11, 22));
+    return 0;
+}

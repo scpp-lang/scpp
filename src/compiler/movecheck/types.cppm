@@ -433,8 +433,27 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
     // operands before their types are compared, so `c ? "const " : ""`
     // compares `const char*` with `const char*` rather than two arrays of
     // different length.
-    Type then_type = decay_array_to_pointer(raw_then_type);
-    Type else_type = decay_array_to_pointer(raw_else_type);
+    // [expr.type]/1: "If an expression initially has the type 'reference
+    // to T' ([dcl.ref], [dcl.init.ref]), the type is adjusted to T prior
+    // to any further analysis; the value category of the expression is
+    // not altered." Reference-ness is therefore never part of an arm's
+    // *type*, and comparing it is comparing something the language says
+    // is not there: `c ? *sp : v` for a `std::shared_ptr<T> sp` and a
+    // `T v` -- both lvalues of type `T` -- was rejected for having
+    // "different" types, as was every `c ? ref : value`.
+    //
+    // The adjustment was already being made, but only on the scalar
+    // branch below, through binary_operand_type (= literal_adoption_
+    // target, which strips exactly this). So `c ? int_ref : int_value`
+    // was accepted and `c ? T_ref : T_value` was not -- one question,
+    // two answers, told apart by whether the arms happened to be scalar.
+    // ch13 §16.3(1) is the only clause of docs/spec about conditional
+    // arms and it is scoped to scalar types ("There is no implicit
+    // conversion between any two distinct *scalar* types ... (1.6) both
+    // arms of a conditional expression"), so it never reached a class
+    // arm at all; front matter §1(2) leaves [expr.cond] in force there.
+    Type then_type = decay_array_to_pointer(literal_adoption_target(raw_then_type));
+    Type else_type = decay_array_to_pointer(literal_adoption_target(raw_else_type));
     if (types_equal(then_type, else_type)) return true;
     const Type& then_value = binary_operand_type(then_type);
     const Type& else_value = binary_operand_type(else_type);
