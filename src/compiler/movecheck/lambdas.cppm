@@ -239,7 +239,27 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
             continue;
         }
         if (chained && !chained_type.has_value()) continue;
-        Type ref_type = chained ? by_reference_capture_type(*chained_type, /*source_is_const=*/false)
+        // ch05 §5.12: a chained capture re-borrows the enclosing
+        // closure's *field*, so whether that borrow may be mutable is
+        // whether the field is writable -- which is exactly what
+        // place_is_read_only answers, and what the non-chained branch
+        // beside it asks of the captured declaration.
+        //
+        // This said `false` unconditionally. A closure that captured a
+        // `const T&` by reference holds a field the inner closure may
+        // only read, and asking for it mutably was rejected as "cannot
+        // pass 'this' by mutable reference: it is only reachable through
+        // a read-only (const) reference" -- naming `this`, because
+        // resolve_borrow_source_root reports the *enclosing closure* as
+        // the root of `this.field`. So a nested lambda that captured
+        // `this` alongside any const entity was rejected on account of
+        // the const entity, with the diagnostic pointing at `this`.
+        // src/compiler/constexpression.cppm's own
+        // `[&, this] { ... [&, this] { ... expr ... } ... }` over a
+        // `const Expr& expr` is that shape.
+        Type ref_type = chained ? by_reference_capture_type(
+                                      *chained_type,
+                                      /*source_is_const=*/place_is_read_only(capture_ident, body, signatures))
                                 : by_reference_capture_type(body.type_of(*captured), body.decl(*captured).is_const);
         if (auto _r = apply_reference_argument(capture_ident, ref_type, state, reference_capture_borrows, body, signatures,
                                   report_errors); !_r.has_value()) {
