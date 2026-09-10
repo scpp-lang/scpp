@@ -1,0 +1,14 @@
+import std;
+
+// [util.smartptr.shared.mod]/1: `swap` is not const-qualified either.
+void exchange(const std::shared_ptr<int>& a, std::shared_ptr<int>& b) {
+    a.swap(b);
+    return;
+}
+
+int main() {
+    std::shared_ptr<int> a = std::make_shared<int>(1);
+    std::shared_ptr<int> b = std::make_shared<int>(2);
+    exchange(a, b);
+    return 0;
+}
