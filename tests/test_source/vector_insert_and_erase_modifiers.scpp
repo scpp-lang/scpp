@@ -1,0 +1,89 @@
+import std;
+
+// [vector.modifiers] declares `insert(const_iterator, const T&)`,
+// `insert(const_iterator, T&&)`, `insert(const_iterator, size_type,
+// const T&)`, `template<class InputIterator> insert(const_iterator,
+// InputIterator, InputIterator)`, `erase(const_iterator)` and
+// `erase(const_iterator, const_iterator)`. This container declared none
+// of them -- no `insert` and no `erase` at all -- which is what
+// `fields.insert(fields.end(), base.begin(), base.end())` in
+// src/compiler/constexpression.cppm ran into. Every value below is
+// cross-checked against clang++-22 -std=c++26 on the equivalent program.
+void show(const std::vector<int>& v) {
+    std::size_t i = 0;
+    while (i < v.size()) {
+        std::print("{} ", v.at(i));
+        i = i + 1;
+    }
+    std::print("| size {}\n", static_cast<int>(v.size()));
+    return;
+}
+
+int main() {
+    std::vector<int> a{};
+    a.push_back(1);
+    a.push_back(2);
+    a.push_back(3);
+    std::vector<int> b{};
+    b.push_back(7);
+    b.push_back(8);
+
+    // The range form, appending and then prepending -- the second one
+    // reallocates, which is why every overload records its position as an
+    // offset first ([vector.modifiers]/2).
+    a.insert(a.end(), b.begin(), b.end());
+    show(a);
+    a.insert(a.begin(), b.begin(), b.end());
+    show(a);
+
+    std::vector<int> c{};
+    c.push_back(1);
+    c.push_back(2);
+    c.push_back(3);
+    int* one_in{};
+    [[scpp::unsafe]] {
+        one_in = c.begin() + 1;
+    }
+    // "Returns: an iterator that points to the first of the newly
+    // inserted elements."
+    int* inserted_at = c.insert(one_in, 9);
+    [[scpp::unsafe]] {
+        std::print("single {} ", inserted_at[0]);
+    }
+    show(c);
+    c.insert(c.end(), 4);
+    show(c);
+    c.insert(c.begin(), static_cast<std::size_t>(2), 0);
+    show(c);
+
+    std::vector<int> d{};
+    d.push_back(1);
+    d.push_back(2);
+    d.push_back(3);
+    d.push_back(4);
+    d.push_back(5);
+    int* second{};
+    [[scpp::unsafe]] {
+        second = d.begin() + 1;
+    }
+    int* after = d.erase(second);
+    [[scpp::unsafe]] {
+        std::print("erase1 {} ", after[0]);
+    }
+    show(d);
+    int* two_in{};
+    [[scpp::unsafe]] {
+        two_in = d.begin() + 2;
+    }
+    d.erase(d.begin(), two_in);
+    show(d);
+    d.erase(d.begin(), d.end());
+    show(d);
+
+    // An empty range inserts nothing and reallocates nothing.
+    std::vector<int> e{};
+    std::vector<int> f{};
+    e.insert(e.end(), f.begin(), f.end());
+    show(e);
+    return 0;
+}

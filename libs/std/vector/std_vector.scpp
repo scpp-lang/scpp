@@ -108,6 +108,49 @@ private:
         return;
     }
 
+    // Opens `count` uninitialized slots at `offset`, growing first if
+    // the result would not fit. [vector.modifiers]/2: "Causes
+    // reallocation if the new size is greater than the old capacity" --
+    // and reallocation is why every insert below records its position as
+    // an *offset* before doing anything, since the same paragraph says
+    // reallocation "invalidates all the references, pointers, and
+    // iterators referring to the elements in the sequence".
+    //
+    // The tail moves element by element, from the back, rather than
+    // through __vector_relocate_bytes: that primitive memsets its source
+    // after copying, which is right for a whole-buffer move (__grow_to's
+    // use) and wrong for a shift, where source and destination overlap
+    // and the zeroing would erase what was just written.
+    void __open_slots_at(size_t offset, size_t count) {
+        if (count == 0) return;
+        if (this->size_ + count > this->capacity_) {
+            size_t next_capacity = this->capacity_ == 0 ? count : this->capacity_;
+            while (next_capacity < this->size_ + count) {
+                next_capacity = next_capacity * 2;
+            }
+            this->__grow_to(next_capacity);
+        }
+        size_t scan = this->size_;
+        while (scan > offset) {
+            size_t source_index = scan - 1;
+            [[scpp::unsafe]] {
+                T* source_slot = &this->data_[source_index];
+                T& moving = source_slot[0];
+                new (&this->data_[source_index + count]) T(std::move(moving));
+                source_slot->~T();
+            }
+            scan = scan - 1;
+        }
+        return;
+    }
+
+    size_t __offset_of(T* position) const {
+        T* base = this->data_;
+        [[scpp::unsafe]] {
+            return static_cast<size_t>(position - base);
+        }
+    }
+
     T* __copy_data_from(const std::vector<T>& other) requires std::copy_constructible<T> {
         size_t other_size = other.size();
         T* fresh = this->__allocate_for(other_size);
@@ -195,6 +238,152 @@ public:
             slot->~T();
         }
         return;
+    }
+
+    // [vector.modifiers]: `template<class InputIterator> constexpr
+    // iterator insert(const_iterator position, InputIterator first,
+    // InputIterator last)`, returning "an iterator that points to the
+    // first of the newly inserted elements" and, per /1, doing at most
+    // one reallocation. This container had no `insert` at all -- nor any
+    // `erase` -- which is what
+    // `fields.insert(fields.end(), base.begin(), base.end())` in
+    // src/compiler/constexpression.cppm ran into.
+    template<typename InputIterator>
+    T* insert(T* position, InputIterator first, InputIterator last) requires std::copy_constructible<T> {
+        size_t offset = this->__offset_of(position);
+        size_t count = 0;
+        InputIterator counting = first;
+        while (counting != last) {
+            count = count + 1;
+            [[scpp::unsafe]] {
+                counting = counting + 1;
+            }
+        }
+        this->__open_slots_at(offset, count);
+        size_t placed = 0;
+        InputIterator source = first;
+        while (placed < count) {
+            [[scpp::unsafe]] {
+                new (&this->data_[offset + placed]) T(source[0]);
+                source = source + 1;
+            }
+            placed = placed + 1;
+        }
+        this->size_ = this->size_ + count;
+        [[scpp::unsafe]] {
+            return &this->data_[offset];
+        }
+    }
+
+    // The single-element forms, `insert(const_iterator, const T&)` and
+    // `insert(const_iterator, T&&)`.
+    T* insert(T* position, const T& value) requires std::copy_constructible<T> {
+        size_t offset = this->__offset_of(position);
+        this->__open_slots_at(offset, static_cast<size_t>(1));
+        [[scpp::unsafe]] {
+            new (&this->data_[offset]) T(value);
+        }
+        this->size_ = this->size_ + 1;
+        [[scpp::unsafe]] {
+            return &this->data_[offset];
+        }
+    }
+
+    T* insert(T* position, T&& value) {
+        size_t offset = this->__offset_of(position);
+        this->__open_slots_at(offset, static_cast<size_t>(1));
+        [[scpp::unsafe]] {
+            new (&this->data_[offset]) T(std::move(value));
+        }
+        this->size_ = this->size_ + 1;
+        [[scpp::unsafe]] {
+            return &this->data_[offset];
+        }
+    }
+
+    // `insert(const_iterator position, size_type n, const T& x)`.
+    T* insert(T* position, size_t count, const T& value) requires std::copy_constructible<T> {
+        size_t offset = this->__offset_of(position);
+        this->__open_slots_at(offset, count);
+        size_t placed = 0;
+        while (placed < count) {
+            [[scpp::unsafe]] {
+                new (&this->data_[offset + placed]) T(value);
+            }
+            placed = placed + 1;
+        }
+        this->size_ = this->size_ + count;
+        [[scpp::unsafe]] {
+            return &this->data_[offset];
+        }
+    }
+
+    // [vector.modifiers]/4-6: `erase(const_iterator first, const_iterator
+    // last)` destroys the erased elements and moves the tail down --
+    // "the destructor of T is called the number of times equal to the
+    // number of the elements erased" -- returning an iterator to the
+    // element that followed the last erased one.
+    T* erase(T* first, T* last) {
+        size_t start = this->__offset_of(first);
+        size_t stop = this->__offset_of(last);
+        if (stop <= start) {
+            [[scpp::unsafe]] {
+                return &this->data_[start];
+            }
+        }
+        size_t count = stop - start;
+        // The tail moves down by *assignment*, and only the elements
+        // left over at the end are destroyed. [vector.modifiers]/6 is
+        // exact about this: "the destructor of T is called the number of
+        // times equal to the number of the elements erased, but the
+        // assignment operator of T is called the number of times equal to
+        // the number of elements in the vector after the erased
+        // elements". Move-constructing the tail into place and destroying
+        // each source instead would call the destructor once per moved
+        // element too -- for {1,2,3} erasing the middle, twice where the
+        // clause says once, which a `T` with a side-effecting destructor
+        // can see.
+        // The same buffer under two names, because §6.2 tracks a borrow
+        // per *variable*: the move-assignment below needs a mutable
+        // reference to the source element while writing through the
+        // destination, and both reaching for one pointer is one variable
+        // borrowed twice ("cannot use 'buffer' while it is mutably
+        // borrowed"), exactly as reaching twice for `this->data_` is one
+        // reborrow of `this` too many.
+        T* source_slots{};
+        T* target_slots{};
+        [[scpp::unsafe]] {
+            source_slots = this->data_;
+            target_slots = this->data_;
+        }
+        size_t destination = start;
+        size_t source_index = stop;
+        size_t live_count = this->size_;
+        while (source_index < live_count) {
+            [[scpp::unsafe]] {
+                T& moving = source_slots[source_index];
+                target_slots[destination] = std::move(moving);
+            }
+            destination = destination + 1;
+            source_index = source_index + 1;
+        }
+        while (destination < this->size_) {
+            [[scpp::unsafe]] {
+                T* slot = &this->data_[destination];
+                slot->~T();
+            }
+            destination = destination + 1;
+        }
+        this->size_ = this->size_ - count;
+        [[scpp::unsafe]] {
+            return &this->data_[start];
+        }
+    }
+
+    T* erase(T* position) {
+        [[scpp::unsafe]] {
+            return this->erase(position, position + 1);
+        }
     }
 
     size_t size() const {
