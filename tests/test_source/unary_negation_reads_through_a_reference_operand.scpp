@@ -1,0 +1,61 @@
+import std;
+
+// [expr.type]/1: "If an expression initially has the type 'reference to
+// T' ..., the type is adjusted to T prior to any further analysis."
+// Unary negation asked whether its operand was floating by reading
+// `operand_type->name` straight off the inferred type -- and a Reference
+// carries its element in `pointee`, not in `name`, so the name was empty,
+// `is_float_scalar_type_name("")` was false, and every `-x` on a
+// `double&` took the *integer* branch: `sub double 0.0, %x`, which is not
+// valid IR at all. The binary operators one screen below were always
+// right because they run their operand type through binary_operand_type
+// first; this one did not.
+//
+// Cross-checked against clang++-22 -std=c++26: same values.
+class Box {
+  public:
+    virtual ~Box() = default;
+    double v;
+    Box(double d) : v{d} { return; }
+    double& ref() { return this->v; }
+};
+
+double negate_mutable(double& x) { return -x; }
+
+double negate_const(const double& x) { return -x; }
+
+float32_t negate_f32(float32_t& x) { return -x; }
+
+float64_t negate_f64(float64_t& x) { return -x; }
+
+int negate_int(int& x) { return -x; }
+
+int64_t negate_i64(int64_t& x) { return -x; }
+
+int main() {
+    double d = 2.5;
+    std::print("parameters {} {}\n", negate_mutable(d), negate_const(d));
+
+    // A reference-returning method and a reference-returning container
+    // accessor -- the two shapes src/compiler/constexpression.cppm uses.
+    Box b{2.5};
+    std::vector<double> v{};
+    v.push_back(2.5);
+    std::print("accessors {} {}\n", -b.ref(), -v.at(0));
+
+    float32_t f = 1.5;
+    float64_t g = 1.5;
+    std::print("widths {} {}\n", negate_f32(f) == -1.5, negate_f64(g) == -1.5);
+
+    // The integer branch is still the right one for integers, at both
+    // widths, which is what this always got right.
+    int i = 7;
+    int64_t big = 9223372036854775807;
+    std::print("integers {} {}\n", negate_int(i), negate_i64(big) == -9223372036854775807);
+
+    // Nested, and mixed into arithmetic that already worked.
+    double a = 2.5;
+    double c = 1.0;
+    std::print("mixed {} {}\n", -(-a), -a + c);
+    return 0;
+}
