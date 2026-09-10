@@ -2844,7 +2844,24 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         if (!operand_result.has_value()) return std::unexpected(std::move(operand_result).error());
                         llvm::LLVMValueRef operand = std::move(operand_result).value();
                         std::optional<Type> operand_type = infer_type(*expr.lhs);
-                        bool is_float = operand_type.has_value() && is_float_scalar_type_name(operand_type->name);
+                        // [expr.type]/1: "If an expression initially has
+                        // the type 'reference to T' ..., the type is
+                        // adjusted to T prior to any further analysis."
+                        // Asking `operand_type->name` without it reads the
+                        // *empty* name of a Reference, so every `-x` whose
+                        // operand was a `double&`/`const double&` -- a
+                        // `vector<double>::at()` result, a reference
+                        // parameter, a reference-returning method -- took
+                        // the integer branch and emitted
+                        // `sub double 0.0, %x`, which is not valid IR at
+                        // all. binary_operand_type is the same adjustment
+                        // codegen_binary already makes one screen below,
+                        // and the reason `a + b` on the very same operands
+                        // was always right while `-a` was not.
+                        bool is_float = false;
+                        if (operand_type.has_value()) {
+                            is_float = is_float_scalar_type_name(binary_operand_type(*operand_type).name);
+                        }
                         return is_float ? llvm::LLVMBuildFNeg(builder_, operand, "fnegtmp") : llvm::LLVMBuildNeg(builder_, operand, "negtmp");
                     }
                     auto operand_result = codegen_contextual_bool_value(*expr.lhs);
