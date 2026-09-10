@@ -1,0 +1,15 @@
+import std;
+
+// [unique.ptr.single.modifiers]: `reset` is not const-qualified -- it
+// rebinds the handle. A read-only handle cannot be reset through, the
+// same way it cannot be assigned through.
+void clear(const std::unique_ptr<int>& p) {
+    p.reset();
+    return;
+}
+
+int main() {
+    std::unique_ptr<int> p = std::make_unique<int>(1);
+    clear(p);
+    return 0;
+}

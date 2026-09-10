@@ -1,0 +1,17 @@
+0
+held 1
+destroy 1
+after-reset null true
+double-reset ok
+destroy 2
+replaced 3
+destroy 3
+reset-null true
+swapped 5 4
+destroy 6
+assigned-null true
+round-trip 7
+end
+destroy 7
+destroy 4
+destroy 5

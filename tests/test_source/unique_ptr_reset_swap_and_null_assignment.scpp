@@ -1,0 +1,57 @@
+import std;
+
+// [unique.ptr.single.modifiers]/3-4: `reset(pointer p = pointer())`
+// "Assigns p to the stored pointer, and then, with the old value of the
+// stored pointer, old_p, evaluates if (old_p) get_deleter()(old_p)";
+// /6-7: `swap(unique_ptr& u)` "Invokes swap on the stored pointers";
+// [unique.ptr.single.asgn]/11-13: `operator=(nullptr_t)` "As if by
+// reset()". `release()` was declared from the start and none of these
+// ever arrived, which is what `expr.lhs.reset()` in
+// src/compiler/constexpression.cppm ran into. Cross-checked against
+// clang++-22 -std=c++26: same twelve lines, same destruction order.
+class Noisy {
+  public:
+    int id;
+    Noisy(int i) : id{i} { return; }
+    virtual ~Noisy() {
+        std::print("destroy {}\n", this->id);
+        return;
+    }
+};
+
+int main() {
+    Noisy* empty{};
+
+    std::unique_ptr<Noisy> p = std::make_unique<Noisy>(1);
+    std::print("held {}\n", p->id);
+    p.reset();
+    std::print("after-reset null {}\n", p.get() == empty);
+    p.reset();
+    std::print("double-reset ok\n");
+
+    std::unique_ptr<Noisy> q = std::make_unique<Noisy>(2);
+    [[scpp::unsafe]] {
+        q.reset(new Noisy(3));
+    }
+    std::print("replaced {}\n", q->id);
+    q.reset(empty);
+    std::print("reset-null {}\n", q.get() == empty);
+
+    std::unique_ptr<Noisy> a = std::make_unique<Noisy>(4);
+    std::unique_ptr<Noisy> b = std::make_unique<Noisy>(5);
+    a.swap(b);
+    std::print("swapped {} {}\n", a->id, b->id);
+
+    std::unique_ptr<Noisy> n = std::make_unique<Noisy>(6);
+    n = nullptr;
+    std::print("assigned-null {}\n", n.get() == empty);
+
+    // release() hands ownership out; reset() takes it back, and only one
+    // destruction happens.
+    std::unique_ptr<Noisy> r = std::make_unique<Noisy>(7);
+    Noisy* raw = r.release();
+    r.reset(raw);
+    std::print("round-trip {}\n", r->id);
+    std::print("end\n");
+    return 0;
+}

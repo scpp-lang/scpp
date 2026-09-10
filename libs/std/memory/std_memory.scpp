@@ -107,6 +107,68 @@ public:
         return raw;
     }
 
+    // [unique.ptr.single.asgn]/11-13: `operator=(nullptr_t)` --
+    // "Effects: As if by reset()", postcondition `get() == nullptr`.
+    // Without it `p = nullptr;` was "cannot be reassigned from this
+    // expression", even though `std::unique_ptr<T> p = nullptr;` (the
+    // nullptr_t constructor just above) has always worked.
+    void operator=(nullptr_t null_pointer) {
+        this->reset();
+        return;
+    }
+
+    // [unique.ptr.single.modifiers]/3-4: `reset(pointer p = pointer())`
+    // "Assigns p to the stored pointer, and then, with the old value of
+    // the stored pointer, old_p, evaluates if (old_p)
+    // get_deleter()(old_p)" -- in that order, which its own Note calls
+    // significant. Spelled as the two overloads `std::shared_ptr` already
+    // declares in this file rather than one default argument, so the two
+    // smart pointers offer the same surface.
+    //
+    // `release()` was here from the start and `reset()` never arrived,
+    // which is what `expr.lhs.reset()` in src/compiler/constexpression.cppm
+    // ran into.
+    void reset() {
+        T* old = this->ptr_;
+        bool owned = this->owns_;
+        T* empty{};
+        this->ptr_ = empty;
+        this->owns_ = false;
+        if (owned) {
+            [[scpp::unsafe]] {
+                delete old;
+            }
+        }
+        return;
+    }
+
+    void reset(T* ptr) {
+        T* old = this->ptr_;
+        bool owned = this->owns_;
+        T* empty{};
+        this->ptr_ = ptr;
+        this->owns_ = ptr != empty;
+        if (owned) {
+            [[scpp::unsafe]] {
+                delete old;
+            }
+        }
+        return;
+    }
+
+    // [unique.ptr.single.modifiers]/7: "Invokes swap on the stored
+    // pointers ... of *this and u". The ownership flag travels with the
+    // pointer it describes.
+    void swap(std::unique_ptr<T>& other) {
+        T* other_ptr = other.ptr_;
+        bool other_owns = other.owns_;
+        other.ptr_ = this->ptr_;
+        other.owns_ = this->owns_;
+        this->ptr_ = other_ptr;
+        this->owns_ = other_owns;
+        return;
+    }
+
     bool operator==(T* other) const {
         return this->ptr_ == other;
     }
@@ -191,6 +253,22 @@ public:
         this->destroy_ = other.destroy_;
         void* empty_control{};
         if (this->control_ != empty_control) std::__shared_ptr_count_acquire(this->control_);
+        return;
+    }
+
+    // The exchange [util.smartptr.shared.mod]/1 asks for, done where the
+    // representation lives: no reference count changes hands, so neither
+    // acquire nor release is involved.
+    void swap(__shared_handle& other) {
+        const void* other_ptr = other.ptr_;
+        void* other_control = other.control_;
+        void (*other_destroy)(const void*) = other.destroy_;
+        other.ptr_ = this->ptr_;
+        other.control_ = this->control_;
+        other.destroy_ = this->destroy_;
+        this->ptr_ = other_ptr;
+        this->control_ = other_control;
+        this->destroy_ = other_destroy;
         return;
     }
 
@@ -343,6 +421,18 @@ public:
 
     int use_count() const {
         return this->handle_.use_count();
+    }
+
+    // [util.smartptr.shared.mod]/1: `void swap(shared_ptr& r) noexcept`
+    // -- "Exchanges the contents of *this and r". `unique_ptr` above has
+    // one now too; this container had `reset()`/`reset(T*)`/`use_count()`
+    // and no `swap`.
+    void swap(std::shared_ptr<T>& other) {
+        T* other_ptr = other.ptr_;
+        other.ptr_ = this->ptr_;
+        this->ptr_ = other_ptr;
+        this->handle_.swap(other.handle_);
+        return;
     }
 
     void reset() {

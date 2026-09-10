@@ -1,0 +1,28 @@
+import std;
+
+// [util.smartptr.shared.mod]/1: `void swap(shared_ptr& r) noexcept` --
+// "Exchanges the contents of *this and r". This container declared
+// `reset()`, `reset(T*)` and `use_count()` and no `swap`, so the
+// smart-pointer pair offered different surfaces for the same clause
+// family. No reference count changes hands in an exchange, which the
+// counts below check directly.
+int main() {
+    int* empty{};
+
+    std::shared_ptr<int> a = std::make_shared<int>(1);
+    std::shared_ptr<int> b = std::make_shared<int>(2);
+    a.swap(b);
+    std::print("swapped {} {}\n", *a, *b);
+
+    std::shared_ptr<int> shared = std::make_shared<int>(3);
+    std::shared_ptr<int> keep = shared;
+    std::shared_ptr<int> lone = std::make_shared<int>(4);
+    shared.swap(lone);
+    std::print("counts {} {} {} {}\n", *shared, *lone, lone.use_count(), shared.use_count());
+
+    std::shared_ptr<int> full = std::make_shared<int>(5);
+    std::shared_ptr<int> none{};
+    full.swap(none);
+    std::print("with-empty {} {}\n", *none, full.get() == empty);
+    return 0;
+}
