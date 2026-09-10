@@ -1,0 +1,27 @@
+import std;
+
+// [optional.nullopt]/1 calls nullopt_t "a unique type", and /2 says it
+// "models copyable". Both matter beyond `optional` itself: the type has
+// to be nameable as a parameter, has to select its own overload, and has
+// to be copyable like any other value.
+void which(std::nullopt_t marker) {
+    std::print("nullopt\n");
+    return;
+}
+
+void which(int value) {
+    std::print("int\n");
+    return;
+}
+
+int main() {
+    which(std::nullopt);
+    which(1);
+
+    std::nullopt_t local{0};
+    std::nullopt_t copied{local};
+    std::optional<std::string> o{std::string{"x"}};
+    o = copied;
+    std::print("copyable {}\n", o.has_value());
+    return 0;
+}

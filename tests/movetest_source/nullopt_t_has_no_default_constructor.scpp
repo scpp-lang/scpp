@@ -1,0 +1,11 @@
+import std;
+
+// [optional.nullopt]/2: nullopt_t "does not have a default constructor
+// or an initializer-list constructor, and is not an aggregate" -- so
+// `std::nullopt_t n{};` is ill-formed, and `std::nullopt` is the only way
+// to obtain one.
+int main() {
+    std::nullopt_t n{};
+    std::optional<int> o{n};
+    return o.has_value() ? 1 : 0;
+}
