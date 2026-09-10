@@ -1,0 +1,49 @@
+import std;
+
+// [class.static.data]/1: a static data member is not part of the
+// subobjects of a class -- there is one copy shared by all objects of it.
+// [dcl.constexpr]/1: one declared `constexpr` is implicitly an inline
+// variable, so it needs no out-of-line definition and no storage: it is a
+// constant, reached through the class's own name. This was rejected
+// outright ("static data members are not supported in this version"),
+// which is why `std::string` and `std::string_view` each carried a free
+// function in place of the `npos` their wording declares.
+class Buf {
+  public:
+    virtual ~Buf() = default;
+    static constexpr std::size_t npos = static_cast<std::size_t>(-1);
+    static constexpr int slots = 3;
+    static constexpr const char* tag = "buf";
+    static constexpr bool on = true;
+    static constexpr double ratio = 0.5;
+
+    int used{};
+    std::size_t missing() const { return Buf::npos; }
+};
+
+struct Limits {
+    static constexpr int high = 7;
+    int v;
+};
+
+int main() {
+    std::print("qualified {}\n", Buf::npos == static_cast<std::size_t>(-1));
+    std::print("scalars {} {} {} {}\n", Buf::slots, Buf::tag, Buf::on, Buf::ratio);
+
+    // A constant expression, not merely a runtime value: usable as an
+    // array bound, exactly like a namespace-scope `constexpr` variable.
+    int arr[Buf::slots]{};
+    arr[2] = 5;
+    std::print("bound {}\n", arr[2]);
+
+    Buf b{};
+    std::print("from-method {}\n", b.missing() == Buf::npos);
+    std::print("struct {}\n", Limits::high);
+
+    // One copy shared by all objects ([class.static.data]/1), and no
+    // storage of its own inside one: the class is still just its fields.
+    Buf other{};
+    other.used = 2;
+    std::print("shared {} {}\n", b.used, other.used);
+    return 0;
+}

@@ -1,0 +1,16 @@
+import std;
+
+// [temp.static]/1: there is one static data member per specialization --
+// this version does not instantiate them.
+template<typename T>
+class C {
+  public:
+    virtual ~C() = default;
+    static constexpr int k = 1;
+    T v{};
+};
+
+int main() {
+    C<int> c{};
+    return C<int>::k - 1;
+}

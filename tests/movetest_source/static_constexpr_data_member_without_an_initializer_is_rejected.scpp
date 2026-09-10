@@ -1,0 +1,10 @@
+import std;
+
+// [dcl.constexpr]/6: a constexpr object "shall be initialized".
+class C {
+  public:
+    virtual ~C() = default;
+    static constexpr int missing;
+};
+
+int main() { return C::missing; }

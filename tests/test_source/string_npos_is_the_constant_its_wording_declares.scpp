@@ -1,0 +1,17 @@
+import std;
+
+// [basic.string.general] and [string.view.template.general] both declare
+// `static constexpr size_type npos = size_type(-1);`. Both classes stood
+// a free function in for it instead. Cross-checked against clang++-22
+// -std=c++26 on the equivalent program: same six lines.
+int main() {
+    std::string t{"ab: cd"};
+    std::print("found {}\n", static_cast<int>(t.find(": ")));
+    std::print("present {}\n", t.find(": ") == std::string::npos);
+    std::print("absent {}\n", t.find("zz") == std::string::npos);
+    std::string_view v{t};
+    std::print("sv-absent {}\n", v.rfind("zz") == std::string_view::npos);
+    std::print("sv-present {}\n", v.rfind("cd") == std::string_view::npos);
+    std::print("npos-eq {}\n", std::string::npos == static_cast<std::size_t>(-1));
+    return 0;
+}
