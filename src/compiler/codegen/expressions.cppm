@@ -2127,6 +2127,37 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         return load_value(LValue{storage, target_type, alignment});
     }
 
+    // [expr.cond]/4: "an attempt is made to form an implicit conversion
+    // sequence from each of those operands to the type of the other",
+    // applied when exactly one can be formed -- "if more than one ... the
+    // program is ill-formed", so both directions converting yields no
+    // composite rather than a choice. movecheck's
+    // conditional_composite_by_conversion decides the same question with
+    // its own resolver; this is the codegen half, asked in the three
+    // places that need it: the arms' common target, the expression's own
+    // inferred type, and whether the conditional is a glvalue at all.
+    [[nodiscard]] std::optional<Type> Codegen::conditional_composite_type(const Expr& then_arm, const Expr& else_arm)
+{
+        auto arm_value_type = [&, this](const Expr& arm) -> std::optional<Type> {
+            std::optional<Type> arm_type = infer_type(arm);
+            if (!arm_type.has_value()) return std::nullopt;
+            if (arm_type->kind == TypeKind::Reference && arm_type->pointee != nullptr) return *arm_type->pointee;
+            return decay_array_to_pointer(*arm_type);
+        };
+        std::optional<Type> then_type = arm_value_type(then_arm);
+        std::optional<Type> else_type = arm_value_type(else_arm);
+        if (!then_type.has_value() || !else_type.has_value()) return std::nullopt;
+        if (types_equal(*then_type, *else_type)) return then_type;
+        bool else_converts_to_then = is_named_record_type(*then_type) &&
+                                     resolve_converting_constructor_by_type(then_type->name, else_arm) != nullptr;
+        bool then_converts_to_else = is_named_record_type(*else_type) &&
+                                     resolve_converting_constructor_by_type(else_type->name, then_arm) != nullptr;
+        if (else_converts_to_then && !then_converts_to_else) return then_type;
+        if (then_converts_to_else && !else_converts_to_then) return else_type;
+        return std::nullopt;
+    }
+
+
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::codegen_value_for_target(const Expr& expr, const Type& target_type)
 {
         // A brace-enclosed initializer list has no type of its own, so it
@@ -2476,6 +2507,14 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         common_type = then_type;
                     } else if (is_scalar_target(else_type) && is_untyped_numeric_literal(*expr.rhs)) {
                         common_type = else_type;
+                    } else {
+                        // [expr.cond]/4's composite: setting common_type is
+                        // the whole of the work here, because
+                        // codegen_value_for_target already routes a
+                        // class-typed target through
+                        // codegen_class_value_for_boundary with the
+                        // converting constructor allowed.
+                        common_type = conditional_composite_type(*expr.rhs, *expr.third);
                     }
                     auto codegen_arm = [&, this](const Expr& arm) -> std::expected<llvm::LLVMValueRef, CodegenError> {
                         return common_type.has_value() ? codegen_value_for_target(arm, *common_type) : codegen_expr(arm);
@@ -3871,6 +3910,35 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
             case ExprKind::Conditional:
                 return [&, this]() -> std::expected<Codegen::LValue, CodegenError> {
+                    // [expr.cond]/5-6: the conditional is a glvalue only
+                    // when the arms are glvalues "of the same value
+                    // category and ... the same type"; "otherwise, the
+                    // result is a prvalue". A prvalue reached where an
+                    // lvalue is wanted -- `(c ? a : b).field` -- is
+                    // materialized into a temporary, exactly as a
+                    // by-value call's result already is. Building a phi
+                    // of the two arms' addresses instead reported
+                    // "expression is not assignable" about an expression
+                    // nobody was assigning to.
+                    std::optional<Type> then_arm_type = infer_type(*expr.rhs);
+                    std::optional<Type> else_arm_type = infer_type(*expr.third);
+                    if (then_arm_type.has_value() && else_arm_type.has_value() &&
+                        !types_equal(*then_arm_type, *else_arm_type)) {
+                        std::optional<Type> composite = conditional_composite_type(*expr.rhs, *expr.third);
+                        if (composite.has_value()) {
+                            auto value_result = codegen_value_for_target(expr, *composite);
+                            if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                            auto composite_llvm_type_result = to_llvm_type(*composite);
+                            if (!composite_llvm_type_result.has_value()) {
+                                return std::unexpected(std::move(composite_llvm_type_result).error());
+                            }
+                            std::optional<unsigned> composite_align = alignment_for_type(*composite);
+                            llvm::LLVMValueRef materialized = create_entry_block_alloca(
+                                std::move(composite_llvm_type_result).value(), "cond.materialized", composite_align);
+                            create_store(std::move(value_result).value(), materialized, composite_align);
+                            return LValue{materialized, *composite, composite_align};
+                        }
+                    }
                     auto cond_result = codegen_contextual_bool_i1(*expr.lhs);
                     if (!cond_result.has_value()) return std::unexpected(std::move(cond_result).error());
                     llvm::LLVMValueRef cond = std::move(cond_result).value();

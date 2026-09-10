@@ -1,0 +1,60 @@
+import std;
+
+// [expr.cond]/4: "if the second and third operand have different types
+// and either has (possibly cv-qualified) class type ... an attempt is
+// made to form an implicit conversion sequence from each of those
+// operands to the type of the other", applied when exactly one can be
+// formed. /6: "otherwise, the result is a prvalue" -- so a composed
+// conditional is a value, and `.member` on it materializes a temporary.
+//
+// conditional_arm_types_agree answered /3 alone (do the arms already
+// have the same type once [expr.type]/1's reference adjustment and the
+// decays are applied) and stopped, so `c ? optional_value : std::nullopt`
+// -- what src/compiler/constexpression.cppm writes -- was rejected for
+// having "different types" even though `std::optional<T>` has a
+// constructor taking `nullopt_t` and `nullopt_t` has none taking an
+// optional. Cross-checked against clang++-22 -std=c++26: same values.
+class A {
+  public:
+    virtual ~A() = default;
+    int v;
+    A(int x) : v{x} { return; }
+};
+
+class B {
+  public:
+    virtual ~B() = default;
+    int w;
+    B(int x) : w{x} { return; }
+    B(const A& a) : w{a.v} { return; }
+};
+
+std::optional<int> then_value(bool b) { return b ? std::optional<int>{7} : std::nullopt; }
+
+std::optional<int> else_value(bool b) { return b ? std::nullopt : std::optional<int>{7}; }
+
+std::optional<std::string> non_trivial(bool b) {
+    return b ? std::optional<std::string>{std::string{"hi"}} : std::nullopt;
+}
+
+int main() {
+    std::print("then {} {}\n", then_value(true).value(), then_value(false).has_value());
+    std::print("else {} {}\n", else_value(false).value(), else_value(true).has_value());
+    std::print("string {} {}\n", non_trivial(true).value(), non_trivial(false).has_value());
+
+    bool yes = true;
+    std::optional<int> from_value = yes ? 7 : std::optional<int>{1};
+    std::print("value-arm {}\n", from_value.value());
+
+    // /6's prvalue result, reached through `.member`: whichever arm is
+    // converted, the composite is B and its `w` is the A's `v`.
+    A a{5};
+    B b{9};
+    std::print("member {} {}\n", (yes ? a : b).w, (!yes ? b : a).w);
+
+    // Neither same-type arms nor scalar arms changed meaning.
+    std::optional<int> p{1};
+    std::optional<int> q{2};
+    std::print("unchanged {} {}\n", (yes ? p : q).value(), yes ? 1 : 2);
+    return 0;
+}

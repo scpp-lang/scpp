@@ -165,6 +165,17 @@ struct NodiscardInfo {
                                                                                const Signatures& signatures);
 [[nodiscard]] const FunctionSignature* find_single_argument_converting_constructor_signature(
             const Type& class_type, const Expr& arg, const Body& body, const Signatures& signatures);
+class ConditionalComposite {
+          public:
+            // Null exactly when the arms do not compose: no conversion
+            // sequence in either direction, or one in both, which
+            // [expr.cond]/4 makes ill-formed rather than a choice.
+            const FunctionSignature* constructor{};
+            Type type{};
+        };
+        [[nodiscard]] ConditionalComposite conditional_composite_by_conversion(
+            const Expr& then_arm, const Type& raw_then_type, const Expr& else_arm, const Type& raw_else_type,
+            const Body& body, const Signatures& signatures);
         [[nodiscard]] bool argument_type_matches_parameter(const Type& arg_type, const Type& param_type, const Body& body);
 [[nodiscard]] bool const_reference_binds_materialized_temporary(const Expr& arg, const Type& param_type,
                                                                 const Body& body,
@@ -1004,6 +1015,54 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     return constructor_parameter_accepts_argument_directly(arg, param_type, body, signatures,
                                                            allow_user_defined_conversion,
                                                            /*require_usable_class_value_source=*/false);
+}
+
+// [expr.cond]/4: "if the second and third operand have different types
+// and either has (possibly cv-qualified) class type ... an attempt is
+// made to form an implicit conversion sequence from each of those
+// operands to the type of the other", and that conversion is applied
+// when *exactly one* can be formed -- "if more than one conversion
+// sequence can be formed ... the program is ill-formed", so both
+// directions converting is a rejection, not an acceptance.
+//
+// conditional_arm_types_agree answers /3 alone -- do the arms already
+// have the same type once [expr.type]/1's reference adjustment and the
+// array/function decays are applied -- and stopped there. So
+// `c ? optional_value : std::nullopt` was "conditional operator requires
+// both arms to have the same type", although `std::optional<T>` has a
+// constructor taking `nullopt_t` ([optional.ctor]/2) and `nullopt_t` has
+// none taking an optional: one sequence, not none and not two.
+//
+// Returns the constructor /4 selects, so its caller can both accept the
+// expression and require that constructor's definition -- the arm is
+// generated through it, and a declaration alone links to nothing.
+[[nodiscard]] ConditionalComposite conditional_composite_by_conversion(
+    const Expr& then_arm, const Type& raw_then_type, const Expr& else_arm, const Type& raw_else_type,
+    const Body& body, const Signatures& signatures) {
+    auto arm_value_type = [](const Type& raw) {
+        Type adjusted = literal_adoption_target(raw);
+        if (is_reference(adjusted) && adjusted.pointee != nullptr) return *adjusted.pointee;
+        return adjusted;
+    };
+    ConditionalComposite composite;
+    Type then_value = arm_value_type(raw_then_type);
+    Type else_value = arm_value_type(raw_else_type);
+    if (types_equal(then_value, else_value)) return composite;
+    const FunctionSignature* else_to_then =
+        find_single_argument_converting_constructor_signature(then_value, else_arm, body, signatures);
+    const FunctionSignature* then_to_else =
+        find_single_argument_converting_constructor_signature(else_value, then_arm, body, signatures);
+    if (else_to_then != nullptr && then_to_else != nullptr) return composite;
+    if (else_to_then != nullptr) {
+        composite.constructor = else_to_then;
+        composite.type = std::move(then_value);
+        return composite;
+    }
+    if (then_to_else != nullptr) {
+        composite.constructor = then_to_else;
+        composite.type = std::move(else_value);
+    }
+    return composite;
 }
 
 [[nodiscard]] const FunctionSignature* find_single_argument_converting_constructor_signature(
@@ -3101,7 +3160,19 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             // operands before the composite type is determined.
             then_type = decay_array_to_pointer(*then_type);
             else_type = decay_array_to_pointer(*else_type);
-            return types_equal(*then_type, *else_type) ? then_type : std::nullopt;
+            if (types_equal(*then_type, *else_type)) return then_type;
+            // [expr.cond]/4's composite: when exactly one arm converts to
+            // the other's type, the conversion is applied and *that* is
+            // the expression's type. Answering std::nullopt here left
+            // every such conditional typeless, so a caller that needed
+            // the type -- a `return`, an argument, `.member` on the
+            // result -- had nothing to work from.
+            if (ConditionalComposite composite = conditional_composite_by_conversion(*expr.rhs, *then_type, *expr.third,
+                                                                                     *else_type, body, signatures);
+                composite.constructor != nullptr) {
+                return composite.type;
+            }
+            return std::nullopt;
         }
 
         case ExprKind::Fold:

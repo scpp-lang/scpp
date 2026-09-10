@@ -1,0 +1,24 @@
+import std;
+
+// [expr.cond]/4 composes arms only when a conversion sequence can be
+// formed; neither of these classes constructs from the other.
+class A {
+  public:
+    virtual ~A() = default;
+    int v;
+    A(int x) : v{x} { return; }
+};
+
+class B {
+  public:
+    virtual ~B() = default;
+    int w;
+    B(int x) : w{x} { return; }
+};
+
+int main() {
+    bool c = true;
+    A a{1};
+    B b{2};
+    return (c ? a : b).v;
+}

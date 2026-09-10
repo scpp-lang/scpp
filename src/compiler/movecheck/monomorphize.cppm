@@ -1785,6 +1785,30 @@ private:
                 if (selected.signature == nullptr) return {};
                 return require_member_definition(*selected.signature);
             }
+            case ExprKind::Conditional: {
+                // [expr.cond]/4 composes arms of different types through a
+                // converting constructor, and an arm generated through one
+                // needs that constructor *defined*, not merely declared --
+                // otherwise `c ? optional_value : std::nullopt` emitted a
+                // call to `std::optional<T>::optional(nullopt_t)` that
+                // nothing ever instantiated, and the program failed to
+                // link. Same question, same one implementation as
+                // movecheck's own acceptance test.
+                // Nothing to require when no definition is deferred at
+                // all: require_member_definition's own first line says
+                // the same, and asking it up here skips two
+                // infer_expr_type calls per conditional expression in the
+                // program rather than doing them and discarding both.
+                if (deferred_member_definitions_.empty()) return {};
+                if (expr.rhs == nullptr || expr.third == nullptr) return {};
+                std::optional<Type> then_type = infer_expr_type(*expr.rhs, body, signatures_);
+                std::optional<Type> else_type = infer_expr_type(*expr.third, body, signatures_);
+                if (!then_type.has_value() || !else_type.has_value()) return {};
+                ConditionalComposite composed = conditional_composite_by_conversion(
+                    *expr.rhs, *then_type, *expr.third, *else_type, body, signatures_);
+                if (composed.constructor == nullptr) return {};
+                return require_member_definition(*composed.constructor);
+            }
             default:
                 return {};
         }
