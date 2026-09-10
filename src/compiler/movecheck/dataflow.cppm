@@ -4288,6 +4288,56 @@ struct ConvertingConstructorBinding {
                     reinitialize_place(state.locals, whole_local_place(stmt.local));
                     return {};
                 }
+                // [expr.assign]/1 with [over.oper]/1: for a class
+                // operand the assignment *is* a call to `operator=`
+                // chosen by overload resolution. §6.5(3) and §6.4(3),
+                // whose branches are above, say which operators a class
+                // has *implicitly*; neither says they are the only ones
+                // it may have, and §6.5(1) says a program may declare its
+                // own. So a class that declares an `operator=` matching
+                // this source is assignable from it, and this is where
+                // that is asked -- the two branches above answer only
+                // "is the source the variable's own type".
+                //
+                // Without it, `libs/std`'s `std::optional<T>::operator=
+                // (const T&)` and `operator=(T&&)` were declared,
+                // registered, and uncallable: `o = value;` -- what
+                // [optional.assign]/13-15 is about, and what
+                // src/compiler/constexpression.cppm's
+                // `lhs_type = decay_array_to_pointer(*lhs_type);` needs
+                // -- was rejected for not being an `optional<T>`.
+                // signatures.cppm's own comment already called such an
+                // overload "an ordinary, unrelated overload of the name";
+                // ordinary is exactly what it now gets to be.
+                if (body.program != nullptr && state.locals.contains(whole_local_place(stmt.local))) {
+                    std::optional<Type> source_type = infer_expr_type(*stmt.expr, body, signatures);
+                    if (source_type.has_value()) {
+                        const Type& source_value =
+                            is_reference(*source_type) && source_type->pointee != nullptr ? *source_type->pointee
+                                                                                          : *source_type;
+                        if (find_converting_assign((*local_type).name, source_value, *body.program) != nullptr) {
+                            if (report_errors) {
+                                auto borrow_it = state.borrows.find(stmt.local);
+                                if (borrow_it != state.borrows.end() &&
+                                    (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
+                                    return std::unexpected(DataflowError(
+                                        "cannot assign to " +
+                                            std::string(record_keyword((*local_type).name, *body.program)) +
+                                            " variable '" + target_name + "': it is currently borrowed",
+                                        state.current_loc));
+                                }
+                            }
+                            if (auto _r = apply_expr(*stmt.expr,
+                                                     /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move,
+                                                     state, body, signatures, report_errors);
+                                !_r.has_value()) {
+                                return std::unexpected(std::move(_r).error());
+                            }
+                            reinitialize_place(state.locals, whole_local_place(stmt.local));
+                            return {};
+                        }
+                    }
+                }
                 if (report_errors && state.locals.contains(whole_local_place(stmt.local))) {
                     if (std::optional<DataflowError> own =
                             diagnose_expression_itself(*stmt.expr, state, body, signatures);

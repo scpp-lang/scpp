@@ -1,0 +1,32 @@
+// The other direction. Recognizing a class's own converting `operator=`
+// must not make a class-typed variable assignable from anything at all:
+// with no `operator=` matching the source, ch02 §6.4(3) and §6.5(3) are
+// the whole list, and neither licenses an unrelated type.
+//
+// Rejected before and after the change that made
+// a_class_is_assigned_through_its_own_converting_operator compile -- this
+// is the guard on its blast radius, not a case it changes.
+import std;
+
+class Ty {
+public:
+    int kind;
+
+    Ty() : kind{0} { return; }
+    virtual ~Ty() { return; }
+};
+
+class Unrelated {
+public:
+    int z;
+
+    Unrelated() : z{0} { return; }
+    virtual ~Unrelated() { return; }
+};
+
+int main() {
+    std::optional<Ty> t{};
+    Unrelated u{};
+    t = u;
+    return 0;
+}

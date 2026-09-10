@@ -4383,6 +4383,43 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     }
                     return lv.ptr;
                 }
+                // [expr.assign]/1 with [over.oper]/1: for a class
+                // operand the assignment is a call to `operator=` chosen
+                // by overload resolution, and an overload taking anything
+                // other than the class's own type is an ordinary member
+                // call like any other. codegen_binary_operator_function_
+                // call already dispatches every binary operator that way,
+                // and binary_operator_method_name already maps `=` to
+                // `operator_assign` -- `Assign` simply short-circuited
+                // into this branch before ever reaching it, so
+                // `std::optional<T>::operator=(const T&)` was declared,
+                // registered, and unreachable. check_moves' own
+                // assignment check was changed in step, so the call this
+                // emits is the one that pass licensed.
+                //
+                // Only after the same-type copy path above: that one has
+                // its own memberwise fallback and must keep winning for
+                // the copy shape, exactly as [over.match.oper] would pick
+                // the copy assignment operator for a same-type source.
+                if (lv.type.kind == TypeKind::Named && structs_.contains(lv.type.name)) {
+                    std::optional<Type> rhs_type = infer_type(*expr.rhs);
+                    if (rhs_type.has_value()) {
+                        const Type& rhs_value = rhs_type->kind == TypeKind::Reference && rhs_type->pointee != nullptr
+                                                    ? *rhs_type->pointee
+                                                    : *rhs_type;
+                        if (find_converting_assign_ast(lv.type.name, rhs_value) != nullptr) {
+                            auto dispatched = codegen_binary_operator_function_call(expr, lv.type, rhs_type);
+                            if (!dispatched.has_value()) return std::unexpected(std::move(dispatched).error());
+                            if (dispatched.value().has_value()) {
+                                if (std::optional<Place> target_place = codegen_place_of(*expr.lhs);
+                                    target_place.has_value()) {
+                                    clear_place_moved(*target_place);
+                                }
+                                return lv.ptr;
+                            }
+                        }
+                    }
+                }
                 // [expr.ass]/1: an array is not a modifiable lvalue, so
                 // no assignment applies to one. Caught here, against the
                 // scpp type, because the only check downstream is

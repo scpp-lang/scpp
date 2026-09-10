@@ -2218,40 +2218,69 @@ class Function {
     std::vector<SourceLocation> superseded_forward_declaration_locs;
 };
 
+// Whether a special member's self-parameter type names the class that
+// declares it.
+//
+// A monomorphized generic class's name is its template's name with the
+// concrete arguments appended after a '.' -- `std::optional.app::Ty`.
+// Stripping the namespace with `rfind("::")` over that whole string lands
+// inside the *argument*, so `std::optional.app::Ty` unqualified to `Ty`
+// and matched `app::Ty` -- making `std::optional<app::Ty>::operator=
+// (app::Ty&&)`, an ordinary converting assignment, look like optional's
+// own move assignment operator. Every namespaced value type hit it:
+// `std::optional<scpp::Type>` among them.
+//
+// The class part is everything before the *first* '.', and the namespace
+// is stripped from that, not from the arguments. The argument list must
+// then match as well, so `optional<A>` and `optional<B>` stay distinct.
+// The index of the first '.' in `name`, or its size when it has none.
+// Written with rfind/substr alone because those are the whole of
+// std::string_view's search surface in libs/std, and this file is one of
+// the self-hosted ones.
+[[nodiscard]] inline std::size_t special_member_first_dot(std::string_view name) {
+    std::size_t candidate = name.rfind(".");
+    if (candidate == static_cast<std::size_t>(-1)) return name.size();
+    bool searching = true;
+    while (searching) {
+        std::string_view prefix = name.substr(0, candidate);
+        std::size_t earlier = prefix.rfind(".");
+        if (earlier == static_cast<std::size_t>(-1)) {
+            searching = false;
+        } else {
+            candidate = earlier;
+        }
+    }
+    return candidate;
+}
+
+// The class part of a possibly-flattened generic name, with its namespace
+// removed: `std::optional.app::Ty` -> `optional`.
+[[nodiscard]] inline std::string_view special_member_owner_head(std::string_view name) {
+    std::string_view head = name.substr(0, special_member_first_dot(name));
+    std::size_t scope = head.rfind("::");
+    if (scope == static_cast<std::size_t>(-1)) return head;
+    return head.substr(scope + 2);
+}
+
+// Everything from that first '.' on -- the template arguments, compared
+// verbatim so `optional<A>` and `optional<B>` stay distinct.
+[[nodiscard]] inline std::string_view special_member_owner_arguments(std::string_view name) {
+    return name.substr(special_member_first_dot(name));
+}
+
+[[nodiscard]] inline bool special_member_names_owner(std::string_view spelled_name, std::string_view owner_name) {
+    if (spelled_name == owner_name) return true;
+    return special_member_owner_head(spelled_name) == special_member_owner_head(owner_name) &&
+           special_member_owner_arguments(spelled_name) == special_member_owner_arguments(owner_name);
+}
+
 [[nodiscard]] inline bool is_special_member_this_param(const Type& type, std::string_view owner_name) {
     if (type.kind != TypeKind::Reference || !type.is_mutable_ref || type.pointee == nullptr ||
         type.pointee->kind != TypeKind::Named) {
         return false;
     }
     std::string_view spelled_name{type.pointee->name};
-    std::size_t spelled_scope = spelled_name.rfind("::");
-    std::size_t owner_scope = owner_name.rfind("::");
-    std::string_view spelled_unqualified =
-        spelled_scope == static_cast<std::size_t>(-1) ? spelled_name : spelled_name.substr(spelled_scope + 2);
-    std::string_view owner_unqualified =
-        owner_scope == static_cast<std::size_t>(-1) ? owner_name : owner_name.substr(owner_scope + 2);
-    if (spelled_name == owner_name || spelled_unqualified == owner_unqualified) return true;
-    std::size_t spelled_start = static_cast<std::size_t>(0);
-    if (spelled_scope != static_cast<std::size_t>(-1)) spelled_start = spelled_scope + 2;
-    std::string_view spelled_tail = spelled_name.substr(spelled_start);
-    std::size_t spelled_dot = spelled_tail.rfind(".");
-    std::string spelled_base{};
-    if (spelled_dot == static_cast<std::size_t>(-1)) {
-        spelled_base = std::string(spelled_tail.data(), spelled_tail.size());
-    } else {
-        spelled_base = std::string(spelled_tail.data(), spelled_dot);
-    }
-    std::size_t owner_start = static_cast<std::size_t>(0);
-    if (owner_scope != static_cast<std::size_t>(-1)) owner_start = owner_scope + 2;
-    std::string_view owner_tail = owner_name.substr(owner_start);
-    std::size_t owner_dot = owner_tail.rfind(".");
-    std::string owner_base{};
-    if (owner_dot == static_cast<std::size_t>(-1)) {
-        owner_base = std::string(owner_tail.data(), owner_tail.size());
-    } else {
-        owner_base = std::string(owner_tail.data(), owner_dot);
-    }
-    return spelled_base == owner_base;
+    return special_member_names_owner(spelled_name, owner_name);
 }
 
 [[nodiscard]] inline bool is_special_member_const_lvalue_self_param(const Type& type, std::string_view owner_name) {
@@ -2260,34 +2289,7 @@ class Function {
         return false;
     }
     std::string_view spelled_name{type.pointee->name};
-    std::size_t spelled_scope = spelled_name.rfind("::");
-    std::size_t owner_scope = owner_name.rfind("::");
-    std::string_view spelled_unqualified =
-        spelled_scope == static_cast<std::size_t>(-1) ? spelled_name : spelled_name.substr(spelled_scope + 2);
-    std::string_view owner_unqualified =
-        owner_scope == static_cast<std::size_t>(-1) ? owner_name : owner_name.substr(owner_scope + 2);
-    if (spelled_name == owner_name || spelled_unqualified == owner_unqualified) return true;
-    std::size_t spelled_start = static_cast<std::size_t>(0);
-    if (spelled_scope != static_cast<std::size_t>(-1)) spelled_start = spelled_scope + 2;
-    std::string_view spelled_tail = spelled_name.substr(spelled_start);
-    std::size_t spelled_dot = spelled_tail.rfind(".");
-    std::string spelled_base{};
-    if (spelled_dot == static_cast<std::size_t>(-1)) {
-        spelled_base = std::string(spelled_tail.data(), spelled_tail.size());
-    } else {
-        spelled_base = std::string(spelled_tail.data(), spelled_dot);
-    }
-    std::size_t owner_start = static_cast<std::size_t>(0);
-    if (owner_scope != static_cast<std::size_t>(-1)) owner_start = owner_scope + 2;
-    std::string_view owner_tail = owner_name.substr(owner_start);
-    std::size_t owner_dot = owner_tail.rfind(".");
-    std::string owner_base{};
-    if (owner_dot == static_cast<std::size_t>(-1)) {
-        owner_base = std::string(owner_tail.data(), owner_tail.size());
-    } else {
-        owner_base = std::string(owner_tail.data(), owner_dot);
-    }
-    return spelled_base == owner_base;
+    return special_member_names_owner(spelled_name, owner_name);
 }
 
 [[nodiscard]] inline bool is_special_member_rvalue_self_param(const Type& type, std::string_view owner_name) {
@@ -2296,34 +2298,7 @@ class Function {
         return false;
     }
     std::string_view spelled_name{type.pointee->name};
-    std::size_t spelled_scope = spelled_name.rfind("::");
-    std::size_t owner_scope = owner_name.rfind("::");
-    std::string_view spelled_unqualified =
-        spelled_scope == static_cast<std::size_t>(-1) ? spelled_name : spelled_name.substr(spelled_scope + 2);
-    std::string_view owner_unqualified =
-        owner_scope == static_cast<std::size_t>(-1) ? owner_name : owner_name.substr(owner_scope + 2);
-    if (spelled_name == owner_name || spelled_unqualified == owner_unqualified) return true;
-    std::size_t spelled_start = static_cast<std::size_t>(0);
-    if (spelled_scope != static_cast<std::size_t>(-1)) spelled_start = spelled_scope + 2;
-    std::string_view spelled_tail = spelled_name.substr(spelled_start);
-    std::size_t spelled_dot = spelled_tail.rfind(".");
-    std::string spelled_base{};
-    if (spelled_dot == static_cast<std::size_t>(-1)) {
-        spelled_base = std::string(spelled_tail.data(), spelled_tail.size());
-    } else {
-        spelled_base = std::string(spelled_tail.data(), spelled_dot);
-    }
-    std::size_t owner_start = static_cast<std::size_t>(0);
-    if (owner_scope != static_cast<std::size_t>(-1)) owner_start = owner_scope + 2;
-    std::string_view owner_tail = owner_name.substr(owner_start);
-    std::size_t owner_dot = owner_tail.rfind(".");
-    std::string owner_base{};
-    if (owner_dot == static_cast<std::size_t>(-1)) {
-        owner_base = std::string(owner_tail.data(), owner_tail.size());
-    } else {
-        owner_base = std::string(owner_tail.data(), owner_dot);
-    }
-    return spelled_base == owner_base;
+    return special_member_names_owner(spelled_name, owner_name);
 }
 
 [[nodiscard]] inline bool is_member_receiver_self_param(const Type& type, std::string_view owner_name) {
@@ -2444,6 +2419,7 @@ class Function {
     return is_special_member_this_param(fn.params[0].type, fn.member_owner_class) &&
            is_special_member_const_lvalue_self_param(fn.params[1].type, fn.member_owner_class);
 }
+
 
 [[nodiscard]] inline bool is_move_assignment_function(const Function& fn) {
     if (fn.member_owner_class.size() == 0 || fn.params.size() != 2) return false;

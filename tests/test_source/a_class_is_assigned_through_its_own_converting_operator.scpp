@@ -1,0 +1,93 @@
+// [expr.assign]/1 with [over.oper]/1: for a class operand, `a = b` is a
+// call to `operator=` chosen by overload resolution. ch02 §6.4(3) and
+// §6.5(3) say which assignment operators a class has *implicitly*;
+// neither says those are the only ones it may have, and §6.5(1) says "A
+// program may declare a copy constructor ([class.copy.ctor]) or a copy
+// assignment operator ([class.copy.assign]) for a class type". No clause
+// of docs/spec restricts what else `operator=` may take, so front matter
+// §1(2) leaves the C++ rule in force.
+//
+// check_moves rejected every source that was not the variable's own type,
+// and codegen never reached its own operator dispatch for `=`. So
+// `libs/std`'s `std::optional<T>::operator=(const T&)` and
+// `operator=(T&&)` were declared, registered, and uncallable --
+// [optional.assign]/13-15's whole point -- which is what
+// src/compiler/constexpression.cppm's
+// `lhs_type = decay_array_to_pointer(*lhs_type);` needs.
+//
+// The namespaced cases are the ones that also needed
+// special_member_names_owner: a monomorphized generic's name carries its
+// arguments after a '.', so stripping the namespace across the whole
+// string landed inside the *argument* and made
+// `std::optional<app::Ty>::operator=(app::Ty&&)` look like optional's own
+// move assignment operator.
+//
+// The same program transliterated to C++ and built with
+// clang++-22 -std=c++26 prints the same six lines.
+import std;
+
+namespace app {
+
+class Ty {
+public:
+    int kind;
+
+    Ty() : kind{0} { return; }
+    virtual ~Ty() { return; }
+};
+
+Ty bumped(const Ty& t) {
+    Ty r{};
+    r.kind = t.kind + 1;
+    return r;
+}
+
+} // namespace app
+
+class Counter {
+public:
+    int n;
+
+    Counter() : n{0} { return; }
+
+    void operator=(int v) {
+        this->n = v * 2;
+        return;
+    }
+
+    virtual ~Counter() { return; }
+};
+
+int main() {
+    // A user-declared converting operator= on an ordinary class.
+    Counter c{};
+    c = 5;
+    std::print("counter {}\n", c.n);
+
+    // std::optional<T> = T, in each of the shapes [optional.assign] is
+    // about: a prvalue, an explicit move, and a scalar T's lvalue.
+    std::optional<app::Ty> t{};
+    app::Ty seed{};
+    seed.kind = 1;
+    t = app::bumped(seed);
+    std::print("prvalue {}\n", t.value().kind);
+
+    app::Ty moved{};
+    moved.kind = 4;
+    t = std::move(moved);
+    std::print("moved {}\n", t.value().kind);
+
+    std::optional<int> n{};
+    int scalar = 9;
+    n = scalar;
+    std::print("scalar {}\n", n.value());
+
+    // Same-type assignment still goes through §6.4(3)/§6.5(3), unchanged.
+    std::optional<int> other{};
+    other = n;
+    std::print("same_type {}\n", other.value());
+
+    // And the optional is genuinely re-engaged each time.
+    std::print("engaged {}\n", t.has_value() ? 1 : 0);
+    return 0;
+}

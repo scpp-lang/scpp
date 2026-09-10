@@ -1353,6 +1353,7 @@ private:
     [[nodiscard]] const Function* find_user_declared_copy_ctor_ast(const std::string& class_name);
 
     [[nodiscard]] const Function* find_user_declared_copy_assign_ast(const std::string& class_name);
+    [[nodiscard]] const Function* find_converting_assign_ast(const std::string& class_name, const Type& source_type);
 
     [[nodiscard]] bool has_user_declared_dtor(const std::string& class_name);
 
