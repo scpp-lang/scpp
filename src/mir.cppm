@@ -146,8 +146,17 @@ struct Projection {
     bool operator==(const Projection&) const = default;
     // Only for deterministic ordering (unordered_map iteration order is
     // not stable, and several diagnostics pick "the lowest" place so the
-    // message does not depend on hash order).
-    auto operator<=>(const Projection&) const = default;
+    // message does not depend on hash order). Written out rather than
+    // defaulted from `<=>` because this language has no `<=>` token at
+    // all -- see the operator table in ast.cppm -- so the member-by-member
+    // lexicographic order a defaulted three-way comparison would produce
+    // is spelled here directly, in the same member order.
+    bool operator<(const Projection& other) const {
+        if (is_index != other.is_index) return other.is_index;
+        if (is_deref != other.is_deref) return other.is_deref;
+        if (!(field == other.field)) return field < other.field;
+        return index < other.index;
+    }
 };
 
 // A place is a storage location a MIR statement can read from or write

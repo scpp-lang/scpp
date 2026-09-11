@@ -1,0 +1,64 @@
+import std;
+// [string.cmp]/1 and [string.compare]/1: two strings compare with `<`, `>`,
+// `<=` and `>=` according as `compare`'s result compares against 0, and
+// `compare` answers with the lexicographic order of the two contents.
+//
+// Every answer below was read off real C++ (`clang++ -std=c++26`) for the
+// same pair, over a grid that includes a prefix pair ("ab" vs "abc"), an
+// equal pair, a pair differing only in case ("A" vs "a"), and the empty
+// string against each of them.
+int main() {
+    std::string empty{""};
+    std::string a{"a"};
+    std::string a2{"a"};
+    std::string ab{"ab"};
+    std::string abc{"abc"};
+    std::string b{"b"};
+    std::string upper_a{"A"};
+
+    // A shorter string that is a prefix of a longer one comes first.
+    if (!(ab < abc)) return 1;
+    if (abc < ab) return 2;
+    if (!(abc > ab)) return 3;
+
+    // The empty string is less than every non-empty one.
+    if (!(empty < a)) return 4;
+    if (empty > a) return 5;
+    if (!(empty <= a)) return 6;
+    if (empty >= a) return 7;
+
+    // Equal contents: neither `<` nor `>`, but both `<=` and `>=`.
+    if (a < a2) return 8;
+    if (a > a2) return 9;
+    if (!(a <= a2)) return 10;
+    if (!(a >= a2)) return 11;
+    if (!(empty <= empty)) return 12;
+    if (!(empty >= empty)) return 13;
+
+    // Ordering is by `char` value, so 'A' (0x41) precedes 'a' (0x61).
+    if (!(upper_a < a)) return 14;
+    if (upper_a > a) return 15;
+
+    // First differing character decides, whatever follows it.
+    if (!(abc < b)) return 16;
+    if (b < abc) return 17;
+
+    // compare() itself: negative, zero, positive.
+    if (!(ab.compare(abc) < 0)) return 18;
+    if (!(abc.compare(ab) > 0)) return 19;
+    if (a.compare(a2) != 0) return 20;
+
+    // The same operators with a literal on the right, then on the left.
+    if (!(ab < "abc")) return 21;
+    if (!(abc > "ab")) return 22;
+    if (!(a <= "a")) return 23;
+    if (!(a >= "a")) return 24;
+    if (!("ab" < abc)) return 25;
+    if (!("abc" > ab)) return 26;
+    if (!("a" <= a)) return 27;
+    if (!("a" >= a)) return 28;
+    if ("b" < abc) return 29;
+    if (abc.compare("abc") != 0) return 30;
+
+    return 0;
+}

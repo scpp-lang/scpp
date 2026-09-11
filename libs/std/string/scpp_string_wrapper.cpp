@@ -47,6 +47,8 @@ void scpp_string_push_back(void* handle, char c) { as_string(handle)->push_back(
 
 int scpp_string_equals(void* handle, const char* s) { return s != nullptr && *as_string(handle) == s ? 1 : 0; }
 
+int scpp_string_compare(void* handle, const char* s) { return as_string(handle)->compare(s != nullptr ? s : ""); }
+
 int scpp_string_contains(void* handle, const char* needle) {
     return needle != nullptr && as_string(handle)->find(needle) != std::string::npos ? 1 : 0;
 }
