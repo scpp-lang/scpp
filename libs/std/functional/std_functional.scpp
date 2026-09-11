@@ -632,6 +632,61 @@ public:
     virtual ~equal_to() = default;
 };
 
+// [unord.hash]/1 requires a `hash` specialization for every integral
+// type, not only for `int`: `std::hash<size_t>` and
+// `std::hash<int64_t>` are what a program spells when it mixes a
+// container's own index or an identifier into a hash, and both were
+// missing -- the primary template is only forward-declared above, so
+// naming either was "no matching class-template definition" rather than
+// a hash of the value.
+//
+// The return type stays `uint64_t`, the one every hasher in this
+// library and every user-written one already uses (see
+// unordered_map/unordered_set's own `__hash`), rather than [unord.hash]'s
+// `size_t`: the two are the same 64-bit width on every target scpp
+// supports, and ch06 gives no implicit conversion between two
+// differently-spelled scalar type names, so changing it would silently
+// reject every hasher already written against the established one.
+export template<>
+class hash<size_t> {
+public:
+    uint64_t call(size_t value) const {
+        return std::__hash_mix_uint64(static_cast<uint64_t>(value));
+    }
+
+    virtual ~hash() = default;
+};
+
+export template<>
+class equal_to<size_t> {
+public:
+    bool call(size_t lhs, size_t rhs) const {
+        return lhs == rhs;
+    }
+
+    virtual ~equal_to() = default;
+};
+
+export template<>
+class hash<int64_t> {
+public:
+    uint64_t call(int64_t value) const {
+        return std::__hash_mix_uint64(static_cast<uint64_t>(value));
+    }
+
+    virtual ~hash() = default;
+};
+
+export template<>
+class equal_to<int64_t> {
+public:
+    bool call(int64_t lhs, int64_t rhs) const {
+        return lhs == rhs;
+    }
+
+    virtual ~equal_to() = default;
+};
+
 export template<>
 class hash<std::string> {
 public:

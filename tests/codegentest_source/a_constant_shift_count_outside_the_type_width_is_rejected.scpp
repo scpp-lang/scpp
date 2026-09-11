@@ -1,0 +1,9 @@
+// [expr.shift]/1: "the behavior is undefined" if the right operand is
+// negative or "greater than or equal to the width of the promoted left
+// operand". ch09 §9.1 makes a constant expression the same program as
+// its runtime twin, so the evaluator says so rather than folding an
+// undefined value into the program.
+int main() {
+    constexpr int too_wide = 1 << 32;
+    return too_wide;
+}

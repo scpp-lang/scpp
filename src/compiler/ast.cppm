@@ -760,10 +760,32 @@ enum class BinaryOp {
     Sub,
     Mul,
     Div,
+    // [expr.mul]/1 groups `%` with `*` and `/`; unlike them it is an
+    // integer-only operator ([expr.mul]/2 requires operands "of integral
+    // or unscoped enumeration type"), which is why every pass below asks
+    // `is_float` before letting it through.
+    Mod,
+    // [expr.bit.and], [expr.xor], [expr.or] -- the three bitwise
+    // operators, each one precedence level apart and all integer-only.
+    BitAnd,
+    BitXor,
+    BitOr,
+    // [expr.shift] -- also integer-only, and the one pair whose two
+    // operands are converted separately: the result's type comes from
+    // the left operand alone, so the right one is *not* required to
+    // match it.
+    Shl,
+    Shr,
     AddAssign,
     SubAssign,
     MulAssign,
     DivAssign,
+    ModAssign,
+    BitAndAssign,
+    BitXorAssign,
+    BitOrAssign,
+    ShlAssign,
+    ShrAssign,
     Eq,
     Ne,
     Lt,
@@ -777,6 +799,11 @@ enum class BinaryOp {
 
 enum class UnaryOp {
     Neg,
+    // [expr.unary.op]/9: `~` requires an operand "of integral or
+    // unscoped enumeration type", and its result is the one's
+    // complement of the promoted operand -- the bitwise counterpart of
+    // Not (`!`), which is `bool`-only.
+    BitNot,
     Not,
     PreInc,
     PreDec,
@@ -2502,19 +2529,30 @@ class Function {
 // the same as "this operator cannot be overloaded" -- every operator the
 // expression grammar can produce is in here. The operators C++ also
 // allows to be overloaded but that this language has no token for at all
-// (`%`, `<<`, `>>`, `<=>`, `^`, `|`, `~`, `,`) are absent because there
-// is no expression for them to give meaning to, not because a class is
-// forbidden from defining them.
+// (`<=>`, `,`) are absent because there is no expression for them to
+// give meaning to, not because a class is forbidden from defining them.
 [[nodiscard]] inline std::string binary_operator_method_name(BinaryOp op) {
     switch (op) {
         case BinaryOp::Add: return std::string{"operator_plus"};
         case BinaryOp::Sub: return std::string{"operator_minus"};
         case BinaryOp::Mul: return std::string{"operator_star"};
         case BinaryOp::Div: return std::string{"operator_slash"};
+        case BinaryOp::Mod: return std::string{"operator_percent"};
+        case BinaryOp::BitAnd: return std::string{"operator_amp"};
+        case BinaryOp::BitXor: return std::string{"operator_caret"};
+        case BinaryOp::BitOr: return std::string{"operator_pipe"};
+        case BinaryOp::Shl: return std::string{"operator_less_less"};
+        case BinaryOp::Shr: return std::string{"operator_greater_greater"};
         case BinaryOp::AddAssign: return std::string{"operator_plus_assign"};
         case BinaryOp::SubAssign: return std::string{"operator_minus_assign"};
         case BinaryOp::MulAssign: return std::string{"operator_star_assign"};
         case BinaryOp::DivAssign: return std::string{"operator_slash_assign"};
+        case BinaryOp::ModAssign: return std::string{"operator_percent_assign"};
+        case BinaryOp::BitAndAssign: return std::string{"operator_amp_assign"};
+        case BinaryOp::BitXorAssign: return std::string{"operator_caret_assign"};
+        case BinaryOp::BitOrAssign: return std::string{"operator_pipe_assign"};
+        case BinaryOp::ShlAssign: return std::string{"operator_less_less_assign"};
+        case BinaryOp::ShrAssign: return std::string{"operator_greater_greater_assign"};
         case BinaryOp::Eq: return std::string{"operator_equal"};
         case BinaryOp::Ne: return std::string{"operator_not_equal"};
         case BinaryOp::Lt: return std::string{"operator_less"};
@@ -2531,6 +2569,7 @@ class Function {
 [[nodiscard]] inline std::string unary_operator_method_name(UnaryOp op) {
     switch (op) {
         case UnaryOp::Neg: return std::string{"operator_negate"};
+        case UnaryOp::BitNot: return std::string{"operator_complement"};
         case UnaryOp::Not: return std::string{"operator_not"};
         case UnaryOp::PreInc: return std::string{"operator_increment"};
         case UnaryOp::PreDec: return std::string{"operator_decrement"};
@@ -2634,16 +2673,96 @@ class Function {
     return key;
 }
 
+// [expr.ass]/1 lists the compound assignment operators, and
+// [expr.ass]/7 gives each one its meaning: `E1 op= E2` is `E1 = E1 op
+// E2` with E1 evaluated once. One table for both halves of that
+// sentence, shared by every pass, so a newly added operator cannot be
+// known to one pass and missing from another's hand-written list.
+[[nodiscard]] inline bool is_compound_assignment_operator(BinaryOp op) {
+    switch (op) {
+        case BinaryOp::AddAssign:
+        case BinaryOp::SubAssign:
+        case BinaryOp::MulAssign:
+        case BinaryOp::DivAssign:
+        case BinaryOp::ModAssign:
+        case BinaryOp::BitAndAssign:
+        case BinaryOp::BitXorAssign:
+        case BinaryOp::BitOrAssign:
+        case BinaryOp::ShlAssign:
+        case BinaryOp::ShrAssign:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// The `op` of `E1 op= E2`; any other operator is its own answer, so a
+// caller may apply this unconditionally.
+[[nodiscard]] inline BinaryOp compound_assignment_base_operator(BinaryOp op) {
+    switch (op) {
+        case BinaryOp::AddAssign: return BinaryOp::Add;
+        case BinaryOp::SubAssign: return BinaryOp::Sub;
+        case BinaryOp::MulAssign: return BinaryOp::Mul;
+        case BinaryOp::DivAssign: return BinaryOp::Div;
+        case BinaryOp::ModAssign: return BinaryOp::Mod;
+        case BinaryOp::BitAndAssign: return BinaryOp::BitAnd;
+        case BinaryOp::BitXorAssign: return BinaryOp::BitXor;
+        case BinaryOp::BitOrAssign: return BinaryOp::BitOr;
+        case BinaryOp::ShlAssign: return BinaryOp::Shl;
+        case BinaryOp::ShrAssign: return BinaryOp::Shr;
+        default: return op;
+    }
+}
+
+// [expr.mul]/2, [expr.shift]/1, [expr.bit.and]/1, [expr.xor]/1,
+// [expr.or]/1 and [expr.unary.op]/9 each require an operand "of integral
+// or unscoped enumeration type": these are the operators with no
+// floating-point form at all, which every pass has to refuse on a
+// `double` rather than silently emitting the wrong instruction for it.
+[[nodiscard]] inline bool is_integer_only_binary_operator(BinaryOp op) {
+    switch (op) {
+        case BinaryOp::Mod:
+        case BinaryOp::BitAnd:
+        case BinaryOp::BitXor:
+        case BinaryOp::BitOr:
+        case BinaryOp::Shl:
+        case BinaryOp::Shr:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// [expr.shift]/1: "the operands are converted separately", so a shift's
+// result type is the left operand's alone and its two operands are not
+// required to have the same type -- unlike every other binary arithmetic
+// operator in this language, where ch06 §6 makes a mismatch ill-formed.
+[[nodiscard]] inline bool is_shift_operator(BinaryOp op) {
+    return op == BinaryOp::Shl || op == BinaryOp::Shr;
+}
+
 [[nodiscard]] inline std::string binary_operator_spelling(BinaryOp op) {
     switch (op) {
         case BinaryOp::Add: return std::string{"+"};
         case BinaryOp::Sub: return std::string{"-"};
         case BinaryOp::Mul: return std::string{"*"};
         case BinaryOp::Div: return std::string{"/"};
+        case BinaryOp::Mod: return std::string{"%"};
+        case BinaryOp::BitAnd: return std::string{"&"};
+        case BinaryOp::BitXor: return std::string{"^"};
+        case BinaryOp::BitOr: return std::string{"|"};
+        case BinaryOp::Shl: return std::string{"<<"};
+        case BinaryOp::Shr: return std::string{">>"};
         case BinaryOp::AddAssign: return std::string{"+="};
         case BinaryOp::SubAssign: return std::string{"-="};
         case BinaryOp::MulAssign: return std::string{"*="};
         case BinaryOp::DivAssign: return std::string{"/="};
+        case BinaryOp::ModAssign: return std::string{"%="};
+        case BinaryOp::BitAndAssign: return std::string{"&="};
+        case BinaryOp::BitXorAssign: return std::string{"^="};
+        case BinaryOp::BitOrAssign: return std::string{"|="};
+        case BinaryOp::ShlAssign: return std::string{"<<="};
+        case BinaryOp::ShrAssign: return std::string{">>="};
         case BinaryOp::Eq: return std::string{"=="};
         case BinaryOp::Ne: return std::string{"!="};
         case BinaryOp::Lt: return std::string{"<"};
@@ -2660,6 +2779,7 @@ class Function {
 [[nodiscard]] inline std::string unary_operator_spelling(UnaryOp op) {
     switch (op) {
         case UnaryOp::Neg: return std::string{"-"};
+        case UnaryOp::BitNot: return std::string{"~"};
         case UnaryOp::Not: return std::string{"!"};
         case UnaryOp::PreInc: return std::string{"++"};
         case UnaryOp::PreDec: return std::string{"--"};
@@ -2683,18 +2803,30 @@ class Function {
         case 1: return BinaryOp::SubAssign;
         case 2: return BinaryOp::MulAssign;
         case 3: return BinaryOp::DivAssign;
-        case 4: return BinaryOp::Ne;
-        case 5: return BinaryOp::Le;
-        case 6: return BinaryOp::Ge;
-        case 7: return BinaryOp::Eq;
-        case 8: return BinaryOp::Lt;
-        case 9: return BinaryOp::Gt;
-        case 10: return BinaryOp::Add;
-        case 11: return BinaryOp::Sub;
-        case 12: return BinaryOp::Mul;
-        case 13: return BinaryOp::Div;
-        case 14: return BinaryOp::And;
-        case 15: return BinaryOp::Or;
+        case 4: return BinaryOp::ModAssign;
+        case 5: return BinaryOp::BitAndAssign;
+        case 6: return BinaryOp::BitXorAssign;
+        case 7: return BinaryOp::BitOrAssign;
+        case 8: return BinaryOp::ShlAssign;
+        case 9: return BinaryOp::ShrAssign;
+        case 10: return BinaryOp::Ne;
+        case 11: return BinaryOp::Le;
+        case 12: return BinaryOp::Ge;
+        case 13: return BinaryOp::Eq;
+        case 14: return BinaryOp::Shl;
+        case 15: return BinaryOp::Shr;
+        case 16: return BinaryOp::Lt;
+        case 17: return BinaryOp::Gt;
+        case 18: return BinaryOp::Add;
+        case 19: return BinaryOp::Sub;
+        case 20: return BinaryOp::Mul;
+        case 21: return BinaryOp::Div;
+        case 22: return BinaryOp::Mod;
+        case 23: return BinaryOp::BitAnd;
+        case 24: return BinaryOp::BitXor;
+        case 25: return BinaryOp::BitOr;
+        case 26: return BinaryOp::And;
+        case 27: return BinaryOp::Or;
         default: return BinaryOp::Assign;
     }
 }
@@ -2705,6 +2837,7 @@ class Function {
         case 1: return UnaryOp::PreDec;
         case 2: return UnaryOp::Neg;
         case 3: return UnaryOp::Not;
+        case 4: return UnaryOp::BitNot;
         default: return UnaryOp::Deref;
     }
 }
@@ -2731,7 +2864,7 @@ class Function {
             start--;
         }
     }
-    for (int index = 0; index < 17; index++) {
+    for (int index = 0; index < 29; index++) {
         BinaryOp op = binary_operator_at_index(index);
         std::string method{"_"};
         method += binary_operator_method_name(op);
@@ -2741,7 +2874,7 @@ class Function {
             return spelled;
         }
     }
-    for (int index = 0; index < 5; index++) {
+    for (int index = 0; index < 6; index++) {
         UnaryOp op = unary_operator_at_index(index);
         std::string method{"_"};
         method += unary_operator_method_name(op);
@@ -4123,9 +4256,11 @@ public:
 // 200;` is ill-formed (200 does not spell a `char`), but
 // `static_cast<char>(200)` is well-formed and is -56.
 //
-// The modulus is taken with `/` and `*` rather than `%` because this
-// file is self-hosted and SCPP26 has no remainder operator, exactly as
-// `two_to_the` above is a doubling loop for want of a shift.
+// The modulus is taken with `/` and `*` rather than `%`, and
+// `two_to_the` above is a doubling loop rather than a shift, because
+// neither operator had a token when they were written. Both do now, and
+// both spellings compute the same value, so this is left as it stands
+// rather than rewritten for its own sake.
 [[nodiscard]] inline std::int64_t scalar_converted_integer_value(std::int64_t value, std::string_view target_name, int pointer_bit_width) {
     std::optional<ScalarTypeInfo> info = scalar_type_info(target_name);
     if (!info.has_value()) return value;

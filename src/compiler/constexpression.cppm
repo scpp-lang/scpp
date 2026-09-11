@@ -3613,6 +3613,62 @@ private:
                 case BinaryOp::Div:
                     if (right == 0) return std::unexpected(ConstexprError(expr.loc, "constexpr division by zero"));
                     return make_checked_int_cell_as(result_type, left / right, expr.loc);
+                // [expr.mul]/2 restricts `%` to integral operands, which
+                // is why it appears in this arm alone and not in the
+                // floating one above.
+                case BinaryOp::Mod:
+                    if (right == 0) return std::unexpected(ConstexprError(expr.loc, "constexpr division by zero"));
+                    // The quotient of the most negative value by -1
+                    // overflows ([expr.mul]/4), so the remainder that
+                    // goes with it is stated rather than computed: it is
+                    // zero for every left operand.
+                    if (right == -1) return make_checked_int_cell_as(result_type, 0, expr.loc);
+                    return make_checked_int_cell_as(result_type, left % right, expr.loc);
+                // [expr.bit.and]/1, [expr.xor]/1, [expr.or]/1: bitwise
+                // on the operands' value representation, so no overflow
+                // is possible between two values of one type.
+                case BinaryOp::BitAnd: return make_checked_int_cell_as(result_type, left & right, expr.loc);
+                case BinaryOp::BitXor: return make_checked_int_cell_as(result_type, left ^ right, expr.loc);
+                case BinaryOp::BitOr: return make_checked_int_cell_as(result_type, left | right, expr.loc);
+                case BinaryOp::Shl:
+                case BinaryOp::Shr: {
+                    // [expr.shift]/1: "the operands are converted
+                    // separately", so a shift's type is the *left*
+                    // operand's alone -- `result_type` above, which
+                    // falls back to `int` whenever the two differ, is
+                    // the wrong answer for exactly this operator, and a
+                    // shift count is routinely a plain `int` next to a
+                    // `size_t` value.
+                    Type shift_type = is_named_type(lhs->type, "bool") ? named_type("int") : lhs->type;
+                    int shift_width = scalar_bit_width(std::string_view{shift_type.name}, host_pointer_bit_width());
+                    if (right < 0 || (shift_width > 0 && right >= static_cast<std::int64_t>(shift_width))) {
+                        return std::unexpected(ConstexprError(
+                            expr.loc, "constexpr shift count is negative or not less than the width of the shifted "
+                                      "type ([expr.shift]/1)"));
+                    }
+                    std::uint64_t bits = static_cast<std::uint64_t>(left);
+                    std::uint64_t count = static_cast<std::uint64_t>(right);
+                    std::int64_t shifted = 0;
+                    if (expr.binary_op == BinaryOp::Shl) {
+                        // Shifted as a bit pattern: [expr.shift]/2 gives
+                        // `E1 << E2` the value `E1 * 2**E2` reduced
+                        // modulo the result type's range, which is what
+                        // an unsigned shift plus the narrowing below
+                        // computes -- and, unlike a signed `<<`, it is
+                        // never undefined in the host compiler either.
+                        shifted = static_cast<std::int64_t>(bits << count);
+                    } else if (is_unsigned_scalar_type_name(std::string_view{shift_type.name})) {
+                        shifted = static_cast<std::int64_t>(bits >> count);
+                    } else {
+                        // [expr.shift]/3: for a signed left operand the
+                        // result is E1/2**E2, i.e. an arithmetic shift.
+                        shifted = left >> right;
+                    }
+                    return make_checked_int_cell_as(
+                        shift_type,
+                        scalar_converted_integer_value(shifted, std::string_view{shift_type.name}, host_pointer_bit_width()),
+                        expr.loc);
+                }
                 case BinaryOp::Eq: return make_bool_cell(left == right);
                 case BinaryOp::Ne: return make_bool_cell(left != right);
                 case BinaryOp::Lt: return make_bool_cell(left < right);
@@ -4477,6 +4533,7 @@ private:
                     if (!expr.lhs) return std::nullopt;
                     switch (expr.unary_op) {
                         case UnaryOp::Neg: return infer_unevaluated_expr_type(*expr.lhs);
+                        case UnaryOp::BitNot: return infer_unevaluated_expr_type(*expr.lhs);
                         case UnaryOp::Not: return named_type("bool");
                         case UnaryOp::PreInc:
                         case UnaryOp::PreDec:
@@ -4506,9 +4563,7 @@ private:
             case ExprKind::Binary:
             return [&, this]() -> std::optional<Type> {
                     if (!expr.lhs || !expr.rhs) return std::nullopt;
-                    if (expr.binary_op == BinaryOp::Assign || expr.binary_op == BinaryOp::AddAssign ||
-                        expr.binary_op == BinaryOp::SubAssign || expr.binary_op == BinaryOp::MulAssign ||
-                        expr.binary_op == BinaryOp::DivAssign) {
+                    if (expr.binary_op == BinaryOp::Assign || is_compound_assignment_operator(expr.binary_op)) {
                         return infer_unevaluated_expr_type(*expr.lhs);
                     }
                     if (expr.binary_op == BinaryOp::Eq || expr.binary_op == BinaryOp::Ne || expr.binary_op == BinaryOp::Lt ||
@@ -4829,9 +4884,7 @@ private:
                 }();
             case ExprKind::Binary:
             return [&, this]() -> std::expected<std::shared_ptr<Cell>, ConstexprError> {
-                    if (expr.binary_op == BinaryOp::Assign || expr.binary_op == BinaryOp::AddAssign ||
-                        expr.binary_op == BinaryOp::SubAssign || expr.binary_op == BinaryOp::MulAssign ||
-                        expr.binary_op == BinaryOp::DivAssign) {
+                    if (expr.binary_op == BinaryOp::Assign || is_compound_assignment_operator(expr.binary_op)) {
                         auto target_result = resolve_lvalue(*expr.lhs);
                         if (!target_result.has_value()) return std::unexpected(std::move(target_result).error());
                         LValue target = std::move(target_result).value();
@@ -4841,10 +4894,7 @@ private:
                         std::shared_ptr<Cell> value = std::move(value_result).value();
                         if (expr.binary_op != BinaryOp::Assign) {
                             std::shared_ptr<Cell> lhs_value = clone_cell(target.cell);
-                            BinaryOp arithmetic_op = expr.binary_op == BinaryOp::AddAssign   ? BinaryOp::Add
-                                                     : expr.binary_op == BinaryOp::SubAssign ? BinaryOp::Sub
-                                                     : expr.binary_op == BinaryOp::MulAssign ? BinaryOp::Mul
-                                                                                             : BinaryOp::Div;
+                            BinaryOp arithmetic_op = compound_assignment_base_operator(expr.binary_op);
                             Expr arithmetic_expr{};
                             arithmetic_expr.binary_op = arithmetic_op;
                             arithmetic_expr.loc = expr.loc;
@@ -4966,6 +5016,29 @@ private:
                             auto bool_result = evaluate_contextual_bool(*expr.lhs, expr.loc, "the operand of '!'");
                             if (!bool_result.has_value()) return std::unexpected(std::move(bool_result).error());
                             return make_bool_cell(!bool_result.value());
+                        }
+                        case UnaryOp::BitNot: {
+                            // [expr.unary.op]/9: the one's complement of
+                            // an integral operand, in that operand's own
+                            // type -- there is no promotion to `int`
+                            // here for the same reason `-x` keeps an
+                            // int8_t an int8_t above (§14.1 adopts the
+                            // usual arithmetic conversions, and this
+                            // language has no two-operand conversion to
+                            // apply to a one-operand expression).
+                            auto operand_result = evaluate_expr_in_context(*expr.lhs, context_type);
+                            if (!operand_result.has_value()) return std::unexpected(std::move(operand_result).error());
+                            std::shared_ptr<Cell> operand = std::move(operand_result).value();
+                            if (is_floating_like(operand->type)) {
+                                return std::unexpected(ConstexprError(
+                                    expr.loc, "'~' requires an operand of integral type ([expr.unary.op]/9)"));
+                            }
+                            auto integer_result = as_integer(operand, expr.loc);
+                            if (!integer_result.has_value()) return std::unexpected(std::move(integer_result).error());
+                            Type complemented_type = is_named_type(operand->type, "bool") ? named_type("int") : operand->type;
+                            std::int64_t complemented = scalar_converted_integer_value(
+                                ~integer_result.value(), std::string_view{complemented_type.name}, host_pointer_bit_width());
+                            return make_checked_int_cell_as(complemented_type, complemented, expr.loc);
                         }
                         case UnaryOp::PreInc:
                         case UnaryOp::PreDec:

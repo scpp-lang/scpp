@@ -2953,6 +2953,7 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             switch (expr.unary_op) {
                 case UnaryOp::Not:
                 case UnaryOp::Neg:
+                case UnaryOp::BitNot:
                 case UnaryOp::PreInc:
                 case UnaryOp::PreDec:
                 case UnaryOp::PostInc:
@@ -3082,14 +3083,32 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
                 resolve_binary_operator_call(expr, binary_lhs_type, binary_rhs_type, body, signatures);
             if (operator_call.signature != nullptr) return operator_call.signature->return_type;
             switch (expr.binary_op) {
+                // [expr.shift]/1: "the operands are converted
+                // separately", so a shift takes its type from the left
+                // operand alone -- never from an untyped literal on the
+                // right, which is what the adopts_rhs_type rule below
+                // would otherwise do to `1 << n`.
+                case BinaryOp::Shl:
+                case BinaryOp::Shr:
+                case BinaryOp::ShlAssign:
+                case BinaryOp::ShrAssign:
+                    return binary_lhs_type;
                 case BinaryOp::Add:
                 case BinaryOp::Sub:
                 case BinaryOp::Mul:
                 case BinaryOp::Div:
+                case BinaryOp::Mod:
+                case BinaryOp::BitAnd:
+                case BinaryOp::BitXor:
+                case BinaryOp::BitOr:
                 case BinaryOp::AddAssign:
                 case BinaryOp::SubAssign:
                 case BinaryOp::MulAssign:
                 case BinaryOp::DivAssign:
+                case BinaryOp::ModAssign:
+                case BinaryOp::BitAndAssign:
+                case BinaryOp::BitXorAssign:
+                case BinaryOp::BitOrAssign:
                 case BinaryOp::Assign: {
                     // Each operand is inferred at most once here, and the
                     // answer reused, which is the whole reason this arm is
@@ -3112,7 +3131,17 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
                     // another. Not recomputing is what is needed, not
                     // remembering.
                     const bool additive = expr.binary_op == BinaryOp::Add || expr.binary_op == BinaryOp::Sub;
-                    const bool multiplicative = expr.binary_op == BinaryOp::Mul || expr.binary_op == BinaryOp::Div;
+                    // `%` joins `*` and `/` here for the same reason
+                    // [expr.mul]/1 groups the three together, and the
+                    // three bitwise operators join them because
+                    // [expr.bit.and]/1, [expr.xor]/1 and [expr.or]/1
+                    // convert their operands the same way: in `1 &
+                    // flags` the `1` adopts `flags`'s type exactly as
+                    // the `2` of `2 * len` does. The shifts do not --
+                    // they are answered above, before this block.
+                    const bool multiplicative = expr.binary_op == BinaryOp::Mul || expr.binary_op == BinaryOp::Div ||
+                                                expr.binary_op == BinaryOp::Mod || expr.binary_op == BinaryOp::BitAnd ||
+                                                expr.binary_op == BinaryOp::BitXor || expr.binary_op == BinaryOp::BitOr;
                     // spec §6: in `2 * len`, the `2` has no type of its
                     // own -- it adopts `len`'s, so the product is a
                     // `size_t`, not an `int`. Taking the lhs type

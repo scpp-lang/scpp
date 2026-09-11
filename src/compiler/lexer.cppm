@@ -193,8 +193,10 @@ enum class TokenKind {
     Colon, // `:` -- class access-specifier sections (`public:`/`private:`,
            // ch04 §4.2) only, in this version.
     Arrow,
-    Tilde, // `~` -- destructor declarator prefix only (`~ClassName()`,
-           // ch04 §4.2), in this version.
+    Tilde, // `~` -- either a destructor declarator prefix (`~ClassName()`,
+           // ch04 §4.2) or the unary bitwise-complement operator
+           // ([expr.unary.op]/9); the parser tells the two apart by
+           // context, exactly as it already does for `*`, `-` and `&`.
 
     // operators
     PlusPlus,
@@ -203,13 +205,27 @@ enum class TokenKind {
     MinusAssign,
     StarAssign,
     SlashAssign,
+    PercentAssign,
+    AmpAssign,
+    CaretAssign,
+    PipeAssign,
     Plus,
     Minus,
     Star,
     Slash,
+    Percent,
+    Caret, // `^` -- bitwise exclusive-or ([expr.xor]).
     Assign,
     EqualEqual,
     NotEqual,
+    // `<<`, `>>`, `<<=` and `>>=` deliberately have no token of their
+    // own: `>>` also closes two nested template-argument-lists
+    // ([temp.names]/3), and one `>>` token would have to be split back
+    // apart at every one of those closings. The lexer keeps emitting a
+    // token per `>`/`<` and the parser's shift level re-joins two
+    // *adjacent* ones (see Parser::shift_operator_at), so a shift is
+    // recognised exactly where the grammar allows one and template
+    // parsing is untouched.
     Less,
     Greater,
     LessEqual,
@@ -217,6 +233,7 @@ enum class TokenKind {
     AmpAmp,
     Amp,
     PipePipe,
+    Pipe, // `|` -- bitwise inclusive-or ([expr.or]).
     Bang,
     Question,
 
@@ -585,6 +602,12 @@ private:
             case '/':
                 if (peek() == '=') { advance(); return make_token(TokenKind::SlashAssign, start, start_line, start_col); }
                 return make_token(TokenKind::Slash, start, start_line, start_col);
+            case '%':
+                if (peek() == '=') { advance(); return make_token(TokenKind::PercentAssign, start, start_line, start_col); }
+                return make_token(TokenKind::Percent, start, start_line, start_col);
+            case '^':
+                if (peek() == '=') { advance(); return make_token(TokenKind::CaretAssign, start, start_line, start_col); }
+                return make_token(TokenKind::Caret, start, start_line, start_col);
             case '!':
                 if (peek() == '=') { advance(); return make_token(TokenKind::NotEqual, start, start_line, start_col); }
                 return make_token(TokenKind::Bang, start, start_line, start_col);
@@ -601,10 +624,12 @@ private:
                 return make_token(TokenKind::Greater, start, start_line, start_col);
             case '&':
                 if (peek() == '&') { advance(); return make_token(TokenKind::AmpAmp, start, start_line, start_col); }
+                if (peek() == '=') { advance(); return make_token(TokenKind::AmpAssign, start, start_line, start_col); }
                 return make_token(TokenKind::Amp, start, start_line, start_col);
             case '|':
                 if (peek() == '|') { advance(); return make_token(TokenKind::PipePipe, start, start_line, start_col); }
-                return make_token(TokenKind::Unknown, start, start_line, start_col);
+                if (peek() == '=') { advance(); return make_token(TokenKind::PipeAssign, start, start_line, start_col); }
+                return make_token(TokenKind::Pipe, start, start_line, start_col);
             case ':':
                 if (peek() == ':') { advance(); return make_token(TokenKind::ColonColon, start, start_line, start_col); }
                 return make_token(TokenKind::Colon, start, start_line, start_col);

@@ -1,0 +1,45 @@
+// [over.oper]/1 with [over.binary]/1 and [over.unary]/1: the operators
+// this language gained tokens for are overloadable like every other one,
+// and each maps onto the single mangled-method-name table in ast.cppm
+// rather than a second mechanism of its own.
+//
+// The shift operators are the interesting pair. [temp.names]/3 makes
+// `>>` close two nested template-argument-lists, so the lexer emits a
+// token per `<`/`>` and the parser rejoins two *adjacent* ones at its
+// shift level. This case holds both readings in one file: a
+// `std::vector<std::vector<int>>` whose `>>` closes two lists, and a
+// `v >> 1` whose `>>` is the operator.
+import std;
+
+class Bits {
+public:
+    Bits() { return; }
+    Bits(int value) { this.value = value; return; }
+    virtual ~Bits() = default;
+
+    Bits operator%(const Bits& other) const { return Bits{this.value % other.value}; }
+    Bits operator&(const Bits& other) const { return Bits{this.value & other.value}; }
+    Bits operator^(const Bits& other) const { return Bits{this.value ^ other.value}; }
+    Bits operator|(const Bits& other) const { return Bits{this.value | other.value}; }
+    Bits operator<<(const Bits& other) const { return Bits{this.value << other.value}; }
+    Bits operator>>(const Bits& other) const { return Bits{this.value >> other.value}; }
+    Bits operator~() const { return Bits{~this.value}; }
+
+    int value = 0;
+};
+
+int main() {
+    Bits a{29};
+    Bits b{4};
+    std::print("mod={} and={} xor={} or={}\n", (a % b).value, (a & b).value, (a ^ b).value, (a | b).value);
+    std::print("shl={} shr={} complement={}\n", (a << b).value, (a >> b).value, (~a).value);
+
+    // The `>>` that closes two template-argument-lists, in the same
+    // file as the `>>` that is an operator.
+    std::vector<std::vector<int>> grid{};
+    std::vector<int> row{};
+    row.push_back(29 >> 2);
+    grid.push_back(row);
+    std::print("nested={}\n", grid[0][0]);
+    return 0;
+}

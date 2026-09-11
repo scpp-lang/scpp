@@ -741,14 +741,22 @@ private:
     }
 
     // [over.oper]/1: how many tokens after `operator` spell an
-    // operator-function-id, or 0 if what follows is not one. `[]` and
-    // `()` are two tokens; everything else the lexer produces is one.
+    // operator-function-id, or 0 if what follows is not one. `[]`, `()`,
+    // and the four shift forms (`<<`, `>>`, `<<=`, `>>=`, which the
+    // lexer deliberately leaves as two tokens -- see TokenKind::Less)
+    // are two tokens; everything else the lexer produces is one.
     [[nodiscard]] int operator_id_token_count(TokenKind first, TokenKind second) const {
         if (first == TokenKind::LBracket) return second == TokenKind::RBracket ? 2 : 0;
         if (first == TokenKind::LParen) return second == TokenKind::RParen ? 2 : 0;
+        if (first == TokenKind::Less && (second == TokenKind::Less || second == TokenKind::LessEqual)) return 2;
+        if (first == TokenKind::Greater && (second == TokenKind::Greater || second == TokenKind::GreaterEqual)) return 2;
         if (first == TokenKind::Plus || first == TokenKind::Minus || first == TokenKind::Star ||
-            first == TokenKind::Slash || first == TokenKind::PlusAssign || first == TokenKind::MinusAssign ||
-            first == TokenKind::StarAssign || first == TokenKind::SlashAssign || first == TokenKind::Assign ||
+            first == TokenKind::Slash || first == TokenKind::Percent || first == TokenKind::Caret ||
+            first == TokenKind::Amp || first == TokenKind::Pipe || first == TokenKind::Tilde ||
+            first == TokenKind::PlusAssign || first == TokenKind::MinusAssign ||
+            first == TokenKind::StarAssign || first == TokenKind::SlashAssign ||
+            first == TokenKind::PercentAssign || first == TokenKind::CaretAssign ||
+            first == TokenKind::AmpAssign || first == TokenKind::PipeAssign || first == TokenKind::Assign ||
             first == TokenKind::EqualEqual || first == TokenKind::NotEqual || first == TokenKind::Less ||
             first == TokenKind::Greater || first == TokenKind::LessEqual || first == TokenKind::GreaterEqual ||
             first == TokenKind::AmpAmp || first == TokenKind::PipePipe || first == TokenKind::Bang ||
@@ -785,14 +793,27 @@ private:
     [[nodiscard]] std::string spelled_member_operator_id(TokenKind first, TokenKind second) const {
         if (first == TokenKind::LBracket && second == TokenKind::RBracket) return std::string("[]");
         if (first == TokenKind::LParen && second == TokenKind::RParen) return std::string("()");
+        if (first == TokenKind::Less && second == TokenKind::Less) return std::string("<<");
+        if (first == TokenKind::Less && second == TokenKind::LessEqual) return std::string("<<=");
+        if (first == TokenKind::Greater && second == TokenKind::Greater) return std::string(">>");
+        if (first == TokenKind::Greater && second == TokenKind::GreaterEqual) return std::string(">>=");
         if (first == TokenKind::Plus) return std::string("+");
         if (first == TokenKind::Minus) return std::string("-");
         if (first == TokenKind::Star) return std::string("*");
         if (first == TokenKind::Slash) return std::string("/");
+        if (first == TokenKind::Percent) return std::string("%");
+        if (first == TokenKind::Caret) return std::string("^");
+        if (first == TokenKind::Amp) return std::string("&");
+        if (first == TokenKind::Pipe) return std::string("|");
+        if (first == TokenKind::Tilde) return std::string("~");
         if (first == TokenKind::PlusAssign) return std::string("+=");
         if (first == TokenKind::MinusAssign) return std::string("-=");
         if (first == TokenKind::StarAssign) return std::string("*=");
         if (first == TokenKind::SlashAssign) return std::string("/=");
+        if (first == TokenKind::PercentAssign) return std::string("%=");
+        if (first == TokenKind::CaretAssign) return std::string("^=");
+        if (first == TokenKind::AmpAssign) return std::string("&=");
+        if (first == TokenKind::PipeAssign) return std::string("|=");
         if (first == TokenKind::Assign) return std::string("=");
         if (first == TokenKind::EqualEqual) return std::string("==");
         if (first == TokenKind::NotEqual) return std::string("!=");
@@ -824,6 +845,22 @@ private:
         // nothing would ever dispatch to.
         if (first == TokenKind::LParen && second == TokenKind::RParen) return std::string("call");
         if (first == TokenKind::Arrow) return std::string("operator_arrow");
+        if (first == TokenKind::Less && second == TokenKind::Less) {
+            if (unary) return std::string();
+            return binary_operator_method_name(BinaryOp::Shl);
+        }
+        if (first == TokenKind::Less && second == TokenKind::LessEqual) {
+            if (unary) return std::string();
+            return binary_operator_method_name(BinaryOp::ShlAssign);
+        }
+        if (first == TokenKind::Greater && second == TokenKind::Greater) {
+            if (unary) return std::string();
+            return binary_operator_method_name(BinaryOp::Shr);
+        }
+        if (first == TokenKind::Greater && second == TokenKind::GreaterEqual) {
+            if (unary) return std::string();
+            return binary_operator_method_name(BinaryOp::ShrAssign);
+        }
         if (first == TokenKind::PlusPlus) {
             if (unary) return unary_operator_method_name(UnaryOp::PreInc);
             return unary_operator_method_name(UnaryOp::PostInc);
@@ -839,16 +876,25 @@ private:
         if (unary) {
             if (first == TokenKind::Star) return unary_operator_method_name(UnaryOp::Deref);
             if (first == TokenKind::Minus) return unary_operator_method_name(UnaryOp::Neg);
+            if (first == TokenKind::Tilde) return unary_operator_method_name(UnaryOp::BitNot);
             return std::string();
         }
         if (first == TokenKind::Plus) return binary_operator_method_name(BinaryOp::Add);
         if (first == TokenKind::Minus) return binary_operator_method_name(BinaryOp::Sub);
         if (first == TokenKind::Star) return binary_operator_method_name(BinaryOp::Mul);
         if (first == TokenKind::Slash) return binary_operator_method_name(BinaryOp::Div);
+        if (first == TokenKind::Percent) return binary_operator_method_name(BinaryOp::Mod);
+        if (first == TokenKind::Amp) return binary_operator_method_name(BinaryOp::BitAnd);
+        if (first == TokenKind::Caret) return binary_operator_method_name(BinaryOp::BitXor);
+        if (first == TokenKind::Pipe) return binary_operator_method_name(BinaryOp::BitOr);
         if (first == TokenKind::PlusAssign) return binary_operator_method_name(BinaryOp::AddAssign);
         if (first == TokenKind::MinusAssign) return binary_operator_method_name(BinaryOp::SubAssign);
         if (first == TokenKind::StarAssign) return binary_operator_method_name(BinaryOp::MulAssign);
         if (first == TokenKind::SlashAssign) return binary_operator_method_name(BinaryOp::DivAssign);
+        if (first == TokenKind::PercentAssign) return binary_operator_method_name(BinaryOp::ModAssign);
+        if (first == TokenKind::AmpAssign) return binary_operator_method_name(BinaryOp::BitAndAssign);
+        if (first == TokenKind::CaretAssign) return binary_operator_method_name(BinaryOp::BitXorAssign);
+        if (first == TokenKind::PipeAssign) return binary_operator_method_name(BinaryOp::BitOrAssign);
         if (first == TokenKind::Assign) return binary_operator_method_name(BinaryOp::Assign);
         if (first == TokenKind::EqualEqual) return binary_operator_method_name(BinaryOp::Eq);
         if (first == TokenKind::NotEqual) return binary_operator_method_name(BinaryOp::Ne);
@@ -10352,11 +10398,64 @@ private:
     [[nodiscard]] std::expected<ExprPtr, ParseError> parse_expr() { return parse_assignment(); }
 
     std::optional<BinaryOp> parse_assignment_operator() {
+        if (std::optional<BinaryOp> shift_assign = shift_assign_operator_here(); shift_assign.has_value()) {
+            advance();
+            advance();
+            return shift_assign;
+        }
         if (match(TokenKind::Assign)) { BinaryOp op = BinaryOp::Assign; return op; }
         if (match(TokenKind::PlusAssign)) { BinaryOp op = BinaryOp::AddAssign; return op; }
         if (match(TokenKind::MinusAssign)) { BinaryOp op = BinaryOp::SubAssign; return op; }
         if (match(TokenKind::StarAssign)) { BinaryOp op = BinaryOp::MulAssign; return op; }
         if (match(TokenKind::SlashAssign)) { BinaryOp op = BinaryOp::DivAssign; return op; }
+        if (match(TokenKind::PercentAssign)) { BinaryOp op = BinaryOp::ModAssign; return op; }
+        if (match(TokenKind::AmpAssign)) { BinaryOp op = BinaryOp::BitAndAssign; return op; }
+        if (match(TokenKind::CaretAssign)) { BinaryOp op = BinaryOp::BitXorAssign; return op; }
+        if (match(TokenKind::PipeAssign)) { BinaryOp op = BinaryOp::BitOrAssign; return op; }
+        return std::optional<BinaryOp>{};
+    }
+
+    // The two tokens at `pos_` are adjacent in the source -- i.e. they
+    // were written with nothing at all between them. The lexer emits a
+    // token per `<`/`>` rather than a single `<<`/`>>` (see
+    // TokenKind::Less's comment: `>>` also closes two nested
+    // template-argument-lists, [temp.names]/3), so the expression
+    // grammar is what puts a shift operator back together -- and only
+    // when the program really wrote one, which is what adjacency
+    // decides. `a > > b` stays the ill-formed thing it is.
+    [[nodiscard]] bool tokens_adjacent_here() const {
+        const Token& first = peek();
+        const Token& second = peek_at(1);
+        return first.line == second.line && first.column + 1 == second.column;
+    }
+
+    // `<<`/`>>` at the current position, per the note above.
+    [[nodiscard]] std::optional<BinaryOp> shift_operator_here() const {
+        if (!tokens_adjacent_here()) return std::optional<BinaryOp>{};
+        if (check(TokenKind::Less) && peek_at(1).kind == TokenKind::Less) {
+            BinaryOp op = BinaryOp::Shl;
+            return op;
+        }
+        if (check(TokenKind::Greater) && peek_at(1).kind == TokenKind::Greater) {
+            BinaryOp op = BinaryOp::Shr;
+            return op;
+        }
+        return std::optional<BinaryOp>{};
+    }
+
+    // `<<=`/`>>=` at the current position. The lexer has already formed
+    // the trailing `<=`/`>=`, so these are `Less LessEqual` and
+    // `Greater GreaterEqual` -- two tokens, like the shifts themselves.
+    [[nodiscard]] std::optional<BinaryOp> shift_assign_operator_here() const {
+        if (!tokens_adjacent_here()) return std::optional<BinaryOp>{};
+        if (check(TokenKind::Less) && peek_at(1).kind == TokenKind::LessEqual) {
+            BinaryOp op = BinaryOp::ShlAssign;
+            return op;
+        }
+        if (check(TokenKind::Greater) && peek_at(1).kind == TokenKind::GreaterEqual) {
+            BinaryOp op = BinaryOp::ShrAssign;
+            return op;
+        }
         return std::optional<BinaryOp>{};
     }
 
@@ -10436,7 +10535,7 @@ private:
     }
 
     [[nodiscard]] std::expected<ExprPtr, ParseError> parse_logic_and() {
-        auto lhs_result = parse_equality();
+        auto lhs_result = parse_bit_or();
         if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
         ExprPtr lhs = std::move(lhs_result).value();
         int chain_depth = 0;
@@ -10447,10 +10546,74 @@ private:
                 return std::unexpected(nesting_too_deep_error("expression"));
             }
             advance();
-            auto rhs_result = parse_equality();
+            auto rhs_result = parse_bit_or();
             if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
             ExprPtr __rhs_value = std::move(rhs_result).value();
             lhs = make_binary(BinaryOp::And, std::move(lhs), std::move(__rhs_value));
+        }
+        return std::move(lhs);
+    }
+
+    // [expr.or], [expr.xor], [expr.bit.and]: three levels, each binding
+    // tighter than the one above it and looser than equality, exactly as
+    // the grammar orders them. `a & b == c` therefore means
+    // `a & (b == c)` here for the same reason it does in C++.
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_bit_or() {
+        auto lhs_result = parse_bit_xor();
+        if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+        ExprPtr lhs = std::move(lhs_result).value();
+        int chain_depth = 0;
+        while (check(TokenKind::Pipe)) {
+            // One tree level per iteration; see parse_logic_or's note.
+            chain_depth++;
+            if (nesting_depth_ + chain_depth > kMaxNestingDepth) {
+                return std::unexpected(nesting_too_deep_error("expression"));
+            }
+            advance();
+            auto rhs_result = parse_bit_xor();
+            if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+            ExprPtr __rhs_value = std::move(rhs_result).value();
+            lhs = make_binary(BinaryOp::BitOr, std::move(lhs), std::move(__rhs_value));
+        }
+        return std::move(lhs);
+    }
+
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_bit_xor() {
+        auto lhs_result = parse_bit_and();
+        if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+        ExprPtr lhs = std::move(lhs_result).value();
+        int chain_depth = 0;
+        while (check(TokenKind::Caret)) {
+            // One tree level per iteration; see parse_logic_or's note.
+            chain_depth++;
+            if (nesting_depth_ + chain_depth > kMaxNestingDepth) {
+                return std::unexpected(nesting_too_deep_error("expression"));
+            }
+            advance();
+            auto rhs_result = parse_bit_and();
+            if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+            ExprPtr __rhs_value = std::move(rhs_result).value();
+            lhs = make_binary(BinaryOp::BitXor, std::move(lhs), std::move(__rhs_value));
+        }
+        return std::move(lhs);
+    }
+
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_bit_and() {
+        auto lhs_result = parse_equality();
+        if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+        ExprPtr lhs = std::move(lhs_result).value();
+        int chain_depth = 0;
+        while (check(TokenKind::Amp)) {
+            // One tree level per iteration; see parse_logic_or's note.
+            chain_depth++;
+            if (nesting_depth_ + chain_depth > kMaxNestingDepth) {
+                return std::unexpected(nesting_too_deep_error("expression"));
+            }
+            advance();
+            auto rhs_result = parse_equality();
+            if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+            ExprPtr __rhs_value = std::move(rhs_result).value();
+            lhs = make_binary(BinaryOp::BitAnd, std::move(lhs), std::move(__rhs_value));
         }
         return std::move(lhs);
     }
@@ -10484,7 +10647,7 @@ private:
     }
 
     [[nodiscard]] std::expected<ExprPtr, ParseError> parse_relational() {
-        auto lhs_result = parse_additive();
+        auto lhs_result = parse_shift();
         if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
         ExprPtr lhs = std::move(lhs_result).value();
         int chain_depth = 0;
@@ -10494,29 +10657,61 @@ private:
             if (nesting_depth_ + chain_depth > kMaxNestingDepth) {
                 return std::unexpected(nesting_too_deep_error("expression"));
             }
+            // A leading `<`/`>` of a `<<=`/`>>=` is not a relational
+            // operator: parse_shift above has already declined it (it is
+            // an assignment, which binds looser than everything here), so
+            // this level has to decline it too and let it reach
+            // parse_assignment_operator intact. `<<`/`>>` needs no such
+            // guard -- parse_shift consumed it.
+            if (shift_assign_operator_here().has_value()) break;
             if (match(TokenKind::Less)) {
-                auto rhs_result = parse_additive();
+                auto rhs_result = parse_shift();
                 if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
                 ExprPtr __rhs_value = std::move(rhs_result).value();
                 lhs = make_binary(BinaryOp::Lt, std::move(lhs), std::move(__rhs_value));
             } else if (match(TokenKind::Greater)) {
-                auto rhs_result = parse_additive();
+                auto rhs_result = parse_shift();
                 if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
                 ExprPtr __rhs_value = std::move(rhs_result).value();
                 lhs = make_binary(BinaryOp::Gt, std::move(lhs), std::move(__rhs_value));
             } else if (match(TokenKind::LessEqual)) {
-                auto rhs_result = parse_additive();
+                auto rhs_result = parse_shift();
                 if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
                 ExprPtr __rhs_value = std::move(rhs_result).value();
                 lhs = make_binary(BinaryOp::Le, std::move(lhs), std::move(__rhs_value));
             } else if (match(TokenKind::GreaterEqual)) {
-                auto rhs_result = parse_additive();
+                auto rhs_result = parse_shift();
                 if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
                 ExprPtr __rhs_value = std::move(rhs_result).value();
                 lhs = make_binary(BinaryOp::Ge, std::move(lhs), std::move(__rhs_value));
             } else {
                 break;
             }
+        }
+        return std::move(lhs);
+    }
+
+    // [expr.shift]: between relational and additive, so `a + b << c`
+    // shifts the sum and `a << b < c` compares the shifted value.
+    [[nodiscard]] std::expected<ExprPtr, ParseError> parse_shift() {
+        auto lhs_result = parse_additive();
+        if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+        ExprPtr lhs = std::move(lhs_result).value();
+        int chain_depth = 0;
+        for (;;) {
+            std::optional<BinaryOp> op = shift_operator_here();
+            if (!op.has_value()) break;
+            // One tree level per iteration; see parse_logic_or's note.
+            chain_depth++;
+            if (nesting_depth_ + chain_depth > kMaxNestingDepth) {
+                return std::unexpected(nesting_too_deep_error("expression"));
+            }
+            advance();
+            advance();
+            auto rhs_result = parse_additive();
+            if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+            ExprPtr __rhs_value = std::move(rhs_result).value();
+            lhs = make_binary(*op, std::move(lhs), std::move(__rhs_value));
         }
         return std::move(lhs);
     }
@@ -10570,6 +10765,11 @@ private:
                 if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
                 ExprPtr __rhs_value = std::move(rhs_result).value();
                 lhs = make_binary(BinaryOp::Div, std::move(lhs), std::move(__rhs_value));
+            } else if (match(TokenKind::Percent)) {
+                auto rhs_result = parse_unary();
+                if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
+                ExprPtr __rhs_value = std::move(rhs_result).value();
+                lhs = make_binary(BinaryOp::Mod, std::move(lhs), std::move(__rhs_value));
             } else {
                 break;
             }
@@ -10720,6 +10920,21 @@ private:
             node->kind = ExprKind::Unary;
             node->loc = loc;
             node->unary_op = UnaryOp::Not;
+            auto lhs_result = parse_unary();
+            if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
+            node->lhs = std::move(lhs_result).value();
+            return std::move(node);
+        }
+        if (match(TokenKind::Tilde)) {
+            // `~x` (bitwise complement) -- unambiguous with the `~` that
+            // introduces a destructor declarator for the same reason
+            // prefix `*` is unambiguous with binary `*`: a destructor
+            // name is only ever looked for where a declaration may
+            // start, never where an operand is expected.
+            auto node = std::make_unique<Expr>();
+            node->kind = ExprKind::Unary;
+            node->loc = loc;
+            node->unary_op = UnaryOp::BitNot;
             auto lhs_result = parse_unary();
             if (!lhs_result.has_value()) return std::unexpected(std::move(lhs_result).error());
             node->lhs = std::move(lhs_result).value();
@@ -11612,10 +11827,32 @@ private:
     }
 
     std::optional<BinaryOp> parse_fold_operator() {
+        if (std::optional<BinaryOp> shift = shift_operator_here(); shift.has_value()) {
+            advance();
+            advance();
+            return shift;
+        }
+        if (std::optional<BinaryOp> shift_assign = shift_assign_operator_here(); shift_assign.has_value()) {
+            advance();
+            advance();
+            return shift_assign;
+        }
         if (match(TokenKind::Plus)) { BinaryOp op = BinaryOp::Add; return op; }
         if (match(TokenKind::Minus)) { BinaryOp op = BinaryOp::Sub; return op; }
         if (match(TokenKind::Star)) { BinaryOp op = BinaryOp::Mul; return op; }
         if (match(TokenKind::Slash)) { BinaryOp op = BinaryOp::Div; return op; }
+        if (match(TokenKind::Percent)) { BinaryOp op = BinaryOp::Mod; return op; }
+        if (match(TokenKind::Amp)) { BinaryOp op = BinaryOp::BitAnd; return op; }
+        if (match(TokenKind::Caret)) { BinaryOp op = BinaryOp::BitXor; return op; }
+        if (match(TokenKind::Pipe)) { BinaryOp op = BinaryOp::BitOr; return op; }
+        if (match(TokenKind::PlusAssign)) { BinaryOp op = BinaryOp::AddAssign; return op; }
+        if (match(TokenKind::MinusAssign)) { BinaryOp op = BinaryOp::SubAssign; return op; }
+        if (match(TokenKind::StarAssign)) { BinaryOp op = BinaryOp::MulAssign; return op; }
+        if (match(TokenKind::SlashAssign)) { BinaryOp op = BinaryOp::DivAssign; return op; }
+        if (match(TokenKind::PercentAssign)) { BinaryOp op = BinaryOp::ModAssign; return op; }
+        if (match(TokenKind::AmpAssign)) { BinaryOp op = BinaryOp::BitAndAssign; return op; }
+        if (match(TokenKind::CaretAssign)) { BinaryOp op = BinaryOp::BitXorAssign; return op; }
+        if (match(TokenKind::PipeAssign)) { BinaryOp op = BinaryOp::BitOrAssign; return op; }
         if (match(TokenKind::EqualEqual)) { BinaryOp op = BinaryOp::Eq; return op; }
         if (match(TokenKind::NotEqual)) { BinaryOp op = BinaryOp::Ne; return op; }
         if (match(TokenKind::Less)) { BinaryOp op = BinaryOp::Lt; return op; }

@@ -1,0 +1,20 @@
+int shift_by(int a, int b) {
+    return a << b;
+}
+
+int remainder(int a, int b) {
+    return a % b;
+}
+
+// [expr.shift]/1's out-of-range shift is undefined, and unlike `+`/`-`/
+// `*` there is no defined wrapping result for an unsafe context to fall
+// back to -- an over-wide shift yields poison, not a value. So the check
+// stays inside `[[scpp::unsafe]] { }` too, exactly as division by zero's
+// does, and this function emits its own copy of it.
+int unchecked(int a, int b) {
+    int result = 0;
+    [[scpp::unsafe]] {
+        result = a << b;
+    }
+    return result;
+}

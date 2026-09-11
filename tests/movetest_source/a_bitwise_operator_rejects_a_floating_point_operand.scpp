@@ -1,0 +1,12 @@
+// [expr.mul]/2, [expr.shift]/1, [expr.bit.and]/1, [expr.xor]/1 and
+// [expr.or]/1 each require an operand "of integral or unscoped
+// enumeration type", so [over.built] provides no candidate at all for a
+// floating-point one -- `%` on two doubles is not a narrowing question
+// or a conversion question but a "there is no such operator" question,
+// and it has to be answered before the same-type rule the arithmetic
+// operators share.
+import std;
+
+double remainder_of(double x, double y) {
+    return x % y;
+}

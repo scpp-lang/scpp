@@ -262,6 +262,63 @@ void test_operators() {
         "operators");
 }
 
+// [expr.mul], [expr.bit.and], [expr.xor], [expr.or] and [expr.ass]: the
+// bitwise family and its compound-assignment forms. `|` used to lex as
+// Unknown and `%`/`^` fell through to the same default, so none of these
+// had a token at all.
+void test_bitwise_operators() {
+    expect_kinds(
+        "% ^ | %= ^= |= &=",
+        {
+            scpp::TokenKind::Percent,
+            scpp::TokenKind::Caret,
+            scpp::TokenKind::Pipe,
+            scpp::TokenKind::PercentAssign,
+            scpp::TokenKind::CaretAssign,
+            scpp::TokenKind::PipeAssign,
+            scpp::TokenKind::AmpAssign,
+            scpp::TokenKind::EndOfFile,
+        },
+        "bitwise_operators");
+}
+
+// [temp.names]/3: `>>` also closes two nested template-argument-lists,
+// so the lexer deliberately produces one token per `<`/`>` and leaves
+// rejoining them to the parser's own shift level (see TokenKind::Less).
+// `<<=`/`>>=` are the leading `<`/`>` followed by the `<=`/`>=` the
+// lexer forms as usual.
+void test_shift_operators_stay_two_tokens() {
+    expect_kinds(
+        "a << b >> c",
+        {
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::Less,
+            scpp::TokenKind::Less,
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::Greater,
+            scpp::TokenKind::Greater,
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::EndOfFile,
+        },
+        "shift_operators_stay_two_tokens");
+    expect_kinds(
+        "a <<= 1; a >>= 1;",
+        {
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::Less,
+            scpp::TokenKind::LessEqual,
+            scpp::TokenKind::IntegerLiteral,
+            scpp::TokenKind::Semicolon,
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::Greater,
+            scpp::TokenKind::GreaterEqual,
+            scpp::TokenKind::IntegerLiteral,
+            scpp::TokenKind::Semicolon,
+            scpp::TokenKind::EndOfFile,
+        },
+        "shift_assign_operators_stay_two_tokens");
+}
+
 void test_arrow_operator() {
     expect_kinds(
         "p->x - 1",
@@ -528,6 +585,8 @@ int main() {
     test_malformed_numbers_stay_one_token();
     test_float_literals_are_unchanged();
     test_operators();
+    test_bitwise_operators();
+    test_shift_operators_stay_two_tokens();
     test_arrow_operator();
     test_comments_are_skipped();
     test_line_and_column_tracking();

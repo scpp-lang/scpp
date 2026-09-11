@@ -1,0 +1,10 @@
+// [expr.shift]/1: "the operands are converted separately", which makes a
+// shift the one binary operator whose two operands need not have the
+// same type. `size_t >> int` is well-formed even though `size_t + int`
+// is not -- applying ch06's no-implicit-conversion rule to a shift would
+// reject the ordinary spelling of a hash mix.
+import std;
+
+std::size_t mix(std::size_t h, int shift) {
+    return (h << shift) | (h >> shift);
+}

@@ -1,0 +1,58 @@
+// [expr.mul]/1-4, [expr.shift]/1-3, [expr.bit.and]/1, [expr.xor]/1,
+// [expr.or]/1 and [expr.unary.op]/9: the six integer-only binary
+// operators, their compound-assignment forms ([expr.ass]/7), and unary
+// `~`. `docs/spec/` adopts none of those clauses and so modifies none of
+// them, which by §1(2) leaves plain C++ rules applying.
+//
+// The lexer had no token for `%`, `^`, `|`, `&=`, `%=`, `^=` or `|=` at
+// all, and `|` lexed as Unknown, so every one of these expressions was a
+// parse error. The shifts are spelled with two `<`/`>` tokens on
+// purpose (see TokenKind::Less): `>>` also closes two nested
+// template-argument-lists, so the parser rejoins two *adjacent* ones
+// rather than the lexer producing a token that would have to be split
+// apart again at every template closing.
+import std;
+
+int main() {
+    int a = 29;
+    int b = 4;
+    std::print("mod={} and={} xor={} or={}\n", a % b, a & b, a ^ b, a | b);
+    std::print("shl={} shr={}\n", a << b, a >> 2);
+    std::print("complement={}\n", ~a);
+
+    // [expr.ass]/7: `E1 op= E2` is `E1 = E1 op E2`.
+    int m = 29;
+    m %= 4;
+    int n = 29;
+    n &= 4;
+    int x = 29;
+    x ^= 4;
+    int o = 29;
+    o |= 4;
+    int l = 29;
+    l <<= 2;
+    int r = 29;
+    r >>= 2;
+    std::print("compound: {} {} {} {} {} {}\n", m, n, x, o, l, r);
+
+    // [expr.shift]/3: an arithmetic right shift on a signed operand,
+    // a logical one on an unsigned operand.
+    int negative = -32;
+    std::size_t unsigned_value = 32;
+    std::print("signed_shr={} unsigned_shr={}\n", negative >> 2, static_cast<int>(unsigned_value >> 2));
+
+    // [expr.shift]/1 converts the two operands separately, so the count
+    // need not have the shifted value's type: an `int` count next to a
+    // `size_t` value is well-formed where `size_t + int` is not.
+    std::size_t wide = 1;
+    int count = 40;
+    std::print("wide={}\n", std::to_string(wide << count));
+
+    // Precedence, exactly as the grammar orders the levels: `|` looser
+    // than `^` looser than `&` looser than `==` looser than `<` looser
+    // than `<<` looser than `+`.
+    std::print("precedence={}\n", 1 | 2 ^ 3 & 6);
+    std::print("shift_binds_tighter_than_compare={}\n", (1 << 3) > 4 ? 1 : 0);
+    std::print("shift_binds_looser_than_add={}\n", 1 << 1 + 2);
+    return 0;
+}

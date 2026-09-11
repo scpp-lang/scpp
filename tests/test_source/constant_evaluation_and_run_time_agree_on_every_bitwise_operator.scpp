@@ -1,0 +1,51 @@
+// ch09 §9.1: a constant-evaluated program is the same program as its
+// runtime twin, so the evaluator has to know every operator codegen
+// does. Each value below is computed twice -- once by the constant
+// evaluator (a `constexpr` initializer, which must be folded) and once
+// at run time -- and the two answers are printed side by side.
+//
+// [expr.shift]/1's "the operands are converted separately" matters here
+// too: the evaluator takes a shift's type from the left operand alone,
+// where `result_type` (which falls back to `int` when the two operands
+// differ) would have been the wrong answer for `size_t << int`.
+import std;
+
+consteval int folded_mix(int seed) {
+    int h = seed;
+    h ^= h >> 3;
+    h |= 1;
+    h &= 255;
+    h %= 97;
+    h <<= 2;
+    return h ^ ~seed;
+}
+
+int runtime_mix(int seed) {
+    int h = seed;
+    h ^= h >> 3;
+    h |= 1;
+    h &= 255;
+    h %= 97;
+    h <<= 2;
+    return h ^ ~seed;
+}
+
+int main() {
+    constexpr int mod = 29 % 4;
+    constexpr int conjunction = 29 & 4;
+    constexpr int exclusive = 29 ^ 4;
+    constexpr int inclusive = 29 | 4;
+    constexpr int shifted_left = 29 << 4;
+    constexpr int shifted_right = 29 >> 2;
+    constexpr int complement = ~29;
+    std::print("{} {} {} {} {} {} {}\n", mod, conjunction, exclusive, inclusive, shifted_left, shifted_right,
+               complement);
+
+    // [expr.shift]/3: an arithmetic right shift keeps the sign.
+    constexpr int negative_shift = -32 >> 2;
+    std::print("negative_shift={}\n", negative_shift);
+
+    constexpr int folded = folded_mix(12345);
+    std::print("folded={} runtime={}\n", folded, runtime_mix(12345));
+    return 0;
+}

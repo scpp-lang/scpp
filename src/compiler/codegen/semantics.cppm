@@ -257,6 +257,7 @@ namespace {
                 switch (expr.unary_op) {
                     case UnaryOp::Not: return named_type("bool");
                     case UnaryOp::Neg: return infer_type(*expr.lhs);
+                    case UnaryOp::BitNot: return infer_type(*expr.lhs);
                     case UnaryOp::PreInc:
                     case UnaryOp::PreDec:
                     case UnaryOp::PostInc:
@@ -360,14 +361,31 @@ namespace {
                     }
                 }
                 switch (expr.binary_op) {
+                    // [expr.shift]/1: "the operands are converted
+                    // separately" -- a shift's type is the left
+                    // operand's alone, so it never consults the right
+                    // one the way the arithmetic arm below does.
+                    case BinaryOp::Shl:
+                    case BinaryOp::Shr:
+                    case BinaryOp::ShlAssign:
+                    case BinaryOp::ShrAssign:
+                        return binary_lhs_type;
                     case BinaryOp::Add:
                     case BinaryOp::Sub:
                     case BinaryOp::Mul:
                     case BinaryOp::Div:
+                    case BinaryOp::Mod:
+                    case BinaryOp::BitAnd:
+                    case BinaryOp::BitXor:
+                    case BinaryOp::BitOr:
                     case BinaryOp::AddAssign:
                     case BinaryOp::SubAssign:
                     case BinaryOp::MulAssign:
                     case BinaryOp::DivAssign:
+                    case BinaryOp::ModAssign:
+                    case BinaryOp::BitAndAssign:
+                    case BinaryOp::BitXorAssign:
+                    case BinaryOp::BitOrAssign:
                     case BinaryOp::Assign: {
                         // Each operand is inferred at most once, and the
                         // answer reused. Inferring the left operand for the

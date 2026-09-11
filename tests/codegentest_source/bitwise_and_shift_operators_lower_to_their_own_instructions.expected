@@ -1,0 +1,6 @@
+sequence: and i32 | xor i32 | or i32
+contains: shl i32
+contains: ashr i32
+contains: lshr i32
+contains: srem i32
+sequence: srem i32 | xor i32 %
