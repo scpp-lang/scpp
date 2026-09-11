@@ -1,0 +1,79 @@
+// [dcl.fct]/2: a function declarator may write its return type *after*
+// the parameter list -- `auto f(P p) -> R` -- with `auto` standing in for
+// the return type in the decl-specifier-seq. The parser had no such form
+// at all: `auto` at the start of a declaration only ever meant a deduced
+// *variable*, so every trailing-return-type declaration (the shape scpp's
+// own src/mir.cppm is written in) failed with `expected a type name` at
+// the `auto` itself.
+//
+// This covers the form in each declarator position that has one: an
+// ordinary namespace-scope function, a namespace-scope operator function,
+// a full-header-form generic function (whose `[[nodiscard]]` sits after
+// the template-head, where [dcl.attr.grammar]/1 puts a declaration's
+// attributes), an in-class member function and member operator, a static
+// member function, and an out-of-line member definition -- each one used at
+// run time, so a return type quietly parsed as the wrong thing shows up as
+// a changed value rather than passing silently.
+import std;
+
+class Counter {
+  public:
+    virtual ~Counter() = default;
+    Counter() = default;
+    Counter(int start) : value_{start} { return; }
+
+    auto value() const -> int { return this->value_; }
+    auto slot() -> int& { return this->value_; }
+    auto operator+(const Counter& other) const -> int { return this->value_ + other.value_; }
+    static auto origin() -> Counter { return Counter{0}; }
+
+    auto bumped(int delta) const -> Counter;
+
+  private:
+    int value_{};
+};
+
+auto Counter::bumped(int delta) const -> Counter { return Counter{this->value_ + delta}; }
+
+auto doubled(int x) -> int { return x * 2; }
+
+struct Pair {
+    int lo = 0;
+    int hi = 0;
+};
+
+auto operator+(const Pair& p, int extra) -> int { return p.hi - p.lo + extra; }
+
+template <typename T>
+[[nodiscard]] auto widest(const T& a, const T& b) -> int {
+    if (a.value() < b.value()) return b.value();
+    return a.value();
+}
+
+// The trailing return type names a template parameter, which is the one
+// thing the leading form cannot do once the type depends on a parameter.
+template <typename T>
+auto twice_over(T v) -> T {
+    return v + v;
+}
+
+int main() {
+    Counter three{3};
+    Counter four{4};
+
+    std::print("value={}\n", three.value());
+    std::print("doubled={}\n", doubled(three.value()));
+    std::print("sum={}\n", three + four);
+    std::print("origin={}\n", Counter::origin().value());
+    std::print("bumped={}\n", three.bumped(5).value());
+    std::print("widest={}\n", widest(three, four));
+    std::print("twice={}\n", twice_over(21));
+
+    Pair p{2, 9};
+    std::print("spread={}\n", p + 1);
+
+    int& slot = three.slot();
+    slot = 11;
+    std::print("aliased={}\n", three.value());
+    return 0;
+}

@@ -6674,6 +6674,77 @@ void test_range_for_and_variable_declaration_agree_on_auto_reference() {
            "range_for_and_variable_declaration_agree: both should refer to the 'auto' placeholder");
 }
 
+// [dcl.fct]/2: `auto f(P) -> R` names the same function `R f(P)` does,
+// so the two spellings must reach the parser's own Function record
+// identically -- the trailing form is the only one whose return type may
+// depend on the parameters, and it was not parsed at all ("expected a
+// type name" at the `auto`).
+void test_trailing_return_type_names_the_same_return_type_as_the_leading_form() {
+    scpp::Program trailing = expect_parse_ok("auto f(int x) -> int { return x; }");
+    scpp::Program leading = expect_parse_ok("int f(int x) { return x; }");
+    const scpp::Function* trailing_fn = find_function_named(trailing, "f");
+    const scpp::Function* leading_fn = find_function_named(leading, "f");
+    expect(trailing_fn != nullptr && leading_fn != nullptr,
+           "trailing_return_type: both spellings should declare a function named 'f'");
+    if (trailing_fn == nullptr || leading_fn == nullptr) return;
+    expect(is_named_type(trailing_fn->return_type, "int"),
+           "trailing_return_type: the trailing form's return type should be 'int'");
+    expect(trailing_fn->return_type.kind == leading_fn->return_type.kind &&
+               trailing_fn->return_type.name == leading_fn->return_type.name,
+           "trailing_return_type: the two spellings should produce the same return type");
+    expect(trailing_fn->params.size() == 1 && trailing_fn->params[0].name == "x",
+           "trailing_return_type: the parameter list should survive the trailing form");
+}
+
+// A reference return type (`-> int&`) goes through the same parse_type
+// as the leading form, so the borrow sugar of ch03 has to survive being
+// written after the parameter list too.
+void test_trailing_return_type_carries_a_reference_return() {
+    scpp::Program program = expect_parse_ok("auto pick(int& a) -> int& { return a; }");
+    const scpp::Function* fn = find_function_named(program, "pick");
+    expect(fn != nullptr, "trailing_return_reference: 'pick' should be declared");
+    if (fn == nullptr) return;
+    expect(fn->return_type.kind == scpp::TypeKind::Reference && fn->return_type.pointee != nullptr &&
+               is_named_type(*fn->return_type.pointee, "int"),
+           "trailing_return_reference: the return type should be a reference to int");
+    expect(fn->return_type.is_mutable_ref, "trailing_return_reference: 'int&' should be a mutable borrow");
+}
+
+// [dcl.spec.auto]/2's other meaning of `auto` -- deducing the return type
+// from the body -- is a separate feature this version does not have.
+// Without a diagnostic of its own it surfaced as whatever the next token
+// happened to be ("expected '{'"), which names the punctuation rather
+// than the rule.
+void test_auto_return_type_without_a_trailing_type_is_rejected() {
+    bool rejected = false;
+    if (auto _r = scpp::parse("auto f(int x) { return x; }"); !_r.has_value()) {
+        rejected = true;
+        const std::string message = _r.error().what();
+        expect(message.find("'->'") != std::string::npos,
+               "auto_return_without_trailing_type: expected the required '->' in " + message);
+        expect(message.find("deducing it from the body") != std::string::npos,
+               "auto_return_without_trailing_type: expected the unsupported-deduction rule in " + message);
+    }
+    expect(rejected, "auto_return_without_trailing_type: expected a ParseError");
+}
+
+// [dcl.attr.grammar]/1 puts a declaration's attribute-specifier-seq on
+// the declaration, and [temp.pre]/1 says a template-head introduces an
+// ordinary declaration -- so `[[nodiscard]]` belongs *after* the header.
+// Only the before-`template` spelling parsed, which is why the shape
+// scpp's own src/mir.cppm uses was "expected a type name" at the `[`.
+void test_attributes_after_a_template_head_appertain_to_the_function() {
+    scpp::Program program =
+        expect_parse_ok("template <typename T> [[nodiscard]] auto widen(const T& v) -> int { return 1; }");
+    const scpp::Function* fn = find_function_named(program, "widen");
+    expect(fn != nullptr, "attributes_after_template_head: 'widen' should be declared");
+    if (fn == nullptr) return;
+    expect(fn->is_nodiscard, "attributes_after_template_head: '[[nodiscard]]' should reach the function");
+    expect(fn->is_generic_template, "attributes_after_template_head: the function should still be a template");
+    expect(is_named_type(fn->return_type, "int"),
+           "attributes_after_template_head: the trailing return type should still be read");
+}
+
 int main() {
     test_int_main_return();
     test_function_with_params();
@@ -6992,6 +7063,10 @@ int main() {
     test_nodiscard_reason_concatenates_adjacent_literals();
     test_extern_linkage_concatenates_before_it_is_checked();
     test_range_for_and_variable_declaration_agree_on_auto_reference();
+    test_trailing_return_type_names_the_same_return_type_as_the_leading_form();
+    test_trailing_return_type_carries_a_reference_return();
+    test_auto_return_type_without_a_trailing_type_is_rejected();
+    test_attributes_after_a_template_head_appertain_to_the_function();
 
     test_hexadecimal_literals_have_their_value();
     test_octal_and_binary_literals_have_their_value();
