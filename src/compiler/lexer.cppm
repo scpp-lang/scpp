@@ -9,6 +9,21 @@ export namespace scpp {
 enum class TokenKind {
     // literals / identifiers
     Identifier,
+    // An integer literal in any of [lex.icon]'s four bases -- decimal
+    // (`42`), hexadecimal (`0x2a`, `0X2A`), octal (`052`), or binary
+    // (`0b101010`) -- optionally with `'` digit separators and an
+    // integer-suffix (`u`/`U`, `l`/`L`, `ll`/`LL`, `z`/`Z` and the legal
+    // combinations of those). spec §16.2 changes only what *type* such a
+    // literal has, not how it is spelled, so the whole of [lex.icon]'s
+    // grammar is available here.
+    //
+    // `text` is the exact source substring, prefix/separators/suffix and
+    // all, like every other literal token; turning it into a value
+    // happens in the parser (see decode_integer_literal), not here. The
+    // lexer finds the token's extent -- it deliberately accepts an
+    // ill-formed spelling (`0x`, `08`, `1ULLL`, `1abc`) as one token so
+    // the parser can report it against the whole literal instead of
+    // silently splitting it into a valid literal plus an identifier.
     IntegerLiteral,
     // A floating-point literal (`1.5`, `0.25`, ...) -- digits, a decimal
     // point, then more digits (no exponent notation in this version).
@@ -219,6 +234,54 @@ struct Token {
         : kind{kind}, text{text}, line{line}, column{column} {}
 };
 
+// What `c` is worth as a digit, or 99 -- a value above every base --
+// when it is not a digit at all. One character-classification question
+// serves all four of [lex.icon]'s bases: a caller just asks whether the
+// answer is below the base it is working in, so `8` ends an
+// octal-literal and `f` ends a decimal one without either needing its
+// own predicate.
+//
+// Shared with the parser so that the extent the lexer scans and the
+// digits the parser reads can never disagree about what a digit is.
+[[nodiscard]] inline int integer_digit_value(char c) {
+    if (c >= '0' && c <= '9') return static_cast<int>(c) - static_cast<int>('0');
+    if (c >= 'a' && c <= 'f') return static_cast<int>(c) - static_cast<int>('a') + 10;
+    if (c >= 'A' && c <= 'F') return static_cast<int>(c) - static_cast<int>('A') + 10;
+    return 99;
+}
+
+// [lex.icon]'s *integer-suffix*: an optional unsigned-suffix (`u`/`U`)
+// in either position around an optional size suffix, which is `l`/`L`,
+// `ll`/`LL` (both letters the same case -- `lL` is not a suffix) or
+// C++23's `z`/`Z`. The empty suffix is valid: most literals have none.
+//
+// spec §16.2(1) gives an integer-literal "no type of its own", so a
+// suffix does not select a type the way it does in C++; it is accepted
+// because it is part of how an integer-literal is spelled, and is then
+// ignored. Validating it anyway keeps `1ULLL` an error rather than a
+// literal that quietly means something else than it says.
+[[nodiscard]] inline bool is_valid_integer_suffix(std::string_view suffix) {
+    std::size_t i = 0;
+    bool seen_unsigned = false;
+    if (i < suffix.size() && (suffix.at(i) == 'u' || suffix.at(i) == 'U')) {
+        seen_unsigned = true;
+        i = i + 1;
+    }
+    if (i < suffix.size()) {
+        char c = suffix.at(i);
+        if (c == 'l' || c == 'L') {
+            i = i + 1;
+            if (i < suffix.size() && suffix.at(i) == c) i = i + 1;
+        } else if (c == 'z' || c == 'Z') {
+            i = i + 1;
+        }
+    }
+    if (!seen_unsigned && i < suffix.size() && (suffix.at(i) == 'u' || suffix.at(i) == 'U')) {
+        i = i + 1;
+    }
+    return i == suffix.size();
+}
+
 struct Lexer {
 public:
     explicit Lexer(std::string_view source) : source_{source} {}
@@ -355,6 +418,77 @@ private:
         return tok;
     }
 
+    // Consumes digits of `base`, plus [lex.icon]'s `'` digit separators.
+    // A `'` is only taken as a separator when a digit of this base
+    // follows it, so the `'` of a char-literal never gets swallowed by a
+    // number that happens to sit in front of it.
+    void scan_digits(int base) {
+        for (;;) {
+            if (at_end()) return;
+            char c = peek();
+            if (c == '\'') {
+                if (integer_digit_value(peek(1)) >= base) return;
+                advance(); // the separator
+                advance(); // the digit after it
+                continue;
+            }
+            if (integer_digit_value(c) >= base) return;
+            advance();
+        }
+    }
+
+    // An integer-literal's extent, from just past its first digit.
+    //
+    // The token runs to the end of the whole number-like run --
+    // including any trailing identifier characters, which is what a
+    // suffix is made of -- so that an ill-formed spelling stays one
+    // token. Splitting `0x` into `0` and `x`, or `1ULLL` into `1` and
+    // `ULLL`, would hand the parser a valid literal followed by a
+    // stray identifier and produce a diagnostic about the wrong thing;
+    // decode_integer_literal validates the spelling and reports it
+    // against the literal as a whole.
+    Token lex_number(std::size_t start, int start_line, int start_col) {
+        // `pos_` is one past the first digit, which `start` still points at.
+        char first = source_.at(start);
+        if (first == '0' && !at_end() && (peek() == 'x' || peek() == 'X')) {
+            advance();
+            scan_digits(16);
+            return finish_integer_literal(start, start_line, start_col);
+        }
+        if (first == '0' && !at_end() && (peek() == 'b' || peek() == 'B')) {
+            advance();
+            scan_digits(2);
+            return finish_integer_literal(start, start_line, start_col);
+        }
+        // Decimal and octal share this scan: both are spelled with
+        // decimal digits, and an octal-literal's leading `0` only
+        // changes how the digits are *read*, not which ones terminate
+        // the run. `08` therefore scans as one literal here and is
+        // rejected later as an octal-literal with a non-octal digit,
+        // rather than becoming `0` followed by `8`.
+        scan_digits(10);
+        // A `.` followed by at least one digit makes this a
+        // FloatLiteral instead (`1.5`) -- a bare trailing `.` with no
+        // following digit (`1.`) is *not* consumed here, left as an
+        // IntegerLiteral followed by a separate `.` token (member
+        // access on an integer literal is nonsensical but not this
+        // lexer's problem to reject). A floating-point literal takes no
+        // suffix in this version, so this returns directly rather than
+        // going through finish_integer_literal.
+        if (!at_end() && peek() == '.' && pos_ + 1 < source_.size() &&
+            std::isdigit(static_cast<std::uint8_t>(source_.at(pos_ + 1)))) {
+            advance(); // '.'
+            scan_digits(10);
+            return make_token(TokenKind::FloatLiteral, start, start_line, start_col);
+        }
+        return finish_integer_literal(start, start_line, start_col);
+    }
+
+    Token finish_integer_literal(std::size_t start, int start_line, int start_col) {
+        while (!at_end() && is_ident_continue(peek())) advance();
+        return make_token(TokenKind::IntegerLiteral, start, start_line, start_col);
+    }
+
     Token next() {
         // Captured *before* skipping trailing whitespace/comments so the
         // EndOfFile token below reports the position right after the
@@ -387,20 +521,7 @@ private:
         }
 
         if (std::isdigit(static_cast<std::uint8_t>(c))) {
-            while (!at_end() && std::isdigit(static_cast<std::uint8_t>(peek()))) advance();
-            // A `.` followed by at least one digit makes this a
-            // FloatLiteral instead (`1.5`) -- a bare trailing `.` with no
-            // following digit (`1.`) is *not* consumed here, left as an
-            // IntegerLiteral followed by a separate `.` token (member
-            // access on an integer literal is nonsensical but not this
-            // lexer's problem to reject).
-            if (!at_end() && peek() == '.' && pos_ + 1 < source_.size() &&
-                std::isdigit(static_cast<std::uint8_t>(source_.at(pos_ + 1)))) {
-                advance(); // '.'
-                while (!at_end() && std::isdigit(static_cast<std::uint8_t>(peek()))) advance();
-                return make_token(TokenKind::FloatLiteral, start, start_line, start_col);
-            }
-            return make_token(TokenKind::IntegerLiteral, start, start_line, start_col);
+            return lex_number(start, start_line, start_col);
         }
 
         if (c == '"') {

@@ -5793,6 +5793,164 @@ private:
         }
     }
 
+    // [lex.icon]'s name for each base, for diagnostics that have to say
+    // which digits are available.
+    [[nodiscard]] std::string integer_literal_base_name(int base) {
+        if (base == 16) {
+            std::string hexadecimal{"hexadecimal"};
+            return hexadecimal;
+        }
+        if (base == 8) {
+            std::string octal{"octal"};
+            return octal;
+        }
+        if (base == 2) {
+            std::string binary{"binary"};
+            return binary;
+        }
+        std::string decimal{"decimal"};
+        return decimal;
+    }
+
+    // Decodes an IntegerLiteral token's text into its value, and is the
+    // one place that validates an integer-literal's spelling. `tok.text`
+    // is the whole number-like run the lexer found -- base prefix, `'`
+    // digit separators and integer-suffix included (see IntegerLiteral's
+    // definition in lexer.cppm) -- so every way of spelling an integer
+    // wrong arrives here as one token, instead of being mistaken for a
+    // valid literal standing next to an identifier.
+    //
+    // All four of [lex.icon]'s bases are read here. spec §16.2 changes
+    // what *type* an integer-literal has, not how it is spelled, so
+    // `0x2a`, `052`, `0b101010` and `42` are four spellings of one
+    // value, and §16.2(1)'s "no type of its own" applies to each alike.
+    // A suffix is accepted and then ignored for the same reason: it is
+    // part of the spelling, but naming a type is not something a literal
+    // does in scpp -- `0x9e3779b9ULL` is the same literal as
+    // `0x9e3779b9`, and both take the type their context requires.
+    //
+    // The value is accumulated in a std::uint64_t and handed back as the
+    // std::int64_t with the same bits, which is how this compiler
+    // carries the 64-bit unsigned range everywhere (see ast.cppm's
+    // scalar_value_range): `0x9e3779b97f4a7c15` is an ordinary
+    // std::uint64_t value and arrives as a negative std::int64_t, which
+    // integer_literal_value_fits accepts for a 64-bit unsigned target
+    // and for nothing else.
+    [[nodiscard]] std::expected<std::int64_t, ParseError> decode_integer_literal(const Token& tok) {
+        std::string_view text = tok.text;
+        if (text.size() == 0) {
+            return std::unexpected(ParseError(tok.line, tok.column, std::string{"empty integer literal"}));
+        }
+        std::size_t index = 0;
+        int base = 10;
+        bool has_base_prefix = false;
+        if (text.size() >= 2 && text.at(0) == '0') {
+            char second = text.at(1);
+            if (second == 'x' || second == 'X') {
+                base = 16;
+                index = 2;
+                has_base_prefix = true;
+            } else if (second == 'b' || second == 'B') {
+                base = 2;
+                index = 2;
+                has_base_prefix = true;
+            } else {
+                // A leading `0` on a run of digits is [lex.icon]'s
+                // octal-literal. It changes only how the digits are
+                // *read*: `010` is eight. The `0` stays part of the
+                // digit sequence (unlike `0x`/`0b`, which are a prefix
+                // and not digits), so `0u` is the digit `0` with a
+                // suffix rather than a prefix with nothing after it.
+                base = 8;
+            }
+        }
+        std::string base_name = integer_literal_base_name(base);
+        // The largest std::uint64_t. Spelled as every bit of zero
+        // flipped rather than as a literal, because a literal that large
+        // would need the very decoding this function performs in order
+        // to be read at all.
+        std::uint64_t largest = 0;
+        largest = largest - 1;
+        std::uint64_t unsigned_base = static_cast<std::uint64_t>(base);
+        std::uint64_t value = 0;
+        std::size_t digit_count = 0;
+        bool overflowed = false;
+        while (index < text.size()) {
+            char c = text.at(index);
+            // A `'` between digits is a separator ([lex.icon]) and
+            // contributes nothing to the value.
+            if (c == '\'') {
+                index = index + 1;
+                continue;
+            }
+            int digit = integer_digit_value(c);
+            if (digit >= base) break;
+            std::uint64_t unsigned_digit = static_cast<std::uint64_t>(digit);
+            // Checked before multiplying/adding rather than after: an
+            // std::uint64_t that has already wrapped cannot be told
+            // apart from a value that legitimately landed there.
+            if (value > (largest - unsigned_digit) / unsigned_base) {
+                overflowed = true;
+            } else {
+                value = value * unsigned_base + unsigned_digit;
+            }
+            digit_count = digit_count + 1;
+            index = index + 1;
+        }
+        std::string literal_text = std::string(text.data(), text.size());
+        // Only a `0x`/`0b` prefix can leave no digits behind: a decimal
+        // or octal literal is a run of digits that starts with one.
+        if (has_base_prefix && digit_count == 0) {
+            std::string message{"invalid integer literal '"};
+            message += literal_text;
+            message += "': the '";
+            message += literal_text.substr(static_cast<std::size_t>(0), static_cast<std::size_t>(2));
+            message += "' prefix must be followed by at least one ";
+            message += base_name;
+            message += " digit";
+            return std::unexpected(ParseError(tok.line, tok.column, message));
+        }
+        std::string_view suffix = text.substr(index, text.size() - index);
+        if (!is_valid_integer_suffix(suffix)) {
+            std::string suffix_text = std::string(suffix.data(), suffix.size());
+            // A leftover that begins with a decimal digit is a digit
+            // this base does not have -- `08`, `0b12`. Saying so beats
+            // reporting it as a suffix nobody wrote. A *letter* is not
+            // treated that way even in a base that has letter digits:
+            // `0x1g` stops on a `g` that is no base's digit, and `123a`
+            // on an `a` that is only a digit where it was not written,
+            // so both read better as the suffix they are standing in.
+            if (integer_digit_value(suffix_text.at(0)) < 10) {
+                std::string message{"invalid digit '"};
+                message += suffix_text.substr(static_cast<std::size_t>(0), static_cast<std::size_t>(1));
+                message += "' in ";
+                message += base_name;
+                message += " integer literal '";
+                message += literal_text;
+                message += "'";
+                if (base == 8) {
+                    message += ": a leading '0' makes this an octal-literal, whose digits are 0 through 7";
+                }
+                return std::unexpected(ParseError(tok.line, tok.column, message));
+            }
+            std::string message{"invalid suffix '"};
+            message += suffix_text;
+            message += "' on integer literal '";
+            message += literal_text;
+            message += "': an integer-suffix is 'u'/'U', 'l'/'L', 'll'/'LL' or 'z'/'Z', optionally with one "
+                       "unsigned-suffix and one size suffix in either order";
+            return std::unexpected(ParseError(tok.line, tok.column, message));
+        }
+        if (overflowed) {
+            std::string message{"integer literal '"};
+            message += literal_text;
+            message += "' is too large: its value does not fit in any scalar type (spec ch16 Table 1's widest is 64 "
+                       "bits)";
+            return std::unexpected(ParseError(tok.line, tok.column, message));
+        }
+        return static_cast<std::int64_t>(value);
+    }
+
     // An enum's underlying type is exactly the integral scalars: not
     // `bool` (an enum needs more than two values) and not the floating
     // ones (an enumerator is an integer).
@@ -11199,18 +11357,12 @@ private:
         }
 
         if (match(TokenKind::IntegerLiteral)) {
+            auto value_result = decode_integer_literal(tok);
+            if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
             auto node = std::make_unique<Expr>();
             node->kind = ExprKind::IntegerLiteral;
             node->loc = loc;
-            std::int64_t parsed_int_value = 0;
-            // spec §5.1(5.1): `data() + size()` is pointer arithmetic on
-            // a raw `const char*`. `from_chars` only offers the
-            // first/last pointer-pair form, so the one-past-the-end
-            // pointer has to be formed here.
-            [[scpp::unsafe]] {
-                std::from_chars(tok.text.data(), tok.text.data() + tok.text.size(), parsed_int_value);
-            }
-            node->int_value = parsed_int_value;
+            node->int_value = value_result.value();
             return std::move(node);
         }
         if (match(TokenKind::FloatLiteral)) {

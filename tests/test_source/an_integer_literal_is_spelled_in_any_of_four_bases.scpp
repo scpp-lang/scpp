@@ -1,0 +1,57 @@
+// [lex.icon] spells an integer-literal in four bases -- decimal,
+// hexadecimal (`0x`), octal (a leading `0`) and binary (`0b`) -- with
+// optional `'` digit separators between digits and an optional
+// integer-suffix. spec ch16 §16.2 is the only clause scpp has about
+// integer literals and it changes what *type* one has ("no type of its
+// own ... takes the scalar type required by the context"), not how one
+// is spelled, so front matter §1(2) leaves the whole of [lex.icon]'s
+// grammar in force.
+//
+// The lexer knew decimal alone. `0x9e3779b9ULL` therefore came out as
+// the literal `0` followed by an identifier `x9e3779b9ULL`, so the
+// diagnostic named a variable nobody had written -- "expected ':' but
+// found 'x9e3779b9ULL'" -- rather than the literal that was never
+// read. The same is true of `052`, which silently meant fifty-two
+// instead of forty-two.
+//
+// A suffix is accepted and then ignored, which is what §16.2(1) leaves
+// room for: a literal has no type of its own in scpp, so `0x2aULL` is
+// the same literal as `0x2a` and takes whatever its context requires.
+//
+// The same program transliterated to C++ and built with
+// clang++-22 -std=c++26 prints the same five lines.
+import std;
+
+int main() {
+    // Four spellings of one value.
+    int decimal = 42;
+    int hexadecimal = 0x2a;
+    int hexadecimal_upper = 0X2A;
+    int octal = 052;
+    int binary = 0b101010;
+    std::print("bases {} {} {} {}\n", hexadecimal == decimal, hexadecimal_upper == decimal, octal == decimal,
+               binary == decimal);
+
+    // An integer-suffix is part of the spelling and nothing more.
+    int suffixed = 0x2aULL;
+    int size_suffixed = 42uz;
+    long lowercase_long = 42l;
+    std::print("suffixes {} {} {}\n", suffixed == decimal, size_suffixed == decimal, lowercase_long == 42);
+
+    // A `'` between two digits contributes nothing to the value.
+    int grouped = 1'000'000;
+    unsigned int grouped_hex = 0xdead'beef;
+    std::print("separators {} {}\n", grouped == 1000000, grouped_hex == 3735928559);
+
+    // The upper half of the 64-bit unsigned range, which is the part a
+    // decimal spelling makes unreadable and a hexadecimal one does not.
+    std::uint64_t golden = 0x9e3779b97f4a7c15ULL;
+    std::uint64_t largest = 0xffffffffffffffff;
+    std::print("wide {} {}\n", golden == 11400714819323198485, largest == 18446744073709551615);
+
+    // Constant evaluation reads the same value the run does.
+    constexpr int mask = 0xff;
+    constexpr int one_less_than_a_power_of_two = 0x100 - 0x1;
+    std::print("constexpr {} {}\n", mask == 255, one_less_than_a_power_of_two == 255);
+    return 0;
+}
