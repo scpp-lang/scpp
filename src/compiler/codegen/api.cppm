@@ -1973,6 +1973,30 @@ private:
     // `bool`/`char` -- see codegen_checked_arith's identical reasoning.
     llvm::LLVMValueRef codegen_checked_div(llvm::LLVMValueRef lhs, llvm::LLVMValueRef rhs, bool is_unsigned, bool is_checked);
 
+    // `%` ([expr.mul]/2, integral operands only): the remainder shares
+    // every one of `/`'s traps -- a zero divisor is the same hardware
+    // #DE, and `MIN % -1` is undefined for the same reason `MIN / -1`
+    // is (the quotient it is defined in terms of is not representable)
+    // -- so both go through the same emit_division_traps below and
+    // differ only in the instruction that follows it.
+    llvm::LLVMValueRef codegen_checked_rem(llvm::LLVMValueRef lhs, llvm::LLVMValueRef rhs, bool is_unsigned, bool is_checked);
+
+    // The `b == 0` / `a == MIN && b == -1` guard shared by
+    // codegen_checked_div and codegen_checked_rem; leaves the builder
+    // positioned in the non-trapping continuation.
+    void emit_division_traps(llvm::LLVMValueRef lhs, llvm::LLVMValueRef rhs, bool is_unsigned);
+
+    // `<<`/`>>` ([expr.shift]): the shift count is converted to the
+    // shifted value's own width first, because [expr.shift]/1 converts
+    // the two operands *separately* -- they need not have the same type,
+    // while an llvm shift instruction requires both of its operands to.
+    // A count that is negative, or not less than that width, makes the
+    // program's behaviour undefined ([expr.shift]/1); on a checked type
+    // that aborts through the same panic mechanism as division by zero
+    // rather than being emitted as an undefined shift.
+    [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_shift(BinaryOp op, llvm::LLVMValueRef lhs, llvm::LLVMValueRef rhs, bool is_unsigned,
+                                    bool is_checked);
+
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_pointer_offset(llvm::LLVMValueRef base_ptr, llvm::LLVMValueRef offset, const Type& pointer_type, bool negate_offset);
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_increment_decrement_step(llvm::LLVMValueRef old_value, const Type& operand_type, bool is_increment, const char* increment_name, const char* decrement_name);
 

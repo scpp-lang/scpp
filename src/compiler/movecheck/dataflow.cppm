@@ -170,7 +170,7 @@ namespace scpp {
 }
 
 [[nodiscard]] bool is_supported_compound_assignment(BinaryOp op) {
-    return op == BinaryOp::AddAssign || op == BinaryOp::SubAssign || op == BinaryOp::MulAssign || op == BinaryOp::DivAssign;
+    return is_compound_assignment_operator(op);
 }
 
 [[nodiscard]] bool return_roots_are_proven_to_outlive_call(const RootSet& returned_roots, LocalId expected_root) {
@@ -201,23 +201,11 @@ namespace scpp {
 }
 
 [[nodiscard]] BinaryOp compound_base_operator(BinaryOp op) {
-    switch (op) {
-        case BinaryOp::AddAssign: return BinaryOp::Add;
-        case BinaryOp::SubAssign: return BinaryOp::Sub;
-        case BinaryOp::MulAssign: return BinaryOp::Mul;
-        case BinaryOp::DivAssign: return BinaryOp::Div;
-        default: return op;
-    }
+    return compound_assignment_base_operator(op);
 }
 
-[[nodiscard]] std::string_view compound_operator_spelling(BinaryOp op) {
-    switch (op) {
-        case BinaryOp::AddAssign: return "+=";
-        case BinaryOp::SubAssign: return "-=";
-        case BinaryOp::MulAssign: return "*=";
-        case BinaryOp::DivAssign: return "/=";
-        default: return "?=";
-    }
+[[nodiscard]] std::string compound_operator_spelling(BinaryOp op) {
+    return binary_operator_spelling(op);
 }
 
 // [expr.post.incr]/1 states the operand rule outright: "The type of the
@@ -396,13 +384,13 @@ namespace scpp {
         }
     }
     if (!expr_is_assignable_place(*expr.lhs, body)) {
-        return std::unexpected(DataflowError("left operand of '" + std::string(compound_operator_spelling(expr.binary_op)) +
+        return std::unexpected(DataflowError("left operand of '" + compound_operator_spelling(expr.binary_op) +
                                 "' must be an assignable place",
                             expr.loc));
     }
     if (assignment_target_is_read_only(*expr.lhs, body, signatures)) {
         return std::unexpected(read_only_write_error(*expr.lhs, body, signatures,
-                                                     std::string(compound_operator_spelling(expr.binary_op)),
+                                                     compound_operator_spelling(expr.binary_op),
                                                      state.current_loc));
     }
     if (std::optional<LocalId> lender = resolve_reborrow_lender(*expr.lhs, body, signatures); lender.has_value()) {
@@ -478,8 +466,42 @@ namespace scpp {
                               "its value";
         return std::unexpected(DataflowError(_msg_enum_operator, loc));
     }
+    // [expr.mul]/2, [expr.shift]/1, [expr.bit.and]/1, [expr.xor]/1 and
+    // [expr.or]/1 each require an operand "of integral or unscoped
+    // enumeration type": these six operators have no floating-point form
+    // at all. Asked before the same-type rule below, because
+    // `1.5 % 2.5`'s defect is not that its operands disagree.
+    if (is_integer_only_binary_operator(expr.binary_op) && lhs_type.has_value() && rhs_type.has_value()) {
+        const Type& lhs_operand = binary_operand_type(*lhs_type);
+        const Type& rhs_operand = binary_operand_type(*rhs_type);
+        bool lhs_is_float = lhs_operand.kind == TypeKind::Named && is_float_scalar_type_name(lhs_operand.name);
+        bool rhs_is_float = rhs_operand.kind == TypeKind::Named && is_float_scalar_type_name(rhs_operand.name);
+        if (lhs_is_float || rhs_is_float) {
+            std::string _msg_integer_only{"no operator for '"};
+            _msg_integer_only += binary_operator_spelling(expr.binary_op);
+            _msg_integer_only += "' on a floating-point operand: [expr.mul]/2, [expr.shift]/1, [expr.bit.and]/1, "
+                                 "[expr.xor]/1 and [expr.or]/1 each require an operand of integral type, so "
+                                 "[over.built] offers no candidate for this one";
+            return std::unexpected(DataflowError(_msg_integer_only, loc));
+        }
+    }
+    // [expr.shift]/1: "the operands are converted separately", so a
+    // shift is the one binary operator whose two operands need not share
+    // a type -- `h >> 2` with an `int` count next to a `size_t` value is
+    // well-formed, and the same-type rule below must not be applied to
+    // it. Nothing else about a shift is left unchecked: both operands
+    // were required to be integral just above.
+    if (is_shift_operator(expr.binary_op)) return {};
+    // `%` joins `*` and `/` here because [expr.mul]/1 groups the three
+    // together, and the three bitwise operators join them because
+    // [expr.bit.and]/1, [expr.xor]/1 and [expr.or]/1 convert their
+    // operands exactly as the arithmetic ones do -- so all of them are
+    // held to the same "operands of the same type" rule, and all of them
+    // are equally meaningless on a raw pointer.
     bool arithmetic_op = expr.binary_op == BinaryOp::Add || expr.binary_op == BinaryOp::Sub || expr.binary_op == BinaryOp::Mul ||
-                         expr.binary_op == BinaryOp::Div;
+                         expr.binary_op == BinaryOp::Div || expr.binary_op == BinaryOp::Mod ||
+                         expr.binary_op == BinaryOp::BitAnd || expr.binary_op == BinaryOp::BitXor ||
+                         expr.binary_op == BinaryOp::BitOr;
     if (arithmetic_op) {
         // spec §5.1(5.1) makes "indirection through, *or pointer
         // arithmetic on*, a value of pointer type ([expr.unary.op],
@@ -2985,6 +3007,24 @@ struct ConvertingConstructorBinding {
             if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec ||
                 expr.unary_op == UnaryOp::PostInc || expr.unary_op == UnaryOp::PostDec) {
                 return validate_increment_decrement_expr(expr, state, body, signatures, report_errors);
+            }
+            // [expr.unary.op]/9 requires `~`'s operand to be "of
+            // integral or unscoped enumeration type", so there is no
+            // built-in candidate for a floating-point one at all -- the
+            // one-operand counterpart of the rule the binary
+            // integer-only operators are held to in
+            // check_binary_expr_operand_types.
+            if (report_errors && expr.unary_op == UnaryOp::BitNot) {
+                if (std::optional<Type> complement_operand = infer_expr_type(*expr.lhs, body, signatures);
+                    complement_operand.has_value()) {
+                    const Type& complemented = binary_operand_type(*complement_operand);
+                    if (complemented.kind == TypeKind::Named && is_float_scalar_type_name(complemented.name)) {
+                        return std::unexpected(DataflowError(
+                            "no operator for '~' on a floating-point operand: [expr.unary.op]/9 requires an operand "
+                            "of integral type, so [over.built] offers no candidate for this one",
+                            expr.loc));
+                    }
+                }
             }
             // `-`, `!` and `~`: spec §16.3 does not list a unary
             // operator's operand among its positions, but the reason is

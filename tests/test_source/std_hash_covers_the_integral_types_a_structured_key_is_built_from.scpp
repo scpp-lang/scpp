@@ -1,0 +1,52 @@
+// [unord.hash]/1 requires a `hash` specialization for every integral
+// type, and [unord.req.general] pairs each one with an `equal_to`.
+// libs/std had `hash<int>` and `hash<std::string>` only, so
+// `std::hash<size_t>` and `std::hash<int64_t>` -- the two a program
+// spells when it mixes a container index or an identifier into a hash --
+// named the forward-declared primary template and nothing else.
+//
+// The mix below is the shape a hasher for a structured key has
+// ([unord.hash] leaves the function itself unspecified): a seed, then
+// one `^=` per component, each combining a component hash with a shifted
+// copy of the accumulator. Every operator in it (`^=`, `<<`, `>>`) is
+// one this language gained a token for alongside these specializations.
+import std;
+
+// ch05 §5.8 makes `+` overflow-checked by default, and a hash mix is
+// deliberately allowed to wrap -- the same reason libs/std's own
+// `__hash_mix_uint64` does its multiply-and-add inside one. `^=`, `<<`
+// and `>>` need no such block: none of them can overflow.
+uint64_t mix(uint64_t accumulator, uint64_t component) {
+    uint64_t h = accumulator;
+    [[scpp::unsafe]] {
+        h ^= component + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    }
+    return h;
+}
+
+int main() {
+    std::size_t index = 7;
+    std::int64_t identifier = -3;
+    std::string field{"path"};
+
+    uint64_t h = std::hash<std::size_t>{}(index);
+    h = mix(h, std::hash<std::int64_t>{}(identifier));
+    h = mix(h, std::hash<std::string>{}(field));
+
+    // A hash is unspecified, so what is checked is that the same inputs
+    // give the same answer and different ones do not.
+    uint64_t again = std::hash<std::size_t>{}(index);
+    again = mix(again, std::hash<std::int64_t>{}(identifier));
+    again = mix(again, std::hash<std::string>{}(field));
+    std::size_t other_index = 8;
+    uint64_t different = std::hash<std::size_t>{}(other_index);
+    std::print("stable={} distinct={}\n", h == again, h != different);
+
+    // [unord.req.general]: the paired `equal_to` is what a container
+    // uses to tell two keys with the same hash apart.
+    std::equal_to<std::size_t> same_index{};
+    std::equal_to<std::int64_t> same_identifier{};
+    std::print("equal={} unequal={} signed_equal={}\n", same_index(index, 7), same_index(index, other_index),
+               same_identifier(identifier, -3));
+    return 0;
+}

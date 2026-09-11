@@ -1,0 +1,19 @@
+int bitwise(int a, int b) {
+    return (a & b) | (a ^ b);
+}
+
+int shifts(int a, int b) {
+    return (a << b) + (a >> b);
+}
+
+unsigned int unsigned_shift(unsigned int a, unsigned int b) {
+    return a >> b;
+}
+
+int remainder(int a, int b) {
+    return a % b;
+}
+
+int complement(int a) {
+    return ~a;
+}

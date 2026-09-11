@@ -40,17 +40,19 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 }
 
 [[nodiscard]] bool is_compound_assignment(BinaryOp op) {
-    return op == BinaryOp::AddAssign || op == BinaryOp::SubAssign || op == BinaryOp::MulAssign || op == BinaryOp::DivAssign;
+    return is_compound_assignment_operator(op);
 }
 
 [[nodiscard]] BinaryOp compound_base_operator(BinaryOp op) {
-    switch (op) {
-        case BinaryOp::AddAssign: return BinaryOp::Add;
-        case BinaryOp::SubAssign: return BinaryOp::Sub;
-        case BinaryOp::MulAssign: return BinaryOp::Mul;
-        case BinaryOp::DivAssign: return BinaryOp::Div;
-        default: return op;
-    }
+    return compound_assignment_base_operator(op);
+}
+
+[[nodiscard]] std::string integer_only_operator_message(BinaryOp op) {
+    std::string message{"'"};
+    message += binary_operator_spelling(op);
+    message += "' requires operands of integral type: [expr.mul]/2, [expr.shift]/1, [expr.bit.and]/1, [expr.xor]/1 "
+               "and [expr.or]/1 each name one, so there is no built-in candidate for a floating-point operand";
+    return message;
 }
 
 } // namespace
@@ -2864,6 +2866,17 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         }
                         return is_float ? llvm::LLVMBuildFNeg(builder_, operand, "fnegtmp") : llvm::LLVMBuildNeg(builder_, operand, "negtmp");
                     }
+                    if (expr.unary_op == UnaryOp::BitNot) {
+                        // [expr.unary.op]/9: the one's complement of an
+                        // integral operand -- an `xor` with all-ones in
+                        // the operand's own width, which is exactly what
+                        // LLVMBuildNot emits. A floating-point operand
+                        // has no such form at all, and movecheck rejects
+                        // one before this runs.
+                        auto operand_result = codegen_expr(*expr.lhs);
+                        if (!operand_result.has_value()) return std::unexpected(std::move(operand_result).error());
+                        return llvm::LLVMBuildNot(builder_, std::move(operand_result).value(), "bitnottmp");
+                    }
                     auto operand_result = codegen_contextual_bool_value(*expr.lhs);
                     if (!operand_result.has_value()) return std::unexpected(std::move(operand_result).error());
                     llvm::LLVMValueRef operand = std::move(operand_result).value();
@@ -3493,12 +3506,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     }
 
 
-    llvm::LLVMValueRef Codegen::codegen_checked_div(llvm::LLVMValueRef lhs, llvm::LLVMValueRef rhs, bool is_unsigned, bool is_checked)
+    void Codegen::emit_division_traps(llvm::LLVMValueRef lhs, llvm::LLVMValueRef rhs, bool is_unsigned)
 {
-        if (!is_checked) {
-            return is_unsigned ? llvm::LLVMBuildUDiv(builder_, lhs, rhs, "divtmp") : llvm::LLVMBuildSDiv(builder_, lhs, rhs, "divtmp");
-        }
-
         llvm::LLVMTypeRef int_ty = llvm::LLVMTypeOf(lhs);
         llvm::LLVMValueRef zero = llvm::LLVMConstInt(int_ty, 0, 0);
         llvm::LLVMValueRef divides_by_zero = llvm::LLVMBuildICmp(builder_, llvm::LLVMIntEQ, rhs, zero, "divzero");
@@ -3523,7 +3532,77 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         llvm::LLVMBuildUnreachable(builder_);
 
         llvm::LLVMPositionBuilderAtEnd(builder_, ok_block);
+    }
+
+
+    llvm::LLVMValueRef Codegen::codegen_checked_div(llvm::LLVMValueRef lhs, llvm::LLVMValueRef rhs, bool is_unsigned, bool is_checked)
+{
+        if (is_checked) emit_division_traps(lhs, rhs, is_unsigned);
         return is_unsigned ? llvm::LLVMBuildUDiv(builder_, lhs, rhs, "divtmp") : llvm::LLVMBuildSDiv(builder_, lhs, rhs, "divtmp");
+    }
+
+
+    llvm::LLVMValueRef Codegen::codegen_checked_rem(llvm::LLVMValueRef lhs, llvm::LLVMValueRef rhs, bool is_unsigned, bool is_checked)
+{
+        if (is_checked) emit_division_traps(lhs, rhs, is_unsigned);
+        return is_unsigned ? llvm::LLVMBuildURem(builder_, lhs, rhs, "remtmp") : llvm::LLVMBuildSRem(builder_, lhs, rhs, "remtmp");
+    }
+
+
+    [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::codegen_shift(BinaryOp op, llvm::LLVMValueRef lhs, llvm::LLVMValueRef rhs, bool is_unsigned,
+                                    bool is_checked)
+{
+        llvm::LLVMTypeRef value_ty = llvm::LLVMTypeOf(lhs);
+        if (llvm::LLVMGetTypeKind(value_ty) != llvm::LLVMIntegerTypeKind ||
+            llvm::LLVMGetTypeKind(llvm::LLVMTypeOf(rhs)) != llvm::LLVMIntegerTypeKind) {
+            return std::unexpected(CodegenError("'<<' and '>>' require operands of integral type ([expr.shift]/1)", current_loc_));
+        }
+        // [expr.shift]/1 converts the two operands separately, so the
+        // count may be narrower or wider than the value being shifted;
+        // an llvm shift needs them in one type. The count is a
+        // *quantity*, so widening it is a zero-extension and narrowing
+        // it a truncation -- a count too large to survive the truncation
+        // is out of range for the shifted type anyway, and the check
+        // below (which runs on the truncated value) still rejects it,
+        // because the range it tests against is smaller than every width
+        // this can truncate to.
+        unsigned value_bits = llvm::LLVMGetIntTypeWidth(value_ty);
+        unsigned count_bits = llvm::LLVMGetIntTypeWidth(llvm::LLVMTypeOf(rhs));
+        llvm::LLVMValueRef count = rhs;
+        if (count_bits < value_bits) {
+            count = llvm::LLVMBuildZExt(builder_, rhs, value_ty, "shiftcount");
+        } else if (count_bits > value_bits) {
+            count = llvm::LLVMBuildTrunc(builder_, rhs, value_ty, "shiftcount");
+        }
+        if (is_checked) {
+            // [expr.shift]/1: "the behavior is undefined" if the right
+            // operand is negative or not less than the width of the
+            // promoted left operand. An unsigned count cannot be
+            // negative, so one unsigned comparison against the width
+            // covers both halves for it; a signed one needs the
+            // negative case tested separately.
+            llvm::LLVMValueRef width = llvm::LLVMConstInt(value_ty, static_cast<std::uint64_t>(value_bits), 0);
+            llvm::LLVMValueRef traps = llvm::LLVMBuildICmp(builder_, llvm::LLVMIntUGE, count, width, "shiftwide");
+            if (!is_unsigned) {
+                llvm::LLVMValueRef zero = llvm::LLVMConstInt(value_ty, 0, 0);
+                traps = llvm::LLVMBuildOr(builder_, traps,
+                                          llvm::LLVMBuildICmp(builder_, llvm::LLVMIntSLT, count, zero, "shiftneg"),
+                                          "shifttraps");
+            }
+            llvm::LLVMValueRef current_function = llvm::LLVMGetBasicBlockParent(llvm::LLVMGetInsertBlock(builder_));
+            llvm::LLVMBasicBlockRef fail_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "shift.fail");
+            llvm::LLVMBasicBlockRef ok_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "shift.ok");
+            llvm::LLVMBuildCondBr(builder_, traps, fail_block, ok_block);
+            llvm::LLVMPositionBuilderAtEnd(builder_, fail_block);
+            build_call(get_or_declare_abort(), {});
+            llvm::LLVMBuildUnreachable(builder_);
+            llvm::LLVMPositionBuilderAtEnd(builder_, ok_block);
+        }
+        if (op == BinaryOp::Shl) return llvm::LLVMBuildShl(builder_, lhs, count, "shltmp");
+        // [expr.shift]/3: a signed left operand shifts its sign in
+        // (arithmetic shift), an unsigned one shifts zeros in.
+        return is_unsigned ? llvm::LLVMBuildLShr(builder_, lhs, count, "shrtmp")
+                           : llvm::LLVMBuildAShr(builder_, lhs, count, "shrtmp");
     }
 
 
@@ -4638,7 +4717,15 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 auto lv_llvm_type_result = to_llvm_type(lv.type);
                 if (!lv_llvm_type_result.has_value()) return std::unexpected(std::move(lv_llvm_type_result).error());
                 llvm::LLVMValueRef lhs = create_load(std::move(lv_llvm_type_result).value(), lv.ptr, lv.alignment, "compoundassign.lhs");
-                auto rhs_result = codegen_value_for_target(*expr.rhs, lv.type);
+                // [expr.shift]/1 converts a shift's operands separately,
+                // so `x <<= n` does not require `n` to have `x`'s type
+                // the way `x += n` does -- asking for the count as
+                // `lv.type` would reject the ordinary `int` count next
+                // to a `size_t` value. codegen_shift brings the two
+                // widths together itself.
+                auto rhs_result = is_shift_operator(compound_base_operator(expr.binary_op))
+                                      ? codegen_expr(*expr.rhs)
+                                      : codegen_value_for_target(*expr.rhs, lv.type);
                 if (!rhs_result.has_value()) return std::unexpected(std::move(rhs_result).error());
                 llvm::LLVMValueRef rhs = std::move(rhs_result).value();
                 std::optional<Type> pointer_result_type =
@@ -4678,6 +4765,33 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         value = is_float ? llvm::LLVMBuildFDiv(builder_, lhs, rhs, "fdivtmp")
                                          : codegen_checked_div(lhs, rhs, is_unsigned, is_checked);
                         break;
+                    // [expr.ass]/7: `E1 op= E2` is `E1 = E1 op E2`, so
+                    // each integer-only operator behaves here exactly as
+                    // its two-operand form does above.
+                    case BinaryOp::Mod:
+                        if (is_float) return std::unexpected(CodegenError(integer_only_operator_message(arithmetic_op), current_loc_));
+                        value = codegen_checked_rem(lhs, rhs, is_unsigned, is_checked);
+                        break;
+                    case BinaryOp::BitAnd:
+                        if (is_float) return std::unexpected(CodegenError(integer_only_operator_message(arithmetic_op), current_loc_));
+                        value = llvm::LLVMBuildAnd(builder_, lhs, rhs, "andtmp");
+                        break;
+                    case BinaryOp::BitXor:
+                        if (is_float) return std::unexpected(CodegenError(integer_only_operator_message(arithmetic_op), current_loc_));
+                        value = llvm::LLVMBuildXor(builder_, lhs, rhs, "xortmp");
+                        break;
+                    case BinaryOp::BitOr:
+                        if (is_float) return std::unexpected(CodegenError(integer_only_operator_message(arithmetic_op), current_loc_));
+                        value = llvm::LLVMBuildOr(builder_, lhs, rhs, "ortmp");
+                        break;
+                    case BinaryOp::Shl:
+                    case BinaryOp::Shr: {
+                        if (is_float) return std::unexpected(CodegenError(integer_only_operator_message(arithmetic_op), current_loc_));
+                        auto value_result = codegen_shift(arithmetic_op, lhs, rhs, is_unsigned, is_checked);
+                        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                        value = std::move(value_result).value();
+                        break;
+                    }
                     default:
                         return std::unexpected(CodegenError("unhandled compound assignment operator", current_loc_));
                 }
@@ -4899,6 +5013,28 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             case BinaryOp::Div:
                 if (is_float) return llvm::LLVMBuildFDiv(builder_, lhs, rhs, "fdivtmp");
                 return codegen_checked_div(lhs, rhs, is_unsigned, is_checked);
+            // The integer-only operators ([expr.mul]/2, [expr.shift]/1,
+            // [expr.bit.and]/1, [expr.xor]/1, [expr.or]/1). A
+            // floating-point operand has no built-in candidate at all;
+            // movecheck says so with the operand types in hand, and this
+            // is the same answer for a program that somehow reaches
+            // codegen without passing through it.
+            case BinaryOp::Mod:
+                if (is_float) return std::unexpected(CodegenError(integer_only_operator_message(expr.binary_op), current_loc_));
+                return codegen_checked_rem(lhs, rhs, is_unsigned, is_checked);
+            case BinaryOp::BitAnd:
+                if (is_float) return std::unexpected(CodegenError(integer_only_operator_message(expr.binary_op), current_loc_));
+                return llvm::LLVMBuildAnd(builder_, lhs, rhs, "andtmp");
+            case BinaryOp::BitXor:
+                if (is_float) return std::unexpected(CodegenError(integer_only_operator_message(expr.binary_op), current_loc_));
+                return llvm::LLVMBuildXor(builder_, lhs, rhs, "xortmp");
+            case BinaryOp::BitOr:
+                if (is_float) return std::unexpected(CodegenError(integer_only_operator_message(expr.binary_op), current_loc_));
+                return llvm::LLVMBuildOr(builder_, lhs, rhs, "ortmp");
+            case BinaryOp::Shl:
+            case BinaryOp::Shr:
+                if (is_float) return std::unexpected(CodegenError(integer_only_operator_message(expr.binary_op), current_loc_));
+                return codegen_shift(expr.binary_op, lhs, rhs, is_unsigned, is_checked);
             // Comparisons always produce a genuine i1 from icmp/fcmp, but
             // a scpp `bool` result needs to be widened to the i8 every
             // other bool value uses (see i1_to_bool/to_llvm_type) before

@@ -108,10 +108,16 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::MinusAssign: return "MinusAssign";
         case scpp::TokenKind::StarAssign: return "StarAssign";
         case scpp::TokenKind::SlashAssign: return "SlashAssign";
+        case scpp::TokenKind::PercentAssign: return "PercentAssign";
+        case scpp::TokenKind::AmpAssign: return "AmpAssign";
+        case scpp::TokenKind::CaretAssign: return "CaretAssign";
+        case scpp::TokenKind::PipeAssign: return "PipeAssign";
         case scpp::TokenKind::Plus: return "Plus";
         case scpp::TokenKind::Minus: return "Minus";
         case scpp::TokenKind::Star: return "Star";
         case scpp::TokenKind::Slash: return "Slash";
+        case scpp::TokenKind::Percent: return "Percent";
+        case scpp::TokenKind::Caret: return "Caret";
         case scpp::TokenKind::Assign: return "Assign";
         case scpp::TokenKind::EqualEqual: return "EqualEqual";
         case scpp::TokenKind::NotEqual: return "NotEqual";
@@ -122,6 +128,7 @@ std::string_view token_kind_name(scpp::TokenKind kind) {
         case scpp::TokenKind::AmpAmp: return "AmpAmp";
         case scpp::TokenKind::Amp: return "Amp";
         case scpp::TokenKind::PipePipe: return "PipePipe";
+        case scpp::TokenKind::Pipe: return "Pipe";
         case scpp::TokenKind::Bang: return "Bang";
         case scpp::TokenKind::Question: return "Question";
         case scpp::TokenKind::EndOfFile: return "EndOfFile";
@@ -402,10 +409,22 @@ std::string_view binary_op_name(scpp::BinaryOp op) {
         case scpp::BinaryOp::Sub: return "-";
         case scpp::BinaryOp::Mul: return "*";
         case scpp::BinaryOp::Div: return "/";
+        case scpp::BinaryOp::Mod: return "%";
+        case scpp::BinaryOp::BitAnd: return "&";
+        case scpp::BinaryOp::BitXor: return "^";
+        case scpp::BinaryOp::BitOr: return "|";
+        case scpp::BinaryOp::Shl: return "<<";
+        case scpp::BinaryOp::Shr: return ">>";
         case scpp::BinaryOp::AddAssign: return "+=";
         case scpp::BinaryOp::SubAssign: return "-=";
         case scpp::BinaryOp::MulAssign: return "*=";
         case scpp::BinaryOp::DivAssign: return "/=";
+        case scpp::BinaryOp::ModAssign: return "%=";
+        case scpp::BinaryOp::BitAndAssign: return "&=";
+        case scpp::BinaryOp::BitXorAssign: return "^=";
+        case scpp::BinaryOp::BitOrAssign: return "|=";
+        case scpp::BinaryOp::ShlAssign: return "<<=";
+        case scpp::BinaryOp::ShrAssign: return ">>=";
         case scpp::BinaryOp::Eq: return "==";
         case scpp::BinaryOp::Ne: return "!=";
         case scpp::BinaryOp::Lt: return "<";
@@ -422,6 +441,7 @@ std::string_view binary_op_name(scpp::BinaryOp op) {
 std::string_view unary_op_name(scpp::UnaryOp op) {
     switch (op) {
         case scpp::UnaryOp::Neg: return "-";
+        case scpp::UnaryOp::BitNot: return "~";
         case scpp::UnaryOp::Not: return "!";
         case scpp::UnaryOp::PreInc: return "++";
         case scpp::UnaryOp::PreDec: return "--";

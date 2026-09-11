@@ -1,0 +1,10 @@
+0
+mod=1 and=4 xor=25 or=29
+shl=464 shr=7
+complement=-30
+compound: 1 4 25 29 116 7
+signed_shr=-8 unsigned_shr=8
+wide=1099511627776
+precedence=1
+shift_binds_tighter_than_compare=1
+shift_binds_looser_than_add=8

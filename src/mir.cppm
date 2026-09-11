@@ -532,7 +532,7 @@ struct Body {
     // spelled the way the source most likely wrote it -- `frames_`, not
     // `this.frames_` -- because that is the name the reader has to find.
     [[nodiscard]] std::string describe_place(const Place& place) const {
-        std::string result;
+        std::string result{};
         std::size_t first_step = 0;
         std::optional<LocalId> self = this_local();
         if (self.has_value() && place.local == *self && !place.path.empty() && !place.path[0].is_index &&

@@ -654,9 +654,7 @@ void rewrite_unqualified_member_calls(Stmt& stmt, const std::unordered_map<std::
 // capture list, checked when *it* is itself resolved.
 [[nodiscard]] std::expected<void, DataflowError> reject_write_to_nonmutable_by_value_capture(const Expr& expr, const std::unordered_set<std::string>& by_value_names) {
     if (expr.kind == ExprKind::Binary &&
-        (expr.binary_op == BinaryOp::Assign || expr.binary_op == BinaryOp::AddAssign ||
-         expr.binary_op == BinaryOp::SubAssign || expr.binary_op == BinaryOp::MulAssign ||
-         expr.binary_op == BinaryOp::DivAssign) &&
+        (expr.binary_op == BinaryOp::Assign || is_compound_assignment_operator(expr.binary_op)) &&
         expr.lhs->kind == ExprKind::Identifier && by_value_names.contains(expr.lhs->name)) {
         return std::unexpected(DataflowError("cannot assign to by-value-captured '" + expr.lhs->name +
                                  "' inside a non-'mutable' lambda (ch05 §5.12 -- a closure's own call operator "

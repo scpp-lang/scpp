@@ -1,0 +1,10 @@
+// [expr.unary.op]/9 requires `~`'s operand to be "of integral or
+// unscoped enumeration type" -- the one-operand counterpart of the rule
+// `%`, `&`, `^`, `|`, `<<` and `>>` are held to. Without this check the
+// expression reached codegen, where an `xor` against a `double` is not
+// valid IR at all.
+import std;
+
+double complement_of(double x) {
+    return ~x;
+}
