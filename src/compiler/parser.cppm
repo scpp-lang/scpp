@@ -3147,12 +3147,21 @@ private:
         // member form; on failure, this wasn't that form after all, so
         // backtrack and report "no match" (false), just like the
         // try/catch(const ParseError&) this replaces.
-        auto return_type_result = parse_type_with_lifetime_attributes_enabled();
-        if (!return_type_result.has_value()) {
-            pos_ = saved_pos;
-            return false;
+        bool out_of_line_has_trailing_return_type = at_auto_placeholder_out_of_line_return_type();
+        Type return_type{};
+
+        if (out_of_line_has_trailing_return_type) {
+            advance(); // 'auto'
+            // See parse_function's identical stand-in.
+            return_type = named_type("void");
+        } else {
+            auto return_type_result = parse_type_with_lifetime_attributes_enabled();
+            if (!return_type_result.has_value()) {
+                pos_ = saved_pos;
+                return false;
+            }
+            return_type = std::move(return_type_result).value();
         }
-        Type return_type = std::move(return_type_result).value();
         std::optional<ParsedOutOfLineMemberOwner> owner = parse_out_of_line_member_owner();
         if (!owner.has_value()) {
             pos_ = saved_pos;
@@ -3222,6 +3231,11 @@ private:
         if (!trailing_attrs_result2.has_value()) return std::unexpected(std::move(trailing_attrs_result2).error());
         parsed.is_const_method = match(TokenKind::KwConst);
         parsed.fn.receiver_ref_qualifier = parse_optional_ref_qualifier();
+        if (out_of_line_has_trailing_return_type) {
+            auto trailing_return_result = parse_trailing_return_type("an out-of-line member definition");
+            if (!trailing_return_result.has_value()) return std::unexpected(std::move(trailing_return_result).error());
+            parsed.fn.return_type = std::move(trailing_return_result).value();
+        }
         auto body_result2 = parse_out_of_line_member_body_or_default(parsed.fn, "an out-of-line member definition");
         if (!body_result2.has_value()) return std::unexpected(std::move(body_result2).error());
         return finish_out_of_line_member_definition(program, std::move(parsed));
@@ -7445,11 +7459,31 @@ private:
             class_names_.insert(p.name);
         }
 
+        // [temp.pre]/1 + [dcl.attr.grammar]/1: a template-head introduces
+        // an ordinary declaration, and a declaration's own attribute-
+        // specifier-seq is written where every other declaration writes
+        // one -- *after* the header (`template <typename T>
+        // [[nodiscard]] auto f(...)`), not before it. The caller's
+        // `is_unsafe`/`is_nodiscard` come from a seq written before the
+        // `template` keyword instead, which appertains to the same
+        // declaration ([temp.pre] gives the template-head no attribute
+        // slot of its own), so the two spellings are folded together
+        // here rather than one of them being the only one that parses.
+        const Token& header_attr_start_tok = peek();
+        auto header_attrs_result = parse_attribute_specifier_seq();
+        if (!header_attrs_result.has_value()) return std::unexpected(std::move(header_attrs_result).error());
+        ParsedAttributes header_attrs = std::move(header_attrs_result).value();
+        if (auto _rv = reject_packed_attribute(header_attrs, header_attr_start_tok, "a function declaration"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+        bool header_is_unsafe = is_unsafe || header_attrs.has("unsafe");
+        bool header_is_nodiscard = is_nodiscard || header_attrs.has_nodiscard;
+        std::string header_nodiscard_reason = nodiscard_reason;
+        if (header_nodiscard_reason.empty()) header_nodiscard_reason = header_attrs.nodiscard_reason;
+
         std::vector<GenericTypeParam> saved_template_params = current_function_template_params_;
         current_function_template_params_ = template_params;
         auto fn_result =
-            parse_function(/*is_extern_c=*/false, /*is_module_extern=*/false, is_unsafe, is_nodiscard,
-                           nodiscard_reason);
+            parse_function(/*is_extern_c=*/false, /*is_module_extern=*/false, header_is_unsafe, header_is_nodiscard,
+                           header_nodiscard_reason);
         current_function_template_params_ = std::move(saved_template_params);
         if (!fn_result.has_value()) return std::unexpected(std::move(fn_result).error());
         Function fn = std::move(fn_result).value();
@@ -8921,11 +8955,22 @@ private:
                 continue;
             }
 
-            auto member_type_result = parse_type();
+            bool member_has_trailing_return_type = at_auto_placeholder_return_type();
+            Type member_type{};
 
-            if (!member_type_result.has_value()) return std::unexpected(std::move(member_type_result).error());
+            if (member_has_trailing_return_type) {
+                advance(); // 'auto'
+                // See parse_function's identical stand-in: the declared
+                // return type arrives only once the parameter list (and
+                // any cv-/ref-qualifier) has been read.
+                member_type = named_type("void");
+            } else {
+                auto member_type_result = parse_type();
 
-            Type member_type = std::move(member_type_result).value();
+                if (!member_type_result.has_value()) return std::unexpected(std::move(member_type_result).error());
+
+                member_type = std::move(member_type_result).value();
+            }
             // [over.oper]/1: a member operator function is declared by
             // the operator-function-id `operator@`. There used to be
             // four near-identical copies of this block -- one for `*`,
@@ -9015,6 +9060,11 @@ private:
                                              "([over.unary]/1) and a binary one is a member with exactly one "
                                              "([over.binary]/1)";
                     return std::unexpected(ParseError(member_loc.line, member_loc.column, _msg_operator_unknown));
+                }
+                if (member_has_trailing_return_type) {
+                    auto trailing_return_result = parse_trailing_return_type("an operator function");
+                    if (!trailing_return_result.has_value()) return std::unexpected(std::move(trailing_return_result).error());
+                    member_type = std::move(trailing_return_result).value();
                 }
                 fn.return_type = std::move(member_type);
                 fn.name = synthesized_member_owner_name;
@@ -9119,6 +9169,11 @@ private:
                 if (member_is_static && (is_const || fn.receiver_ref_qualifier != ReceiverRefQualifier::None)) {
                     return std::unexpected(ParseError(member_loc.line, member_loc.column,
                                       "a static member function cannot be const-qualified or ref-qualified"));
+                }
+                if (member_has_trailing_return_type) {
+                    auto trailing_return_result = parse_trailing_return_type("a member function");
+                    if (!trailing_return_result.has_value()) return std::unexpected(std::move(trailing_return_result).error());
+                    member_type = std::move(trailing_return_result).value();
                 }
                 fn.return_type = std::move(member_type);
                 fn.name = synthesized_member_owner_name;
@@ -9324,6 +9379,68 @@ private:
         return std::expected<void, ParseError>{};
     }
 
+    // [dcl.fct]/2: a function declarator may write its return type
+    // *after* the parameter list -- `auto f(P p) -> R` -- with `auto`
+    // standing in for the return type in the decl-specifier-seq. This is
+    // not a second spelling of the leading form: it is the only one
+    // whose return type may name the parameters themselves (`auto
+    // for_each(const Program&, VisitFn&& visit) ->
+    // std::invoke_result_t<VisitFn&, const Scope&>`), because the
+    // parameters are not in scope yet where a leading return type is
+    // written.
+    //
+    // Recognized by shape rather than by parsing speculatively and
+    // backtracking: the `auto` of a *declaration* (`auto v = expr;`) is
+    // followed by a name and then `=`/`{`, never by a parameter list, so
+    // `auto <name> (` and `auto operator@` are unambiguous function
+    // declarator starts. (`auto v(expr);` -- the direct-initialization
+    // declaration spelling -- is parsed as a declaration before this is
+    // ever reached; see parse_top_level_item's backtracking attempt.)
+    [[nodiscard]] bool at_auto_placeholder_return_type() const {
+        if (!check(TokenKind::KwAuto)) return false;
+        const Token& declarator_id = peek_at(1);
+        if (declarator_id.kind != TokenKind::Identifier) return false;
+        std::string declarator_id_text{declarator_id.text.data(), declarator_id.text.size()};
+        if (declarator_id_text == "operator") return true;
+        return peek_at(2).kind == TokenKind::LParen;
+    }
+
+    // The out-of-line counterpart of at_auto_placeholder_return_type:
+    // `auto Owner::method(...) -> R` (or `auto Owner<T>::method(...) ->
+    // R`), where what follows `auto` is a *qualified* declarator-id
+    // rather than a plain name.
+    [[nodiscard]] bool at_auto_placeholder_out_of_line_return_type() const {
+        if (!check(TokenKind::KwAuto)) return false;
+        if (peek_at(1).kind != TokenKind::Identifier) return false;
+        return peek_at(2).kind == TokenKind::ColonColon || peek_at(2).kind == TokenKind::Less;
+    }
+
+    // The `-> <type>` half of the trailing form, read once the parameter
+    // list (and whatever cv-/ref-qualifiers and attributes follow it)
+    // has been consumed -- [dcl.fct]/2 puts the trailing-return-type
+    // last, after the attribute-specifier-seq, which is why every caller
+    // asks for it there rather than straight after the `)`.
+    //
+    // A bare `auto` with no `->` is return type deduction from the body
+    // ([dcl.spec.auto]/2), a separate feature this version does not
+    // have; saying so here is what keeps it from surfacing as a stray
+    // `expected '{'` several tokens later.
+    [[nodiscard]] std::expected<Type, ParseError> parse_trailing_return_type(const char* what) {
+        if (!check(TokenKind::Arrow)) {
+            const Token& tok = peek();
+            {
+                std::string _msg_trailing_return{"expected '->' and a return type after "};
+                _msg_trailing_return += what;
+                _msg_trailing_return += "'s parameter list: a function declared with 'auto' spells its return type "
+                                        "in the trailing form ([dcl.fct]/2) -- deducing it from the body is not "
+                                        "supported in this version";
+                return std::unexpected(ParseError(tok.line, tok.column, _msg_trailing_return));
+            }
+        }
+        advance(); // '->'
+        return parse_type_with_lifetime_attributes_enabled();
+    }
+
     // Parses one function declaration or definition's `<return-type>
     // <name>(<params>)` followed by either `;` (a bodyless declaration --
     // legal for `extern "C"` (ch02 §2.1), bare `extern` (ch11 §11.6), or
@@ -9370,9 +9487,18 @@ private:
             }
             break;
         }
-        auto return_type_result = parse_type_with_lifetime_attributes_enabled();
-        if (!return_type_result.has_value()) return std::unexpected(std::move(return_type_result).error());
-        fn.return_type = std::move(return_type_result).value();
+        bool has_trailing_return_type = at_auto_placeholder_return_type();
+        if (has_trailing_return_type) {
+            advance(); // 'auto'
+            // A stand-in only: the real return type is read off the
+            // trailing form below, and nothing between here and there
+            // looks at fn.return_type.
+            fn.return_type = named_type("void");
+        } else {
+            auto return_type_result = parse_type_with_lifetime_attributes_enabled();
+            if (!return_type_result.has_value()) return std::unexpected(std::move(return_type_result).error());
+            fn.return_type = std::move(return_type_result).value();
+        }
         // [over.oper]/1: an operator function may also be declared at
         // namespace scope. `"literal" + s` has no class left operand, so
         // there is no member operator to find and only a non-member one
@@ -9509,6 +9635,11 @@ private:
         if (!fn_attrs_result.has_value()) return std::unexpected(std::move(fn_attrs_result).error());
         ParsedAttributes fn_attrs = std::move(fn_attrs_result).value();
         if (auto _rv = reject_packed_attribute(fn_attrs, fn_attr_start_tok, "a function declarator"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+        if (has_trailing_return_type) {
+            auto trailing_return_result = parse_trailing_return_type("a function");
+            if (!trailing_return_result.has_value()) return std::unexpected(std::move(trailing_return_result).error());
+            fn.return_type = std::move(trailing_return_result).value();
+        }
         if (auto _rv = merge_lifetime_attribute(fn.return_lifetime, fn_attrs.lifetime, fn_attr_start_tok, "a function declarator"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
         LifetimeAnnotation return_lifetime_for_hoist = fn.return_lifetime;
         if (auto _rv = hoist_type_lifetime_annotation(fn.return_type, return_lifetime_for_hoist, fn_attr_start_tok, "a function declarator"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
