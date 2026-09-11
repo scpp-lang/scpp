@@ -1,0 +1,10 @@
+// [func.require]: `INVOKE(declval<Fn>(), ...)` requires `Fn` to be
+// callable. `int` is not, so there is no type for
+// `std::invoke_result_t` to name and the trait is ill-formed rather
+// than silently answering with something.
+import std;
+
+int main() {
+    std::invoke_result_t<int, int> r = 0;
+    return r;
+}

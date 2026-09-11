@@ -1,0 +1,37 @@
+// [meta.trans.other]/[func.require]: the type `std::invoke_result_t`
+// names is the one the *selected* `operator()` returns, so the
+// arguments and the receiver's own const-ness both take part in
+// choosing it -- `Probe&` with an `int` and `const Probe&` with a
+// `bool` are two different questions with two different answers. A
+// function type answers directly from its own return type instead: it
+// has no class, and so no `operator()` to select at all.
+import std;
+
+struct Probe {
+    int base;
+    int call(int x) { return this->base + x; }
+    bool call(bool flag) const { return !flag; }
+};
+
+using CountResult = std::invoke_result_t<Probe&, int>;
+using FlagResult = std::invoke_result_t<const Probe&, bool>;
+
+int triple(int x) { return x * 3; }
+
+int main() {
+    Probe p{10};
+    CountResult counted = p(5);
+    if (counted != 15) return 1;
+
+    const Probe& readonly = p;
+    FlagResult flagged = readonly(false);
+    if (!flagged) return 2;
+
+    std::invoke_result_t<int(int), int> tripled = triple(4);
+    if (tripled != 12) return 3;
+
+    std::function<int(int)> boxed{[](int x) { return x + 1; }};
+    std::invoke_result_t<std::function<int(int)>&, int> boxed_result = boxed(41);
+    if (boxed_result != 42) return 4;
+    return 0;
+}

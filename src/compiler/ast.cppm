@@ -517,6 +517,24 @@ class AlignmentSpecifier {
     return type.kind == TypeKind::Named && type.name == nullptr_type_name();
 }
 
+// [meta.trans.other]/[func.require]: `std::invoke_result_t<Fn,
+// ArgTypes...>` -- the type `INVOKE(declval<Fn>(), declval<ArgTypes>()
+// ...)` yields. scpp has no `decltype`, and an alias declaration takes
+// no template parameters here, so this trait cannot be a library
+// definition at all: it is a type-level *computation*, spelled as a
+// Named type carrying its own arguments in `template_args` (`Fn` first,
+// then the argument types) and resolved in place by the Monomorphizer
+// exactly the way an ordinary generic instantiation's own
+// `template_args` are -- see Type::template_args' comment. Nothing
+// downstream of that pass ever sees this name.
+[[nodiscard]] inline std::string invoke_result_type_name() { return "std::invoke_result_t"; }
+
+// Whether `type` is a not-yet-resolved `std::invoke_result_t<...>`
+// spelling. Never true after monomorphization.
+[[nodiscard]] inline bool is_invoke_result_type(const Type& type) {
+    return type.kind == TypeKind::Named && type.name == invoke_result_type_name() && !type.template_args.empty();
+}
+
 class Param {
   public:
     virtual ~Param() = default;

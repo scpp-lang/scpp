@@ -702,6 +702,7 @@ private:
         if (tok.kind == TokenKind::KwAuto) return true;
         if (peek_std_qualified_builtin_scalar_type_name().has_value()) return true;
         if (check_std_qualified("span")) return true;
+        if (check_std_qualified("invoke_result_t")) return true;
         if (tok.kind != TokenKind::Identifier) return false;
         // ch11: a bare identifier might be the *first segment* of a
         // qualified name (`std::string`) rather than a plain type name --
@@ -3735,6 +3736,48 @@ private:
             type.pointee = std::make_shared<Type>(std::move(element));
             type.is_mutable_ref = !element_is_const;
             return type;
+        }
+        // [meta.trans.other]/[func.require]: `std::invoke_result_t<Fn,
+        // ArgTypes...>`. Parsed here rather than resolved through
+        // `generic_type_names_` because it names no class or struct at
+        // all -- there is nothing in `libs/std` for it to instantiate.
+        // It is a type-level computation ("the type calling `Fn` with
+        // `ArgTypes...` yields"), which scpp cannot express in the
+        // library: there is no `decltype`, and an alias declaration
+        // takes no template parameters. So the spelling is recognized
+        // structurally right here and left for the Monomorphizer,
+        // exactly the way `Name<Args...>` itself is -- see
+        // invoke_result_type_name() (ast.cppm) and
+        // resolve_invoke_result_type (monomorphize.cppm).
+        //
+        // `Fn` is the *first* argument and is written exactly as
+        // [func.require] declvals it: `F&` names an lvalue callable,
+        // `const F&` a const lvalue, a bare `F` an rvalue. Each
+        // remaining argument is likewise a full type-id, so all of them
+        // go through parse_template_type_argument (which accepts
+        // `const T&`, a pointer, another generic instantiation, ...).
+        if (check_std_qualified("invoke_result_t")) {
+            const Token& trait_tok = peek();
+            consume_std_qualified();
+            if (auto _r = expect(TokenKind::Less, "'<'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            Type type{};
+
+            type.kind = TypeKind::Named;
+            type.name = invoke_result_type_name();
+            if (check(TokenKind::Greater)) {
+                return std::unexpected(ParseError(trait_tok.line, trait_tok.column,
+                                                  "'std::invoke_result_t' takes a callable type followed by its "
+                                                  "argument types ([meta.trans.other])"));
+            }
+            while (true) {
+                auto arg_result = parse_template_type_argument();
+                if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
+                Type __arg_result_value = std::move(arg_result).value();
+                type.template_args.push_back(std::move(__arg_result_value));
+                if (!(match(TokenKind::Comma))) break;
+            }
+            if (auto _r = expect(TokenKind::Greater, "'>'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            return parse_pointer_suffixes(std::move(type), const_qualifies_first_pointer);
         }
 
         const Token& tok = peek();
