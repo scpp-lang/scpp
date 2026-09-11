@@ -24,6 +24,76 @@ void unordered_set_deallocate_bytes(void* ptr, uint64_t align) {
     return;
 }
 
+// [unord.set.modifiers]/1: `pair<iterator, bool> insert(const
+// value_type& obj)` -- "the bool component ... is true if and only if
+// the insertion takes place, and the iterator component ... points to
+// the element with key equivalent to the key of obj". `insert` here
+// returned the bool alone, which is what
+// `array_bounds_resolving_structs_.insert(name).second` in
+// src/compiler/constexpression.cppm ran into, and what
+// parse_constructor_member_initializer_list's own note in
+// src/compiler/parser.cppm described before working around it with a
+// `contains()` call and a separate `insert()`.
+//
+// The iterator and the two-field result mirror std::unordered_map's
+// unordered_map_iterator/unordered_map_emplace_result exactly -- same
+// clause family, same reason for the shape: there is no std::pair here,
+// and no structured bindings, so callers read `.first`/`.second` off a
+// named class.
+export template<typename T>
+class unordered_set_iterator {
+private:
+    T* slot_{};
+
+public:
+    unordered_set_iterator() { return; }
+
+    unordered_set_iterator(T* slot) {
+        this->slot_ = slot;
+        return;
+    }
+
+    T* operator->() const [[scpp::lifetime(self)]] {
+        return this->slot_;
+    }
+
+    T& operator*() const {
+        [[scpp::unsafe]] {
+            return *this->slot_;
+        }
+    }
+
+    bool operator==(const std::unordered_set_iterator<T>& other) const {
+        return this->slot_ == other.slot_;
+    }
+
+    bool operator!=(const std::unordered_set_iterator<T>& other) const {
+        return this->slot_ != other.slot_;
+    }
+
+    virtual ~unordered_set_iterator() { return; }
+};
+
+export template<typename T>
+class unordered_set_insert_result {
+  public:
+    std::unordered_set_iterator<T> first{};
+    bool second{};
+
+    virtual ~unordered_set_insert_result() { return; }
+};
+
+// Which slot a probe landed on, and whether it had to be constructed --
+// the private half of the answer above, before it is dressed as an
+// iterator. Not exported: no caller outside this file names it.
+class unordered_set_slot_result {
+  public:
+    size_t index{};
+    bool inserted{};
+
+    virtual ~unordered_set_slot_result() { return; }
+};
+
 export template<typename T>
 class [[scpp::thread_movable_if(scpp::is_thread_movable(T), scpp::is_thread_shareable(T))]] unordered_set {
 private:
@@ -247,7 +317,7 @@ public:
         return;
     }
 
-    bool __insert_copy(const T& value) {
+    unordered_set_slot_result __insert_copy(const T& value) {
         this->__ensure_capacity_for_one_more();
         size_t index = this->__bucket_index_for_hash(this->__hash(value), this->slot_count_);
         size_t first_tombstone = 0;
@@ -262,7 +332,10 @@ public:
                 size_t target = has_first_tombstone ? first_tombstone : index;
                 this->__construct_slot(target, value);
                 if (has_first_tombstone) this->tombstones_ = this->tombstones_ - 1;
-                return true;
+                unordered_set_slot_result placed{};
+                placed.index = target;
+                placed.inserted = true;
+                return placed;
             }
             if (state == 2) {
                 if (!has_first_tombstone) {
@@ -274,7 +347,12 @@ public:
                 [[scpp::unsafe]] {
                     matches = this->__equals(this->slots_[index], value);
                 }
-                if (matches) return false;
+                if (matches) {
+                    unordered_set_slot_result existing{};
+                    existing.index = index;
+                    existing.inserted = false;
+                    return existing;
+                }
             }
             index = this->__probe_next(index);
             probes = probes + 1;
@@ -283,7 +361,7 @@ public:
         return this->__insert_copy(value);
     }
 
-    bool __insert_move(T&& value) {
+    unordered_set_slot_result __insert_move(T&& value) {
         this->__ensure_capacity_for_one_more();
         size_t index = this->__bucket_index_for_hash(this->__hash(value), this->slot_count_);
         size_t first_tombstone = 0;
@@ -298,7 +376,10 @@ public:
                 size_t target = has_first_tombstone ? first_tombstone : index;
                 this->__construct_slot(target, std::move(value));
                 if (has_first_tombstone) this->tombstones_ = this->tombstones_ - 1;
-                return true;
+                unordered_set_slot_result placed{};
+                placed.index = target;
+                placed.inserted = true;
+                return placed;
             }
             if (state == 2) {
                 if (!has_first_tombstone) {
@@ -310,7 +391,12 @@ public:
                 [[scpp::unsafe]] {
                     matches = this->__equals(this->slots_[index], value);
                 }
-                if (matches) return false;
+                if (matches) {
+                    unordered_set_slot_result existing{};
+                    existing.index = index;
+                    existing.inserted = false;
+                    return existing;
+                }
             }
             index = this->__probe_next(index);
             probes = probes + 1;
@@ -340,12 +426,30 @@ public:
         return;
     }
 
-    bool insert(const T& value) {
-        return this->__insert_copy(value);
+    std::unordered_set_insert_result<T> insert(const T& value) {
+        unordered_set_slot_result placed{this->__insert_copy(value)};
+        std::unordered_set_insert_result<T> result{};
+        T* slot{};
+        [[scpp::unsafe]] {
+            slot = &this->slots_[placed.index];
+        }
+        std::unordered_set_iterator<T> at{slot};
+        result.first = std::move(at);
+        result.second = placed.inserted;
+        return result;
     }
 
-    bool insert(T&& value) {
-        return this->__insert_move(std::move(value));
+    std::unordered_set_insert_result<T> insert(T&& value) {
+        unordered_set_slot_result placed{this->__insert_move(std::move(value))};
+        std::unordered_set_insert_result<T> result{};
+        T* slot{};
+        [[scpp::unsafe]] {
+            slot = &this->slots_[placed.index];
+        }
+        std::unordered_set_iterator<T> at{slot};
+        result.first = std::move(at);
+        result.second = placed.inserted;
+        return result;
     }
 
     bool contains(const T& value) const {

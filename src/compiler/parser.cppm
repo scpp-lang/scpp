@@ -6717,14 +6717,15 @@ private:
 
             init.member_name = std::string(name_tok.text.data(), name_tok.text.size());
             init.loc = make_source_location(name_tok.line, name_tok.column, source_path_);
-            // std::unordered_set::insert's return type differs between
-            // scpp's self-hosting implementation (a plain bool) and real
-            // std::unordered_set (std::pair<iterator, bool>) -- rather
-            // than relying on insert's return value at all (which would
-            // need a different access idiom, ".second" vs. none, per
-            // compiler), check membership with contains() first (bool in
-            // both), then insert separately.
-            if (seen_members.contains(init.member_name)) {
+            // [unord.set.modifiers]/1: `insert`'s bool component "is true
+            // if and only if the insertion takes place", so one call
+            // answers both questions. This looked the name up twice --
+            // `contains()` and then `insert()` -- above a note explaining
+            // that scpp's own `unordered_set::insert` returned a plain
+            // bool where real `std::unordered_set` returns
+            // `pair<iterator, bool>`, so the `.second` idiom would not
+            // compile under both compilers. It returns the pair now.
+            if (!seen_members.insert(init.member_name).second) {
                 {
                     std::string _msg_5348{"member '"};
                     _msg_5348 += init.member_name;
@@ -6733,7 +6734,6 @@ private:
                                  _msg_5348));
                 }
             }
-            seen_members.insert(init.member_name);
             if (check(TokenKind::LParen)) {
                 const Token& tok = peek();
                 {

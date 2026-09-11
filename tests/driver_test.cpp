@@ -8129,13 +8129,13 @@ int main() {
     if (!values.empty()) return 1;
     int i = 0;
     while (i < 40) {
-        if (!values.insert(i)) return 2;
+        if (!values.insert(i).second) return 2;
         i = i + 1;
     }
     if (values.size() != 40) return 3;
     i = 0;
     while (i < 40) {
-        if (values.insert(i)) return 4;
+        if (values.insert(i).second) return 4;
         if (!values.contains(i)) return 5;
         i = i + 1;
     }
@@ -8202,7 +8202,7 @@ int main() {
     int i = 0;
     while (i < 40) {
         IntKey key{i};
-        if (!values.insert(key)) return 2;
+        if (!values.insert(key).second) return 2;
         i = i + 1;
     }
     if (values.size() != 40) return 3;
@@ -8215,7 +8215,7 @@ int main() {
     i = 0;
     while (i < 40) {
         IntKey key{i};
-        if (values.insert(key)) return 5;
+        if (values.insert(key).second) return 5;
         i = i + 1;
     }
     if (values.size() != 40) return 6;
