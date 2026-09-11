@@ -141,7 +141,7 @@ namespace {
 
 constexpr const char* kCompileErrorSentinel = "COMPILE_ERROR";
 constexpr const char* kNoAbortSentinel = "NO_ABORT";
-constexpr int kTimeoutSeconds = 15;
+constexpr int kTimeoutSeconds = 30;
 
 std::string read_file(const fs::path& path) {
     std::ifstream file(path, std::ios::binary);

@@ -47,9 +47,9 @@ int main() {
     IntKey one{1};
     IntKey two{2};
     IntKey again{1};
-    if (!values.insert(one)) return 1;
-    if (!values.insert(two)) return 2;
-    if (values.insert(again)) return 3;
+    if (!values.insert(one).second) return 1;
+    if (!values.insert(two).second) return 2;
+    if (values.insert(again).second) return 3;
     if (!values.contains(one)) return 4;
     if (!values.erase(two)) return 5;
     if (values.contains(two)) return 6;

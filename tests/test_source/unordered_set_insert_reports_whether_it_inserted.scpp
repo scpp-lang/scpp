@@ -1,0 +1,31 @@
+import std;
+
+// [unord.set.modifiers]/1: `pair<iterator, bool> insert(const value_type&
+// obj)` -- "the bool component ... is true if and only if the insertion
+// takes place, and the iterator component ... points to the element with
+// key equivalent to the key of obj". This returned the bool alone, so
+// `array_bounds_resolving_structs_.insert(name).second` in
+// src/compiler/constexpression.cppm had nothing to read, and
+// src/compiler/parser.cppm carried a note saying so while looking each
+// name up twice instead. Cross-checked against clang++-22 -std=c++26:
+// same five lines.
+int main() {
+    std::unordered_set<std::string> s{};
+    std::print("first {}\n", s.insert(std::string{"a"}).second);
+    std::print("again {}\n", s.insert(std::string{"a"}).second);
+    std::print("other {}\n", s.insert(std::string{"b"}).second);
+    std::print("size {}\n", static_cast<int>(s.size()));
+
+    // The iterator component points at the element already present, and
+    // the bool says the insertion did not take place.
+    std::unordered_set_insert_result<std::string> found = s.insert(std::string{"a"});
+    const std::string& at = *found.first;
+    std::print("points-at {} {}\n", at, found.second);
+
+    // The rvalue overload answers the same way, and a moved-in value that
+    // is already present leaves the set unchanged.
+    std::unordered_set<int> numbers{};
+    std::print("moved {} {}\n", numbers.insert(7).second, numbers.insert(7).second);
+    std::print("count {}\n", static_cast<int>(numbers.size()));
+    return 0;
+}

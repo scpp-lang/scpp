@@ -1,0 +1,14 @@
+import std;
+
+// [unord.set.modifiers]: `insert` is not const-qualified -- it changes
+// the set. A read-only handle cannot insert through.
+void add(const std::unordered_set<int>& s) {
+    s.insert(1);
+    return;
+}
+
+int main() {
+    std::unordered_set<int> s{};
+    add(s);
+    return 0;
+}
