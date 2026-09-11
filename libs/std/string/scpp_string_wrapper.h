@@ -68,6 +68,14 @@ void scpp_string_push_back(void* handle, char c);
 // 0 otherwise (including when `s` is NULL).
 int scpp_string_equals(void* handle, const char* s);
 
+// Returns a negative value, 0, or a positive value according as
+// `handle`'s content compares less than, equal to, or greater than the
+// nul-terminated C string `s` -- std::string::compare's answer, which
+// [string.cmp]/1 is what the relational operators are defined in terms
+// of. A NULL `s` is treated as the empty string, so the comparison stays
+// a total order rather than becoming undefined.
+int scpp_string_compare(void* handle, const char* s);
+
 // Returns 1 if `handle`'s content contains `needle` as a substring
 // (std::string::contains(std::string_view), C++23), 0 otherwise
 // (including when `needle` is NULL, matching the convention every other

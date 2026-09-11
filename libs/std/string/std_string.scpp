@@ -30,6 +30,7 @@ extern "C" {
     void scpp_string_append(void* handle, const char* s);
     void scpp_string_push_back(void* handle, char c);
     int scpp_string_equals(void* handle, const char* s);
+    int scpp_string_compare(void* handle, const char* s);
     const char* scpp_int64_to_cstr(int64_t value);
     const char* scpp_uint64_to_cstr(size_t value);
     int scpp_string_contains(void* handle, const char* needle);
@@ -260,6 +261,60 @@ public:
         return !this->equals(other.c_str());
     }
 
+    // [string.compare]/1: a negative value, zero, or a positive value
+    // according as this string's content is lexicographically less than,
+    // equal to, or greater than `s`. The character-by-character order is
+    // the one `char`'s comparison gives, so this is a total order over
+    // every string value and never depends on where a string was built.
+    int compare(const char* s) const {
+        [[scpp::unsafe]] {
+            return scpp_string_compare(this->handle, s);
+        }
+    }
+
+    int compare(const string& other) const {
+        return this->compare(other.c_str());
+    }
+
+    // [string.cmp]/1 defines each relational operator on strings as the
+    // corresponding comparison of `compare`'s result against 0. They are
+    // written out one by one rather than deduced from a single
+    // three-way operator because this language has no `<=>` token at all
+    // (there is no expression it could give meaning to), so `compare` --
+    // which [string.cmp] itself names as the thing being compared -- is
+    // the primitive here.
+    bool operator<(const char* other) const {
+        return this->compare(other) < 0;
+    }
+
+    bool operator<(const string& other) const {
+        return this->compare(other.c_str()) < 0;
+    }
+
+    bool operator>(const char* other) const {
+        return this->compare(other) > 0;
+    }
+
+    bool operator>(const string& other) const {
+        return this->compare(other.c_str()) > 0;
+    }
+
+    bool operator<=(const char* other) const {
+        return this->compare(other) <= 0;
+    }
+
+    bool operator<=(const string& other) const {
+        return this->compare(other.c_str()) <= 0;
+    }
+
+    bool operator>=(const char* other) const {
+        return this->compare(other) >= 0;
+    }
+
+    bool operator>=(const string& other) const {
+        return this->compare(other.c_str()) >= 0;
+    }
+
     // std::string::contains(std::string_view) (C++23): true if `s`
     // occurs anywhere within this string's content.
     bool contains(const char* s) const {
@@ -352,6 +407,30 @@ export string operator+(char lhs, const string& rhs) {
     result.push_back(lhs);
     result.append(rhs.c_str());
     return result;
+}
+
+// [string.cmp]/1 again, for `"literal" < s` and its three siblings.
+// Non-member for the same reason `operator+(const char*, const string&)`
+// above is: the left operand is not a std::string, so there is no member
+// operator to find on it. Unlike `==`, a relational operator has no
+// reversed candidate -- C++ gets `"literal" < s` from the rewritten
+// `0 < (s <=> "literal")`, and with no `<=>` token in this language the
+// reversed spelling has to be declared, or `<` would work in one operand
+// order only.
+export bool operator<(const char* lhs, const string& rhs) {
+    return rhs.compare(lhs) > 0;
+}
+
+export bool operator>(const char* lhs, const string& rhs) {
+    return rhs.compare(lhs) < 0;
+}
+
+export bool operator<=(const char* lhs, const string& rhs) {
+    return rhs.compare(lhs) >= 0;
+}
+
+export bool operator>=(const char* lhs, const string& rhs) {
+    return rhs.compare(lhs) <= 0;
 }
 
 // std::to_string(std::int64_t)/std::to_string(std::size_t): formats an
