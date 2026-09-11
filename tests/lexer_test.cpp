@@ -138,6 +138,106 @@ void test_integer_literal_text() {
     expect(tokens[0].text == "12345", "integer_literal_text: text should match '12345'");
 }
 
+// One integer literal, and the whole of its source spelling. The lexer's
+// job for a literal is its *extent*: the text is handed to the parser
+// exactly as written, prefix/separators/suffix and all.
+void expect_one_integer_literal(std::string_view source, std::string_view case_name) {
+    std::vector<scpp::Token> tokens = scpp::tokenize(source);
+    expect(tokens.size() == 2, std::string(case_name) + ": expected one literal plus EndOfFile, got " +
+                                   std::to_string(tokens.size()) + " tokens");
+    if (tokens.size() < 2) return;
+    expect(tokens[0].kind == scpp::TokenKind::IntegerLiteral, std::string(case_name) + ": kind should be IntegerLiteral");
+    expect(tokens[0].text == source, std::string(case_name) + ": text should be the whole literal, got '" +
+                                         std::string(tokens[0].text) + "'");
+}
+
+// [lex.icon]: all four bases. The lexer used to know decimal only, so
+// `0x9e3779b9ULL` came out as the literal `0` followed by the identifier
+// `x9e3779b9ULL` -- a valid literal standing next to a name nobody
+// wrote, which is why the diagnostic named the identifier.
+void test_hexadecimal_literals() {
+    expect_one_integer_literal("0x2a", "hexadecimal_lowercase");
+    expect_one_integer_literal("0X2A", "hexadecimal_uppercase");
+    expect_one_integer_literal("0xDeadBeef", "hexadecimal_mixed_case");
+    expect_one_integer_literal("0x9e3779b9ULL", "hexadecimal_with_suffix");
+    expect_one_integer_literal("0x9e3779b97f4a7c15ULL", "hexadecimal_sixty_four_bit");
+}
+
+void test_binary_literals() {
+    expect_one_integer_literal("0b101010", "binary_lowercase");
+    expect_one_integer_literal("0B1", "binary_uppercase");
+}
+
+void test_octal_literals() {
+    expect_one_integer_literal("052", "octal");
+    expect_one_integer_literal("0", "octal_zero_is_just_zero");
+}
+
+// [lex.icon]'s integer-suffix is part of the literal's extent, not a
+// separate identifier token sitting behind it.
+void test_integer_suffixes_belong_to_the_literal() {
+    expect_one_integer_literal("42u", "suffix_u");
+    expect_one_integer_literal("42U", "suffix_upper_u");
+    expect_one_integer_literal("42L", "suffix_l");
+    expect_one_integer_literal("42ll", "suffix_ll");
+    expect_one_integer_literal("42ULL", "suffix_ull");
+    expect_one_integer_literal("42zu", "suffix_zu");
+}
+
+// A `'` between two digits is a digit separator; a `'` anywhere else
+// still opens a char literal, so `1` next to `'a'` stays two tokens.
+void test_digit_separators() {
+    expect_one_integer_literal("1'000'000", "digit_separator_decimal");
+    expect_one_integer_literal("0xdead'beef", "digit_separator_hexadecimal");
+    expect_kinds(
+        "1 'a'",
+        {
+            scpp::TokenKind::IntegerLiteral,
+            scpp::TokenKind::CharLiteral,
+            scpp::TokenKind::EndOfFile,
+        },
+        "digit_separator_does_not_eat_a_char_literal");
+    std::vector<scpp::Token> adjacent = scpp::tokenize("1'a'");
+    expect(adjacent.size() == 3, "digit_separator_needs_a_digit_after_it: expected 3 tokens");
+    if (adjacent.size() >= 2) {
+        expect(adjacent[0].text == "1", "digit_separator_needs_a_digit_after_it: literal should be just '1'");
+        expect(adjacent[1].kind == scpp::TokenKind::CharLiteral,
+               "digit_separator_needs_a_digit_after_it: the quotes should still be a char literal");
+    }
+}
+
+// An ill-formed spelling stays one token so that the parser can report it
+// against the literal as a whole; splitting it would produce a valid
+// literal plus a stray identifier and a diagnostic about the wrong thing.
+void test_malformed_numbers_stay_one_token() {
+    expect_one_integer_literal("0x", "empty_hexadecimal");
+    expect_one_integer_literal("08", "octal_with_an_eight");
+    expect_one_integer_literal("1ULLL", "over_long_suffix");
+    expect_one_integer_literal("123abc", "digits_then_letters");
+}
+
+// Floating-point literals are unchanged: no suffix is consumed, so
+// `1.5f` is still the literal `1.5` and the identifier `f`.
+void test_float_literals_are_unchanged() {
+    expect_kinds(
+        "1.5 0.25",
+        {
+            scpp::TokenKind::FloatLiteral,
+            scpp::TokenKind::FloatLiteral,
+            scpp::TokenKind::EndOfFile,
+        },
+        "float_literals");
+    expect_kinds(
+        "1.f",
+        {
+            scpp::TokenKind::IntegerLiteral,
+            scpp::TokenKind::Dot,
+            scpp::TokenKind::Identifier,
+            scpp::TokenKind::EndOfFile,
+        },
+        "trailing_dot_is_not_part_of_the_number");
+}
+
 void test_operators() {
     expect_kinds(
         "+ - * / = == != < > <= >= && || ! &",
@@ -420,6 +520,13 @@ int main() {
     test_unsafe_is_not_a_keyword();
     test_identifier_text();
     test_integer_literal_text();
+    test_hexadecimal_literals();
+    test_binary_literals();
+    test_octal_literals();
+    test_integer_suffixes_belong_to_the_literal();
+    test_digit_separators();
+    test_malformed_numbers_stay_one_token();
+    test_float_literals_are_unchanged();
     test_operators();
     test_arrow_operator();
     test_comments_are_skipped();

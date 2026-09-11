@@ -6273,6 +6273,121 @@ void test_class_def_loc_is_the_class_declaration() {
     expect_field_loc(plain->loc, 1, 1, "class 'Plain'");
     expect_field_loc(generic->loc, 7, 1, "class 'Generic'");
 }
+
+// [lex.icon] gives an integer-literal four bases, `'` digit separators
+// and an optional integer-suffix, and spec §16.2 changes only what
+// *type* such a literal has, not how it is spelled -- so every one of
+// those spellings has to arrive at the same value. The lexer used to
+// know decimal alone, so `0x2a` parsed as the literal `0` next to an
+// identifier `x2a`.
+std::int64_t parsed_initializer_value(std::string_view literal, std::string_view case_name) {
+    std::string source{"int64_t f() {\n    int64_t v = "};
+    source += std::string(literal);
+    source += ";\n    return v;\n}\n";
+    auto result = scpp::parse(source);
+    if (!result.has_value()) {
+        expect(false, std::string(case_name) + ": '" + std::string(literal) + "' should parse, got: " +
+                          result.error().what());
+        return 0;
+    }
+    const scpp::Function* fn = find_function_named(result.value(), "f");
+    if (fn == nullptr || fn->body == nullptr || fn->body->statements.empty()) {
+        expect(false, std::string(case_name) + ": expected a function with a declaration");
+        return 0;
+    }
+    const scpp::Stmt& decl = *fn->body->statements[0];
+    if (decl.kind != scpp::StmtKind::VarDecl || decl.init == nullptr ||
+        decl.init->kind != scpp::ExprKind::IntegerLiteral) {
+        expect(false, std::string(case_name) + ": expected an integer-literal initializer");
+        return 0;
+    }
+    return decl.init->int_value;
+}
+
+void expect_literal_value(std::string_view literal, std::int64_t value, std::string_view case_name) {
+    std::int64_t actual = parsed_initializer_value(literal, case_name);
+    expect(actual == value, std::string(case_name) + ": '" + std::string(literal) + "' should be " +
+                                std::to_string(value) + ", got " + std::to_string(actual));
+}
+
+void test_hexadecimal_literals_have_their_value() {
+    expect_literal_value("0x2a", 42, "hexadecimal_lowercase");
+    expect_literal_value("0X2A", 42, "hexadecimal_uppercase");
+    expect_literal_value("0xff", 255, "hexadecimal_ff");
+    expect_literal_value("0x0", 0, "hexadecimal_zero");
+}
+
+void test_octal_and_binary_literals_have_their_value() {
+    expect_literal_value("052", 42, "octal");
+    expect_literal_value("010", 8, "octal_ten");
+    expect_literal_value("00", 0, "octal_double_zero");
+    expect_literal_value("0b101010", 42, "binary");
+    expect_literal_value("0B1", 1, "binary_one");
+}
+
+// A suffix is part of the spelling and nothing more: spec §16.2(1) gives
+// an integer-literal "no type of its own", so `42ULL` is the same
+// literal as `42` and takes whatever type its context requires.
+void test_integer_suffixes_do_not_change_the_value() {
+    expect_literal_value("42u", 42, "suffix_u");
+    expect_literal_value("42U", 42, "suffix_upper_u");
+    expect_literal_value("42l", 42, "suffix_l");
+    expect_literal_value("42LL", 42, "suffix_ll");
+    expect_literal_value("42ull", 42, "suffix_ull");
+    expect_literal_value("42llu", 42, "suffix_llu");
+    expect_literal_value("42z", 42, "suffix_z");
+    expect_literal_value("42uz", 42, "suffix_uz");
+    expect_literal_value("0x2aULL", 42, "hexadecimal_suffix_ull");
+    expect_literal_value("0u", 0, "octal_zero_with_suffix");
+}
+
+void test_digit_separators_do_not_change_the_value() {
+    expect_literal_value("1'000'000", 1000000, "digit_separator_decimal");
+    expect_literal_value("0xdead'beef", 3735928559, "digit_separator_hexadecimal");
+    expect_literal_value("0b1010'1010", 170, "digit_separator_binary");
+}
+
+// The 64-bit unsigned range is carried as the std::int64_t with the same
+// bits everywhere in this compiler (see ast.cppm's scalar_value_range),
+// which is what lets `0x9e3779b97f4a7c15` -- an ordinary std::uint64_t
+// value, above INT64_MAX -- be spelled at all.
+void test_a_literal_above_int64_max_wraps_into_the_same_bits() {
+    std::int64_t expected = static_cast<std::int64_t>(0x9e3779b97f4a7c15ULL);
+    expect_literal_value("0x9e3779b97f4a7c15ULL", expected, "sixty_four_bit_hexadecimal");
+    expect_literal_value("18446744073709551615", -1, "largest_uint64_decimal");
+    expect_literal_value("0xffffffffffffffff", -1, "largest_uint64_hexadecimal");
+}
+
+void expect_literal_rejected(std::string_view literal, std::string_view expected_fragment,
+                             std::string_view case_name) {
+    std::string source{"int64_t f() {\n    int64_t v = "};
+    source += std::string(literal);
+    source += ";\n    return v;\n}\n";
+    auto result = scpp::parse(source);
+    expect(!result.has_value(), std::string(case_name) + ": '" + std::string(literal) + "' should be rejected");
+    if (result.has_value()) return;
+    std::string message{result.error().what()};
+    expect(message.find(std::string(expected_fragment)) != std::string::npos,
+           std::string(case_name) + ": diagnostic should mention '" + std::string(expected_fragment) + "', got: " +
+               message);
+}
+
+// A malformed literal is reported against the whole literal. Before the
+// lexer knew about bases, `0x` was the literal `0` followed by the
+// identifier `x`, so the diagnostic named a variable the program never
+// declared instead of the literal that is actually wrong.
+void test_malformed_integer_literals_are_reported_against_the_literal() {
+    expect_literal_rejected("0x", "at least one hexadecimal digit", "empty_hexadecimal");
+    expect_literal_rejected("0b", "at least one binary digit", "empty_binary");
+    expect_literal_rejected("08", "invalid digit '8' in octal integer literal '08'", "octal_with_an_eight");
+    expect_literal_rejected("0b12", "invalid digit '2' in binary integer literal '0b12'", "binary_with_a_two");
+    expect_literal_rejected("1ULLL", "invalid suffix 'ULLL'", "over_long_suffix");
+    expect_literal_rejected("1lL", "invalid suffix 'lL'", "mixed_case_long_long_suffix");
+    expect_literal_rejected("1uu", "invalid suffix 'uu'", "doubled_unsigned_suffix");
+    expect_literal_rejected("123abc", "invalid suffix 'abc'", "digits_then_letters");
+    expect_literal_rejected("0x1ffffffffffffffff", "is too large", "overflowing_hexadecimal");
+    expect_literal_rejected("18446744073709551616", "is too large", "overflowing_decimal");
+}
 } // namespace
 
 
@@ -6877,6 +6992,13 @@ int main() {
     test_nodiscard_reason_concatenates_adjacent_literals();
     test_extern_linkage_concatenates_before_it_is_checked();
     test_range_for_and_variable_declaration_agree_on_auto_reference();
+
+    test_hexadecimal_literals_have_their_value();
+    test_octal_and_binary_literals_have_their_value();
+    test_integer_suffixes_do_not_change_the_value();
+    test_digit_separators_do_not_change_the_value();
+    test_a_literal_above_int64_max_wraps_into_the_same_bits();
+    test_malformed_integer_literals_are_reported_against_the_literal();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";
