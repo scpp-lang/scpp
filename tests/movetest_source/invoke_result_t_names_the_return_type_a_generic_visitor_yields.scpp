@@ -1,0 +1,31 @@
+// [meta.trans.other]/[func.require]: the shape src/mir.cppm's own
+// for_each_initializer_scope has -- a generic function whose return
+// type is its visitor's, deduced once per instantiation from the
+// closure the call site passes. Both instantiations are well-formed and
+// each names a different `std::expected`.
+import std;
+
+struct Scope {
+    int value;
+};
+
+template <typename VisitFn>
+auto for_each(const Scope& only, VisitFn&& visit) -> std::invoke_result_t<VisitFn&, const Scope&> {
+    if (std::invoke_result_t<VisitFn&, const Scope&> r = visit(only); !r.has_value()) return r;
+    return {};
+}
+
+int main() {
+    Scope s{1};
+    std::expected<void, int> by_int = for_each(s, [](const Scope& scope) -> std::expected<void, int> {
+        if (scope.value == 0) return std::expected<void, int>(std::unexpected<int>(1));
+        return {};
+    });
+    std::expected<void, bool> by_bool = for_each(s, [](const Scope& scope) -> std::expected<void, bool> {
+        if (scope.value == 0) return std::expected<void, bool>(std::unexpected<bool>(true));
+        return {};
+    });
+    if (!by_int.has_value()) return 1;
+    if (!by_bool.has_value()) return 2;
+    return 0;
+}

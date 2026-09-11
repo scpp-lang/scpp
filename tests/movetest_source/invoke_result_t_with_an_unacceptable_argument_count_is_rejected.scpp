@@ -1,0 +1,15 @@
+// [func.require]: the trait asks what calling `Fn` with *these*
+// arguments yields. A callable that accepts one argument answers
+// nothing at all about a two-argument call, so the trait is ill-formed
+// rather than falling back on the one overload that does exist.
+import std;
+
+struct Once {
+    int call(int x) { return x; }
+};
+
+int main() {
+    Once once{};
+    std::invoke_result_t<Once&, int, int> r = 0;
+    return r;
+}

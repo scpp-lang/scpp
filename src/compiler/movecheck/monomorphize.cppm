@@ -329,6 +329,14 @@ private:
     // the rebuild is O(program), so doing it once per instantiated member
     // declaration is quadratic in the size of the program.
     std::size_t signatures_function_count_ = 0;
+    // How many `std::invoke_result_t<...>` resolutions are currently
+    // nested. A resolved result may itself be spelled with the trait
+    // (a `call` method may declare its return type in terms of another
+    // callable's), so the resolution is genuinely recursive -- but a
+    // `call` whose return type is `std::invoke_result_t` of its *own*
+    // class defines itself in terms of itself, and would otherwise
+    // recurse until the stack ran out rather than report anything.
+    std::size_t invoke_result_depth_ = 0;
     // Every generic class/struct template's own name -- see the
     // constructor's own comment.
     std::unordered_set<std::string> generic_type_template_names_;
@@ -3214,6 +3222,154 @@ private:
         return {};
     }
 
+    // [func.require]/1: the object expression `INVOKE(declval<Fn>(),
+    // ...)` names, described the only two ways overload resolution
+    // needs it -- whether it is an lvalue or an rvalue, and whether it
+    // is const. `declval<T&>()` is an lvalue, `declval<T&&>()` and
+    // `declval<T>()` are rvalues; the `const` travels with whichever of
+    // the two it was spelled on.
+    struct InvokeReceiverCategory {
+        bool is_lvalue = false;
+        bool is_const = false;
+    };
+
+    [[nodiscard]] InvokeReceiverCategory invoke_receiver_category(const Type& callable) {
+        InvokeReceiverCategory category;
+        if (callable.kind == TypeKind::Reference) {
+            category.is_lvalue = !callable.is_rvalue_ref;
+            // An lvalue reference spells its constness as `const T&`
+            // (is_mutable_ref == false); an rvalue reference, whose
+            // is_mutable_ref is meaningless, spells it on the referent.
+            category.is_const = (!callable.is_rvalue_ref && !callable.is_mutable_ref) ||
+                                (callable.pointee != nullptr && callable.pointee->is_const_qualified);
+            return category;
+        }
+        category.is_lvalue = false;
+        category.is_const = callable.is_const_qualified;
+        return category;
+    }
+
+    // Whether a `call` overload declared with this signature may be
+    // selected for a receiver of the given category. `sig`'s own
+    // receiver is its parameter 0 (scpp gives every method an explicit
+    // leading `this` parameter -- see resolve_lambda's own this_param).
+    [[nodiscard]] bool invoke_receiver_matches(const FunctionSignature& sig, const InvokeReceiverCategory& category) {
+        if (sig.is_static || sig.param_types.empty()) return false;
+        // [over.match.funcs]/5: an `&`-qualified member is viable only
+        // for an lvalue, an `&&`-qualified one only for an rvalue; an
+        // unqualified one is viable for both.
+        if (sig.receiver_ref_qualifier == ReceiverRefQualifier::LValue && !category.is_lvalue) return false;
+        if (sig.receiver_ref_qualifier == ReceiverRefQualifier::RValue && category.is_lvalue) return false;
+        if (!category.is_const) return true;
+        const Type& receiver = sig.param_types[0];
+        if (receiver.kind == TypeKind::Reference) {
+            return !receiver.is_mutable_ref || (receiver.pointee != nullptr && receiver.pointee->is_const_qualified);
+        }
+        return receiver.is_const_qualified;
+    }
+
+    // [meta.trans.other]/[func.require]: computes `std::
+    // invoke_result_t<Fn, ArgTypes...>` from arguments that are already
+    // fully resolved (`args[0]` is `Fn`, the rest are `ArgTypes...`).
+    //
+    // scpp spells "the function-call operator" as a method named `call`
+    // -- monomorphize's own bare-call redirect desugars `f(args)` into
+    // `f.call(args)`, `operator()` is parsed straight onto that same
+    // name (parser.cppm's member_operator_method_name), and a lambda's
+    // synthesized closure gets exactly one such method (resolve_lambda,
+    // below). So "the type calling `Fn` with `ArgTypes...` yields" is
+    // one question with one answer everywhere: the return type of the
+    // `<Fn>_call` overload this receiver and these arguments select.
+    // A function pointer is the one callable that has no class at all,
+    // and answers directly from its own type.
+    [[nodiscard]] std::expected<Type, DataflowError> resolve_invoke_result_type(const std::vector<Type>& args,
+                                                                               SourceLocation loc) {
+        const Type& callable = args.front();
+        const Type& underlying =
+            callable.kind == TypeKind::Reference && callable.pointee != nullptr ? *callable.pointee : callable;
+        std::vector<Type> arg_types(args.begin() + 1, args.end());
+        if (underlying.kind == TypeKind::FunctionPointer || underlying.kind == TypeKind::Function) {
+            if (underlying.function_return == nullptr) {
+                return std::unexpected(DataflowError(
+                    "'std::invoke_result_t' cannot determine the return type of '" + describe_type_brief(callable) + "'", loc));
+            }
+            if (underlying.function_params.size() != arg_types.size()) {
+                return std::unexpected(DataflowError("'" + describe_type_brief(callable) + "' is not callable with " +
+                                                         std::to_string(arg_types.size()) + " argument(s)",
+                                                     loc));
+            }
+            return *underlying.function_return;
+        }
+        if (underlying.kind != TypeKind::Named) {
+            return std::unexpected(
+                DataflowError("'std::invoke_result_t' requires a callable type, but '" + describe_type_brief(callable) +
+                                  "' is not one ([func.require])",
+                              loc));
+        }
+        const std::string call_name = underlying.name + "_call";
+        auto overloads_it = signatures_.find(call_name);
+        if (overloads_it == signatures_.end()) {
+            return std::unexpected(DataflowError("'" + describe_type_brief(callable) +
+                                                     "' is not callable: it has no 'operator()' ([func.require])",
+                                                 loc));
+        }
+        const std::vector<FunctionSignature>& overloads = overloads_it->second;
+        // The same single-candidate fast path resolve_overload (calls.cppm)
+        // takes, and for the same reason: when exactly one `call` has ever
+        // been declared under this name there is nothing to disambiguate
+        // between, and demanding that it *also* pass receiver-qualifier
+        // matching would answer "not callable" for calls scpp itself
+        // resolves and emits. `std::function<R(Args...)>` is exactly that
+        // case -- its six cv/ref-qualified `call` overloads collapse to one
+        // per instantiation -- and this trait must not disagree with the
+        // call machinery about whether such an object is callable.
+        if (overloads.size() == 1) {
+            if (!signature_accepts_argument_count(overloads.front(), arg_types.size(), 1)) {
+                return std::unexpected(DataflowError("'" + describe_type_brief(callable) + "' is not callable with " +
+                                                         std::to_string(arg_types.size()) + " argument(s) ([func.require])",
+                                                     loc));
+            }
+            return overloads.front().return_type;
+        }
+        const InvokeReceiverCategory category = invoke_receiver_category(callable);
+        std::vector<const FunctionSignature*> viable;
+        std::vector<const FunctionSignature*> exact;
+        for (const FunctionSignature& sig : overloads) {
+            if (!signature_accepts_argument_count(sig, arg_types.size(), 1)) continue;
+            if (!invoke_receiver_matches(sig, category)) continue;
+            viable.push_back(&sig);
+            bool every_argument_matches = true;
+            for (std::size_t i = 0; i < arg_types.size(); i++) {
+                if (!types_equal(sig.param_types[i + 1], arg_types[i])) {
+                    every_argument_matches = false;
+                    break;
+                }
+            }
+            if (every_argument_matches) exact.push_back(&sig);
+        }
+        // Among several overloads, an identically-spelled one wins
+        // outright. Otherwise whatever survives is still an answer as
+        // long as every member of it returns the same type -- this
+        // deliberately stops short of conversion-ranked overload
+        // resolution, and reports the ambiguity rather than picking one
+        // when the candidates genuinely disagree about the result.
+        const std::vector<const FunctionSignature*>& candidates = !exact.empty() ? exact : viable;
+        if (candidates.empty()) {
+            return std::unexpected(DataflowError("'" + describe_type_brief(callable) + "' is not callable with " +
+                                                     std::to_string(arg_types.size()) + " argument(s) ([func.require])",
+                                                 loc));
+        }
+        for (const FunctionSignature* candidate : candidates) {
+            if (!types_equal(candidate->return_type, candidates.front()->return_type)) {
+                return std::unexpected(
+                    DataflowError("'std::invoke_result_t' is ambiguous: several 'operator()' overloads of '" +
+                                      describe_type_brief(callable) + "' accept these arguments and disagree on the return type",
+                                  loc));
+            }
+        }
+        return candidates.front()->return_type;
+    }
+
     // Resolves a (possibly not-yet-resolved) generic-type
     // Type value, returning the fully-resolved result *by value* --
     // deliberately never mutating through a reference into
@@ -3343,6 +3499,32 @@ private:
             auto resolved = resolve_generic_type(arg, loc);
             if (!resolved.has_value()) return std::unexpected(std::move(resolved).error());
             resolved_args.push_back(std::move(resolved).value());
+        }
+        // [meta.trans.other]: `std::invoke_result_t<Fn, ArgTypes...>`
+        // names no template to instantiate -- it *computes* a type, and
+        // can only do so once `Fn` and `ArgTypes...` are themselves
+        // concrete, which the loop just above is what guarantees. Any
+        // `const`/lifetime written on the spelling itself (`const
+        // std::invoke_result_t<F, A>`) appertains to the computed type,
+        // so it carries over rather than being dropped with the node.
+        if (is_invoke_result_type(type)) {
+            if (invoke_result_depth_ >= 64) {
+                return std::unexpected(
+                    DataflowError("'std::invoke_result_t' is defined in terms of its own result", loc));
+            }
+            auto computed = resolve_invoke_result_type(resolved_args, loc);
+            if (!computed.has_value()) return std::unexpected(std::move(computed).error());
+            Type result = std::move(computed).value();
+            if (type.is_const_qualified) result.is_const_qualified = true;
+            if (type.lifetime.present()) result.lifetime = type.lifetime;
+            // The computed type is read back out of a signature, which
+            // for a generic class's own `call` method may still spell an
+            // uninstantiated generic type -- resolve it the same way any
+            // other type reaching this function is.
+            invoke_result_depth_++;
+            auto resolved_result = resolve_generic_type(std::move(result), loc);
+            invoke_result_depth_--;
+            return resolved_result;
         }
         bool wrapper_lifetime_source =
             type.name == "std::reference_wrapper" ||

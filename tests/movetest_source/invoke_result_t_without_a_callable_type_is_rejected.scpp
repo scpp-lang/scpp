@@ -1,0 +1,10 @@
+// [meta.trans.other]: `invoke_result_t` takes the callable type first
+// and then the argument types; an empty argument list names no callable
+// at all, so it is rejected at the spelling rather than producing a
+// type node nothing downstream could resolve.
+import std;
+
+int main() {
+    std::invoke_result_t<> r = 0;
+    return r;
+}

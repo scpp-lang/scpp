@@ -1,0 +1,45 @@
+// [meta.trans.other]/[func.require]: `std::invoke_result_t<Fn,
+// ArgTypes...>` is the type `INVOKE(declval<Fn>(), declval<ArgTypes>()
+// ...)` yields. This is the shape src/mir.cppm's own
+// for_each_initializer_scope has: a generic function whose return type
+// is the visitor's, spelled `std::invoke_result_t<VisitFn&, const
+// Scope&>` -- an lvalue-reference callable invoked with one const
+// reference -- so the walk hands back whatever `std::expected<void, E>`
+// the caller's own visitor chose, and stops at its first failure.
+import std;
+
+struct Scope {
+    int value;
+};
+
+template <typename VisitFn>
+auto for_each(const Scope& first, const Scope& second, VisitFn&& visit)
+    -> std::invoke_result_t<VisitFn&, const Scope&> {
+    if (std::invoke_result_t<VisitFn&, const Scope&> r = visit(first); !r.has_value()) return r;
+    if (std::invoke_result_t<VisitFn&, const Scope&> r = visit(second); !r.has_value()) return r;
+    return {};
+}
+
+int main() {
+    Scope a{1};
+    Scope b{2};
+    int seen = 0;
+    std::expected<void, int> walked = for_each(a, b, [&seen](const Scope& s) -> std::expected<void, int> {
+        seen = seen + s.value;
+        return {};
+    });
+    if (!walked.has_value()) return 1;
+    if (seen != 3) return 2;
+
+    int visits = 0;
+    std::expected<void, int> stopped = for_each(a, b, [&visits](const Scope& s) -> std::expected<void, int> {
+        visits = visits + 1;
+        if (s.value == 1) return std::expected<void, int>(std::unexpected<int>(7));
+        return {};
+    });
+    if (stopped.has_value()) return 3;
+    if (stopped.error() != 7) return 4;
+    // The first failure stops the walk, so the second scope is never visited.
+    if (visits != 1) return 5;
+    return 0;
+}
