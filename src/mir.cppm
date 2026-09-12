@@ -694,7 +694,7 @@ template <typename VisitFn>
     using Result = std::invoke_result_t<VisitFn&, const InitializerScope&>;
     for (const GlobalVar& global : program.globals) {
         if (global.decl == nullptr || global.decl->kind != StmtKind::VarDecl) continue;
-        InitializerScope scope;
+        InitializerScope scope{};
         scope.declared_type = &global.decl->type;
         scope.expr = global.decl->init.get();
         scope.brace_args = &global.decl->ctor_args;
@@ -708,7 +708,7 @@ template <typename VisitFn>
     for (const ClassDef& def : program.classes) {
         for (const ClassField& field : def.fields) {
             if (!field.default_initializer.has_value()) continue;
-            InitializerScope scope;
+            InitializerScope scope{};
             scope.declared_type = &field.type;
             scope.expr = field.default_initializer->expr.get();
             scope.brace_args = &field.default_initializer->brace_args;
@@ -722,7 +722,7 @@ template <typename VisitFn>
     for (const StructDef& def : program.structs) {
         for (const StructField& field : def.fields) {
             if (!field.default_initializer.has_value()) continue;
-            InitializerScope scope;
+            InitializerScope scope{};
             scope.declared_type = &field.type;
             scope.expr = field.default_initializer->expr.get();
             scope.brace_args = &field.default_initializer->brace_args;
@@ -736,7 +736,7 @@ template <typename VisitFn>
     for (const Function& fn : program.functions) {
         for (const Param& param : fn.params) {
             if (param.default_expr == nullptr) continue;
-            InitializerScope scope;
+            InitializerScope scope{};
             scope.declared_type = &param.type;
             scope.expr = param.default_expr.get();
             scope.loc = param.default_expr->loc;
