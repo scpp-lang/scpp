@@ -1,0 +1,83 @@
+// std_utility.scpp
+//
+// The `:utility` interface partition of the "std" module: `std::pair`,
+// mirroring real C++'s <utility>. Neither the type nor its members
+// existed here at all, so `std::pair<bool, Type>(...)` -- what
+// src/mir.cppm, src/compiler/codegen/semantics.cppm and
+// src/compiler/movecheck/calls.cppm all write to pair a resolved
+// name's const-ness with its declared type -- was "expected a type
+// name": the parser only recognizes `Name<Arg, ...>` as a generic-type
+// instantiation once some `class`/`struct Name<...>` template has
+// actually been parsed (parser.cppm's generic_type_names_), exactly the
+// mechanism std::optional/std::vector/std::unordered_map already rely
+// on; `pair` had never been declared anywhere, so it named nothing.
+//
+// Declared with `class`, not `struct`: a generic struct's own type
+// parameter can never be bare (parser.cppm's parse_struct_def --
+// "struct field triviality is a whole-type property, so it must be
+// constrained by a concept at the struct itself"), and no single
+// concept can state "T1 and T2 are each some type" the way plain
+// `typename` does for a class -- so an unconstrained two-type-parameter
+// aggregate like this one has to be a `class`.
+//
+// That in turn means an explicit virtual destructor is mandatory
+// (ch11 §11.5(1)), and a user-declared destructor suppresses the
+// implicitly-defined copy constructor/assignment ch11 §11.5 refers back
+// to (ch06 §6.5(2)-(3)) -- exactly the reason std::optional/std::expected
+// each hand back their own copy members, guarded by `requires
+// std::copy_constructible<T>`. That guard only ever names *one* of a
+// class template's own type parameters (parse_optional_method_requires_
+// clause), which is enough for those single-type-parameter templates.
+// `pair<T1, T2>` has two: guarding a hand-written copy constructor on
+// `std::copy_constructible<T1>` alone would still eagerly compile a
+// `second{other.second}` member-initializer against whatever `T2`
+// happens to be for *every* instantiation whose `T1` is copyable, silently
+// breaking `pair<CopyableT1, MoveOnlyT2>` even though nothing ever
+// calls that copy constructor -- unlike `std::expected`, `pair` has no
+// other member that already forces `T2` to be copyable first, so there
+// is no sound way to spell that guard correctly. `pair` is therefore
+// move-only for now (ch06 §6.4(2)'s implicitly-defined move constructor
+// remains available unconditionally, so returning one by value or
+// storing one in a `std::optional`/`std::function` result -- every use
+// this library currently has -- still works); a future need for a
+// copyable `pair` should either extend parse_optional_method_requires_
+// clause to accept more than one constrained parameter, or hand-write
+// per-instantiation copy support the way this comment's own reasoning
+// shows a single shared guard cannot.
+//
+// For the same reason, `pair` declares no `operator==`/`operator!=` of
+// its own yet: either would likewise be a plain (non-template) member
+// eagerly compiled against both `T1` and `T2` for every instantiation,
+// requiring both to support `==` unconditionally even though nothing
+// in this codebase currently compares two `pair`s directly (only reads
+// `.first`/`.second` off one, see mir.cppm/semantics.cppm/calls.cppm's
+// own `ReadOnlyPlaceQuery::declared_variable` and `find_type_replacement`
+// call sites) -- add it if and when a real caller needs it.
+//
+// `first`/`second` carry no in-class default member initializer, and
+// the one constructor below is a member *template* (its own `U1`/`U2`,
+// distinct from the class's own `T1`/`T2`, exactly like std::optional's
+// own converting `template<typename U> optional(U value)`) whose
+// member-initializer-list names both members directly ([dcl.init]/4.1)
+// -- between the two, neither `T1` nor `T2` is ever required to be
+// default-constructible merely to instantiate `pair<T1, T2>`, only to
+// actually call this constructor with arguments convertible to them.
+export module std:utility;
+
+namespace std {
+
+export template<typename T1, typename T2>
+class pair {
+public:
+    T1 first;
+    T2 second;
+
+    template<typename U1, typename U2>
+    pair(U1 first_value, U2 second_value) : first{std::move(first_value)}, second{std::move(second_value)} {
+        return;
+    }
+
+    virtual ~pair() = default;
+};
+
+} // namespace std
