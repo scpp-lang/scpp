@@ -1,0 +1,13 @@
+manifest-version = 1
+
+[package]
+name = "scpp-movecheck"
+version = "0.1.0"
+
+[dependencies]
+std = { path = "../../../libs/std" }
+scpp-compiler = { path = "../.." }
+
+[[lib]]
+name = "scpp-movecheck"
+sources = ["movecheck.cppm", "errors.cppm"]
