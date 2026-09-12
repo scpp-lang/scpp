@@ -5672,6 +5672,12 @@ private:
         return result;
     }
 
+    // spec §10.5(1) [namespace.unnamed]: an *unnamed-namespace-definition*
+    // is ill-formed in SCPP26 (unlike C++26) -- `namespace` must always
+    // be followed by at least one identifier, so `namespace { ... }`
+    // falls straight through to the "expected namespace name" error
+    // below exactly like any other malformed declaration, with no
+    // separate rejection rule needed.
     [[nodiscard]] std::expected<void, ParseError> parse_namespace_block_inner(Program& program, bool export_contents) {
         if (auto _r = expect(TokenKind::KwNamespace, "'namespace'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         std::size_t pushed = 0;
