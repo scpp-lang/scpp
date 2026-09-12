@@ -3190,6 +3190,46 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             then_type = decay_array_to_pointer(*then_type);
             else_type = decay_array_to_pointer(*else_type);
             if (types_equal(*then_type, *else_type)) return then_type;
+            // [expr.cond]/4's null-pointer case: `nullptr` (spec ch16
+            // §16.5(1)-(2)) converts to any pointer type, so exactly one
+            // arm spelled as a bare `nullptr` and the other of pointer
+            // type composite to that pointer type -- e.g. `found ?
+            // &item_of(*found) : nullptr`. Checked before
+            // conditional_composite_by_conversion below, which only
+            // knows about a class-typed arm's own converting
+            // constructor and has nothing to say about `nullptr`.
+            bool then_is_null = is_nullptr_literal(*expr.rhs);
+            bool else_is_null = is_nullptr_literal(*expr.third);
+            if (then_is_null != else_is_null) {
+                const Type& pointer_side_type = then_is_null ? *else_type : *then_type;
+                if (pointer_side_type.kind == TypeKind::Pointer || pointer_side_type.kind == TypeKind::FunctionPointer) {
+                    return pointer_side_type;
+                }
+            }
+            // [expr.cond]/7: when the two arms' value categories differ
+            // (one is a place -- e.g. a `const T&`-returning call -- and
+            // the other a prvalue), the whole conditional is itself a
+            // prvalue of their common *value* type, read through
+            // whichever arm's reference the place-typed one carries --
+            // the exact adjustment conditional_composite_by_conversion's
+            // own arm_value_type below already applies internally (it
+            // just returns an empty composite once that leaves the two
+            // arms equal, since there is then no conversion left to
+            // find), so it is answered here too: without this, `result
+            // = valid ? name_of(id) : std::string("<unknown>");` compared
+            // "reference to std::string" against "std::string" by raw
+            // kind, found them unequal, found no converting constructor
+            // either (both arms already have the same class type), and
+            // reported the assignment's source as having no usable type
+            // at all.
+            auto arm_value_type = [](const Type& raw) {
+                Type adjusted = literal_adoption_target(raw);
+                if (is_reference(adjusted) && adjusted.pointee != nullptr) return *adjusted.pointee;
+                return adjusted;
+            };
+            Type then_value_type = arm_value_type(*then_type);
+            Type else_value_type = arm_value_type(*else_type);
+            if (types_equal(then_value_type, else_value_type)) return then_value_type;
             // [expr.cond]/4's composite: when exactly one arm converts to
             // the other's type, the conversion is applied and *that* is
             // the expression's type. Answering std::nullopt here left

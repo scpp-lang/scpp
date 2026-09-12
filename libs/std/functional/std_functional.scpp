@@ -313,7 +313,21 @@ public:
         return;
     }
 
-    R call(Args... args) {
+    // [func.wrap.func.inv]: `std::function<R(Args...)>::operator()` is
+    // unconditionally `const` -- invoking the stored target never
+    // modifies the wrapper's own state (the type-erased pointer and the
+    // three function-pointer members below are all read, never
+    // written, by a call), regardless of whether the target itself is a
+    // mutable callable. Declaring this non-const rejected calling a
+    // `const std::function<R(Args...)>&` parameter at all --
+    // "cannot call non-const member function 'call' through a
+    // read-only receiver" -- although real C++ permits exactly that (a
+    // const std::function still invokes even a mutable-lambda target;
+    // `std::move_only_function<R(Args...)>` just above is the
+    // deliberately different one -- its unqualified specialization
+    // really does require a non-const call, which is why its own `call`
+    // stays non-const).
+    R call(Args... args) const {
         return this->invoke_(this->object_, args...);
     }
 };

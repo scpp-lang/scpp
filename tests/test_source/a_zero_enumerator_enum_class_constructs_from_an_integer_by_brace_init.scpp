@@ -1,0 +1,49 @@
+// spec ch14 §14.1(3)-(4): "An explicit conversion whose source expression
+// is of integral type and whose destination type is an enumeration type
+// is ill-formed" and "a program that needs to convert an integer value
+// to an enumeration type shall call scpp::enum_cast<T>(value)". Neither
+// applies to an opaque "newtype" index -- `enum class LocalId :
+// std::size_t {}` (src/mir.cppm:55) -- because that enum declares no
+// enumerator at all: `scpp::enum_cast<T>(value)` succeeds "if and only
+// if value is equal to the underlying integer value of one of T's
+// enumerators" (§14.1(5)), which is vacuously never true when there are
+// zero enumerators to match. There is still a legal way to build such a
+// value: direct-list-initialization (`T{value}`), which this chapter
+// never modifies (its own (1) lists only [dcl.enum], [expr.static.cast]
+// and [expr.cast] as the clauses it changes) and which real C++ already
+// permits for any scoped enumeration with a fixed underlying type
+// (P0138), independently of whether the value names an enumerator.
+//
+// This is the fix that unblocked src/mir.cppm's self-hosting probe past
+// its `LocalId` local_index/resolved_local_of family: every conversion
+// from an index into `LocalId` is written as `LocalId id{n}; return id;`
+// (a local variable's own brace-init, not `static_cast<LocalId>(n)`
+// used as a bare expression -- see the second function below, which
+// documents why the direct-expression spelling still does not work).
+import std;
+
+enum class LocalId : std::size_t {};
+
+[[nodiscard]] std::size_t local_index(LocalId id) {
+    return static_cast<std::size_t>(id);
+}
+
+// A brace-initialized local of enum type is direct-list-initialization
+// (ch04 §4.2), a different grammar production from a `return` statement's
+// bare initializer -- so this, unlike `return LocalId{n - 1};` (which
+// still fails: `LocalId` is neither a class nor a struct, so bare
+// `LocalId{n - 1}` in expression position has no constructor to call
+// through), is how every LocalId-producing helper in src/mir.cppm is
+// shaped.
+[[nodiscard]] LocalId resolved_local_of(std::size_t resolved_local) {
+    LocalId id{resolved_local - 1};
+    return id;
+}
+
+int main() {
+    LocalId zero{0};
+    LocalId five = resolved_local_of(6);
+    std::println("{}", static_cast<int>(local_index(zero)));
+    std::println("{}", static_cast<int>(local_index(five)));
+    return 0;
+}

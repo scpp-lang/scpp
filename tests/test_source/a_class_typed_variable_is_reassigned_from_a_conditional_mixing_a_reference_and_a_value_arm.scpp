@@ -1,0 +1,43 @@
+// spec §6.4(3)/§6.5(3): a class-typed variable may be reassigned from an
+// rvalue of the same type (a move, or a call returning by value) or from
+// a copy-assignable lvalue of the same type. The two arms of a
+// conditional operator (ch05's `? :`) may mix those categories -- one
+// arm a `const T&`-returning call (a place), the other a fresh `T(...)`
+// construction (a prvalue) -- and [expr.cond]/7 says the whole
+// expression is then itself a prvalue of their common type.
+//
+// infer_expr_type's own Conditional case (src/compiler/movecheck/
+// calls.cppm) compared the two arms' *raw* inferred types, which for a
+// reference-returning arm is `Reference(T)`, not `T` -- so it never
+// matched a same-typed value arm's plain `T`, found no converting
+// constructor either (there is nothing to convert: both arms already
+// name the same class), and reported the conditional as having no type
+// at all. An assignment sourced from such a conditional was then
+// rejected as "cannot be reassigned from this expression", even though
+// both arms are exactly `std::string`. This is exactly the shape
+// src/mir.cppm's Body::describe_place hits:
+// `result = is_valid_local(...) ? name_of(...) : std::string("<unknown>");`
+import std;
+
+class Registry {
+public:
+    virtual ~Registry() = default;
+    std::vector<std::string> names{};
+
+    [[nodiscard]] const std::string& name_of(std::size_t id) const { return names[id]; }
+    [[nodiscard]] bool is_valid(std::size_t id) const { return id < names.size(); }
+
+    [[nodiscard]] std::string describe(std::size_t id) const {
+        std::string result{};
+        result = is_valid(id) ? name_of(id) : std::string("<unknown>");
+        return result;
+    }
+};
+
+int main() {
+    Registry registry{};
+    registry.names.push_back(std::string("alpha"));
+    std::println("{}", registry.describe(0));
+    std::println("{}", registry.describe(5));
+    return 0;
+}

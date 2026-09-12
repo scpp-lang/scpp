@@ -1,0 +1,54 @@
+// [expr.cond]/4's null-pointer case: "if the second and third operand
+// are pointers ... and at least one is a null pointer constant, the
+// composite pointer type ... is the type of the other" -- `nullptr`
+// (spec ch16 §16.5(1)-(2)) converts to any pointer type, so a
+// conditional with one arm a bare `nullptr` and the other of pointer
+// type is well-typed, and its type is that pointer type.
+//
+// movecheck's own infer_expr_type (src/compiler/movecheck/calls.cppm)
+// and codegen's conditional_composite_type (src/compiler/codegen/
+// expressions.cppm) each answered the class-typed "one arm converts to
+// the other via a converting constructor" case already, but had nothing
+// to say about a pointer arm against a bare `nullptr` arm -- so a
+// function declared to return `T*`, whose `return` statement spelled the
+// "maybe nothing" idiom as `found ? &container[i] : nullptr;` instead of
+// an if/else with two separate `return`s, was rejected: "function ...
+// returns a lifetime-tracked value from an incompatible source type".
+// This is exactly the shape src/mir.cppm's Body::type_if_local hits.
+import std;
+
+struct Item {
+    int value = 0;
+};
+
+class Box {
+public:
+    virtual ~Box() = default;
+    std::vector<Item> items{};
+
+    [[nodiscard]] std::optional<std::size_t> find(std::size_t id) const {
+        if (id < items.size()) return id;
+        return std::nullopt;
+    }
+
+    // The blocker's own shape: a conditional whose one arm takes the
+    // address of a place and whose other arm is a bare `nullptr`.
+    [[nodiscard]] const Item* item_if_present(std::size_t id) const {
+        std::optional<std::size_t> found = find(id);
+        return found.has_value() ? &items[*found] : nullptr;
+    }
+};
+
+int main() {
+    Box box{};
+    box.items.push_back(Item{5});
+    const Item* present = box.item_if_present(0);
+    const Item* absent = box.item_if_present(9);
+    int present_value = -1;
+    [[scpp::unsafe]] {
+        if (present != nullptr) present_value = present->value;
+    }
+    std::println("{}", present_value);
+    std::println("{}", absent == nullptr ? 1 : 0);
+    return 0;
+}
