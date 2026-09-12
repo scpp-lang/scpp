@@ -3069,6 +3069,22 @@ void test_export_namespace_block_matches_per_declaration_exports() {
            "export_namespace_block_matches_per_declaration_exports: class export should match");
 }
 
+// spec §10.5(1) [namespace.unnamed]: an unnamed-namespace-definition is
+// ill-formed in SCPP26, unlike C++26 -- `namespace` must always name at
+// least one segment. `namespace { ... }` therefore falls through to the
+// same "expected namespace name" diagnostic as any other malformed
+// `namespace` declaration; see blackbox_test/cases/16_namespaces/
+// unnamed_namespace_is_rejected.scpp for the end-to-end compile-error
+// check.
+void test_unnamed_namespace_is_rejected() {
+    bool threw = false;
+    if (auto _r = scpp::parse("namespace { int hidden{}; }\nint main() { return 0; }\n"); !_r.has_value()) {
+        const scpp::ParseError& e = _r.error();
+        threw = std::string(e.what()).find("namespace name") != std::string::npos;
+    }
+    expect(threw, "unnamed_namespace_is_rejected: expected an 'expected namespace name' diagnostic");
+}
+
 // ch11 §11.3: `export class Name { ... };` exports the whole class --
 // every synthesized method inherits is_exported, not just the class
 // name entry itself.
@@ -7043,6 +7059,7 @@ int main() {
     test_export_group_marks_multiple_declarations_exported();
     test_export_namespace_block_marks_direct_members_exported();
     test_export_namespace_block_matches_per_declaration_exports();
+    test_unnamed_namespace_is_rejected();
     test_export_class_propagates_to_methods();
     test_export_in_non_matching_namespace_is_allowed();
     test_export_with_no_namespace_is_allowed();

@@ -893,7 +893,6 @@ struct ReadOnlyPlaceQuery {
 } // namespace scpp
 
 namespace scpp {
-namespace {
 
 // The single authority on which declaration a name refers to. Binds every name-use in a function body to the declaration it actually
 // refers to, following ordinary lexical scope, and builds the matching
@@ -914,7 +913,8 @@ public:
     // body but still has parameters, and codegen still gives those
     // storage, so they are numbered here like any other declaration
     // rather than by a second rule kept in step by hand.
-    LocalResolver(std::vector<Param>& params, Stmt* body) : params_(params), body_(body) {}
+    LocalResolver(std::vector<Param>& params, Stmt* body) : params_{params}, body_{body} {}
+    virtual ~LocalResolver() = default;
 
     // `member_initializers` is a constructor's own `: base{...},
     // field{...}` list. Those expressions are outside the body but are
@@ -926,7 +926,7 @@ public:
         // before any scope frame exists and are never popped -- matching
         // both MirBuilder and codegen.
         for (Param& param : params_) {
-            LocalDecl decl;
+            LocalDecl decl{};
             decl.type = param.type;
             decl.source_name = param.name;
             // [dcl.fct]/5: the top-level `const` of `f(const int v)` is
@@ -962,9 +962,9 @@ private:
 
     std::vector<Param>& params_;
     Stmt* body_;
-    std::vector<LocalDecl> decls_;
-    std::unordered_map<std::string, std::vector<Binding>> bindings_;
-    std::vector<std::vector<std::string>> scope_stack_;
+    std::vector<LocalDecl> decls_{};
+    std::unordered_map<std::string, std::vector<Binding>> bindings_{};
+    std::vector<std::vector<std::string>> scope_stack_{};
 
     std::size_t declare(const std::string& name, LocalDecl decl) {
         std::size_t id = decls_.size();
@@ -980,9 +980,12 @@ private:
         for (const std::string& name : scope_stack_.back()) {
             auto it = bindings_.find(name);
             if (it == bindings_.end()) continue;
-            for (auto binding = it->second.rbegin(); binding != it->second.rend(); ++binding) {
-                if (!binding->in_scope) continue;
-                binding->in_scope = false;
+            // std::vector has no rbegin()/rend() yet -- walk backwards by index.
+            std::vector<Binding>& bound = it->second;
+            for (std::size_t i = bound.size(); i > 0; i--) {
+                Binding& binding = bound[i - 1];
+                if (!binding.in_scope) continue;
+                binding.in_scope = false;
                 break;
             }
         }
@@ -1002,8 +1005,10 @@ private:
     [[nodiscard]] std::size_t lookup(const std::string& name) const {
         auto it = bindings_.find(name);
         if (it == bindings_.end() || it->second.empty()) return 0;
-        for (auto binding = it->second.rbegin(); binding != it->second.rend(); ++binding) {
-            if (binding->in_scope) return binding->id + 1;
+        // std::vector has no rbegin()/rend() yet -- walk backwards by index.
+        const std::vector<Binding>& bound = it->second;
+        for (std::size_t i = bound.size(); i > 0; i--) {
+            if (bound[i - 1].in_scope) return bound[i - 1].id + 1;
         }
         return it->second.back().id + 1;
     }
@@ -1049,7 +1054,7 @@ private:
     void resolve_lambda_body(Expr& expr) {
         push_scope();
         for (Param& param : expr.lambda_params) {
-            LocalDecl decl;
+            LocalDecl decl{};
             decl.type = param.type;
             decl.source_name = param.name;
             // [dcl.fct]/5: the top-level `const` of `f(const int v)` is
@@ -1084,7 +1089,7 @@ private:
                 // `int x = x;` binds to the new `x` exactly as in C++
                 // (and a shadowing declaration shadows from its own
                 // initializer onward).
-                LocalDecl decl;
+                LocalDecl decl{};
                 decl.type = stmt.type;
                 decl.source_name = stmt.var_name;
                 decl.decl_loc = stmt.loc;
@@ -1150,10 +1155,11 @@ private:
 
 class MirBuilder {
 public:
-    explicit MirBuilder(const Function& fn) : fn_(fn), owned_params_(fn.params) {
+    explicit MirBuilder(const Function& fn) : fn_{fn}, owned_params_{fn.params} {
         body_.owned_body = deep_clone_stmt(*fn.body);
         body_.owned_member_initializers = fn.member_initializers;
     }
+    virtual ~MirBuilder() = default;
 
     Body build() {
         body_.function_owning_module = fn_.owning_module;
@@ -1193,7 +1199,7 @@ private:
     // resolution assigns, since the numbering depends only on declaration
     // order.
     std::vector<Param> owned_params_;
-    Body body_;
+    Body body_{};
     std::size_t current_block_ = 0;
     // Lexical `[[scpp::unsafe]]` nesting at the point currently being
     // lowered; stamped onto every block created (see
@@ -1204,13 +1210,13 @@ private:
     // scope_stack_. Parameters are declared before any frame is pushed
     // (see build()), so they're never captured here: they live for the
     // whole function, same as in codegen.
-    std::vector<std::vector<LocalId>> scope_stack_;
+    std::vector<std::vector<LocalId>> scope_stack_{};
     struct ControlFlowFrame {
         std::optional<std::size_t> continue_block;
         std::size_t end_block;
         std::size_t scope_depth;
     };
-    std::vector<ControlFlowFrame> control_flow_stack_;
+    std::vector<ControlFlowFrame> control_flow_stack_{};
 
     // Records that `id` was declared in the innermost open scope, so that
     // scope's exit resets exactly this local's liveness -- and, crucially,
@@ -1233,23 +1239,25 @@ private:
         std::vector<LocalId> locals = std::move(scope_stack_.back());
         scope_stack_.pop_back();
         if (current_has_terminator()) return;
-        for (auto it = locals.rbegin(); it != locals.rend(); ++it) {
-            current().statements.push_back(local_stmt(MirStatementKind::ScopeExit, *it, nullptr, Type{}, SourceLocation{}));
+        // std::vector has no rbegin()/rend() yet -- walk backwards by index.
+        for (std::size_t i = locals.size(); i > 0; i--) {
+            current().statements.push_back(local_stmt(MirStatementKind::ScopeExit, locals[i - 1], nullptr, Type{}, SourceLocation{}));
         }
     }
 
     void emit_scope_exits_to_depth(std::size_t target_depth) {
         for (std::size_t depth = scope_stack_.size(); depth > target_depth; depth--) {
             const std::vector<LocalId>& locals = scope_stack_[depth - 1];
-            for (auto it = locals.rbegin(); it != locals.rend(); ++it) {
-                current().statements.push_back(local_stmt(MirStatementKind::ScopeExit, *it, nullptr, Type{}, SourceLocation{}));
+            // std::vector has no rbegin()/rend() yet -- walk backwards by index.
+            for (std::size_t i = locals.size(); i > 0; i--) {
+                current().statements.push_back(local_stmt(MirStatementKind::ScopeExit, locals[i - 1], nullptr, Type{}, SourceLocation{}));
             }
         }
     }
 
     [[nodiscard]] static MirStatement local_stmt(MirStatementKind kind, LocalId id, const Expr* expr, const Type& type,
                                                  const SourceLocation& loc) {
-        MirStatement stmt;
+        MirStatement stmt{};
         stmt.kind = kind;
         stmt.local = id;
         stmt.has_local = true;
@@ -1263,7 +1271,7 @@ private:
     // tells the checker apart the two cases it must handle differently:
     // a local (keyed by its declaration) and a global (which has none).
     [[nodiscard]] MirStatement assign_stmt(const Expr& target, const Expr* rhs, const SourceLocation& loc) const {
-        MirStatement stmt;
+        MirStatement stmt{};
         stmt.kind = MirStatementKind::Assign;
         if (std::optional<LocalId> id = body_.local_of(target); id.has_value()) {
             stmt.local = *id;
@@ -1276,7 +1284,7 @@ private:
     }
 
     [[nodiscard]] static MirStatement plain_stmt(MirStatementKind kind, const Expr* expr, const SourceLocation& loc) {
-        MirStatement stmt;
+        MirStatement stmt{};
         stmt.kind = kind;
         stmt.expr = expr;
         stmt.loc = loc;
@@ -1397,7 +1405,7 @@ private:
             }
 
             case StmtKind::Return: {
-                Terminator term;
+                Terminator term{};
                 term.kind = TerminatorKind::Return;
                 term.return_value = stmt.expr ? stmt.expr.get() : nullptr;
                 term.loc = stmt.loc;
@@ -1430,7 +1438,7 @@ private:
                 std::size_t else_block = new_block();
                 std::size_t merge_block = new_block();
 
-                Terminator term;
+                Terminator term{};
                 term.kind = TerminatorKind::Branch;
                 term.true_target = then_block;
                 term.false_target = else_block;
@@ -1443,7 +1451,7 @@ private:
                 lower_stmt(*stmt.then_branch);
                 pop_scope();
                 if (!current_has_terminator()) {
-                    Terminator term;
+                    Terminator term{};
                     term.kind = TerminatorKind::Goto;
                     term.target = merge_block;
                     term.loc = stmt.loc;
@@ -1455,7 +1463,7 @@ private:
                 if (stmt.else_branch) lower_stmt(*stmt.else_branch);
                 pop_scope();
                 if (!current_has_terminator()) {
-                    Terminator term;
+                    Terminator term{};
                     term.kind = TerminatorKind::Goto;
                     term.target = merge_block;
                     term.loc = stmt.loc;
@@ -1472,12 +1480,12 @@ private:
                 std::size_t body_block = new_block();
                 std::size_t end_block = new_block();
 
-                Terminator to_cond;
+                Terminator to_cond{};
                 to_cond.kind = TerminatorKind::Goto;
                 to_cond.target = cond_block;
                 to_cond.loc = stmt.loc;
                 body_.blocks[preheader].terminator = std::move(to_cond);
-                Terminator branch;
+                Terminator branch{};
                 branch.kind = TerminatorKind::Branch;
                 branch.true_target = body_block;
                 branch.false_target = end_block;
@@ -1492,7 +1500,7 @@ private:
                 pop_scope();
                 control_flow_stack_.pop_back();
                 if (!current_has_terminator()) {
-                    Terminator back_edge;
+                    Terminator back_edge{};
                     back_edge.kind = TerminatorKind::Goto;
                     back_edge.target = cond_block;
                     back_edge.loc = stmt.loc;
@@ -1506,13 +1514,13 @@ private:
             case StmtKind::Switch: {
                 std::size_t dispatch_block = current_block_;
                 std::size_t end_block = new_block();
-                std::vector<std::size_t> case_blocks;
+                std::vector<std::size_t> case_blocks{};
                 case_blocks.reserve(stmt.switch_cases.size());
-                for ([[maybe_unused]] const SwitchCase& switch_case : stmt.switch_cases) {
+                for (std::size_t case_index = 0; case_index < stmt.switch_cases.size(); case_index++) {
                     case_blocks.push_back(new_block());
                 }
 
-                Terminator dispatch;
+                Terminator dispatch{};
                 dispatch.kind = TerminatorKind::Switch;
                 dispatch.condition = stmt.condition.get();
                 dispatch.loc = stmt.loc;
@@ -1542,7 +1550,7 @@ private:
                         (!switch_case.statements.empty() && switch_case.statements.back()->kind == StmtKind::Fallthrough);
                     pop_scope();
                     if (!current_has_terminator()) {
-                        Terminator term;
+                        Terminator term{};
                         term.kind = TerminatorKind::Goto;
                         term.target = falls_into_next_case && i + 1 < case_blocks.size() ? case_blocks[i + 1] : end_block;
                         term.loc = stmt.loc;
@@ -1557,7 +1565,7 @@ private:
             case StmtKind::Break: {
                 if (control_flow_stack_.empty()) return;
                 emit_scope_exits_to_depth(control_flow_stack_.back().scope_depth);
-                Terminator term;
+                Terminator term{};
                 term.kind = TerminatorKind::Goto;
                 term.target = control_flow_stack_.back().end_block;
                 term.loc = stmt.loc;
@@ -1566,12 +1574,14 @@ private:
             }
 
             case StmtKind::Continue: {
-                for (auto it = control_flow_stack_.rbegin(); it != control_flow_stack_.rend(); ++it) {
-                    if (!it->continue_block.has_value()) continue;
-                    emit_scope_exits_to_depth(it->scope_depth);
-                    Terminator term;
+                // std::vector has no rbegin()/rend() yet -- walk backwards by index.
+                for (std::size_t i = control_flow_stack_.size(); i > 0; i--) {
+                    const ControlFlowFrame& frame = control_flow_stack_[i - 1];
+                    if (!frame.continue_block.has_value()) continue;
+                    emit_scope_exits_to_depth(frame.scope_depth);
+                    Terminator term{};
                     term.kind = TerminatorKind::Goto;
-                    term.target = *it->continue_block;
+                    term.target = *frame.continue_block;
                     term.loc = stmt.loc;
                     current().terminator = std::move(term);
                     return;
@@ -1606,7 +1616,7 @@ private:
     // CFG and was walked, and nothing was asked about it.
     void close_implicit_function_exit() {
         if (current().terminator.kind != TerminatorKind::None) return;
-        Terminator term;
+        Terminator term{};
         term.kind = TerminatorKind::Return;
         term.return_value = nullptr;
         term.loc = fn_.body != nullptr ? fn_.body->loc : fn_.loc;
@@ -1614,7 +1624,7 @@ private:
     }
 
     void insert_drops_before_returns() {
-        std::vector<LocalId> unique_ptr_locals;
+        std::vector<LocalId> unique_ptr_locals{};
         for (std::size_t i = 0; i < body_.local_decls.size(); i++) {
             const Type& type = body_.local_decls[i].type;
             if (type.kind == TypeKind::Named &&
@@ -1626,14 +1636,13 @@ private:
 
         for (BasicBlock& block : body_.blocks) {
             if (block.terminator.kind != TerminatorKind::Return) continue;
-            for (auto it = unique_ptr_locals.rbegin(); it != unique_ptr_locals.rend(); ++it) {
-                block.statements.push_back(local_stmt(MirStatementKind::Drop, *it, nullptr, Type{}, SourceLocation{}));
+            // std::vector has no rbegin()/rend() yet -- walk backwards by index.
+            for (std::size_t i = unique_ptr_locals.size(); i > 0; i--) {
+                block.statements.push_back(local_stmt(MirStatementKind::Drop, unique_ptr_locals[i - 1], nullptr, Type{}, SourceLocation{}));
             }
         }
     }
 };
-
-} // namespace
 
 void resolve_locals(Function& fn) {
     LocalResolver resolver{fn.params, fn.body.get()};
@@ -1644,7 +1653,7 @@ void resolve_program_locals(Program& program) {
 }
 
 Body build_mir(const Function& fn) {
-    MirBuilder builder(fn);
+    MirBuilder builder{fn};
     return builder.build();
 }
 
@@ -1652,7 +1661,7 @@ Body build_mir(const Function& fn) {
                                                const std::string& visibility_module,
                                                const std::vector<std::string>& namespace_path,
                                                const std::string& source_path) {
-    Body body;
+    Body body{};
     body.program = &program;
     body.function_owning_module = owning_module;
     body.function_visibility_module = visibility_module;
@@ -1660,8 +1669,6 @@ Body build_mir(const Function& fn) {
     body.function_source_path = source_path;
     return body;
 }
-
-namespace {
 
 // The constant value of a subscript index, when it has one. Only a
 // literal is accepted here on purpose: anything that needs evaluating
@@ -1682,8 +1689,6 @@ namespace {
 [[nodiscard]] bool is_indirection_operator_call(const Expr& expr) {
     return expr.kind == ExprKind::Call && (expr.name == "operator_deref" || expr.name == "operator_arrow");
 }
-
-} // namespace
 
 [[nodiscard]] std::optional<Place> place_of(const Expr& expr, const Body& body,
                                             const std::function<std::optional<Place>(LocalId)>& resolve_root,
