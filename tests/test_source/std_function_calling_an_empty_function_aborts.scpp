@@ -1,0 +1,14 @@
+// [func.wrap.func.inv]/1: "if (!*this) throws bad_function_call".
+// Exceptions are outside this project's model (ch01), so
+// libs/std/functional/std_functional.scpp's `function<R(Args...)>::call()`
+// aborts instead, exactly like std::optional::value() aborting on
+// `!has_value_` rather than throwing bad_optional_access -- calling
+// through a default-constructed (empty) std::function must terminate
+// the process via SIGABRT (exit code 134, POSIX 128+signum), not
+// silently invoke a null function pointer.
+import std;
+
+int main() {
+    std::function<int(int)> empty_fn{};
+    return empty_fn(1);
+}

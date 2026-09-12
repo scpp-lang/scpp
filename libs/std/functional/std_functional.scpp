@@ -1,6 +1,7 @@
 export module std:functional;
 
 import :string;
+import :cstdlib;
 
 namespace std {
 
@@ -112,7 +113,9 @@ public:
     }
 
     R call(Args... args) {
-        return this->invoke_(this->object_, args...);
+        [[scpp::unsafe]] {
+            return this->invoke_(this->object_, args...);
+        }
     }
 };
 
@@ -142,7 +145,9 @@ public:
     }
 
     R call(Args... args) const {
-        return this->invoke_(this->object_, args...);
+        [[scpp::unsafe]] {
+            return this->invoke_(this->object_, args...);
+        }
     }
 };
 
@@ -172,7 +177,9 @@ public:
     }
 
     R call(Args... args) & {
-        return this->invoke_(this->object_, args...);
+        [[scpp::unsafe]] {
+            return this->invoke_(this->object_, args...);
+        }
     }
 };
 
@@ -202,7 +209,9 @@ public:
     }
 
     R call(Args... args) const & {
-        return this->invoke_(this->object_, args...);
+        [[scpp::unsafe]] {
+            return this->invoke_(this->object_, args...);
+        }
     }
 };
 
@@ -232,7 +241,9 @@ public:
     }
 
     R call(Args... args) && {
-        return this->invoke_(this->object_, args...);
+        [[scpp::unsafe]] {
+            return this->invoke_(this->object_, args...);
+        }
     }
 };
 
@@ -262,7 +273,9 @@ public:
     }
 
     R call(Args... args) const && {
-        return this->invoke_(this->object_, args...);
+        [[scpp::unsafe]] {
+            return this->invoke_(this->object_, args...);
+        }
     }
 };
 
@@ -286,8 +299,18 @@ public:
         return;
     }
 
+    // [func.wrap.func.con]/8: "constructs an empty std::function" --
+    // the default constructor leaves every member at its in-class
+    // default member initializer (nullptr for all four), so no body is
+    // needed beyond that.
+    function() { return; }
+
     function(const std::function<R(Args...)>& other) {
-        this->object_ = other.copy_(other.object_);
+        if (other.copy_ != nullptr) {
+            this->object_ = other.copy_(other.object_);
+        } else {
+            this->object_ = nullptr;
+        }
         this->invoke_ = other.invoke_;
         this->copy_ = other.copy_;
         this->destroy_ = other.destroy_;
@@ -295,9 +318,14 @@ public:
     }
 
     std::function<R(Args...)>& operator=(const std::function<R(Args...)>& other) {
-        void* copied = other.copy_(other.object_);
-        [[scpp::unsafe]] {
-            this->destroy_(this->object_);
+        void* copied = nullptr;
+        if (other.copy_ != nullptr) {
+            copied = other.copy_(other.object_);
+        }
+        if (this->destroy_ != nullptr) {
+            [[scpp::unsafe]] {
+                this->destroy_(this->object_);
+            }
         }
         this->object_ = copied;
         this->invoke_ = other.invoke_;
@@ -306,30 +334,75 @@ public:
         return *this;
     }
 
+    // [func.wrap.func.dtor]/1: "If !*this ... no effects." `destroy_`
+    // is null exactly when the wrapper is empty (default-constructed,
+    // or copied/assigned from an empty one), so guarding on it rather
+    // than unconditionally calling through a possibly-null function
+    // pointer covers that case.
     virtual ~function() {
-        [[scpp::unsafe]] {
-            this->destroy_(this->object_);
+        if (this->destroy_ != nullptr) {
+            [[scpp::unsafe]] {
+                this->destroy_(this->object_);
+            }
         }
         return;
     }
 
+    // [func.wrap.func.inv]/1: "if (!*this) throws bad_function_call".
+    // Exceptions are outside what this file's callers use for this
+    // condition -- every real caller (src/mir.cppm's `resolve_root`,
+    // src/compiler/constexpression.cppm's ModuleQuery hooks) already
+    // guards a call with `if (fn)` first -- so an empty invocation is a
+    // caller bug rather than a recoverable condition, exactly like
+    // std::optional::value() below aborting on `!has_value_` rather
+    // than throwing bad_optional_access.
+    //
     // [func.wrap.func.inv]: `std::function<R(Args...)>::operator()` is
     // unconditionally `const` -- invoking the stored target never
     // modifies the wrapper's own state (the type-erased pointer and the
-    // three function-pointer members below are all read, never
-    // written, by a call), regardless of whether the target itself is a
-    // mutable callable. Declaring this non-const rejected calling a
-    // `const std::function<R(Args...)>&` parameter at all --
-    // "cannot call non-const member function 'call' through a
-    // read-only receiver" -- although real C++ permits exactly that (a
-    // const std::function still invokes even a mutable-lambda target;
-    // `std::move_only_function<R(Args...)>` just above is the
-    // deliberately different one -- its unqualified specialization
-    // really does require a non-const call, which is why its own `call`
-    // stays non-const).
+    // three function-pointer members are all read, never written, by a
+    // call), regardless of whether the target itself is a mutable
+    // callable. Declaring this non-const rejected calling a `const
+    // std::function<R(Args...)>&` parameter at all -- "cannot call
+    // non-const member function 'call' through a read-only receiver" --
+    // although real C++ permits exactly that (a const std::function
+    // still invokes even a mutable-lambda target;
+    // `std::move_only_function<R(Args...)>` above is the deliberately
+    // different one -- its unqualified specialization really does
+    // require a non-const call, which is why its own `call` stays
+    // non-const).
     R call(Args... args) const {
-        return this->invoke_(this->object_, args...);
+        if (this->invoke_ == nullptr) std::abort();
+        // `invoke_` is a stored, type-erased `R (*)(void*, Args...)`:
+        // this call cannot be reasoned about by movecheck's return-
+        // lifetime analysis any more than a raw pointer dereference
+        // can (nothing here ties the returned value, when `R` is
+        // itself a pointer/reference/span, to any traceable root) --
+        // without this block, instantiating `function<T*(Args...)>`
+        // reported "returns a lifetime-tracked value from an
+        // incompatible source type" for a call this pass genuinely has
+        // no way to verify, generic or concrete. `[[scpp::unsafe]]`
+        // is the same "I know this pass cannot check this" vocabulary
+        // already used for a raw pointer dereference or an unsafe
+        // constructor call, applied here to the same class of problem
+        // -- every other `call()`/`__move_only_function_invoke*` below
+        // shares it for the same reason.
+        [[scpp::unsafe]] {
+            return this->invoke_(this->object_, args...);
+        }
     }
+
+    // [func.wrap.func.general]/1 gives std::function a contextual
+    // conversion to bool that is true iff `*this` has a target
+    // ([func.wrap.func.con]/7's "std::function<...> f2(f); ... if
+    // (f) ... " assumes exactly this). `explicit`, matching
+    // std::optional's own `operator bool()` just above: `bool b = fn;`
+    // stays ill-formed, only `if (fn)` and `!fn` are licensed by
+    // [conv.general]/4's contextual conversion.
+    explicit operator bool() const {
+        return this->invoke_ != nullptr;
+    }
+
 };
 
 export template<typename R, typename... Args>
@@ -352,8 +425,18 @@ public:
         return;
     }
 
+    // [func.wrap.func.con]/8: "constructs an empty std::function" --
+    // the default constructor leaves every member at its in-class
+    // default member initializer (nullptr for all four), so no body is
+    // needed beyond that.
+    function() { return; }
+
     function(const std::function<R(Args...) const>& other) {
-        this->object_ = other.copy_(other.object_);
+        if (other.copy_ != nullptr) {
+            this->object_ = other.copy_(other.object_);
+        } else {
+            this->object_ = nullptr;
+        }
         this->invoke_ = other.invoke_;
         this->copy_ = other.copy_;
         this->destroy_ = other.destroy_;
@@ -361,9 +444,14 @@ public:
     }
 
     std::function<R(Args...) const>& operator=(const std::function<R(Args...) const>& other) {
-        void* copied = other.copy_(other.object_);
-        [[scpp::unsafe]] {
-            this->destroy_(this->object_);
+        void* copied = nullptr;
+        if (other.copy_ != nullptr) {
+            copied = other.copy_(other.object_);
+        }
+        if (this->destroy_ != nullptr) {
+            [[scpp::unsafe]] {
+                this->destroy_(this->object_);
+            }
         }
         this->object_ = copied;
         this->invoke_ = other.invoke_;
@@ -372,15 +460,44 @@ public:
         return *this;
     }
 
+    // [func.wrap.func.dtor]/1: "If !*this ... no effects." `destroy_`
+    // is null exactly when the wrapper is empty (default-constructed,
+    // or copied/assigned from an empty one), so guarding on it rather
+    // than unconditionally calling through a possibly-null function
+    // pointer covers that case.
     virtual ~function() {
-        [[scpp::unsafe]] {
-            this->destroy_(this->object_);
+        if (this->destroy_ != nullptr) {
+            [[scpp::unsafe]] {
+                this->destroy_(this->object_);
+            }
         }
         return;
     }
 
+    // [func.wrap.func.inv]/1: "if (!*this) throws bad_function_call".
+    // Exceptions are outside what this file's callers use for this
+    // condition -- every real caller (src/mir.cppm's `resolve_root`,
+    // src/compiler/constexpression.cppm's ModuleQuery hooks) already
+    // guards a call with `if (fn)` first -- so an empty invocation is a
+    // caller bug rather than a recoverable condition, exactly like
+    // std::optional::value() below aborting on `!has_value_` rather
+    // than throwing bad_optional_access.
     R call(Args... args) const {
-        return this->invoke_(this->object_, args...);
+        if (this->invoke_ == nullptr) std::abort();
+        [[scpp::unsafe]] {
+            return this->invoke_(this->object_, args...);
+        }
+    }
+
+    // [func.wrap.func.general]/1 gives std::function a contextual
+    // conversion to bool that is true iff `*this` has a target
+    // ([func.wrap.func.con]/7's "std::function<...> f2(f); ... if
+    // (f) ... " assumes exactly this). `explicit`, matching
+    // std::optional's own `operator bool()` just above: `bool b = fn;`
+    // stays ill-formed, only `if (fn)` and `!fn` are licensed by
+    // [conv.general]/4's contextual conversion.
+    explicit operator bool() const {
+        return this->invoke_ != nullptr;
     }
 };
 
@@ -404,8 +521,18 @@ public:
         return;
     }
 
+    // [func.wrap.func.con]/8: "constructs an empty std::function" --
+    // the default constructor leaves every member at its in-class
+    // default member initializer (nullptr for all four), so no body is
+    // needed beyond that.
+    function() { return; }
+
     function(const std::function<R(Args...) &>& other) {
-        this->object_ = other.copy_(other.object_);
+        if (other.copy_ != nullptr) {
+            this->object_ = other.copy_(other.object_);
+        } else {
+            this->object_ = nullptr;
+        }
         this->invoke_ = other.invoke_;
         this->copy_ = other.copy_;
         this->destroy_ = other.destroy_;
@@ -413,9 +540,14 @@ public:
     }
 
     std::function<R(Args...) &>& operator=(const std::function<R(Args...) &>& other) {
-        void* copied = other.copy_(other.object_);
-        [[scpp::unsafe]] {
-            this->destroy_(this->object_);
+        void* copied = nullptr;
+        if (other.copy_ != nullptr) {
+            copied = other.copy_(other.object_);
+        }
+        if (this->destroy_ != nullptr) {
+            [[scpp::unsafe]] {
+                this->destroy_(this->object_);
+            }
         }
         this->object_ = copied;
         this->invoke_ = other.invoke_;
@@ -424,15 +556,44 @@ public:
         return *this;
     }
 
+    // [func.wrap.func.dtor]/1: "If !*this ... no effects." `destroy_`
+    // is null exactly when the wrapper is empty (default-constructed,
+    // or copied/assigned from an empty one), so guarding on it rather
+    // than unconditionally calling through a possibly-null function
+    // pointer covers that case.
     virtual ~function() {
-        [[scpp::unsafe]] {
-            this->destroy_(this->object_);
+        if (this->destroy_ != nullptr) {
+            [[scpp::unsafe]] {
+                this->destroy_(this->object_);
+            }
         }
         return;
     }
 
+    // [func.wrap.func.inv]/1: "if (!*this) throws bad_function_call".
+    // Exceptions are outside what this file's callers use for this
+    // condition -- every real caller (src/mir.cppm's `resolve_root`,
+    // src/compiler/constexpression.cppm's ModuleQuery hooks) already
+    // guards a call with `if (fn)` first -- so an empty invocation is a
+    // caller bug rather than a recoverable condition, exactly like
+    // std::optional::value() below aborting on `!has_value_` rather
+    // than throwing bad_optional_access.
     R call(Args... args) & {
-        return this->invoke_(this->object_, args...);
+        if (this->invoke_ == nullptr) std::abort();
+        [[scpp::unsafe]] {
+            return this->invoke_(this->object_, args...);
+        }
+    }
+
+    // [func.wrap.func.general]/1 gives std::function a contextual
+    // conversion to bool that is true iff `*this` has a target
+    // ([func.wrap.func.con]/7's "std::function<...> f2(f); ... if
+    // (f) ... " assumes exactly this). `explicit`, matching
+    // std::optional's own `operator bool()` just above: `bool b = fn;`
+    // stays ill-formed, only `if (fn)` and `!fn` are licensed by
+    // [conv.general]/4's contextual conversion.
+    explicit operator bool() const {
+        return this->invoke_ != nullptr;
     }
 };
 
@@ -456,8 +617,18 @@ public:
         return;
     }
 
+    // [func.wrap.func.con]/8: "constructs an empty std::function" --
+    // the default constructor leaves every member at its in-class
+    // default member initializer (nullptr for all four), so no body is
+    // needed beyond that.
+    function() { return; }
+
     function(const std::function<R(Args...) const &>& other) {
-        this->object_ = other.copy_(other.object_);
+        if (other.copy_ != nullptr) {
+            this->object_ = other.copy_(other.object_);
+        } else {
+            this->object_ = nullptr;
+        }
         this->invoke_ = other.invoke_;
         this->copy_ = other.copy_;
         this->destroy_ = other.destroy_;
@@ -465,9 +636,14 @@ public:
     }
 
     std::function<R(Args...) const &>& operator=(const std::function<R(Args...) const &>& other) {
-        void* copied = other.copy_(other.object_);
-        [[scpp::unsafe]] {
-            this->destroy_(this->object_);
+        void* copied = nullptr;
+        if (other.copy_ != nullptr) {
+            copied = other.copy_(other.object_);
+        }
+        if (this->destroy_ != nullptr) {
+            [[scpp::unsafe]] {
+                this->destroy_(this->object_);
+            }
         }
         this->object_ = copied;
         this->invoke_ = other.invoke_;
@@ -476,15 +652,44 @@ public:
         return *this;
     }
 
+    // [func.wrap.func.dtor]/1: "If !*this ... no effects." `destroy_`
+    // is null exactly when the wrapper is empty (default-constructed,
+    // or copied/assigned from an empty one), so guarding on it rather
+    // than unconditionally calling through a possibly-null function
+    // pointer covers that case.
     virtual ~function() {
-        [[scpp::unsafe]] {
-            this->destroy_(this->object_);
+        if (this->destroy_ != nullptr) {
+            [[scpp::unsafe]] {
+                this->destroy_(this->object_);
+            }
         }
         return;
     }
 
+    // [func.wrap.func.inv]/1: "if (!*this) throws bad_function_call".
+    // Exceptions are outside what this file's callers use for this
+    // condition -- every real caller (src/mir.cppm's `resolve_root`,
+    // src/compiler/constexpression.cppm's ModuleQuery hooks) already
+    // guards a call with `if (fn)` first -- so an empty invocation is a
+    // caller bug rather than a recoverable condition, exactly like
+    // std::optional::value() below aborting on `!has_value_` rather
+    // than throwing bad_optional_access.
     R call(Args... args) const & {
-        return this->invoke_(this->object_, args...);
+        if (this->invoke_ == nullptr) std::abort();
+        [[scpp::unsafe]] {
+            return this->invoke_(this->object_, args...);
+        }
+    }
+
+    // [func.wrap.func.general]/1 gives std::function a contextual
+    // conversion to bool that is true iff `*this` has a target
+    // ([func.wrap.func.con]/7's "std::function<...> f2(f); ... if
+    // (f) ... " assumes exactly this). `explicit`, matching
+    // std::optional's own `operator bool()` just above: `bool b = fn;`
+    // stays ill-formed, only `if (fn)` and `!fn` are licensed by
+    // [conv.general]/4's contextual conversion.
+    explicit operator bool() const {
+        return this->invoke_ != nullptr;
     }
 };
 
@@ -508,8 +713,18 @@ public:
         return;
     }
 
+    // [func.wrap.func.con]/8: "constructs an empty std::function" --
+    // the default constructor leaves every member at its in-class
+    // default member initializer (nullptr for all four), so no body is
+    // needed beyond that.
+    function() { return; }
+
     function(const std::function<R(Args...) &&>& other) {
-        this->object_ = other.copy_(other.object_);
+        if (other.copy_ != nullptr) {
+            this->object_ = other.copy_(other.object_);
+        } else {
+            this->object_ = nullptr;
+        }
         this->invoke_ = other.invoke_;
         this->copy_ = other.copy_;
         this->destroy_ = other.destroy_;
@@ -517,9 +732,14 @@ public:
     }
 
     std::function<R(Args...) &&>& operator=(const std::function<R(Args...) &&>& other) {
-        void* copied = other.copy_(other.object_);
-        [[scpp::unsafe]] {
-            this->destroy_(this->object_);
+        void* copied = nullptr;
+        if (other.copy_ != nullptr) {
+            copied = other.copy_(other.object_);
+        }
+        if (this->destroy_ != nullptr) {
+            [[scpp::unsafe]] {
+                this->destroy_(this->object_);
+            }
         }
         this->object_ = copied;
         this->invoke_ = other.invoke_;
@@ -528,15 +748,44 @@ public:
         return *this;
     }
 
+    // [func.wrap.func.dtor]/1: "If !*this ... no effects." `destroy_`
+    // is null exactly when the wrapper is empty (default-constructed,
+    // or copied/assigned from an empty one), so guarding on it rather
+    // than unconditionally calling through a possibly-null function
+    // pointer covers that case.
     virtual ~function() {
-        [[scpp::unsafe]] {
-            this->destroy_(this->object_);
+        if (this->destroy_ != nullptr) {
+            [[scpp::unsafe]] {
+                this->destroy_(this->object_);
+            }
         }
         return;
     }
 
+    // [func.wrap.func.inv]/1: "if (!*this) throws bad_function_call".
+    // Exceptions are outside what this file's callers use for this
+    // condition -- every real caller (src/mir.cppm's `resolve_root`,
+    // src/compiler/constexpression.cppm's ModuleQuery hooks) already
+    // guards a call with `if (fn)` first -- so an empty invocation is a
+    // caller bug rather than a recoverable condition, exactly like
+    // std::optional::value() below aborting on `!has_value_` rather
+    // than throwing bad_optional_access.
     R call(Args... args) && {
-        return this->invoke_(this->object_, args...);
+        if (this->invoke_ == nullptr) std::abort();
+        [[scpp::unsafe]] {
+            return this->invoke_(this->object_, args...);
+        }
+    }
+
+    // [func.wrap.func.general]/1 gives std::function a contextual
+    // conversion to bool that is true iff `*this` has a target
+    // ([func.wrap.func.con]/7's "std::function<...> f2(f); ... if
+    // (f) ... " assumes exactly this). `explicit`, matching
+    // std::optional's own `operator bool()` just above: `bool b = fn;`
+    // stays ill-formed, only `if (fn)` and `!fn` are licensed by
+    // [conv.general]/4's contextual conversion.
+    explicit operator bool() const {
+        return this->invoke_ != nullptr;
     }
 };
 
@@ -560,8 +809,18 @@ public:
         return;
     }
 
+    // [func.wrap.func.con]/8: "constructs an empty std::function" --
+    // the default constructor leaves every member at its in-class
+    // default member initializer (nullptr for all four), so no body is
+    // needed beyond that.
+    function() { return; }
+
     function(const std::function<R(Args...) const &&>& other) {
-        this->object_ = other.copy_(other.object_);
+        if (other.copy_ != nullptr) {
+            this->object_ = other.copy_(other.object_);
+        } else {
+            this->object_ = nullptr;
+        }
         this->invoke_ = other.invoke_;
         this->copy_ = other.copy_;
         this->destroy_ = other.destroy_;
@@ -569,9 +828,14 @@ public:
     }
 
     std::function<R(Args...) const &&>& operator=(const std::function<R(Args...) const &&>& other) {
-        void* copied = other.copy_(other.object_);
-        [[scpp::unsafe]] {
-            this->destroy_(this->object_);
+        void* copied = nullptr;
+        if (other.copy_ != nullptr) {
+            copied = other.copy_(other.object_);
+        }
+        if (this->destroy_ != nullptr) {
+            [[scpp::unsafe]] {
+                this->destroy_(this->object_);
+            }
         }
         this->object_ = copied;
         this->invoke_ = other.invoke_;
@@ -580,15 +844,44 @@ public:
         return *this;
     }
 
+    // [func.wrap.func.dtor]/1: "If !*this ... no effects." `destroy_`
+    // is null exactly when the wrapper is empty (default-constructed,
+    // or copied/assigned from an empty one), so guarding on it rather
+    // than unconditionally calling through a possibly-null function
+    // pointer covers that case.
     virtual ~function() {
-        [[scpp::unsafe]] {
-            this->destroy_(this->object_);
+        if (this->destroy_ != nullptr) {
+            [[scpp::unsafe]] {
+                this->destroy_(this->object_);
+            }
         }
         return;
     }
 
+    // [func.wrap.func.inv]/1: "if (!*this) throws bad_function_call".
+    // Exceptions are outside what this file's callers use for this
+    // condition -- every real caller (src/mir.cppm's `resolve_root`,
+    // src/compiler/constexpression.cppm's ModuleQuery hooks) already
+    // guards a call with `if (fn)` first -- so an empty invocation is a
+    // caller bug rather than a recoverable condition, exactly like
+    // std::optional::value() below aborting on `!has_value_` rather
+    // than throwing bad_optional_access.
     R call(Args... args) const && {
-        return this->invoke_(this->object_, args...);
+        if (this->invoke_ == nullptr) std::abort();
+        [[scpp::unsafe]] {
+            return this->invoke_(this->object_, args...);
+        }
+    }
+
+    // [func.wrap.func.general]/1 gives std::function a contextual
+    // conversion to bool that is true iff `*this` has a target
+    // ([func.wrap.func.con]/7's "std::function<...> f2(f); ... if
+    // (f) ... " assumes exactly this). `explicit`, matching
+    // std::optional's own `operator bool()` just above: `bool b = fn;`
+    // stays ill-formed, only `if (fn)` and `!fn` are licensed by
+    // [conv.general]/4's contextual conversion.
+    explicit operator bool() const {
+        return this->invoke_ != nullptr;
     }
 };
 

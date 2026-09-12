@@ -7040,6 +7040,79 @@ private:
             }
         }
 
+        // The `obj.field(args)` counterpart of the sugar just above:
+        // parse_member_or_method_call (parser.cppm) cannot yet tell "a
+        // method named X" apart from "a data member named X" at parse
+        // time -- that answer depends on X's enclosing class, knowable
+        // only once movecheck has a Program to look one up in -- so
+        // `obj.field(args)` parses exactly like an ordinary
+        // `obj.method(args)` Call (receiver in `lhs`, `field` in
+        // `name`). When no method of that name exists on `obj`'s class
+        // but a data member of that name does (mir.cppm's
+        // ReadOnlyPlaceQuery::declared_variable and its siblings, each a
+        // std::function invoked as `query.declared_variable(expr)`),
+        // the same "f(args)" -> "f.call(args)" rule applies one level
+        // down: `expr.lhs` (currently the plain receiver) is rewrapped
+        // as a Member naming the field, and outer `expr.name` becomes
+        // "call". Restricted to a receiver that is still a plain,
+        // not-yet-rewritten Identifier resolving to a known local/
+        // parameter (the only shape this pass can cheaply type without
+        // a full inference pass), and skipped entirely when a method of
+        // that name is found first, so an ordinary method call is never
+        // shadowed by a same-named field (which a class could not
+        // declare alongside it anyway).
+        if (expr.kind == ExprKind::Call && expr.lhs != nullptr && expr.lhs->kind == ExprKind::Identifier &&
+            !expr.explicit_global_qualification) {
+            if (std::optional<LocalId> receiver_local = body.local_of(*expr.lhs); receiver_local.has_value()) {
+                const Type& local_type = body.type_of(*receiver_local);
+                const Type& underlying = local_type.kind == TypeKind::Reference ? *local_type.pointee : local_type;
+                if (underlying.kind == TypeKind::Named) {
+                    std::string mangled_method_name = underlying.name + "_" + expr.name;
+                    bool has_method = false;
+                    for (const Function& candidate : program_.functions) {
+                        if (candidate.member_owner_class == underlying.name && candidate.name == mangled_method_name) {
+                            has_method = true;
+                            break;
+                        }
+                    }
+                    if (!has_method) {
+                        bool has_field = false;
+                        for (const ClassDef& def : program_.classes) {
+                            if (def.name != underlying.name) continue;
+                            for (const ClassField& field : def.fields) {
+                                if (field.name == expr.name) {
+                                    has_field = true;
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                        if (!has_field) {
+                            for (const StructDef& def : program_.structs) {
+                                if (def.name != underlying.name) continue;
+                                for (const StructField& field : def.fields) {
+                                    if (field.name == expr.name) {
+                                        has_field = true;
+                                        break;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        if (has_field) {
+                            auto field_access = std::make_unique<Expr>();
+                            field_access->kind = ExprKind::Member;
+                            field_access->loc = expr.loc;
+                            field_access->name = expr.name;
+                            field_access->lhs = std::move(expr.lhs);
+                            expr.lhs = std::move(field_access);
+                            expr.name = "call";
+                        }
+                    }
+                }
+            }
+        }
+
         if (expr.lhs) {
             if (auto _r = walk_expr(*expr.lhs, body, enclosing_this_type, allow_generic_monomorphization); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());

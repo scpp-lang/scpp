@@ -4962,6 +4962,26 @@ struct ConvertingConstructorBinding {
                     // second, equally spurious "derived from <unknown>"
                     // diagnosis immediately after.
                     if (is_synthetic_check_only_function) return {};
+                    // Likewise tolerated inside an `[[scpp::unsafe]] { }`
+                    // block (`state.unsafe_depth > 0`, spec §5.1(3)):
+                    // this diagnosis is reached only when `returned_type`
+                    // could not be matched to `fn.return_type` by any of
+                    // the type-compatibility routes above, which is
+                    // exactly what happens returning a pointer obtained
+                    // by calling *through* an opaque, type-erased
+                    // callable (a stored `R (*)(void*, Args...)` function
+                    // pointer, or a method on a still-generic template
+                    // parameter type) -- this pass has no way to trace
+                    // such a call's return value to any root, generic or
+                    // concrete, no matter how many times it retries. An
+                    // author who wraps that one `return` in
+                    // `[[scpp::unsafe]]` has already said, in the same
+                    // vocabulary every other ungated-by-this-pass
+                    // operation uses, "I know this pass cannot verify
+                    // this; I am taking responsibility for it" -- the
+                    // same trade this function already makes for a raw
+                    // pointer dereference or an unsafe constructor call.
+                    if (state.unsafe_depth > 0) return {};
                     return std::unexpected(DataflowError("function '" + fn.name + "' returns a lifetime-tracked value from an incompatible source type",
                                         state.current_loc));
                 }

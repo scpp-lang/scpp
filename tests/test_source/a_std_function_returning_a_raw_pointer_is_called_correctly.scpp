@@ -1,0 +1,40 @@
+// libs/std/functional/std_functional.scpp's `function<R(Args...)>::call()`
+// returns `this->invoke_(this->object_, args...)` through a stored,
+// type-erased `R (*)(void*, Args...)` function pointer -- opaque to
+// movecheck's return-lifetime analysis regardless of `R`. Before this
+// test existed, instantiating `std::function` with a raw-pointer `R`
+// (e.g. `const Widget*(...)`, exactly the shape src/mir.cppm's
+// `ReadOnlyPlaceQuery::class_def`/`struct_def` need) reported "function
+// '...call' returns a lifetime-tracked value from an incompatible
+// source type": the checker cannot trace the returned pointer to any
+// parameter of `call()` itself, generic or concrete, no matter how the
+// call expression is shaped. `call()`'s own `[[scpp::unsafe]]` block
+// around that `return` (spec §5.1(3): an unsafe context is a property
+// of the enclosing compound-statement) is what licenses it, the same
+// vocabulary already used for a raw pointer dereference.
+import std;
+
+struct Widget {
+    int value = 0;
+};
+
+const Widget* select_widget(const Widget& w, bool pick) {
+    if (pick) {
+        [[scpp::unsafe]] {
+            return &w;
+        }
+    }
+    return nullptr;
+}
+
+int main() {
+    Widget widget{42};
+    std::function<const Widget*(const Widget&, bool)> lookup{select_widget};
+    const Widget* found = lookup(widget, true);
+    const Widget* missing = lookup(widget, false);
+    [[scpp::unsafe]] {
+        std::println("{}", found->value);
+    }
+    std::println("{}", missing == nullptr ? "true" : "false");
+    return 0;
+}

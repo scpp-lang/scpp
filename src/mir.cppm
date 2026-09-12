@@ -98,7 +98,26 @@ enum class LocalId : std::size_t {};
 // checks rather than failing loudly.
 inline void set_resolved_local(Expr& expr, LocalId id) { expr.resolved_local = local_index(id) + 1; }
 
-struct LocalDecl {
+// Declared `class` (not `struct`, ch04 §4.2/spec ch04): `type`
+// (scpp::Type), `source_name` (std::string) and `decl_loc`
+// (SourceLocation) are all class-typed, and a plain `struct` may only
+// hold scalars, pointers, trivial structs/unions, and fixed-size arrays
+// of trivial types -- see parser.cppm's InjectedGenericTypeName for the
+// same rule applied to the same shape of problem. Every special member
+// is defaulted: LocalDecl is only ever built via `LocalDecl decl{};`
+// followed by per-field assignment (never positional brace-init), and
+// copied/moved wholesale only through `std::vector<LocalDecl>` (Body's
+// own `local_decls`, and LocalResolver::take_decls()'s return), for
+// which the compiler-generated member-wise copy/move is exactly right.
+class LocalDecl {
+  public:
+    virtual ~LocalDecl() = default;
+    LocalDecl() = default;
+    LocalDecl(const LocalDecl&) = default;
+    LocalDecl& operator=(const LocalDecl&) = default;
+    LocalDecl(LocalDecl&&) = default;
+    LocalDecl& operator=(LocalDecl&&) = default;
+
     Type type;
     // The name this local was written with in the source. Diagnostics
     // must print this -- a LocalId is an internal index and must never
@@ -151,7 +170,25 @@ struct LocalDecl {
 // than with a points-to analysis. Declining to build a place here
 // therefore bought no soundness; it only removed `*p` and `p->m` from
 // the two-state model entirely.
-struct Projection {
+// Declared `class` (not `struct`, ch04 §4.2/spec ch04): `field`
+// (std::string) is class-typed. Every call site builds this with 4
+// positional arguments (see projected_field/projected_index/
+// projected_deref below), so, like parser.cppm's
+// InjectedGenericTypeName, an explicit matching constructor replaces the
+// aggregate-init those sites already use; `operator==` stays defaulted
+// (member-wise equality is exactly right for a class too).
+class Projection {
+  public:
+    virtual ~Projection() = default;
+    Projection() = default;
+    Projection(const Projection&) = default;
+    Projection& operator=(const Projection&) = default;
+    Projection(Projection&&) = default;
+    Projection& operator=(Projection&&) = default;
+
+    Projection(bool is_index, bool is_deref, std::string field, std::int64_t index)
+        : is_index{is_index}, is_deref{is_deref}, field{std::move(field)}, index{index} {}
+
     bool is_index = false;         // false: `.field`; true: `[index]`
     bool is_deref = false;         // `*`; `field`/`index` unused
     std::string field;             // `.field`
@@ -187,11 +224,40 @@ struct Projection {
 // member named inside its own class is an id-expression, so member
 // storage was always in the model; only the key was too coarse to
 // record it.
-struct Place {
+//
+// Declared `class` (not `struct`, ch04 §4.2/spec ch04): `path`
+// (std::vector<Projection>) is class-typed. whole_local_place below is
+// the one call site building this positionally, hence the matching
+// explicit constructor.
+class Place {
+  public:
+    virtual ~Place() = default;
+    Place() = default;
+    Place(const Place&) = default;
+    Place& operator=(const Place&) = default;
+    Place(Place&&) = default;
+    Place& operator=(Place&&) = default;
+
+    Place(LocalId local, std::vector<Projection> path) : local{local}, path{std::move(path)} {}
+
     LocalId local{};
     std::vector<Projection> path;
 
-    bool operator==(const Place&) const = default;
+    // Written out member-wise (like Projection's own operator< above)
+    // rather than `= default`: a defaulted equality operator requires
+    // every field to be equality-comparable, and libs/std's own
+    // std::vector<T> has no operator== yet -- so `path`
+    // (std::vector<Projection>) fails that requirement even though
+    // Projection itself is equality-comparable. Same information, same
+    // answer, just spelled without leaning on a stdlib gap.
+    bool operator==(const Place& other) const {
+        if (!(local == other.local)) return false;
+        if (path.size() != other.path.size()) return false;
+        for (std::size_t i = 0; i < path.size(); i++) {
+            if (!(path[i] == other.path[i])) return false;
+        }
+        return true;
+    }
 
     [[nodiscard]] bool is_whole_local() const { return path.empty(); }
 
@@ -346,7 +412,21 @@ enum class MirStatementKind {
     UnsafeExit,
 };
 
-struct MirStatement {
+// Declared `class` (not `struct`, ch04 §4.2/spec ch04): `type`
+// (scpp::Type) and `loc` (SourceLocation) are class-typed. Every
+// existing call site (local_stmt/assign_stmt/plain_stmt below)
+// default-constructs `MirStatement stmt{};` and assigns fields
+// individually, never positional aggregate-init, so the defaulted
+// default constructor already matches every use.
+class MirStatement {
+  public:
+    virtual ~MirStatement() = default;
+    MirStatement() = default;
+    MirStatement(const MirStatement&) = default;
+    MirStatement& operator=(const MirStatement&) = default;
+    MirStatement(MirStatement&&) = default;
+    MirStatement& operator=(MirStatement&&) = default;
+
     MirStatementKind kind;
     // Declare / Assign (target) / Drop / ScopeExit / BindReference (the
     // reference). Unset (left default) for Eval/UnsafeEnter/UnsafeExit,
@@ -396,7 +476,20 @@ enum class TerminatorKind {
     Unreachable, // e.g. after two branches that both already returned
 };
 
-struct Terminator {
+// Declared `class` (not `struct`, ch04 §4.2/spec ch04): `switch_targets`
+// (std::vector<SwitchTarget>) and `loc` (SourceLocation) are class-typed.
+// Always default-constructed (`Terminator terminator;` inside
+// BasicBlock) then assigned field-by-field, so the defaulted default
+// constructor already matches every use.
+class Terminator {
+  public:
+    virtual ~Terminator() = default;
+    Terminator() = default;
+    Terminator(const Terminator&) = default;
+    Terminator& operator=(const Terminator&) = default;
+    Terminator(Terminator&&) = default;
+    Terminator& operator=(Terminator&&) = default;
+
     TerminatorKind kind = TerminatorKind::None;
     std::size_t target = 0;                  // Goto
     std::size_t true_target = 0;             // Branch (condition is true)
@@ -407,7 +500,21 @@ struct Terminator {
     SourceLocation loc;                 // the originating Stmt's position, see MirStatement::loc
 };
 
-struct BasicBlock {
+// Declared `class` (not `struct`, ch04 §4.2/spec ch04): `statements`
+// (std::vector<MirStatement>) and `terminator` (Terminator, itself now
+// class-typed) are both class-typed. Always default-constructed
+// (`BasicBlock{}`, `push_back(BasicBlock{})`) then filled in via its own
+// members' mutators, so the defaulted default constructor already
+// matches every use.
+class BasicBlock {
+  public:
+    virtual ~BasicBlock() = default;
+    BasicBlock() = default;
+    BasicBlock(const BasicBlock&) = default;
+    BasicBlock& operator=(const BasicBlock&) = default;
+    BasicBlock(BasicBlock&&) = default;
+    BasicBlock& operator=(BasicBlock&&) = default;
+
     std::vector<MirStatement> statements;
     Terminator terminator;
     // Lexical `[[scpp::unsafe]]` nesting in effect where this block
@@ -453,9 +560,57 @@ struct BasicBlock {
 // push_scope/pop_scope in codegen.cppm). Because those statements now
 // name a LocalId rather than a name, an inner shadow going out of scope
 // no longer resets the outer local it shadowed.
-struct Body {
+//
+// Declared `class` (not `struct`, ch04 §4.2/spec ch04): most fields
+// below (blocks, owned_member_initializers, local_decls, the
+// function_* strings/vector) are class-typed, and `owned_body` is a
+// move-only StmtPtr, so -- exactly like Expr/Function above, the two
+// other owners of a StmtPtr -- the copy constructor/assignment are
+// declared explicitly (deep-cloning `owned_body`, mirroring how build()
+// already deep-clones the source Function's own body below) rather than
+// defaulted; move stays defaulted.
+class Body {
+  public:
+    virtual ~Body() = default;
+    Body() = default;
+    Body(const Body& other)
+        : blocks{other.blocks},
+          owned_member_initializers{other.owned_member_initializers},
+          local_decls{other.local_decls},
+          program{other.program},
+          function_owning_module{other.function_owning_module},
+          function_visibility_module{other.function_visibility_module},
+          function_member_owner_class{other.function_member_owner_class},
+          function_access_context_class{other.function_access_context_class},
+          function_source_path{other.function_source_path},
+          function_namespace_path{other.function_namespace_path},
+          function_is_generic_template{other.function_is_generic_template} {
+        if (other.owned_body != nullptr) this->owned_body = deep_clone_stmt(*other.owned_body);
+    }
+    Body& operator=(const Body& other) {
+        this->blocks = other.blocks;
+        if (other.owned_body != nullptr) {
+            this->owned_body = deep_clone_stmt(*other.owned_body);
+        } else {
+            this->owned_body = nullptr;
+        }
+        this->owned_member_initializers = other.owned_member_initializers;
+        this->local_decls = other.local_decls;
+        this->program = other.program;
+        this->function_owning_module = other.function_owning_module;
+        this->function_visibility_module = other.function_visibility_module;
+        this->function_member_owner_class = other.function_member_owner_class;
+        this->function_access_context_class = other.function_access_context_class;
+        this->function_source_path = other.function_source_path;
+        this->function_namespace_path = other.function_namespace_path;
+        this->function_is_generic_template = other.function_is_generic_template;
+        return *this;
+    }
+    Body(Body&&) = default;
+    Body& operator=(Body&&) = default;
+
     std::vector<BasicBlock> blocks;
-    StmtPtr owned_body;
+    StmtPtr owned_body{};
     // A constructor's own `: base{...}, field{...}` list, deep-copied for
     // the same reason `owned_body` is: the LocalResolver run below writes
     // each identifier's resolved id into the expression it reads, and the
@@ -659,7 +814,22 @@ Body build_mir(const Function& fn);
 // normalised to the two spellings an initializer can have (`= expr` and
 // `{args...}`) so a consumer never has to know which kind of declaration
 // it came from.
-struct InitializerScope {
+// Declared `class` (not `struct`, ch04 §4.2/spec ch04): `loc`
+// (SourceLocation), `name` (std::string) and `body` (Body) are all
+// class-typed. Every call site (for_each_initializer_scope below)
+// default-constructs `InitializerScope scope{};` and assigns fields
+// individually, so the defaulted default constructor already matches
+// every use; `body`'s own explicit copy constructor above makes the
+// defaulted copy here correct too.
+class InitializerScope {
+  public:
+    virtual ~InitializerScope() = default;
+    InitializerScope() = default;
+    InitializerScope(const InitializerScope&) = default;
+    InitializerScope& operator=(const InitializerScope&) = default;
+    InitializerScope(InitializerScope&&) = default;
+    InitializerScope& operator=(InitializerScope&&) = default;
+
     // The declared type the expression initializes, and where to point a
     // diagnostic. `name` is the variable/field/parameter's own name.
     const Type* declared_type = nullptr;
@@ -796,7 +966,22 @@ template <typename VisitFn>
 // [refwrap.access], [span.elem]). Nothing here matches on a type *name*;
 // `shared_ptr` is not special, it is merely the commonest spelling of
 // "accessor returning a non-const reference".
-struct ReadOnlyPlaceQuery {
+// Declared `class` (not `struct`, ch04 §4.2/spec ch04): every field is a
+// std::function, itself class-typed. Constructed by callers outside this
+// file (this partition only ever takes `const ReadOnlyPlaceQuery&`), so
+// only a default constructor plus ordinary copy/move -- exactly what a
+// caller assembling one field-by-field, or via aggregate-style
+// `ReadOnlyPlaceQuery{}` then per-field assignment, needs -- are
+// declared, all defaulted.
+class ReadOnlyPlaceQuery {
+  public:
+    virtual ~ReadOnlyPlaceQuery() = default;
+    ReadOnlyPlaceQuery() = default;
+    ReadOnlyPlaceQuery(const ReadOnlyPlaceQuery&) = default;
+    ReadOnlyPlaceQuery& operator=(const ReadOnlyPlaceQuery&) = default;
+    ReadOnlyPlaceQuery(ReadOnlyPlaceQuery&&) = default;
+    ReadOnlyPlaceQuery& operator=(ReadOnlyPlaceQuery&&) = default;
+
     // For an Identifier: the named entity's own `const`/`constexpr`-ness
     // and its declared type, or nullopt when this pass cannot resolve the
     // name (left to the other pass's own check).
@@ -829,12 +1014,19 @@ struct ReadOnlyPlaceQuery {
         case ExprKind::Member:
         case ExprKind::Subscript: {
             if (expr.lhs == nullptr) return false;
-            std::optional<Type> base = query.inferred_type ? query.inferred_type(*expr.lhs) : std::nullopt;
-            const Type* effective = base.has_value() ? &*base : nullptr;
-            if (effective != nullptr && effective->kind == TypeKind::Reference && effective->pointee != nullptr) {
-                effective = effective->pointee.get();
+            // A by-value `std::optional<Type>` rather than a raw `const
+            // Type*` alias into it: every read below goes through
+            // std::optional's own `operator->`/`operator*`, exactly like
+            // ast.cppm's `deduced_type_for_by_value_param` and
+            // `operator_operand_type_or_null` unwrap a reference the same
+            // way -- neither needs a `[[scpp::unsafe]]` block, since
+            // §5.1(5.1)/§7.1(4) gate raw-pointer indirection, not a
+            // library type's own overloaded arrow/dereference.
+            std::optional<Type> effective = query.inferred_type ? query.inferred_type(*expr.lhs) : std::nullopt;
+            if (effective.has_value() && effective->kind == TypeKind::Reference && effective->pointee != nullptr) {
+                effective = Type{*effective->pointee};
             }
-            if (effective != nullptr) {
+            if (effective.has_value()) {
                 // An indirection ends the propagation, and answers on its
                 // own: whatever it took to *reach* the pointer/span, what
                 // is on the far side of it is qualified by the pointee/
@@ -855,18 +1047,22 @@ struct ReadOnlyPlaceQuery {
                     // holding it is. Otherwise fall through to the base.
                     if (const ClassDef* def = query.class_def ? query.class_def(effective->name) : nullptr;
                         def != nullptr) {
-                        for (const ClassField& field : def->fields) {
-                            if (field.name != expr.name) continue;
-                            if (type_is_read_only_view(field.type)) return true;
-                            break;
+                        [[scpp::unsafe]] {
+                            for (const ClassField& field : def->fields) {
+                                if (field.name != expr.name) continue;
+                                if (type_is_read_only_view(field.type)) return true;
+                                break;
+                            }
                         }
                     }
                     if (const StructDef* def = query.struct_def ? query.struct_def(effective->name) : nullptr;
                         def != nullptr) {
-                        for (const StructField& field : def->fields) {
-                            if (field.name != expr.name) continue;
-                            if (type_is_read_only_view(field.type)) return true;
-                            break;
+                        [[scpp::unsafe]] {
+                            for (const StructField& field : def->fields) {
+                                if (field.name != expr.name) continue;
+                                if (type_is_read_only_view(field.type)) return true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -916,6 +1112,25 @@ namespace scpp {
 // its declaration, so a second, separately-maintained walk could drift
 // out of step with this one and silently mis-index the table.
 //
+// One declaration of a given spelling, and whether its lexical scope is
+// still open. Entries are never removed: a name that has gone out of
+// scope is still *known*, which is what lets the checker answer a use of
+// it with "out of scope here" (and a type-aware message) rather than the
+// far vaguer "undeclared".
+//
+// A namespace-scope struct rather than LocalResolver's own private
+// nested one: a private nested aggregate type instantiated `std::vector<T>`
+// with confused std::vector<LocalResolver::LocalBinding>::push_back's own
+// overload resolution -- "argument 1 is a different type" against its own
+// `const LocalResolver::LocalBinding&` parameter -- even though the
+// pushed `LocalBinding{id, true}` names that exact type. Every other
+// multi-field helper aggregate in this file (Projection, Place, ...) is
+// already namespace-scope for the same reason none of *them* hit this.
+struct LocalBinding {
+    std::size_t id = 0;
+    bool in_scope = true;
+};
+
 // The walk covers the whole body -- including code the CFG lowering
 // skips as unreachable -- so that an id can never index past the end of
 // local_decls whatever the control flow looks like.
@@ -955,36 +1170,32 @@ public:
             param.resolved_local = declare(param.name, std::move(decl)) + 1;
         }
         if (member_initializers != nullptr) {
-            for (MemberInitializer& member_initializer : *member_initializers) {
-                resolve_initializer(member_initializer.initializer);
+            [[scpp::unsafe]] {
+                for (MemberInitializer& member_initializer : *member_initializers) {
+                    resolve_initializer(member_initializer.initializer);
+                }
             }
         }
-        if (body_ != nullptr) resolve_stmt(*body_);
+        if (body_ != nullptr) {
+            [[scpp::unsafe]] {
+                resolve_stmt(*body_);
+            }
+        }
     }
 
     [[nodiscard]] std::vector<LocalDecl> take_decls() { return std::move(decls_); }
 
 private:
-    // One declaration of a given spelling, and whether its lexical scope
-    // is still open. Entries are never removed: a name that has gone out
-    // of scope is still *known*, which is what lets the checker answer a
-    // use of it with "out of scope here" (and a type-aware message)
-    // rather than the far vaguer "undeclared".
-    struct Binding {
-        std::size_t id = 0;
-        bool in_scope = true;
-    };
-
     std::vector<Param>& params_;
     Stmt* body_;
     std::vector<LocalDecl> decls_{};
-    std::unordered_map<std::string, std::vector<Binding>> bindings_{};
+    std::unordered_map<std::string, std::vector<LocalBinding>> bindings_{};
     std::vector<std::vector<std::string>> scope_stack_{};
 
     std::size_t declare(const std::string& name, LocalDecl decl) {
         std::size_t id = decls_.size();
         decls_.push_back(std::move(decl));
-        bindings_[name].push_back(Binding{id, true});
+        bindings_[name].push_back(LocalBinding{id, true});
         if (!scope_stack_.empty()) scope_stack_.back().push_back(name);
         return id;
     }
@@ -996,9 +1207,9 @@ private:
             auto it = bindings_.find(name);
             if (it == bindings_.end()) continue;
             // std::vector has no rbegin()/rend() yet -- walk backwards by index.
-            std::vector<Binding>& bound = it->second;
+            std::vector<LocalBinding>& bound = it->second;
             for (std::size_t i = bound.size(); i > 0; i--) {
-                Binding& binding = bound[i - 1];
+                LocalBinding& binding = bound[i - 1];
                 if (!binding.in_scope) continue;
                 binding.in_scope = false;
                 break;
@@ -1021,7 +1232,7 @@ private:
         auto it = bindings_.find(name);
         if (it == bindings_.end() || it->second.empty()) return 0;
         // std::vector has no rbegin()/rend() yet -- walk backwards by index.
-        const std::vector<Binding>& bound = it->second;
+        const std::vector<LocalBinding>& bound = it->second;
         for (std::size_t i = bound.size(); i > 0; i--) {
             if (bound[i - 1].in_scope) return bound[i - 1].id + 1;
         }
@@ -1168,6 +1379,38 @@ private:
     }
 };
 
+// One frame per lexically-enclosing loop/switch MirBuilder is currently
+// lowering, recording where `continue`/`break` jump to and how many
+// scope frames a `continue`'s implicit drops must unwind through.
+//
+// Namespace-scope rather than MirBuilder's own private nested struct,
+// like LocalResolver's LocalBinding just above: a private nested
+// aggregate instantiated `std::vector<T>::push_back` overload resolution
+// against itself with a spurious "argument 1 is a different type" --
+// see LocalBinding's own comment for the full story; this is the same
+// underlying issue hitting a second private nested struct.
+//
+// Declared `class` (not `struct`, ch04 §4.2/spec ch04): `continue_block`
+// (std::optional<std::size_t>) is class-typed. Both call sites below
+// build this with 3 positional arguments, hence the matching explicit
+// constructor.
+class ControlFlowFrame {
+  public:
+    virtual ~ControlFlowFrame() = default;
+    ControlFlowFrame() = default;
+    ControlFlowFrame(const ControlFlowFrame&) = default;
+    ControlFlowFrame& operator=(const ControlFlowFrame&) = default;
+    ControlFlowFrame(ControlFlowFrame&&) = default;
+    ControlFlowFrame& operator=(ControlFlowFrame&&) = default;
+
+    ControlFlowFrame(std::optional<std::size_t> continue_block, std::size_t end_block, std::size_t scope_depth)
+        : continue_block{continue_block}, end_block{end_block}, scope_depth{scope_depth} {}
+
+    std::optional<std::size_t> continue_block;
+    std::size_t end_block;
+    std::size_t scope_depth;
+};
+
 class MirBuilder {
 public:
     explicit MirBuilder(const Function& fn) : fn_{fn}, owned_params_{fn.params} {
@@ -1226,11 +1469,6 @@ private:
     // (see build()), so they're never captured here: they live for the
     // whole function, same as in codegen.
     std::vector<std::vector<LocalId>> scope_stack_{};
-    struct ControlFlowFrame {
-        std::optional<std::size_t> continue_block;
-        std::size_t end_block;
-        std::size_t scope_depth;
-    };
     std::vector<ControlFlowFrame> control_flow_stack_{};
 
     // Records that `id` was declared in the innermost open scope, so that
@@ -1643,7 +1881,7 @@ private:
         for (std::size_t i = 0; i < body_.local_decls.size(); i++) {
             const Type& type = body_.local_decls[i].type;
             if (type.kind == TypeKind::Named &&
-                (type.name == "std::unique_ptr" || type.name.rfind("std::unique_ptr.", 0) == 0)) {
+                (type.name == "std::unique_ptr" || type.name.starts_with("std::unique_ptr."))) {
                 LocalId id{i};
                 unique_ptr_locals.push_back(id);
             }
@@ -1709,8 +1947,15 @@ Body build_mir(const Function& fn) {
 [[nodiscard]] std::optional<Place> place_of(const Expr& expr, const Body& body,
                                             const std::function<std::optional<Place>(LocalId)>& resolve_root,
                                             PlacePrecision precision) {
-    return place_of(
-        expr, [&body](const Expr& e) { return body.local_of(e); }, resolve_root, precision);
+    // The lambda is wrapped in an explicit std::function<...> rather
+    // than handed to the second overload directly: overload resolution
+    // does not attempt the lambda-to-std::function user-defined
+    // conversion when matching a *reference* parameter against a raw
+    // closure argument (it only ever tried binding the lambda straight
+    // to the first overload's own `const Body&` and reported that
+    // mismatch), so the temporary is constructed here, by name, instead.
+    std::function<std::optional<LocalId>(const Expr&)> local_of{[&body](const Expr& e) { return body.local_of(e); }};
+    return place_of(expr, local_of, resolve_root, precision);
 }
 
 [[nodiscard]] std::optional<Place> place_of(const Expr& expr,
