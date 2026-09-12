@@ -1,0 +1,36 @@
+// std::pair<T1, T2> ([utility.pair]/1): "a class template ... used to
+// store two heterogeneous objects as a single unit", accessible as
+// `.first`/`.second`. Exercises exactly what src/mir.cppm's own
+// `ReadOnlyPlaceQuery::declared_variable` (and its two implementations
+// in src/compiler/codegen/semantics.cppm and
+// src/compiler/movecheck/calls.cppm) needs: a `std::pair<bool, T>`
+// built from a `bool` and some other, differently-typed value, with
+// each member read back independently, plus a `std::pair` returned by
+// value out of a function (exercising the implicitly-defined move
+// constructor a user-declared virtual destructor leaves available,
+// ch06 §6.4(2)) and stored inside a `std::optional`.
+import std;
+
+struct Point {
+    int x = 0;
+    int y = 0;
+};
+
+std::pair<bool, Point> make_pair_result(bool flag, int x, int y) {
+    Point p{x, y};
+    return std::pair<bool, Point>(flag, p);
+}
+
+int main() {
+    std::pair<bool, int> counted{true, 42};
+    std::print("first={} second={}\n", counted.first, counted.second);
+
+    std::pair<bool, Point> located = make_pair_result(false, 3, 4);
+    std::print("flag={} x={} y={}\n", located.first, located.second.x, located.second.y);
+
+    std::optional<std::pair<bool, int>> maybe_pair{std::pair<bool, int>(true, 7)};
+    if (maybe_pair.has_value()) {
+        std::print("optional_first={} optional_second={}\n", maybe_pair->first, maybe_pair->second);
+    }
+    return 0;
+}
