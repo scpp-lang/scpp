@@ -5071,6 +5071,121 @@ void test_exported_type_alias_inside_namespace_parses() {
            "exported_type_alias_inside_namespace_parses: alias should preserve underlying type");
 }
 
+// [stmt.dcl]/[dcl.typedef]: an alias-declaration is a block-declaration, so
+// it is a statement. The alias is resolved eagerly, exactly as a
+// namespace-scope one is, so no TypeAliasDecl reaches the Program and the
+// declaration itself leaves only an empty Block behind.
+void test_block_scope_type_alias_parses_and_resolves() {
+    scpp::Program program = expect_parse_ok(
+        "struct P { int id = 0; };\n"
+        "int main() {\n"
+        "    using Small = int;\n"
+        "    using Pair = P;\n"
+        "    Small count = 3;\n"
+        "    Pair p{};\n"
+        "    p.id = count;\n"
+        "    return p.id - 3;\n"
+        "}\n");
+    expect(program.type_aliases.empty(),
+           "block_scope_type_alias_parses_and_resolves: a block-scope alias should not reach Program::type_aliases");
+    const scpp::Function* main_fn = find_function_named(program, "main");
+    expect(main_fn != nullptr, "block_scope_type_alias_parses_and_resolves: expected main");
+    if (main_fn == nullptr) return;
+    expect(main_fn->body->statements.size() == 6,
+           "block_scope_type_alias_parses_and_resolves: expected 6 statements");
+    if (main_fn->body->statements.size() != 6) return;
+    expect(main_fn->body->statements[0]->kind == scpp::StmtKind::Block &&
+               main_fn->body->statements[0]->statements.empty(),
+           "block_scope_type_alias_parses_and_resolves: alias declaration should parse to an empty Block");
+    expect(main_fn->body->statements[2]->kind == scpp::StmtKind::VarDecl &&
+               is_named_type(main_fn->body->statements[2]->type, "int"),
+           "block_scope_type_alias_parses_and_resolves: 'Small count' should resolve to int");
+    expect(main_fn->body->statements[3]->kind == scpp::StmtKind::VarDecl &&
+               is_named_type(main_fn->body->statements[3]->type, "P"),
+           "block_scope_type_alias_parses_and_resolves: 'Pair p' should resolve to P");
+}
+
+// [basic.lookup.unqual]: the nearest declaration wins. An inner block's
+// alias shadows an outer block's, and a block-scope alias shadows a
+// namespace-scope alias of the same name -- in both cases only until its
+// own block ends.
+void test_block_scope_type_alias_shadows_outer_alias() {
+    scpp::Program program = expect_parse_ok(
+        "using Id = long;\n"
+        "int main() {\n"
+        "    using Id = int;\n"
+        "    Id inner = 1;\n"
+        "    {\n"
+        "        using Id = bool;\n"
+        "        Id nested = true;\n"
+        "        return nested ? 0 : 1;\n"
+        "    }\n"
+        "}\n"
+        "Id outer_still_long = 2;\n");
+    const scpp::Function* main_fn = find_function_named(program, "main");
+    expect(main_fn != nullptr, "block_scope_type_alias_shadows_outer_alias: expected main");
+    if (main_fn == nullptr) return;
+    expect(main_fn->body->statements.size() == 3,
+           "block_scope_type_alias_shadows_outer_alias: expected 3 statements");
+    if (main_fn->body->statements.size() != 3) return;
+    expect(is_named_type(main_fn->body->statements[1]->type, "int"),
+           "block_scope_type_alias_shadows_outer_alias: outer-block Id should be int, not long");
+    const scpp::Stmt& nested_block = *main_fn->body->statements[2];
+    expect(nested_block.kind == scpp::StmtKind::Block && nested_block.statements.size() == 3,
+           "block_scope_type_alias_shadows_outer_alias: expected a nested block of 3 statements");
+    if (nested_block.statements.size() != 3) return;
+    expect(is_named_type(nested_block.statements[1]->type, "bool"),
+           "block_scope_type_alias_shadows_outer_alias: inner-block Id should be bool");
+    expect(program.globals.size() == 1 && program.globals[0].decl != nullptr &&
+               is_named_type(program.globals[0].decl->type, "long"),
+           "block_scope_type_alias_shadows_outer_alias: Id should be long again outside main");
+}
+
+// A block-scope alias is visible only for the rest of its own block, so
+// naming it after that block has closed is an error, not a silent fallback.
+void test_block_scope_type_alias_is_not_visible_after_its_block() {
+    bool rejected = false;
+    if (auto _r = scpp::parse("int main() {\n"
+                              "    { using Local = int; Local ok = 1; }\n"
+                              "    Local bad = 2;\n"
+                              "    return bad;\n"
+                              "}\n");
+        !_r.has_value()) {
+        rejected = true;
+    }
+    expect(rejected, "block_scope_type_alias_is_not_visible_after_its_block: expected a ParseError");
+}
+
+void test_duplicate_block_scope_type_alias_is_rejected() {
+    bool rejected = false;
+    if (auto _r = scpp::parse("int main() { using Id = int; using Id = long; return 0; }\n"); !_r.has_value()) {
+        rejected = true;
+    }
+    expect(rejected, "duplicate_block_scope_type_alias_is_rejected: expected a ParseError");
+}
+
+void test_block_scope_type_alias_clashing_with_local_type_is_rejected() {
+    bool rejected = false;
+    if (auto _r = scpp::parse("int main() { struct Id { int v = 0; }; using Id = int; return 0; }\n");
+        !_r.has_value()) {
+        rejected = true;
+    }
+    expect(rejected, "block_scope_type_alias_clashing_with_local_type_is_rejected: expected a ParseError");
+}
+
+// Only the alias-declaration form is a block declaration here; a
+// using-declaration naming a base member belongs in a class body, so
+// spelling one in a block gets a diagnostic that says what was expected
+// rather than the old "expected an expression but found 'using'".
+void test_block_scope_using_declaration_without_assign_is_rejected() {
+    auto result = scpp::parse("struct B { int v = 0; };\n"
+                              "int main() { using B::v; return 0; }\n");
+    expect(!result.has_value(), "block_scope_using_declaration_without_assign_is_rejected: expected a ParseError");
+    if (result.has_value()) return;
+    expect(std::string(result.error().what()).find("must be an alias declaration") != std::string::npos,
+           "block_scope_using_declaration_without_assign_is_rejected: expected the alias-declaration diagnostic");
+}
+
 void test_break_and_continue_parse_inside_loop() {
     scpp::Program program = expect_parse_ok(
         "int main() {\n"
@@ -7021,6 +7136,12 @@ int main() {
     test_namespace_relative_qualified_generic_type_declaration_parses();
     test_type_alias_declaration_parses_and_resolves();
     test_exported_type_alias_inside_namespace_parses();
+    test_block_scope_type_alias_parses_and_resolves();
+    test_block_scope_type_alias_shadows_outer_alias();
+    test_block_scope_type_alias_is_not_visible_after_its_block();
+    test_duplicate_block_scope_type_alias_is_rejected();
+    test_block_scope_type_alias_clashing_with_local_type_is_rejected();
+    test_block_scope_using_declaration_without_assign_is_rejected();
 
     test_expr_field_count_is_guarded();
     test_stmt_field_count_is_guarded();

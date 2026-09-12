@@ -536,6 +536,15 @@ private:
     // underlying Type directly rather than a distinct "alias type" node.
     std::unordered_map<std::string, Type> type_aliases_{};
     std::vector<std::unordered_map<std::string, std::string>> local_type_name_scopes_{};
+    // [dcl.typedef]/[stmt.dcl]: block-scope `using Alias = Type;`. One
+    // frame per block, pushed/popped by parse_block alongside
+    // local_type_name_scopes_ above, so an alias declared in a block is
+    // visible only to the rest of that block and shadows any outer alias
+    // or type of the same name. Like type_aliases_, the Type is stored
+    // already resolved, so downstream phases never see a local alias at
+    // all -- the declaration itself parses to an empty Block, exactly as
+    // a local `struct`/`class` definition does.
+    std::vector<std::unordered_map<std::string, Type>> local_type_alias_scopes_{};
     std::size_t next_local_type_id_ = 0;
     // Set by parse_record_body_into immediately before it parses a member
     // type definition ([class.mem]: a `struct`/`class`/`enum class`
@@ -2186,6 +2195,25 @@ private:
         return std::optional<std::string>{};
     }
 
+    // The block-scope counterpart of resolve_visible_type_alias below:
+    // searches local_type_alias_scopes_ innermost-first, so an alias
+    // declared in an inner block shadows an outer one of the same name.
+    // Only an unqualified name can name a block-scope alias ([basic.lookup.qual]:
+    // a block-scope declaration has no qualified name to be found by).
+    [[nodiscard]] std::optional<Type> resolve_visible_local_type_alias(const std::string& spelled_name) const {
+        if (spelled_name.empty() || spelled_name.contains("::")) return std::optional<Type>{};
+        // std::vector has no rbegin()/rend() yet -- walk backwards (innermost
+        // scope first) by index instead.
+        for (std::size_t i = local_type_alias_scopes_.size(); i > 0; i--) {
+            const std::unordered_map<std::string, Type>& scope = local_type_alias_scopes_[i - 1];
+            auto alias_it = scope.find(spelled_name);
+            if (alias_it != scope.end()) {
+                return std::optional<Type>{alias_it->second};
+            }
+        }
+        return std::optional<Type>{};
+    }
+
     // Returns the enclosing type name a member type definition should be
     // qualified with, and clears it so it applies to exactly one
     // definition (see pending_nested_type_owner_'s own declaration).
@@ -2210,6 +2238,15 @@ private:
         if (local_type_name_scopes_.empty()) {
             return std::unexpected(ParseError(loc.line, loc.column, "internal parser error: missing block scope for local type definition"));
         }
+        if (!local_type_alias_scopes_.empty() && local_type_alias_scopes_.back().contains(bare_name)) {
+            {
+                std::string _msg_1760{"redeclaration of local type '"};
+                _msg_1760 += bare_name;
+                _msg_1760 += "' in the same block scope";
+                return std::unexpected(ParseError(loc.line, loc.column,
+                             _msg_1760));
+            }
+        }
         auto emplace_result = local_type_name_scopes_.back().emplace(bare_name, qualified_name);
         if (!emplace_result.second) {
             {
@@ -2223,8 +2260,35 @@ private:
         return {};
     }
 
+    // Records a block-scope `using Alias = Type;` in the innermost block
+    // frame. The bare name must not already name a local type or alias
+    // declared in that same frame ([basic.scope.declarative]); an outer
+    // one is fine and is simply shadowed.
+    [[nodiscard]] std::expected<void, ParseError> register_local_type_alias(const std::string& bare_name, Type underlying_type, const SourceLocation& loc) {
+        if (local_type_alias_scopes_.empty()) {
+            return std::unexpected(ParseError(loc.line, loc.column, "internal parser error: missing block scope for local type alias declaration"));
+        }
+        bool clashes_with_local_type = !local_type_name_scopes_.empty() && local_type_name_scopes_.back().contains(bare_name);
+        if (clashes_with_local_type || local_type_alias_scopes_.back().contains(bare_name)) {
+            {
+                std::string _msg_1762{"redeclaration of local type '"};
+                _msg_1762 += bare_name;
+                _msg_1762 += "' in the same block scope";
+                return std::unexpected(ParseError(loc.line, loc.column,
+                             _msg_1762));
+            }
+        }
+        local_type_alias_scopes_.back().emplace(bare_name, std::move(underlying_type));
+        return {};
+    }
+
     [[nodiscard]] std::optional<Type> resolve_visible_type_alias(const std::string& spelled_name) const {
         if (spelled_name.empty()) return std::optional<Type>{};
+        // A block-scope alias is nearer than any namespace-scope one, so
+        // it wins ([basic.lookup.unqual] searches innermost scope first).
+        if (std::optional<Type> local = resolve_visible_local_type_alias(spelled_name); local.has_value()) {
+            return local;
+        }
         // Must capture 'this' explicitly (not just '[&]') so the
         // implicit `type_aliases_` -> `this->type_aliases_` member-field
         // rewrite that runs before lambda-capture analysis has an
@@ -2284,6 +2348,13 @@ private:
             }
             return std::string(type.name);
         };
+        // Checked before struct_names_ for the same reason
+        // resolve_visible_local_type_alias runs first in
+        // resolve_visible_type_alias: a block-scope alias shadows a
+        // namespace-scope type of the same name.
+        if (std::optional<Type> local_alias = resolve_visible_local_type_alias(spelled_name); local_alias.has_value()) {
+            return alias_underlying_name(*local_alias);
+        }
         if (spelled_name.contains("::")) {
             if (struct_names_.contains(spelled_name)) return std::string(spelled_name);
             if (!namespace_stack_.empty()) {
@@ -8660,6 +8731,7 @@ private:
         // return here abandons the whole parse anyway (same as
         // parse_block's own push/pop).
         local_type_name_scopes_.emplace_back();
+        local_type_alias_scopes_.emplace_back();
         AccessSpecifier current_access = default_access;
         while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
             if (match(TokenKind::KwPublic)) {
@@ -9358,6 +9430,7 @@ private:
         if (auto _r = expect(TokenKind::RBrace, "'}'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         local_type_name_scopes_.pop_back();
+        local_type_alias_scopes_.pop_back();
         if (!template_params.empty()) injected_generic_type_name_stack_.pop_back();
         current_class_template_params_ = std::move(saved_class_template_params);
         std::expected<void, ParseError> body_ok{};
@@ -9750,6 +9823,7 @@ private:
         SourceLocation loc = current_loc();
         if (auto _r = expect(TokenKind::LBrace, "'{'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         local_type_name_scopes_.emplace_back();
+        local_type_alias_scopes_.emplace_back();
         auto block = std::make_unique<Stmt>();
         block->kind = StmtKind::Block;
         block->loc = loc;
@@ -9761,6 +9835,7 @@ private:
         }
         if (auto _r = expect(TokenKind::RBrace, "'}'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         local_type_name_scopes_.pop_back();
+        local_type_alias_scopes_.pop_back();
         return std::move(block);
     }
 
@@ -9790,6 +9865,37 @@ private:
             [[scpp::unsafe]] {
                 if (auto _rv = parse_class_def(*current_program_, /*is_exported=*/false, std::move(no_template_params), std::move(no_leading_alignments), std::move(no_forced_name), true); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
             }
+        }
+        return make_block_stmt(loc);
+    }
+
+    // [stmt.dcl]/[dcl.typedef]: a block-scope alias-declaration,
+    // `using Alias = Type;`. The alias is resolved eagerly and recorded
+    // in the innermost block frame, exactly as a namespace-scope alias is
+    // recorded in type_aliases_ by parse_type_alias_decl, so every later
+    // use of `Alias` in this block already parses to the underlying Type
+    // and no later phase ever sees the alias. Like a local
+    // `struct`/`class` definition, the declaration itself carries no
+    // runtime effect and so parses to an empty Block.
+    [[nodiscard]] std::expected<StmtPtr, ParseError> parse_local_type_alias_statement() {
+        SourceLocation loc = current_loc();
+        auto using_tok_result = expect(TokenKind::KwUsing, "'using'");
+        if (!using_tok_result.has_value()) return std::unexpected(std::move(using_tok_result).error());
+        auto name_result = expect(TokenKind::Identifier, "alias name");
+        if (!name_result.has_value()) return std::unexpected(std::move(name_result).error());
+        std::string bare_name{name_result.value().text.data(), name_result.value().text.size()};
+        if (!check(TokenKind::Assign)) {
+            const Token& tok = peek();
+            return std::unexpected(ParseError(tok.line, tok.column,
+                             "a block-scope using declaration must be an alias declaration spelled 'using Alias = Type;'"));
+        }
+        advance(); // '='
+        auto underlying_type_result = parse_type();
+        if (!underlying_type_result.has_value()) return std::unexpected(std::move(underlying_type_result).error());
+        Type underlying_type = std::move(underlying_type_result).value();
+        if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _rv = register_local_type_alias(bare_name, std::move(underlying_type), loc); !_rv.has_value()) {
+            return std::unexpected(std::move(_rv).error());
         }
         return make_block_stmt(loc);
     }
@@ -9966,6 +10072,7 @@ private:
         }
         if (check(TokenKind::LBrace)) return parse_block();
         if (check(TokenKind::KwStruct) || check(TokenKind::KwClass)) return parse_local_type_definition_statement();
+        if (check(TokenKind::KwUsing)) return parse_local_type_alias_statement();
         if (check(TokenKind::KwStatic)) return parse_var_decl();
         if (looks_like_type_start()) return parse_var_decl();
         if (check(TokenKind::KwReturn)) return parse_return();

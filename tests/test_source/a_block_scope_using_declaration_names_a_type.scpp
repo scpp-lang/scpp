@@ -1,0 +1,78 @@
+// [stmt.dcl]/[dcl.typedef]: `using Alias = Type;` is a block-declaration,
+// and a block-declaration is a statement, so an alias may be declared
+// anywhere a statement may appear. The spec adopts no clause narrowing
+// that, so plain C++ applies. The alias is a name for a type, not a new
+// type: `Local` below is whatever `T` was substituted with, and `Boxed` is
+// the very same `std::optional<int>` the callee already declares -- which is
+// what makes passing one to a function written in terms of the underlying
+// type work without any conversion at all.
+//
+// Also covers the scoping the rule implies: an inner block's alias shadows
+// an outer one for exactly its own extent, a block-scope alias shadows a
+// namespace-scope alias of the same name, and both are gone again once
+// their block closes.
+import std;
+
+using Value = long;
+
+struct Point {
+    int x = 0;
+    int y = 0;
+};
+
+int sum_of(const std::optional<int>& left, int fallback) {
+    return (left.has_value() ? left.value() : 0) + fallback;
+}
+
+// The alias names a template specialization, and a reference to it, and is
+// then used for a local, for a member call, and for an argument.
+int boxed_total() {
+    using Boxed = std::optional<int>;
+    Boxed four{4};
+    using BoxedRef = const Boxed&;
+    BoxedRef borrowed = four;
+    return sum_of(borrowed, 11);
+}
+
+// A block-scope alias is usable inside a generic function, where it names
+// the very type the template parameter was substituted with.
+template<typename T>
+T doubled(T value) {
+    using Local = T;
+    Local copy = value;
+    return copy + copy;
+}
+
+int shadowing() {
+    // Shadows the namespace-scope `using Value = long;` above.
+    using Value = int;
+    Value outer = 10;
+    {
+        using Value = long;
+        Value inner = 3;
+        outer += static_cast<int>(inner);
+    }
+    // `Value` is `int` again here, not `long`.
+    Value after = outer;
+    return after;
+}
+
+int aliased_struct() {
+    using P = Point;
+    P p{};
+    p.x = 7;
+    p.y = 2;
+    return p.x * p.y;
+}
+
+// The namespace-scope alias is untouched by any of the block-scope ones.
+Value untouched = 100;
+
+int main() {
+    std::println("boxed={}", boxed_total());
+    std::println("doubled={}", doubled(21));
+    std::println("shadowing={}", shadowing());
+    std::println("struct={}", aliased_struct());
+    std::println("untouched={}", static_cast<int>(untouched));
+    return 0;
+}
