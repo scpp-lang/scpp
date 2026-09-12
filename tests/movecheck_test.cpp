@@ -1706,6 +1706,24 @@ void test_check_moves_returns_disengaged_expected_on_failure_without_throwing() 
            "message");
 }
 
+void test_dataflow_error_copy_construction_and_properties() {
+    cases_run++;
+    scpp::SourceLocation loc;
+    loc.line = 42;
+    loc.column = 7;
+    scpp::DataflowError err1("test dataflow message", loc);
+    expect(std::string(err1.what()) == "test dataflow message",
+           "dataflow_error: expected matching what()");
+    expect(err1.loc.line == 42 && err1.loc.column == 7,
+           "dataflow_error: expected matching loc");
+
+    scpp::DataflowError err2 = err1;
+    expect(std::string(err2.what()) == "test dataflow message",
+           "dataflow_error: expected copy to preserve what()");
+    expect(err2.loc.line == 42 && err2.loc.column == 7,
+           "dataflow_error: expected copy to preserve loc");
+}
+
 // --- keying locals by declaration (mir.cppm's LocalId) ----------------
 //
 // Every case below has two declarations that share a spelling. Before
@@ -3426,6 +3444,7 @@ int main() {
     test_lambda_by_reference_capture_still_rejects_mutation_through_const_reference();
     test_check_moves_returns_engaged_expected_on_success();
     test_check_moves_returns_disengaged_expected_on_failure_without_throwing();
+    test_dataflow_error_copy_construction_and_properties();
 
     test_borrow_violation_without_a_namesake_is_rejected();
     test_sibling_scope_namesake_does_not_hide_a_borrow();
