@@ -78,6 +78,13 @@ int scpp_string_ends_with(void* handle, const char* suffix) {
                : 0;
 }
 
+int scpp_string_starts_with(void* handle, const char* prefix) {
+    if (prefix == nullptr) return 0;
+    const std::string* s = as_string(handle);
+    std::string_view prefix_view(prefix);
+    return s->size() >= prefix_view.size() && s->compare(0, prefix_view.size(), prefix_view) == 0 ? 1 : 0;
+}
+
 const char* scpp_string_substr(void* handle, std::size_t pos, std::size_t len) {
     const std::string* s = as_string(handle);
     if (pos > s->size()) std::abort();

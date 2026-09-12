@@ -1,0 +1,18 @@
+// std::string::starts_with (C++20) did not exist in
+// libs/std/string/std_string.scpp before src/mir.cppm needed a
+// starts-with check (`type.name.starts_with("std::unique_ptr.")`) as
+// a replacement for the two-argument `rfind(needle, pos)` overload,
+// which this stdlib's own `rfind` never implemented (only the
+// single-argument, whole-string form).
+import std;
+
+int main() {
+    std::string s{"std::unique_ptr.Widget"};
+    std::println("{}", s.starts_with("std::unique_ptr.") ? "true" : "false");
+    std::println("{}", s.starts_with("std::shared_ptr.") ? "true" : "false");
+    std::println("{}", s.starts_with("") ? "true" : "false");
+
+    std::string prefix{"std::"};
+    std::println("{}", s.starts_with(prefix) ? "true" : "false");
+    return 0;
+}

@@ -95,6 +95,9 @@ target_sources(scpp_mir
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
             src/mir.cppm)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(scpp_mir PRIVATE -Wno-error=unknown-attributes)
+endif()
 target_link_libraries(scpp_mir PUBLIC scpp_ast)
 
 separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")

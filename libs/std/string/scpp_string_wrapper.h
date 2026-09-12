@@ -103,6 +103,11 @@ std::size_t scpp_string_rfind_char(void* handle, char needle);
 // `suffix` is NULL).
 int scpp_string_ends_with(void* handle, const char* suffix);
 
+// Returns 1 if `handle`'s content starts with the nul-terminated C
+// string `prefix` (std::string::starts_with, C++20), 0 otherwise
+// (including when `prefix` is NULL).
+int scpp_string_starts_with(void* handle, const char* prefix);
+
 // Allocates a NEW std::string holding the substring of `handle`'s
 // content starting at byte offset `pos`, `len` bytes long (silently
 // clamped to however many bytes are actually available, same as real
