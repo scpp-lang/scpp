@@ -1,0 +1,21 @@
+// [func.wrap.func.inv]: `std::function<R(Args...)>::operator()` is
+// unconditionally `const` -- unlike `std::move_only_function<R(Args...)>`,
+// whose unqualified specialization really does require a non-const
+// call. `libs/std/functional/std_functional.scpp`'s own `call` member
+// for the plain, unqualified `function<R(Args...)>` specialization was
+// missing that `const`, so passing one by `const std::function<R(Args...)>&`
+// and invoking it through that reference -- exactly what
+// src/mir.cppm's Body::place_of does with its own `local_of`/
+// `resolve_root` callback parameters -- was rejected: "cannot call
+// non-const member function 'call' through a read-only receiver".
+import std;
+
+int call_through_const_ref(const std::function<int(int)>& fn, int x) {
+    return fn(x);
+}
+
+int main() {
+    std::function<int(int)> doubles{[](int x) { return x * 2; }};
+    std::println("{}", call_through_const_ref(doubles, 21));
+    return 0;
+}

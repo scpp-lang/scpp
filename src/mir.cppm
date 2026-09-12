@@ -52,25 +52,39 @@ enum class LocalId : std::size_t {};
 }
 
 [[nodiscard]] inline LocalId resolved_local_of(const Expr& expr) {
-    return static_cast<LocalId>(expr.resolved_local - 1);
+    // `enum class LocalId : std::size_t {}` declares no enumerator at all,
+    // so ch14 §14.1(3)-(4)'s "an integer reaches an enumeration only
+    // through scpp::enum_cast" does not apply: enum_cast checks a value
+    // against the declared enumerators, and there are none to check
+    // against here by design (LocalId is an opaque index, not a closed
+    // set of named states) -- `scpp::enum_cast<LocalId>(n)` could never
+    // succeed for any `n`. Direct-list-initialization (brace-init) is a
+    // separate rule this chapter leaves unmodified, so it is how every
+    // conversion in this file from a resolved index into a `LocalId`
+    // goes the other way, one local at a time.
+    LocalId id{expr.resolved_local - 1};
+    return id;
 }
 
 [[nodiscard]] inline bool has_declared_local(const Stmt& stmt) { return stmt.declared_local != 0; }
 
 [[nodiscard]] inline LocalId declared_local_of(const Stmt& stmt) {
-    return static_cast<LocalId>(stmt.declared_local - 1);
+    LocalId id{stmt.declared_local - 1};
+    return id;
 }
 
 [[nodiscard]] inline bool has_param_local(const Param& param) { return param.resolved_local != 0; }
 
 [[nodiscard]] inline LocalId param_local(const Param& param) {
-    return static_cast<LocalId>(param.resolved_local - 1);
+    LocalId id{param.resolved_local - 1};
+    return id;
 }
 
 [[nodiscard]] inline bool has_resolved_local(const LambdaCapture& capture) { return capture.resolved_local != 0; }
 
 [[nodiscard]] inline LocalId resolved_local_of(const LambdaCapture& capture) {
-    return static_cast<LocalId>(capture.resolved_local - 1);
+    LocalId id{capture.resolved_local - 1};
+    return id;
 }
 
 // Everything the checker needs to know about one declaration. One of
@@ -244,11 +258,11 @@ struct Place {
 // to every map cannot be missed.
 struct PlaceHash {
     [[nodiscard]] std::size_t operator()(const Place& place) const {
-        std::size_t h = std::hash<std::size_t>{}(local_index(place.local));
+        std::size_t h = static_cast<std::size_t>(std::hash<std::size_t>{}(local_index(place.local)));
         for (const Projection& step : place.path) {
             std::size_t step_hash = step.is_deref  ? 0x9e3779b9ULL
-                                    : step.is_index ? std::hash<std::int64_t>{}(step.index)
-                                                    : std::hash<std::string>{}(step.field);
+                                    : step.is_index ? static_cast<std::size_t>(std::hash<std::int64_t>{}(step.index))
+                                                    : static_cast<std::size_t>(std::hash<std::string>{}(step.field));
             h ^= step_hash + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
         }
         return h;
@@ -523,7 +537,8 @@ struct Body {
     // always the first parameter and can never be shadowed or redeclared.
     [[nodiscard]] std::optional<LocalId> this_local() const {
         if (local_decls.empty() || local_decls[0].source_name != "this") return std::nullopt;
-        return static_cast<LocalId>(0);
+        LocalId id{0};
+        return id;
     }
 
     // How to spell `place` in a diagnostic. Never prints a LocalId: the
@@ -1629,7 +1644,8 @@ private:
             const Type& type = body_.local_decls[i].type;
             if (type.kind == TypeKind::Named &&
                 (type.name == "std::unique_ptr" || type.name.rfind("std::unique_ptr.", 0) == 0)) {
-                unique_ptr_locals.push_back(static_cast<LocalId>(i));
+                LocalId id{i};
+                unique_ptr_locals.push_back(id);
             }
         }
         if (unique_ptr_locals.empty()) return;

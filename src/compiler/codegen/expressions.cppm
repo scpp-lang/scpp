@@ -2150,6 +2150,20 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         std::optional<Type> else_type = arm_value_type(else_arm);
         if (!then_type.has_value() || !else_type.has_value()) return std::nullopt;
         if (types_equal(*then_type, *else_type)) return then_type;
+        // [expr.cond]/4's null-pointer case: `nullptr` converts to any
+        // pointer type (spec ch16 §16.5(1)-(2)), so exactly one arm
+        // spelled as a bare `nullptr` and the other of pointer type
+        // composite to that pointer type -- mirrors movecheck's
+        // infer_expr_type Conditional case (calls.cppm), which asks the
+        // same question for the same reason.
+        bool then_is_null = then_arm.kind == ExprKind::NullptrLiteral;
+        bool else_is_null = else_arm.kind == ExprKind::NullptrLiteral;
+        if (then_is_null != else_is_null) {
+            const Type& pointer_side_type = then_is_null ? *else_type : *then_type;
+            if (pointer_side_type.kind == TypeKind::Pointer || pointer_side_type.kind == TypeKind::FunctionPointer) {
+                return pointer_side_type;
+            }
+        }
         bool else_converts_to_then = is_named_record_type(*then_type) &&
                                      resolve_converting_constructor_by_type(then_type->name, else_arm) != nullptr;
         bool then_converts_to_else = is_named_record_type(*else_type) &&
