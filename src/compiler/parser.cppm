@@ -10080,7 +10080,7 @@ private:
         if (check(TokenKind::KwStruct) || check(TokenKind::KwClass)) return parse_local_type_definition_statement();
         if (check(TokenKind::KwUsing)) return parse_local_type_alias_statement();
         if (check(TokenKind::KwStatic)) return parse_var_decl();
-        if (looks_like_type_start()) return parse_var_decl();
+        if (looks_like_declaration_start()) return parse_var_decl();
         if (check(TokenKind::KwReturn)) return parse_return();
         if (check(TokenKind::KwIf)) return parse_if();
         if (check(TokenKind::KwWhile)) return parse_while();
@@ -10096,6 +10096,71 @@ private:
     // case possibly followed by `&`.
     [[nodiscard]] bool at_auto_declaration_start() const {
         return check(TokenKind::KwAuto) || (check(TokenKind::KwConst) && peek_at(1).kind == TokenKind::KwAuto);
+    }
+
+    // looks_like_type_start() recognizes only the *first* token a
+    // declaration and a value-constructing expression can equally start
+    // with -- `Type name = ...;` and a bare `Type{args}`/`Type(args)`
+    // temporary used directly as an expression (e.g. `if
+    // (std::string_view{p} == q)`) are indistinguishable by that one
+    // token alone. Every caller that must commit to one or the other
+    // outright (parse_statement's statement-start dispatch, and parse_if/
+    // parse_for's own init-clause, which both consumed a declaration here
+    // via parse_var_decl unconditionally whenever looks_like_type_start()
+    // held) needs this stronger check instead: it's only a declaration
+    // once an actual declarator -- an identifier, or the `(*name)`
+    // function-pointer-declarator form (starts_function_pointer_
+    // declarator) -- is confirmed to follow the whole type. Anything else
+    // there (most commonly `{` or `(`) means the type name was just used
+    // as an ordinary value, which parse_postfix already knows how to
+    // parse (its Identifier-then-`{`/`(` cases build exactly the Call
+    // node such a construction needs) -- so this must fall through to
+    // ordinary expression parsing instead of parse_var_decl, which would
+    // otherwise misread that `{`/`(` as an (absent) variable name and
+    // report "expected variable name but found '{'/'('".
+    //
+    // Resolved with a speculative, fully-backtracked lookahead -- the
+    // same technique parse_unary already uses just below to resolve
+    // sizeof/alignof's and the C-style cast's own, analogous type-vs-
+    // expression ambiguity -- rather than duplicating parse_type's own
+    // qualified-name/generic-argument/pointer-suffix lookahead here: the
+    // type is parsed for real (and discarded; the caller's own
+    // parse_var_decl call parses it again, for keeps, once this returns
+    // true), with `pos_` unconditionally restored to where it started
+    // before returning either way.
+    //
+    // Defaults to *true* ("is a declaration") whenever a speculative
+    // sub-parse below fails outright, rather than only when it
+    // successfully finds a declarator: looks_like_type_start() already
+    // committed this position to being a genuine type/`alignas`/
+    // `constexpr` token, so a later failure here (an over-deep pointer
+    // type, a malformed `alignas(...)` operand, a generic type's own
+    // argument-count mismatch, ...) is a real error in an attempted
+    // declaration, not evidence this is secretly an expression instead --
+    // defaulting to *false* on such a failure regressed
+    // test_deeply_nested_pointer_type_is_rejected by silently discarding
+    // parse_type's own "type nesting is too deep" error and falling back
+    // to parse_expr_stmt, which then failed with an unrelated, far less
+    // useful diagnostic. Letting the caller's own parse_var_decl call
+    // re-parse the same input for real reproduces and reports that exact
+    // original error instead.
+    [[nodiscard]] bool looks_like_declaration_start() {
+        if (!looks_like_type_start()) return false;
+        if (at_auto_declaration_start()) return true;
+        std::size_t saved_pos = pos_;
+        bool found_declarator = true;
+        auto alignments_result = parse_alignment_specifier_seq();
+        if (alignments_result.has_value()) {
+            match(TokenKind::KwConstexpr);
+            if (!at_auto_declaration_start()) {
+                auto type_result = parse_type();
+                if (type_result.has_value()) {
+                    found_declarator = check(TokenKind::Identifier) || starts_function_pointer_declarator();
+                }
+            }
+        }
+        pos_ = saved_pos;
+        return found_declarator;
     }
 
     // The `[const] auto[&]` prefix of a declaration, in the one place
@@ -10451,13 +10516,18 @@ private:
             // own init-statement is already handled entirely at parse
             // time (see parse_for/desugar_classic_for just above/below).
             // Disambiguated the same way parse_for's own init-clause is:
-            // a leading type-looking token (or `auto`) means this is a
-            // declaration, consumed without its own trailing `;`
-            // (require_semicolon=false) since that belongs to *this*
-            // clause, not the declaration itself -- anything else is an
-            // ordinary condition expression with no init-statement at
-            // all, exactly like before.
-            if (looks_like_type_start()) {
+            // a leading type-looking token (or `auto`) *actually
+            // followed by a declarator* (looks_like_declaration_start --
+            // see its own comment) means this is a declaration, consumed
+            // without its own trailing `;` (require_semicolon=false)
+            // since that belongs to *this* clause, not the declaration
+            // itself -- anything else is an ordinary condition
+            // expression with no init-statement at all, exactly like
+            // before -- including a leading `Type{args}`/`Type(args)`
+            // temporary (e.g. `if (std::string_view{p} == q)`), which
+            // looks_like_type_start() alone can't tell apart from a
+            // declaration's own leading type.
+            if (looks_like_declaration_start()) {
                 auto init_stmt_result = parse_var_decl(/*require_semicolon=*/false);
                 if (!init_stmt_result.has_value()) return std::unexpected(std::move(init_stmt_result).error());
                 init_stmt = std::move(init_stmt_result).value();
@@ -10597,7 +10667,14 @@ private:
         StmtPtr init_stmt{};
 
         if (!check(TokenKind::Semicolon)) {
-            if (looks_like_type_start()) {
+            // See looks_like_declaration_start's own comment (and
+            // parse_if's identical use just above): a leading type-
+            // looking token is only this init-clause's own declaration
+            // once a declarator actually follows it -- otherwise (e.g. a
+            // leading `Type{args}`/`Type(args)` temporary) it's an
+            // ordinary init-expression instead, parsed below exactly
+            // like any other.
+            if (looks_like_declaration_start()) {
                 auto init_stmt_result = parse_var_decl(/*require_semicolon=*/false);
                 if (!init_stmt_result.has_value()) return std::unexpected(std::move(init_stmt_result).error());
                 init_stmt = std::move(init_stmt_result).value();

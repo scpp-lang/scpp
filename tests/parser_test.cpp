@@ -2918,6 +2918,132 @@ void test_if_with_init_statement_and_condition_parses() {
     expect(outer.statements[1]->kind == scpp::StmtKind::If, "if_with_init_statement_and_condition_parses: statement 1 is If");
 }
 
+// A leading type-looking token immediately followed by a declarator (an
+// identifier) is still an if-with-init declaration for a *class/struct*
+// type, not only for a builtin scalar like the test just above already
+// covers -- looks_like_declaration_start's own extra lookahead must
+// still recognize this as a declaration (find an identifier after the
+// type) rather than accidentally routing it to ordinary expression
+// parsing instead.
+void test_if_with_init_statement_recognizes_a_struct_typed_declarator() {
+    scpp::Program program = expect_parse_ok(
+        "struct Point { int x; int y; };\n"
+        "int f(Point* maybe) {\n"
+        "    if (Point* p = maybe; p != nullptr) { return p->x; }\n"
+        "    return 0;\n"
+        "}\n");
+    const scpp::Function* fn = find_function_named(program, "f");
+    expect(fn != nullptr, "if_with_init_statement_recognizes_a_struct_typed_declarator: expected function 'f'");
+    const scpp::Stmt& outer = *fn->body->statements[0];
+    expect(outer.kind == scpp::StmtKind::Block,
+           "if_with_init_statement_recognizes_a_struct_typed_declarator: desugared into Block");
+    expect(outer.statements.size() == 2,
+           "if_with_init_statement_recognizes_a_struct_typed_declarator: Block has decl and if");
+    expect(outer.statements[0]->kind == scpp::StmtKind::VarDecl,
+           "if_with_init_statement_recognizes_a_struct_typed_declarator: statement 0 is VarDecl");
+    expect(outer.statements[0]->var_name == "p",
+           "if_with_init_statement_recognizes_a_struct_typed_declarator: declared name is 'p'");
+    expect(outer.statements[1]->kind == scpp::StmtKind::If,
+           "if_with_init_statement_recognizes_a_struct_typed_declarator: statement 1 is If");
+}
+
+// Regression test for the parser bug this PR fixes: an if-condition
+// beginning with a brace-initialized temporary of a type name
+// (`Type{args}`) was misread as an attempted `if (Type var = ...; cond)`
+// declaration -- parse_var_decl demanded a variable name immediately
+// after the type and found '{' instead, reporting "expected variable
+// name but found '{'" (see src/compiler/movecheck/calls.cppm's own
+// `if (std::string_view{def.name} == candidate)`, the exact shape that
+// surfaced this). looks_like_declaration_start now confirms a real
+// declarator (an identifier, or a function-pointer declarator) follows
+// the type before treating a leading type-looking token as a
+// declaration at all, so this must parse as an ordinary Binary '=='
+// condition whose left operand is a Call constructing 'Point'.
+void test_if_condition_starting_with_braced_type_construction_parses() {
+    scpp::Program program = expect_parse_ok(
+        "struct Point {\n"
+        "    int x;\n"
+        "    int y;\n"
+        "    bool operator==(const Point& other) const { return this->x == other.x; }\n"
+        "};\n"
+        "bool same_x(Point p, int a, int b) {\n"
+        "    if (Point{a, b} == p) { return true; }\n"
+        "    return false;\n"
+        "}\n");
+    const scpp::Function* fn = find_function_named(program, "same_x");
+    expect(fn != nullptr, "if_condition_starting_with_braced_type_construction_parses: expected function 'same_x'");
+    const scpp::Stmt& if_stmt = *fn->body->statements[0];
+    expect(if_stmt.kind == scpp::StmtKind::If,
+           "if_condition_starting_with_braced_type_construction_parses: statement 0 is If");
+    expect(if_stmt.condition != nullptr && if_stmt.condition->kind == scpp::ExprKind::Binary,
+           "if_condition_starting_with_braced_type_construction_parses: condition is a Binary expression");
+    expect(if_stmt.condition->binary_op == scpp::BinaryOp::Eq,
+           "if_condition_starting_with_braced_type_construction_parses: condition operator is '=='");
+    expect(if_stmt.condition->lhs != nullptr && if_stmt.condition->lhs->kind == scpp::ExprKind::Call,
+           "if_condition_starting_with_braced_type_construction_parses: condition lhs is a Call (Point{a, b})");
+    expect(if_stmt.condition->lhs->name == "Point",
+           "if_condition_starting_with_braced_type_construction_parses: constructed type is 'Point'");
+    expect(if_stmt.condition->lhs->args.size() == 2,
+           "if_condition_starting_with_braced_type_construction_parses: constructor call has 2 arguments");
+}
+
+// Same disambiguation bug, exercised through a classic for loop's own
+// init-clause (parse_for), which shares looks_like_declaration_start
+// with parse_if: a leading braced construction there must desugar to an
+// ordinary ExprStmt, not be misrouted into parse_var_decl either.
+void test_for_init_clause_starting_with_braced_type_construction_parses() {
+    scpp::Program program = expect_parse_ok(
+        "struct Point { int x; int y; };\n"
+        "int count_up(Point p) {\n"
+        "    int total = 0;\n"
+        "    for (Point{1, 2}.x; p.x < 10; p.x = p.x + 1) {\n"
+        "        total = total + p.x;\n"
+        "    }\n"
+        "    return total;\n"
+        "}\n");
+    const scpp::Function* fn = find_function_named(program, "count_up");
+    expect(fn != nullptr, "for_init_clause_starting_with_braced_type_construction_parses: expected function 'count_up'");
+    const scpp::Stmt& outer = *fn->body->statements[1];
+    expect(outer.kind == scpp::StmtKind::Block,
+           "for_init_clause_starting_with_braced_type_construction_parses: desugared into Block");
+    expect(outer.statements.size() == 2,
+           "for_init_clause_starting_with_braced_type_construction_parses: Block has init and while");
+    const scpp::Stmt& init_stmt = *outer.statements[0];
+    expect(init_stmt.kind == scpp::StmtKind::ExprStmt,
+           "for_init_clause_starting_with_braced_type_construction_parses: init is an ExprStmt, not VarDecl");
+    expect(init_stmt.expr != nullptr && init_stmt.expr->kind == scpp::ExprKind::Member,
+           "for_init_clause_starting_with_braced_type_construction_parses: init expr is '.x' member access");
+    expect(init_stmt.expr->lhs != nullptr && init_stmt.expr->lhs->kind == scpp::ExprKind::Call,
+           "for_init_clause_starting_with_braced_type_construction_parses: member base is a Call (Point{1, 2})");
+    expect(init_stmt.expr->lhs->name == "Point",
+           "for_init_clause_starting_with_braced_type_construction_parses: constructed type is 'Point'");
+    expect(outer.statements[1]->kind == scpp::StmtKind::While,
+           "for_init_clause_starting_with_braced_type_construction_parses: statement 1 is the desugared While");
+}
+
+// A statement made of *only* a braced type construction (its value
+// discarded) hits the same ambiguity at parse_statement's own
+// declaration-vs-expression dispatch -- looks_like_declaration_start is
+// shared there too, so this must parse as an ExprStmt wrapping a Call,
+// not fail with parse_var_decl's "expected variable name" error either.
+void test_statement_of_only_a_braced_type_construction_parses() {
+    scpp::Program program = expect_parse_ok(
+        "struct Point { int x; int y; };\n"
+        "void discard_point() {\n"
+        "    Point{1, 2};\n"
+        "    return;\n"
+        "}\n");
+    const scpp::Function* fn = find_function_named(program, "discard_point");
+    expect(fn != nullptr, "statement_of_only_a_braced_type_construction_parses: expected function 'discard_point'");
+    const scpp::Stmt& stmt = *fn->body->statements[0];
+    expect(stmt.kind == scpp::StmtKind::ExprStmt,
+           "statement_of_only_a_braced_type_construction_parses: statement 0 is an ExprStmt");
+    expect(stmt.expr != nullptr && stmt.expr->kind == scpp::ExprKind::Call,
+           "statement_of_only_a_braced_type_construction_parses: expr is a Call (Point{1, 2})");
+    expect(stmt.expr->name == "Point",
+           "statement_of_only_a_braced_type_construction_parses: constructed type is 'Point'");
+}
+
 void test_forward_declaration_parameter_names_must_match() {
     bool threw = false;
     if (auto _r = scpp::parse("int add(int a, int b);\nint add(int x, int y) { return x + y; }\n"); !_r.has_value()) {
@@ -7092,6 +7218,10 @@ int main() {
     test_if_consteval_parses();
     test_if_not_consteval_parses();
     test_if_with_init_statement_and_condition_parses();
+    test_if_with_init_statement_recognizes_a_struct_typed_declarator();
+    test_if_condition_starting_with_braced_type_construction_parses();
+    test_for_init_clause_starting_with_braced_type_construction_parses();
+    test_statement_of_only_a_braced_type_construction_parses();
     test_forward_declaration_parameter_names_must_match();
     test_export_module_declaration();
     test_dotted_module_name_declaration();
