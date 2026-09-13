@@ -23,7 +23,7 @@ enum class LocalState { Bottom, Initialized, MovedOut, Conflict };
 // `s.a` and `s.b` are now two keys instead of one, which is what lets
 // spec §6.2's states apply to an object "of member storage duration"
 // (§6.2(1)) at all. There is exactly one move-state map, and this is it.
-using StateMap = std::unordered_map<Place, LocalState, PlaceHash>;
+using StateMap = std::unordered_map<Place, LocalState>;
 using RootSet = std::vector<LocalId>;
 
 struct BorrowState {
@@ -113,8 +113,8 @@ using ParameterLifetimeMap = std::unordered_map<std::string, LifetimeAnnotation>
 // local_decls -- Body::is_valid_local rejects it -- so any attempt to ask
 // for its type or its declaration fails loudly instead of aliasing a real
 // local. format_roots spells it out for diagnostics.
-inline constexpr LocalId kProgramLifetimeRoot = static_cast<LocalId>(static_cast<std::size_t>(-1));
-inline constexpr std::string_view kProgramLifetimeRootName = "<program-lifetime>";
+constexpr LocalId kProgramLifetimeRoot = static_cast<LocalId>(static_cast<std::size_t>(-1));
+constexpr std::string_view kProgramLifetimeRootName = "<program-lifetime>";
 
 // One by-reference capture's hold on the enclosing frame, kept so it can
 // be released when the closure variable dies
@@ -221,7 +221,9 @@ void forget_place_tree(StateMap& state, const Place& place);
 
 bool DataflowState::operator==(const DataflowState& other) const {
     if (parameter_lifetimes.size() != other.parameter_lifetimes.size()) return false;
-    for (const auto& [name, lifetime] : parameter_lifetimes) {
+    for (const auto& entry : parameter_lifetimes) {
+        const auto& name = entry.first;
+        const auto& lifetime = entry.second;
         auto it = other.parameter_lifetimes.find(name);
         if (it == other.parameter_lifetimes.end()) return false;
         if (lifetime.name != it->second.name) return false;
@@ -259,11 +261,15 @@ LocalState join(LocalState a, LocalState b) {
 // destroying.
 StateMap join_maps(const StateMap& a, const StateMap& b) {
     StateMap result = a;
-    for (const auto& [place, state] : b) {
+    for (const auto& entry : b) {
+        const auto& place = entry.first;
+        const auto& state = entry.second;
         auto it = result.find(place);
         result[place] = it == result.end() ? join(lookup(a, place), state) : join(it->second, state);
     }
-    for (const auto& [place, state] : a) {
+    for (const auto& entry : a) {
+        const auto& place = entry.first;
+        const auto& state = entry.second;
         if (b.contains(place)) continue;
         result[place] = join(state, lookup(b, place));
     }
@@ -279,7 +285,7 @@ StateMap join_maps(const StateMap& a, const StateMap& b) {
 // it can't still be "half alive" at a join point coming from only one
 // predecessor -- see the BorrowState/ScopeExit comments below.
 BorrowState join_borrow(const BorrowState& a, const BorrowState& b) {
-    BorrowState result;
+    BorrowState result{};
     result.mutable_borrow = a.mutable_borrow || b.mutable_borrow;
     result.shared_count = std::max(a.shared_count, b.shared_count);
     return result;
@@ -287,7 +293,9 @@ BorrowState join_borrow(const BorrowState& a, const BorrowState& b) {
 
 BorrowMap join_borrow_maps(const BorrowMap& a, const BorrowMap& b) {
     BorrowMap result = a;
-    for (const auto& [place, borrow] : b) {
+    for (const auto& entry : b) {
+        const auto& place = entry.first;
+        const auto& borrow = entry.second;
         auto it = result.find(place);
         result[place] = it == result.end() ? borrow : join_borrow(it->second, borrow);
     }
@@ -301,7 +309,9 @@ BorrowMap join_borrow_maps(const BorrowMap& a, const BorrowMap& b) {
 // iteration computes along the way.
 RefTargetMap join_ref_targets(const RefTargetMap& a, const RefTargetMap& b) {
     RefTargetMap result = a;
-    for (const auto& [ref_name, target] : b) {
+    for (const auto& entry : b) {
+        const auto& ref_name = entry.first;
+        const auto& target = entry.second;
         result.insert_or_assign(ref_name, target);
     }
     return result;
@@ -309,7 +319,9 @@ RefTargetMap join_ref_targets(const RefTargetMap& a, const RefTargetMap& b) {
 
 LocalLifetimeSourceMap join_local_lifetime_sources(const LocalLifetimeSourceMap& a, const LocalLifetimeSourceMap& b) {
     LocalLifetimeSourceMap result = a;
-    for (const auto& [name, roots] : b) {
+    for (const auto& entry : b) {
+        const auto& name = entry.first;
+        const auto& roots = entry.second;
         result.insert_or_assign(name, roots);
     }
     return result;
@@ -317,7 +329,9 @@ LocalLifetimeSourceMap join_local_lifetime_sources(const LocalLifetimeSourceMap&
 
 ReborrowSuspensionMap join_suspended_reborrows(const ReborrowSuspensionMap& a, const ReborrowSuspensionMap& b) {
     ReborrowSuspensionMap result = a;
-    for (const auto& [name, suspension] : b) {
+    for (const auto& entry : b) {
+        const auto& name = entry.first;
+        const auto& suspension = entry.second;
         auto it = result.find(name);
         if (it == result.end()) {
             result[name] = suspension;
@@ -331,7 +345,9 @@ ReborrowSuspensionMap join_suspended_reborrows(const ReborrowSuspensionMap& a, c
 
 ClosureCaptureBorrowMap join_closure_capture_borrows(const ClosureCaptureBorrowMap& a, const ClosureCaptureBorrowMap& b) {
     ClosureCaptureBorrowMap result = a;
-    for (const auto& [name, borrows] : b) {
+    for (const auto& entry : b) {
+        const auto& name = entry.first;
+        const auto& borrows = entry.second;
         result.insert_or_assign(name, borrows);
     }
     return result;
@@ -383,7 +399,7 @@ DataflowState join_states(const DataflowState& a, const DataflowState& b) {
         // statement runs next anyway. Keeping `a`'s is just the same
         // "no real join needed" shape as every other field above, not a
         // deliberate choice between the two.
-        a.current_loc,
+        a.current_loc
     };
 }
 
@@ -430,7 +446,7 @@ RootSet union_roots(RootSet lhs, const RootSet& rhs) {
 
 [[nodiscard]] std::string format_roots(const Body& body, const RootSet& roots) {
     if (roots.empty()) return "<unknown>";
-    std::string joined;
+    std::string joined{};
     for (std::size_t i = 0; i < roots.size(); i++) {
         if (i != 0) joined += ", ";
         joined += format_root(body, roots[i]);
@@ -472,8 +488,10 @@ RootSet union_roots(RootSet lhs, const RootSet& rhs) {
 }
 
 [[nodiscard]] std::optional<Place> find_moved_subobject(const StateMap& state, const Place& place) {
-    std::optional<Place> found;
-    for (const auto& [key, value] : state) {
+    std::optional<Place> found{};
+    for (const auto& entry : state) {
+        const auto& key = entry.first;
+        const auto& value = entry.second;
         if (value == LocalState::Initialized || value == LocalState::Bottom) continue;
         if (!key.is_strictly_under(place)) continue;
         // Deterministic across runs: an unordered_map's iteration order
