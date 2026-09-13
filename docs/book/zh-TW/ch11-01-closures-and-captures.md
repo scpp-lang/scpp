@@ -152,9 +152,9 @@ int main() {
 - 把閉包傳給另一個函式時，通常走的是一個由 concept 約束的普通泛型參數；
 - 在方法內部，`this` 必須顯式捕獲。
 
-這已經足夠寫出今天 scpp 裡的普通 callback 風格程式碼了。下一節可以繼續留在這個主題
-裡，再加入泛型 lambda。
+這已經足夠寫出今天 scpp 裡的普通 callback 風格程式碼了。下一節會繼續留在「可呼叫程
+式碼」這個主題裡，但會轉去講具名函式與函式指標。
 
 ---
 
-[← 上一章：用生命週期驗證參照](ch10-03-validating-references-with-lifetimes.md) · [目錄](README.md)
+[← 上一章：用生命週期驗證參照](ch10-03-validating-references-with-lifetimes.md) · [目錄](README.md) · [下一章：函式指標 →](ch11-02-function-pointers.md)
