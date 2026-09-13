@@ -24,7 +24,7 @@ namespace scpp {
 // reallocate out from under a held reference -- see this file's other
 // generic-type methods' identical concern).
 [[nodiscard]] Function clone_function(const Function& fn) {
-    Function clone;
+    Function clone{};
     clone.return_type = fn.return_type;
     clone.return_lifetime = fn.return_lifetime;
     clone.name = fn.name;
@@ -279,14 +279,14 @@ namespace scpp {
     if (type.kind != TypeKind::Named) return false;
     for (const ConceptRequirement& req : concept_def.requirements) {
         if (req.is_construct) {
-            Type target_type;
+            Type target_type{};
             if (req.construct_type_name == concept_def.template_param_name) {
                 target_type = type;
             } else {
                 target_type.kind = TypeKind::Named;
                 target_type.name = req.construct_type_name;
             }
-            std::vector<Type> substituted_args;
+            std::vector<Type> substituted_args{};
             substituted_args.reserve(req.arg_types.size());
             for (const Type& arg_type : req.arg_types) {
                 substituted_args.push_back(
