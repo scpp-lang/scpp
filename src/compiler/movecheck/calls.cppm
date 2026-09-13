@@ -82,7 +82,7 @@ struct CalleeSignature {
     auto matches_name = [&](std::string_view alias_name) {
         if (alias_name == call_expr.name) return true;
         if (!call_expr.explicit_global_qualification && !body.function_namespace_path.empty()) {
-            std::string qualified;
+            std::string qualified{};
             for (std::size_t i = 0; i < body.function_namespace_path.size(); i++) {
                 if (i != 0) qualified += "::";
                 qualified += body.function_namespace_path[i];
@@ -159,10 +159,16 @@ struct NodiscardInfo {
 [[nodiscard]] bool is_freely_copyable_class_value_source(const Expr& expr, const Type& target_type, const Body& body,
                                                          const Signatures& signatures);
 [[nodiscard]] bool is_implicit_move_return_source(const Expr& expr, const Type& target_type, const Body& body);
-[[nodiscard]] std::vector<ArgumentConversion> constructor_argument_conversions(const FunctionSignature& candidate,
-                                                                               const std::vector<ExprPtr>& ctor_args,
-                                                                               const Body& body,
-                                                                               const Signatures& signatures);
+// Defined in signatures.cppm (this module's own partition ordered
+// earliest among the ones every other partition already depends on) --
+// module-extern per SCPP spec ch11 §11.6, exactly like the other
+// forward declarations of another partition's function just below,
+// since a bare, bodyless declaration is otherwise only legal when
+// followed by a matching definition in the *same* translation unit.
+[[nodiscard]] extern std::vector<ArgumentConversion> constructor_argument_conversions(const FunctionSignature& candidate,
+                                                                                      const std::vector<ExprPtr>& ctor_args,
+                                                                                      const Body& body,
+                                                                                      const Signatures& signatures);
 [[nodiscard]] const FunctionSignature* find_single_argument_converting_constructor_signature(
             const Type& class_type, const Expr& arg, const Body& body, const Signatures& signatures);
 class ConditionalComposite {
@@ -274,7 +280,9 @@ struct SelectedOperator {
 [[nodiscard]] std::expected<void, DataflowError> validate_sizeof_operand(const Expr& expr, const Body& body, const Signatures& signatures,
                                     const SourceLocation& loc);
 [[nodiscard]] std::expected<void, DataflowError> validate_alignof_operand(const Expr& expr, const Body& body, const SourceLocation& loc);
-[[nodiscard]] std::optional<LocalId> direct_write_root(const Expr& expr, const Body& body);
+// Defined in borrows.cppm -- module-extern per SCPP spec ch11 §11.6 (see
+// constructor_argument_conversions' own comment above).
+[[nodiscard]] extern std::optional<LocalId> direct_write_root(const Expr& expr, const Body& body);
 [[nodiscard]] bool produces_rvalue_of_type(const Expr& expr, const Type& expected_type, const Body& body,
                                            const Signatures& signatures);
 // [basic.lval]: does this expression designate an existing object?
@@ -310,7 +318,7 @@ std::expected<void, DataflowError> check_enum_conversion_compatibility(const Typ
 }
 
 [[nodiscard]] FunctionSignature function_pointer_signature(const Type& type) {
-    FunctionSignature sig;
+    FunctionSignature sig{};
     sig.param_types = type.function_params;
     sig.param_names.resize(sig.param_types.size());
     sig.param_default_exprs.assign(sig.param_types.size(), nullptr);
@@ -331,7 +339,15 @@ std::expected<void, DataflowError> check_enum_conversion_compatibility(const Typ
     if (!is_vector_like_named_type(type)) return std::nullopt;
     if (type.template_args.size() == 1) return type.template_args[0];
     if (body.program == nullptr) return std::nullopt;
-    if (const ClassDef* def = find_class_def(*body.program, type.name)) {
+    // Rewritten from a bare `if (const ClassDef* def = ...)` declaration-
+    // as-condition (real C++'s [stmt.if]/1 second form): a raw pointer,
+    // unlike a class type with its own `operator bool()`
+    // (check_user_defined_conversion), has no contextual-bool conversion
+    // in this version (ch06 §6/spec ch16 §16.3(4)), so the null check
+    // must be spelled out explicitly, using the if-with-init form
+    // (parse_if's C++17 `if (init; cond)`) to keep `def` scoped to the
+    // branch that uses it.
+    if (const ClassDef* def = find_class_def(*body.program, type.name); def != nullptr) {
         for (const ClassField& field : def->fields) {
             if (field.name == "data_" && field.type.kind == TypeKind::Pointer && field.type.pointee) {
                 return *field.type.pointee;
@@ -339,7 +355,7 @@ std::expected<void, DataflowError> check_enum_conversion_compatibility(const Typ
         }
         return std::nullopt;
     }
-    if (const StructDef* def = find_struct_def(*body.program, type.name)) {
+    if (const StructDef* def = find_struct_def(*body.program, type.name); def != nullptr) {
         for (const StructField& field : def->fields) {
             if (field.name == "data_" && field.type.kind == TypeKind::Pointer && field.type.pointee) {
                 return *field.type.pointee;
@@ -374,10 +390,15 @@ std::expected<void, DataflowError> check_enum_conversion_compatibility(const Typ
 // identically.
 [[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
 
-void check_constructor_arguments(const std::string& class_name, const std::vector<ExprPtr>& ctor_args,
-                                  DataflowState& state, const Body& body, const Signatures& signatures,
-                                  bool report_errors);
-[[maybe_unused]] void maybe_instantiate_generic_constructor_overloads(const std::string& class_name,
+// Unused forward declaration removed: no call in this file matches its
+// `(const std::string&, ...) -> void` shape -- dataflow.cppm's own
+// check_constructor_arguments (what the comment two definitions below
+// actually cross-references) takes a `const Type&` and returns
+// `std::expected<void, DataflowError>` instead, a genuinely different
+// signature, not merely a module-extern declaration of the same one.
+// Defined in monomorphize.cppm -- module-extern per SCPP spec ch11
+// §11.6 (see constructor_argument_conversions' own comment above).
+[[maybe_unused]] extern void maybe_instantiate_generic_constructor_overloads(const std::string& class_name,
                                                                        const std::vector<ExprPtr>& args, Body& body,
                                                                        SourceLocation loc);
 [[nodiscard]] CalleeSignature resolve_callee_signature(const Expr& call_expr, const Body& body,
@@ -453,7 +474,7 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
         }
     }
     if (call_expr.lhs) {
-        std::string class_name;
+        std::string class_name{};
         if (call_expr.lhs->kind == ExprKind::Identifier) {
             const Type* receiver = body.type_if_local(*call_expr.lhs);
             if (receiver != nullptr) class_name = named_type_name(*receiver);
@@ -515,14 +536,19 @@ void check_constructor_arguments(const std::string& class_name, const std::vecto
 [[nodiscard]] const FunctionSignature* resolve_overload(const Expr& call_expr, const CalleeSignature& callee,
                                                           const Body& body, const Signatures& signatures,
                                                           std::vector<const FunctionSignature*>* out_ambiguous);
-[[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
+// is_read_only_reachable: defined in borrows.cppm -- module-extern per
+// SCPP spec ch11 §11.6 (see constructor_argument_conversions' own
+// comment above).
+[[nodiscard]] extern bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] bool produces_rvalue_of_type(const Expr& expr, const Type& expected_type, const Body& body,
                                             const Signatures& signatures);
 // spec §6.5: forward-declared since apply_expr's own Binary/Assign case
 // (defined well before is_bare_same_type_copy_source's own definition,
 // near is_move_construction_shape) needs it for the Member-target copy-
-// assignment eligibility check.
-[[nodiscard]] bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type, const Body& body,
+// assignment eligibility check. Defined in dataflow.cppm -- module-extern
+// per SCPP spec ch11 §11.6 (see constructor_argument_conversions' own
+// comment above).
+[[nodiscard]] extern bool is_bare_same_type_copy_source(const Expr& expr, const Type& target_type, const Body& body,
                                                  const Signatures& signatures);
 [[nodiscard]] bool is_reference_wrapper_constructor_call(const Expr& expr) {
     return expr.kind == ExprKind::Call && expr.lhs == nullptr && expr.args.size() == 1 &&
@@ -695,7 +721,18 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     if (type.kind != TypeKind::Named || body.program == nullptr) return nullptr;
     for (const ClassDef& def : body.program->classes) {
         if (def.name == type.name && def.is_nodiscard) {
-            static thread_local NodiscardInfo info;
+            // `thread_local` (unlike `static` alone) isn't a storage
+            // duration this version's parser/lexer recognizes at all, so
+            // `static thread_local` is rewritten to a plain `static`
+            // local -- safe here since the compiler that runs this scpp
+            // source itself never calls into movecheck from more than
+            // one thread at once (ch05/ch11 self-hosting is about the
+            // *language* scpp itself supports for its own users'
+            // programs -- e.g. codegen/statements.cppm's std::thread
+            // construction support -- not a claim that this compiler's
+            // own single-pass, single-threaded implementation needs TLS
+            // for its own internal statics).
+            static NodiscardInfo info;
             info.subject = "type '" + def.name + "'";
             info.reason = def.nodiscard_reason;
             return &info;
@@ -703,7 +740,7 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     }
     for (const StructDef& def : body.program->structs) {
         if (def.name == type.name && def.is_nodiscard) {
-            static thread_local NodiscardInfo info;
+            static NodiscardInfo info;
             info.subject = "type '" + def.name + "'";
             info.reason = def.nodiscard_reason;
             return &info;
@@ -716,9 +753,12 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
                                                                      const Signatures& signatures) {
     if (expr.kind != ExprKind::Call) return nullptr;
     CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
-    if (const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures)) {
+    // See infer_vector_element_type's own comment on the identical
+    // rewrite: a raw `const FunctionSignature*` has no contextual-bool
+    // conversion, so the null check is now explicit.
+    if (const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures); sig != nullptr) {
         if (sig->is_nodiscard) {
-            static thread_local NodiscardInfo info;
+            static NodiscardInfo info;
             info.subject = "function '" + (callee.key.empty() ? expr.name : callee.key) + "'";
             info.reason = sig->nodiscard_reason;
             return &info;
@@ -918,7 +958,7 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
         // as the converting-constructor route above, so [over.best.ics]/4
         // keeps holding -- neither may chain onto the other.
         if (allow_user_defined_conversion) {
-            std::string key;
+            std::string key{};
             const FunctionSignature* conversion =
                 find_conversion_function_signature(arg_type, param_type, body, signatures, key);
             if (conversion != nullptr && !conversion->is_explicit) return true;
@@ -1044,7 +1084,7 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
         if (is_reference(adjusted) && adjusted.pointee != nullptr) return *adjusted.pointee;
         return adjusted;
     };
-    ConditionalComposite composite;
+    ConditionalComposite composite{};
     Type then_value = arm_value_type(raw_then_type);
     Type else_value = arm_value_type(raw_else_type);
     if (types_equal(then_value, else_value)) return composite;
@@ -1076,7 +1116,7 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
         return type;
     };
     if (class_type.kind != TypeKind::Named) return nullptr;
-    std::vector<const FunctionSignature*> matches;
+    std::vector<const FunctionSignature*> matches{};
     for (const FunctionSignature* candidate : constructor_overloads_of(class_type.name, signatures)) {
         if (!compile_time_dependency_visible_in_body(*candidate, body)) continue;
         if (candidate->param_types.size() != 2) continue;
@@ -1100,9 +1140,9 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     // is not even a stable order -- so movecheck could decide a
     // conversion existed via one constructor while codegen, ranking,
     // found the pair ambiguous and emitted nothing.
-    std::vector<ExprPtr> single_arg;
+    std::vector<ExprPtr> single_arg{};
     single_arg.push_back(deep_clone_expr(arg));
-    std::vector<std::vector<ArgumentConversion>> conversions;
+    std::vector<std::vector<ArgumentConversion>> conversions{};
     for (const FunctionSignature* candidate : matches) {
         conversions.push_back(constructor_argument_conversions(*candidate, single_arg, body, signatures));
     }
@@ -1166,7 +1206,7 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
         if (sig.is_generic_template) result += " [generic]";
         return result;
     };
-    std::string candidate_list;
+    std::string candidate_list{};
     for (const FunctionSignature& sig : candidates) {
         candidate_list += "\n  candidate: " + describe_signature(sig);
     }
@@ -1179,7 +1219,7 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     // these argument types", which is factually the opposite of what
     // happened: they all matched.
     {
-        std::vector<const FunctionSignature*> tied;
+        std::vector<const FunctionSignature*> tied{};
         if (resolve_overload(call_expr, callee, body, signatures, &tied) == nullptr && tied.size() > 1) {
             std::string result = "ambiguous call to '" + display_name + "': " + std::to_string(tied.size()) +
                                  " overloads match these argument types equally well and none is better than the others ([over.match.best])";
@@ -1188,7 +1228,7 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
         }
     }
 
-    std::vector<const FunctionSignature*> right_arity;
+    std::vector<const FunctionSignature*> right_arity{};
     for (const FunctionSignature& sig : candidates) {
         if (signature_accepts_argument_count(sig, call_expr.args.size(), callee.param_offset)) right_arity.push_back(&sig);
     }
@@ -1265,7 +1305,7 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
         conversion.reference_is_mutable = type.is_mutable_ref && !type.is_rvalue_ref;
         conversion.reference_is_rvalue = type.is_rvalue_ref;
     };
-    std::vector<ArgumentConversion> result;
+    std::vector<ArgumentConversion> result{};
     if (callee.param_offset == 1 && call_expr.lhs != nullptr && !candidate.param_types.empty()) {
         ArgumentConversion receiver_conversion{};
         receiver_conversion.rank = ConversionRank::Identity;
@@ -1368,7 +1408,7 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
         return &only;
     }
 
-    std::vector<const FunctionSignature*> matches;
+    std::vector<const FunctionSignature*> matches{};
     for (const FunctionSignature& candidate : it->second) {
         if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
         if (!signature_accepts_argument_count(candidate, call_expr.args.size(), callee.param_offset)) continue;
@@ -1420,7 +1460,7 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     // resolve_overload_by_type so the two passes select the same
     // function for `std::move(x).error()`.
     if (callee.param_offset == 1 && call_expr.lhs != nullptr) {
-        std::vector<const FunctionSignature*> ref_qualified;
+        std::vector<const FunctionSignature*> ref_qualified{};
         for (const FunctionSignature* candidate : matches) {
             if (candidate->receiver_ref_qualifier == ReceiverRefQualifier::None) continue;
             if (candidate->param_types.empty() || candidate->param_types[0].pointee == nullptr) continue;
@@ -1449,7 +1489,7 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     // A genuinely ambiguous call has no selection to make: codegen
     // rejects the program with the ambiguity message, so there is no
     // emitted code for the checks below to have missed.
-    std::vector<std::vector<ArgumentConversion>> conversions;
+    std::vector<std::vector<ArgumentConversion>> conversions{};
     for (const FunctionSignature* candidate : matches) {
         conversions.push_back(argument_conversions_for(call_expr, *candidate, callee, body, signatures));
     }
@@ -1484,7 +1524,7 @@ void collect_operator_lookup_keys(const std::string& method_name, const std::opt
                                   std::vector<std::string>& keys) {
     keys.push_back(method_name);
     if (!body.function_namespace_path.empty()) {
-        std::string qualified;
+        std::string qualified{};
         for (std::size_t i = 0; i < body.function_namespace_path.size(); i++) {
             qualified += body.function_namespace_path[i];
             qualified += "::";
@@ -1551,7 +1591,7 @@ void collect_operator_lookup_keys(const std::string& method_name, const std::opt
         }
     }
     // The non-member candidates ([over.match.oper]/2.2).
-    std::vector<std::string> keys;
+    std::vector<std::string> keys{};
     collect_operator_lookup_keys(method_name, lhs_type, rhs_type, body, keys);
     for (const std::string& key : keys) {
         if (!signatures.contains(key)) continue;
@@ -1639,7 +1679,7 @@ void collect_operator_lookup_keys(const std::string& method_name, const std::opt
                                                                const Type& destination, bool allow_explicit,
                                                                const Body& body, const Signatures& signatures) {
     SelectedOperator selected{};
-    std::string key;
+    std::string key{};
     const FunctionSignature* candidate =
         find_conversion_function_signature(operand_type, destination, body, signatures, key);
     if (candidate == nullptr) return selected;
@@ -1658,7 +1698,7 @@ void collect_operator_lookup_keys(const std::string& method_name, const std::opt
 [[nodiscard]] bool has_explicit_only_conversion_function(const std::optional<Type>& operand_type,
                                                          const Type& destination, const Body& body,
                                                          const Signatures& signatures) {
-    std::string key;
+    std::string key{};
     const FunctionSignature* candidate =
         find_conversion_function_signature(operand_type, destination, body, signatures, key);
     return candidate != nullptr && candidate->is_explicit;
@@ -1717,7 +1757,7 @@ void collect_operator_lookup_keys(const std::string& method_name, const std::opt
 }
 
 [[nodiscard]] Type function_pointer_type_from_signature(const FunctionSignature& sig) {
-    Type type;
+    Type type{};
     type.kind = TypeKind::FunctionPointer;
     type.function_return = std::make_shared<Type>(sig.return_type);
     type.function_params = sig.param_types;
@@ -1745,7 +1785,14 @@ void collect_operator_lookup_keys(const std::string& method_name, const std::opt
         return it == signatures.end() ? nullptr : &it->second;
     };
     auto lookup_name = [&](std::string_view name) -> const std::vector<FunctionSignature>* {
-        if (const auto* direct = signature_set_for_name(name)) return direct;
+        // Same explicit-null-check rewrite as infer_vector_element_type's
+        // own comment explains -- a raw pointer needs it spelled out.
+        // Spelled `const auto` (no explicit `*`): `auto` already deduces
+        // signature_set_for_name's own `const std::vector<FunctionSignature>*`
+        // return type in full, pointer and all -- parse_auto_declared_type
+        // rejects a written `auto*` outright ("a plain 'auto' already
+        // deduces a pointer type from a pointer initializer").
+        if (const auto direct = signature_set_for_name(name); direct != nullptr) return direct;
         std::size_t pos = name.rfind("::");
         return pos == std::string_view::npos ? nullptr : signature_set_for_name(name.substr(pos + 2));
     };
@@ -1772,7 +1819,7 @@ void collect_operator_lookup_keys(const std::string& method_name, const std::opt
     if (visible_global != nullptr) {
         return std::nullopt;
     }
-    const auto* candidates = lookup_name(source->name);
+    const auto candidates = lookup_name(source->name);
     if (candidates == nullptr) return std::nullopt;
     for (const FunctionSignature& sig : *candidates) {
         if (!compile_time_dependency_visible_in_body(sig, body)) continue;
@@ -1806,8 +1853,8 @@ void collect_operator_lookup_keys(const std::string& method_name, const std::opt
             bool same_source = !body.function_source_path.empty() && body.function_source_path == fn.loc.source_path_text();
             if (!fn.is_exported && !same_module && !same_source) continue;
             saw_visible_generic_template = true;
-            std::unordered_map<std::string, Type> type_bindings;
-            std::unordered_map<std::string, std::vector<Type>> pack_bindings;
+            std::unordered_map<std::string, Type> type_bindings{};
+            std::unordered_map<std::string, std::vector<Type>> pack_bindings{};
             std::size_t explicit_index = 0;
             bool ok = true;
             for (const GenericTypeParam& tp : fn.template_params) {
@@ -1838,7 +1885,7 @@ void collect_operator_lookup_keys(const std::string& method_name, const std::opt
                 type_bindings[tp.name] = arg.type;
             }
             if (!ok || explicit_index != source->explicit_template_args.size()) continue;
-            Type candidate;
+            Type candidate{};
             candidate.kind = TypeKind::FunctionPointer;
             candidate.function_return = std::make_shared<Type>(substitute_type(substitute_type, fn.return_type, type_bindings));
             candidate.is_unsafe_function_pointer = fn.is_unsafe || fn.is_extern_c;
@@ -2102,12 +2149,14 @@ std::expected<void, DataflowError> check_scalar_conversion(const Type& target_ty
     const Type* named = &*base;
     if (named->kind == TypeKind::Reference && named->pointee != nullptr) named = named->pointee.get();
     if (named->kind != TypeKind::Named) return std::nullopt;
-    if (const ClassDef* def = find_class_def(*body.program, named->name)) {
+    // Same explicit-null-check rewrite as infer_vector_element_type's own
+    // comment explains.
+    if (const ClassDef* def = find_class_def(*body.program, named->name); def != nullptr) {
         for (const ClassField& field : def->fields) {
             if (field.name == member.name) return field.loc;
         }
     }
-    if (const StructDef* def = find_struct_def(*body.program, named->name)) {
+    if (const StructDef* def = find_struct_def(*body.program, named->name); def != nullptr) {
         for (const StructField& field : def->fields) {
             if (field.name == member.name) return field.loc;
         }
@@ -2369,7 +2418,7 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
 // movecheck's name resolution for it. See that function for the rule and
 // for what the two copies disagreed about.
 [[nodiscard]] bool place_is_read_only(const Expr& expr, const Body& body, const Signatures& signatures) {
-    ReadOnlyPlaceQuery query;
+    ReadOnlyPlaceQuery query{};
     query.declared_variable =
         [&](const Expr& name_expr) -> std::optional<std::pair<bool, Type>> {
         if (std::optional<LocalId> local = body.local_of(name_expr); local.has_value()) {
@@ -2879,18 +2928,22 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             if (const GlobalVar* global = find_visible_global_for_expr(expr, body); global != nullptr && global->decl != nullptr) {
                 return global->decl->type;
             }
+            // Same explicit-null-check rewrite as infer_vector_element_
+            // type's own comment explains, applied to this IIFE lambda's
+            // own returned raw pointer.
             if (const EnumDef* def = [&]() {
                     const EnumDef* enum_def = nullptr;
                     [[maybe_unused]] const EnumVariant* variant = find_enum_variant(body.program, expr.name, &enum_def);
                     return enum_def;
-                }()) {
+                }();
+                def != nullptr) {
                 return named_type(def->name);
             }
             auto sig_it = signatures.find(expr.name);
             if (sig_it != signatures.end() && sig_it->second.size() == 1) {
                 const FunctionSignature& sig = sig_it->second[0];
                 if (!compile_time_dependency_visible_in_body(sig, body)) return std::nullopt;
-                Type result;
+                Type result{};
                 result.kind = TypeKind::FunctionPointer;
                 result.function_return = std::make_shared<Type>(sig.return_type);
                 result.function_params = sig.param_types;
@@ -2919,7 +2972,7 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             return infer_expr_lvalue_type(*expr.lhs, body, signatures);
 
         case ExprKind::New: {
-            Type result;
+            Type result{};
             result.kind = TypeKind::Pointer;
             result.pointee = std::make_shared<Type>(expr.type);
             result.is_mutable_pointee = true;
@@ -2983,7 +3036,7 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
                         // conditional needed a `bool` condition when the
                         // `!` already produced one.
                         if (expr.unary_op == UnaryOp::Not) {
-                            std::string key;
+                            std::string key{};
                             if (find_conversion_function_signature(operand, named_type("bool"), body, signatures,
                                                                    key) != nullptr) {
                                 return named_type("bool");
@@ -3000,7 +3053,7 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
                         auto it = signatures.find(expr.lhs->name);
                         if (it != signatures.end() && it->second.size() == 1) {
                             const FunctionSignature& sig = it->second[0];
-                            Type result;
+                            Type result{};
                             result.kind = TypeKind::FunctionPointer;
                             result.function_return = std::make_shared<Type>(sig.return_type);
                             result.function_params = sig.param_types;
@@ -3158,8 +3211,17 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
                                                  !is_untyped_numeric_literal(*expr.rhs);
                     if (additive) {
                         if (binary_lhs_type.has_value() && binary_rhs_type.has_value()) {
+                            // Rewritten from a bare `if (std::optional<Type>
+                            // result = ...)` declaration-as-condition (see
+                            // infer_vector_element_type's own comment on the
+                            // identical, parser-level reason): this
+                            // version's `if`/`for` grammar only has the
+                            // C++17 `if (init; cond)` form, never a bare
+                            // declaration alone as its own condition, so the
+                            // `.has_value()` check is spelled out explicitly.
                             if (std::optional<Type> result = pointer_arithmetic_result_type(
-                                    expr.binary_op, *binary_lhs_type, *binary_rhs_type)) {
+                                    expr.binary_op, *binary_lhs_type, *binary_rhs_type);
+                                result.has_value()) {
                                 return result;
                             }
                         }
@@ -3330,7 +3392,7 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             if (is_reference_wrapper_constructor_call(expr)) {
                 std::optional<Type> arg_type = infer_expr_type(*expr.args[0], body, signatures);
                 if (arg_type.has_value() && arg_type->kind == TypeKind::Reference && arg_type->pointee != nullptr) {
-                    Type wrapped;
+                    Type wrapped{};
                     wrapped.kind = TypeKind::Named;
                     wrapped.name = expr.name.starts_with("std::") ? "std::reference_wrapper" : "reference_wrapper";
                     Type referent = *arg_type->pointee;
@@ -3343,7 +3405,7 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             if (is_optional_constructor_call(expr)) {
                 std::optional<Type> arg_type = infer_expr_type(*expr.args[0], body, signatures);
                 if (arg_type.has_value() && arg_type->is_reference_wrapper_lifetime_source) {
-                    Type opt;
+                    Type opt{};
                     opt.kind = TypeKind::Named;
                     opt.name = expr.name.starts_with("std::") ? "std::optional" : "optional";
                     opt.template_args.push_back(*arg_type);
@@ -3430,13 +3492,15 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
                 functions_type.template_args.push_back(named_type("Function"));
                 return functions_type;
             }
-            if (const ClassDef* def = find_class_def(*body.program, base_named.name)) {
+            // Same explicit-null-check rewrite as infer_vector_element_
+            // type's own comment explains.
+            if (const ClassDef* def = find_class_def(*body.program, base_named.name); def != nullptr) {
                 for (const ClassField& field : def->fields) {
                     if (field.name == expr.name) return member_access_type(field.type, base_is_const);
                 }
                 return {};
             }
-            if (const StructDef* def = find_struct_def(*body.program, base_named.name)) {
+            if (const StructDef* def = find_struct_def(*body.program, base_named.name); def != nullptr) {
                 for (const StructField& field : def->fields) {
                     if (field.name == expr.name) return member_access_type(field.type, base_is_const);
                 }
@@ -3475,7 +3539,7 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
 
 std::expected<void, DataflowError> validate_sizeof_operand(const Expr& expr, const Body& body, const Signatures& signatures,
                              const SourceLocation& loc) {
-    Type queried_type;
+    Type queried_type{};
     if (expr.sizeof_operand_is_type) {
         queried_type = expr.type;
     } else {
