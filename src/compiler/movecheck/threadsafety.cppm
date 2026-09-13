@@ -242,7 +242,7 @@ void collect_interfaces_for_thread_safety(const Program& program, const std::str
                     return evaluate_thread_bool_constant_expr_for_program(*c.thread_movable_if_shareable_expr, program,
                                                                           visiting);
                 }
-                std::unordered_set<std::string> interfaces;
+                std::unordered_set<std::string> interfaces{};
                 collect_interfaces_for_thread_safety(program, c.name, interfaces);
                 for (const std::string& interface_name : interfaces) {
                     const ClassDef* iface = find_class_def(program, interface_name);
