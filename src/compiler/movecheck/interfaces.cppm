@@ -36,7 +36,7 @@ namespace scpp {
 class ClassSemanticsValidator {
 public:
     ClassSemanticsValidator(const Program& program, const Signatures& signatures)
-        : program_(program), signatures_(signatures) {
+        : program_{program}, signatures_{signatures} {
         class_defs_.reserve(program_.classes.size());
         for (const ClassDef& def : program_.classes) {
             class_defs_[def.name] = &def;
@@ -345,7 +345,7 @@ private:
             return std::unexpected(DataflowError("interface '" + def.name + "' declares a non-static data member (spec §11.2(1))"));
         }
         if (def.is_interface) {
-            std::unordered_set<std::string> visiting;
+            std::unordered_set<std::string> visiting{};
             if (auto _r = validate_interface_bases(def, visiting); !_r.has_value()) return std::unexpected(std::move(_r).error());
         }
         if (auto _r = validate_explicit_virtual_destructor(def); !_r.has_value()) return std::unexpected(std::move(_r).error());
@@ -453,28 +453,32 @@ private:
         }
         const ClassDef* def = class_defs_.at(class_name);
 
-        std::unordered_map<std::string, std::vector<Provider>> base_visible_candidates;
-        std::unordered_map<std::string, std::unordered_set<std::string>> base_visible_contributors;
-        std::unordered_map<std::string, std::vector<Provider>> base_virtual_candidates;
+        std::unordered_map<std::string, std::vector<Provider>> base_visible_candidates{};
+        std::unordered_map<std::string, std::unordered_set<std::string>> base_visible_contributors{};
+        std::unordered_map<std::string, std::vector<Provider>> base_virtual_candidates{};
         for (const BaseSpecifier& base : def->base_specifiers) {
             result.reachable_bases.insert(base.base_type.name);
             if (auto _r = ensure_analyzed(base.base_type.name); !_r.has_value()) return std::unexpected(std::move(_r).error());
             Analysis& base_analysis = analyses_.at(base.base_type.name);
             result.reachable_bases.insert(base_analysis.reachable_bases.begin(), base_analysis.reachable_bases.end());
-            for (const auto& [name, providers] : base_analysis.visible_names) {
+            for (const auto& visible_entry : base_analysis.visible_names) {
+                const auto& name = visible_entry.first;
+                const auto& providers = visible_entry.second;
                 auto& dest = base_visible_candidates[name];
                 dest.insert(dest.end(), providers.begin(), providers.end());
                 base_visible_contributors[name].insert(base.base_type.name);
             }
-            for (const auto& [slot, provider] : base_analysis.effective_virtual_slots) {
+            for (const auto& virtual_entry : base_analysis.effective_virtual_slots) {
+                const auto& slot = virtual_entry.first;
+                const auto& provider = virtual_entry.second;
                 base_virtual_candidates[slot].push_back(provider);
                 result.all_virtual_slots.insert(slot);
             }
             result.all_virtual_slots.insert(base_analysis.all_virtual_slots.begin(), base_analysis.all_virtual_slots.end());
         }
 
-        std::unordered_map<std::string, std::vector<const Function*>> own_names;
-        std::unordered_map<std::string, Provider> own_virtual_slots;
+        std::unordered_map<std::string, std::vector<const Function*>> own_names{};
+        std::unordered_map<std::string, Provider> own_virtual_slots{};
         for (const Function* fn : declared_members_of(def->name)) {
             if (is_constructor_slot(*fn)) continue;
             std::string name = lookup_name(*fn);
@@ -517,7 +521,7 @@ private:
             }
         }
 
-        std::unordered_map<std::string, std::vector<Provider>> using_names;
+        std::unordered_map<std::string, std::vector<Provider>> using_names{};
         for (const ClassUsingDeclaration& using_decl : def->using_declarations) {
             if (!result.reachable_bases.contains(using_decl.base_name)) {
                 return std::unexpected(DataflowError("class '" + def->name + "' names non-base class '" + using_decl.base_name +
@@ -534,13 +538,13 @@ private:
             dest.insert(dest.end(), base_it->second.begin(), base_it->second.end());
         }
 
-        std::unordered_set<std::string> all_names;
-        for (const auto& [name, _] : base_visible_candidates) all_names.insert(name);
-        for (const auto& [name, _] : own_names) all_names.insert(name);
-        for (const auto& [name, _] : using_names) all_names.insert(name);
+        std::unordered_set<std::string> all_names{};
+        for (const auto& entry : base_visible_candidates) all_names.insert(entry.first);
+        for (const auto& entry : own_names) all_names.insert(entry.first);
+        for (const auto& entry : using_names) all_names.insert(entry.first);
         for (const std::string& name : all_names) {
             if (own_names.contains(name)) {
-                std::vector<Provider> providers;
+                std::vector<Provider> providers{};
                 for (const Function* fn : own_names.at(name)) {
                     providers.push_back(Provider{def, fn, slot_key(*fn), name});
                 }
@@ -561,13 +565,15 @@ private:
             result.visible_names[name] = candidates_it->second;
         }
 
-        for (const auto& [slot, provider] : own_virtual_slots) {
-            result.effective_virtual_slots[slot] = provider;
+        for (const auto& own_slot_entry : own_virtual_slots) {
+            result.effective_virtual_slots[own_slot_entry.first] = own_slot_entry.second;
         }
-        for (const auto& [slot, providers] : base_virtual_candidates) {
+        for (const auto& base_slot_entry : base_virtual_candidates) {
+            const auto& slot = base_slot_entry.first;
+            const auto& providers = base_slot_entry.second;
             if (result.effective_virtual_slots.contains(slot)) continue;
-            std::unordered_set<std::string> distinct_owners;
-            Provider chosen;
+            std::unordered_set<std::string> distinct_owners{};
+            Provider chosen{};
             bool have_chosen = false;
             for (const Provider& provider : providers) {
                 if (!distinct_owners.insert(provider.owner->name).second) continue;
@@ -592,7 +598,7 @@ private:
     [[nodiscard]] std::expected<void, DataflowError> validate_thread_contracts() {
         for (const ClassDef& def : program_.classes) {
             if (should_skip(def) || def.is_interface) continue;
-            std::unordered_set<std::string> interfaces;
+            std::unordered_set<std::string> interfaces{};
             collect_interfaces(def.name, interfaces);
             for (const std::string& interface_name : interfaces) {
                 const ClassDef* iface = find_class_def(program_, interface_name);
