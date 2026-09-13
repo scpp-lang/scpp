@@ -49,7 +49,6 @@ struct FunctionSignature {
     std::string display_name;
 };
 
-namespace {
 [[nodiscard]] bool is_forwarding_reference_param(const Function& fn, const Param& param) {
     if (param.type.kind != TypeKind::Reference || !param.type.is_rvalue_ref || !param.type.pointee) return false;
     if (!param.generic_concept.empty()) return true;
@@ -61,8 +60,6 @@ namespace {
         if (!tp.is_non_type && !tp.is_pack && tp.name == param.type.pointee->name) return true;
     }
     return false;
-}
-
 }
 
 using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature>>;
@@ -88,19 +85,14 @@ using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature
     return sig.has_varargs || arg_count <= fixed_param_count;
 }
 
-[[nodiscard]] bool compile_time_dependency_visible_in_body(const FunctionSignature& candidate, const Body& body);
-[[nodiscard]] bool argument_matches_parameter_for_constructor_selection(const Expr& arg, const Type& param_type,
-                                                                       const Body& body,
-                                                                       const Signatures& signatures,
-                                                                       bool allow_user_defined_conversion = true);
-[[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
-[[nodiscard]] bool place_is_read_only(const Expr& expr, const Body& body, const Signatures& signatures);
-[[nodiscard]] bool expr_is_assignable_place(const Expr& expr, const Body& body);
-[[nodiscard]] DataflowError read_only_write_error(const Expr& place, const Body& body, const Signatures& signatures,
-                                                  const std::string& operator_spelling, SourceLocation loc);
-[[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
-[[nodiscard]] bool produces_rvalue_of_type(const Expr& expr, const Type& expected_type, const Body& body,
-                                           const Signatures& signatures);
+[[nodiscard]] extern bool compile_time_dependency_visible_in_body(const FunctionSignature& candidate, const Body& body);
+[[nodiscard]] extern bool argument_matches_parameter_for_constructor_selection(const Expr& arg, const Type& param_type,
+                                                                              const Body& body,
+                                                                              const Signatures& signatures,
+                                                                              bool allow_user_defined_conversion = true);
+[[nodiscard]] extern std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
+[[nodiscard]] extern bool produces_rvalue_of_type(const Expr& expr, const Type& expected_type, const Body& body,
+                                                  const Signatures& signatures);
 
 
 [[nodiscard]] std::string describe_constructor_candidate(const FunctionSignature& candidate) {
@@ -271,7 +263,7 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 // by-value boundaries even though they are spelled as classes with
 // user-declared special members in the library source. Treat those named
 // wrappers as freely copyable without relaxing ordinary class copy rules.
-[[nodiscard]] bool is_freely_copyable_value_type(const Type& type, const Program&) {
+[[nodiscard]] bool is_freely_copyable_value_type(const Type& type, const Program& program [[maybe_unused]]) {
     if (type.kind != TypeKind::Named) return false;
     std::string base_name = unqualified_template_base_name(type.name);
     return type.name == "std::string_view" || type.name == "std::format_string<>" || base_name == "format_string";
@@ -364,8 +356,8 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 
 [[nodiscard]] std::vector<const ClassDef*> collect_virtual_interface_bases_in_construction_order(const Program& program,
                                                                                                  const ClassDef& def) {
-    std::vector<const ClassDef*> out;
-    std::unordered_set<std::string> seen;
+    std::vector<const ClassDef*> out{};
+    std::unordered_set<std::string> seen{};
     collect_virtual_interface_bases_in_construction_order(program, def, out, seen);
     return out;
 }
@@ -403,10 +395,10 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 // entries were written in is never consulted.
 [[nodiscard]] std::vector<std::optional<std::size_t>> member_initializer_execution_ranks(
     const Function& ctor, const ClassDef& def, const std::vector<const ClassDef*>& interface_bases) {
-    std::vector<std::optional<std::size_t>> ranks;
+    std::vector<std::optional<std::size_t>> ranks{};
     ranks.reserve(ctor.member_initializers.size());
     for (const MemberInitializer& init : ctor.member_initializers) {
-        std::optional<std::size_t> rank;
+        std::optional<std::size_t> rank{};
         for (std::size_t i = 0; i < interface_bases.size(); i++) {
             const ClassDef* interface_def = interface_bases[i];
             if (interface_def == nullptr) continue;
@@ -559,10 +551,18 @@ struct ConstructedOwner {
         // exist.
         return {};
     }
-    for (const Expr* child : {expr.lhs.get(), expr.rhs.get(), expr.third.get()}) {
-        if (child == nullptr) continue;
-        if (auto _r = check_this_usage_in_expr(*child, rank, owner, entry_description);
-            !_r.has_value()) {
+    if (expr.lhs != nullptr) {
+        if (auto _r = check_this_usage_in_expr(*expr.lhs, rank, owner, entry_description); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    }
+    if (expr.rhs != nullptr) {
+        if (auto _r = check_this_usage_in_expr(*expr.rhs, rank, owner, entry_description); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    }
+    if (expr.third != nullptr) {
+        if (auto _r = check_this_usage_in_expr(*expr.third, rank, owner, entry_description); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
     }
@@ -653,7 +653,7 @@ struct ConstructedOwner {
 [[nodiscard]] std::expected<void, DataflowError> check_member_initializer_order(
     const Function& ctor, const std::string& owner_name, const std::vector<std::optional<std::size_t>>& ranks) {
     std::size_t previous_index = 0;
-    std::optional<std::size_t> previous;
+    std::optional<std::size_t> previous{};
     for (std::size_t i = 0; i < ranks.size(); i++) {
         if (!ranks[i].has_value()) continue;
         if (previous.has_value() && *ranks[i] <= *previous) {
@@ -699,7 +699,7 @@ struct ConstructedOwner {
     }
     if (!ctor.body) return {};
     if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return {};
-    std::unordered_set<std::string> direct_field_names;
+    std::unordered_set<std::string> direct_field_names{};
     for (const StructField& field : def.fields) direct_field_names.insert(field.name);
     for (const MemberInitializer& init : ctor.member_initializers) {
         if (!direct_field_names.contains(init.member_name)) {
@@ -708,7 +708,7 @@ struct ConstructedOwner {
                                 init.loc.is_known() ? init.loc : ctor.loc));
         }
     }
-    std::vector<std::string> missing;
+    std::vector<std::string> missing{};
     for (const StructField& field : def.fields) {
         if (field.type.kind == TypeKind::Array) continue;
         bool covered_by_ctor = std::any_of(ctor.member_initializers.begin(), ctor.member_initializers.end(),
@@ -716,7 +716,7 @@ struct ConstructedOwner {
         if (!covered_by_ctor && !field.default_initializer.has_value()) missing.push_back(field.name);
     }
     if (!missing.empty()) {
-        std::string names;
+        std::string names{};
         for (std::size_t i = 0; i < missing.size(); i++) {
             if (i > 0) names += ", ";
             names += "'" + missing[i] + "'";
@@ -727,10 +727,10 @@ struct ConstructedOwner {
                                 "initializer (spec §6.1(4))",
                             ctor.loc));
     }
-    std::vector<std::optional<std::size_t>> ranks;
+    std::vector<std::optional<std::size_t>> ranks{};
     ranks.reserve(ctor.member_initializers.size());
     for (const MemberInitializer& init : ctor.member_initializers) {
-        std::optional<std::size_t> rank;
+        std::optional<std::size_t> rank{};
         for (std::size_t i = 0; i < def.fields.size(); i++) {
             if (def.fields[i].name == init.member_name) {
                 rank = i;
@@ -761,7 +761,7 @@ struct ConstructedOwner {
     // with.
     if (!ctor.body) return {};
     if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return {};
-    std::unordered_set<std::string> direct_field_names;
+    std::unordered_set<std::string> direct_field_names{};
     for (const ClassField& field : def.fields) direct_field_names.insert(field.name);
     std::vector<const ClassDef*> interface_bases = collect_virtual_interface_bases_in_construction_order(program, def);
     const MemberInitializer* explicit_base_init = find_explicit_base_initializer(ctor, def);
@@ -790,7 +790,7 @@ struct ConstructedOwner {
                                 init.loc.is_known() ? init.loc : ctor.loc));
         }
     }
-    std::vector<std::string> missing;
+    std::vector<std::string> missing{};
     for (const ClassField& field : def.fields) {
         if (field.type.kind == TypeKind::Array) continue;
         bool covered_by_ctor = std::any_of(ctor.member_initializers.begin(), ctor.member_initializers.end(),
@@ -798,7 +798,7 @@ struct ConstructedOwner {
         if (!covered_by_ctor && !field.default_initializer.has_value()) missing.push_back(field.name);
     }
     if (!missing.empty()) {
-        std::string names;
+        std::string names{};
         for (std::size_t i = 0; i < missing.size(); i++) {
             if (i > 0) names += ", ";
             names += "'" + missing[i] + "'";
@@ -917,7 +917,7 @@ struct ConstructedOwner {
         type.is_const_qualified = false;
         return type;
     };
-    std::vector<ArgumentConversion> result;
+    std::vector<ArgumentConversion> result{};
     for (std::size_t i = 0; i < ctor_args.size(); i++) {
         ArgumentConversion conversion{};
         conversion.rank = ConversionRank::Identity;
@@ -968,7 +968,7 @@ struct ConstructedOwner {
 [[nodiscard]] const FunctionSignature* resolve_constructor_signature(const std::string& class_name,
                                                                      const std::vector<ExprPtr>& ctor_args,
                                                                      const Body& body, const Signatures& signatures) {
-    std::vector<const FunctionSignature*> matches;
+    std::vector<const FunctionSignature*> matches{};
     for (const FunctionSignature* candidate : constructor_overloads_of(class_name, signatures)) {
         if (!compile_time_dependency_visible_in_body(*candidate, body)) continue;
         if (!signature_accepts_argument_count(*candidate, ctor_args.size(), 1)) continue;
@@ -984,7 +984,7 @@ struct ConstructedOwner {
     if (matches.size() == 1) return matches[0];
     // [over.match.best]/2.4: a non-template is better than a template.
     {
-        std::vector<const FunctionSignature*> non_generic;
+        std::vector<const FunctionSignature*> non_generic{};
         for (const FunctionSignature* candidate : matches) {
             if (!candidate->is_generic_template) non_generic.push_back(candidate);
         }
@@ -1002,7 +1002,7 @@ struct ConstructedOwner {
     // that fell back to `matches[0]` on a tie. Three "first one wins"
     // rules in a row, in the pass whose job is to check the very
     // constructor codegen will emit.
-    std::vector<std::vector<ArgumentConversion>> conversions;
+    std::vector<std::vector<ArgumentConversion>> conversions{};
     for (const FunctionSignature* candidate : matches) {
         conversions.push_back(constructor_argument_conversions(*candidate, ctor_args, body, signatures));
     }
@@ -1041,8 +1041,8 @@ struct ConstructedOwner {
     for (const ExprPtr& arg : ctor_args) {
         if (arg == nullptr || !infer_expr_type(*arg, body, signatures).has_value()) return std::nullopt;
     }
-    std::vector<const FunctionSignature*> arity_candidates;
-    std::vector<const FunctionSignature*> viable_candidates;
+    std::vector<const FunctionSignature*> arity_candidates{};
+    std::vector<const FunctionSignature*> viable_candidates{};
     for (const FunctionSignature* candidate : constructor_overloads_of(class_name, signatures)) {
         if (!compile_time_dependency_visible_in_body(*candidate, body)) continue;
         if (!signature_accepts_argument_count(*candidate, ctor_args.size(), 1)) continue;
@@ -1059,12 +1059,12 @@ struct ConstructedOwner {
     if (arity_candidates.empty()) return std::nullopt;
     if (viable_candidates.size() == 1) return std::nullopt;
     auto describe_all = [](const std::vector<const FunctionSignature*>& candidates) {
-        std::vector<std::string> described;
+        std::vector<std::string> described{};
         for (const FunctionSignature* candidate : candidates) {
             std::string text = describe_constructor_candidate(*candidate);
             if (std::find(described.begin(), described.end(), text) == described.end()) described.push_back(text);
         }
-        std::string result;
+        std::string result{};
         for (const std::string& text : described) result += "\n  candidate: " + text;
         return result;
     };
@@ -1092,7 +1092,7 @@ struct ConstructedOwner {
     const ClassDef* class_def = find_class_def(*body.program, class_name);
     if (class_def == nullptr) return {};
     if (class_has_any_constructor(class_name, *body.program)) {
-        static const std::vector<ExprPtr> no_ctor_args;
+        static const std::vector<ExprPtr> no_ctor_args{};
         const FunctionSignature* sig = resolve_constructor_signature(class_name, no_ctor_args, body, signatures);
         if (sig == nullptr) {
             return std::unexpected(DataflowError(std::string(context_message) + ": base class '" + class_name +
@@ -1113,7 +1113,7 @@ struct ConstructedOwner {
         }
         return {};
     }
-    if (auto base = class_def->direct_ordinary_base()) {
+    if (auto base = class_def->direct_ordinary_base(); base.has_value()) {
         return ensure_implicit_default_construction_is_valid(base->get().base_type.name, current_class, body, signatures, loc,
                                                       context_message);
     }
@@ -1275,7 +1275,7 @@ struct ConstructedOwner {
         return std::optional<std::size_t>(0);
     }
 
-    std::optional<std::size_t> found;
+    std::optional<std::size_t> found{};
     for (std::size_t i = 0; i < fn.params.size(); i++) {
         // ch03/ch05 §5.11: an rvalue-reference (`T&&`) parameter is
         // never an eligible elision source -- its argument may be a
@@ -1316,7 +1316,7 @@ struct ConstructedOwner {
     if (fn.return_lifetime.present() || fn.return_type.kind != TypeKind::Pointer) return {};
     if (!fn.params.empty() && fn.params[0].name == "this" && is_reference(fn.params[0].type)) return {0};
 
-    std::vector<std::size_t> indices;
+    std::vector<std::size_t> indices{};
     for (std::size_t i = 0; i < fn.params.size(); i++) {
         if (is_pointer_return_lifetime_source_type(fn.params[i].type) &&
             !(is_reference(fn.params[i].type) && fn.params[i].type.is_rvalue_ref)) {
@@ -1406,7 +1406,7 @@ struct ConstructedOwner {
                                     "' cannot name the reserved lifetime group 'any' in its return annotation",
                                 fn.loc));
         }
-        std::vector<std::size_t> indices;
+        std::vector<std::size_t> indices{};
         for (std::size_t i = 0; i < fn.params.size(); i++) {
             if (fn.params[i].lifetime.name != fn.return_lifetime.name) continue;
             if (!param_can_outlive_call_for_lifetime_return(fn.params[i])) {
@@ -1464,7 +1464,7 @@ struct ConstructedOwner {
 // initialization-state legality is checked separately, this is purely
 // about const-ness.
 [[nodiscard]] std::expected<Signatures, DataflowError> build_signatures(const Program& program) {
-    Signatures signatures;
+    Signatures signatures{};
     for (const Function& fn : program.functions) {
         if (auto _r = add_function_signature(signatures, fn); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
@@ -1482,7 +1482,7 @@ struct ConstructedOwner {
 [[nodiscard]] std::expected<void, DataflowError> add_function_signature(Signatures& signatures, const Function& fn) {
     if (auto _r = validate_equality_operator_signature(fn); !_r.has_value()) return std::unexpected(std::move(_r).error());
     if (auto _r = validate_operator_arrow_signature(fn); !_r.has_value()) return std::unexpected(std::move(_r).error());
-    FunctionSignature sig;
+    FunctionSignature sig{};
     sig.param_types.reserve(fn.params.size());
     sig.param_is_forwarding_reference.reserve(fn.params.size());
     sig.param_names.reserve(fn.params.size());
@@ -1575,11 +1575,13 @@ struct ConstructedOwner {
 // stays with its caller.
 [[nodiscard]] std::vector<const FunctionSignature*> constructor_overloads_of(const std::string& class_name,
                                                                             const Signatures& signatures) {
-    std::vector<const FunctionSignature*> overloads;
+    std::vector<const FunctionSignature*> overloads{};
     if (class_name.empty()) return overloads;
     const std::string constructor_name = class_name + "_new";
     const std::string specialization_prefix = constructor_name + ".";
-    for (const auto& [name, candidates] : signatures) {
+    for (const auto& entry : signatures) {
+        const auto& name = entry.first;
+        const auto& candidates = entry.second;
         if (name != constructor_name && !name.starts_with(specialization_prefix)) continue;
         for (const FunctionSignature& candidate : candidates) {
             if (candidate.member_owner_class != class_name) continue;
