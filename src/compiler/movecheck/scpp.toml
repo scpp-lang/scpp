@@ -10,4 +10,4 @@ scpp-compiler = { path = "../.." }
 
 [[lib]]
 name = "scpp-movecheck"
-sources = ["movecheck.cppm", "errors.cppm"]
+sources = ["movecheck.cppm", "errors.cppm", "state.cppm"]

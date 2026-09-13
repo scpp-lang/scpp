@@ -335,6 +335,24 @@ struct PlaceHash {
     }
 };
 
+} // namespace scpp
+
+namespace std {
+
+template<>
+class hash<scpp::Place> {
+public:
+    uint64_t operator()(const scpp::Place& place) const {
+        return scpp::PlaceHash{}(place);
+    }
+
+    virtual ~hash() = default;
+};
+
+} // namespace std
+
+export namespace scpp {
+
 enum class MirStatementKind {
     // `local` was just declared with no initializer. Whether it starts
     // Initialized (struct/array/unique_ptr -- all zero-initialized by

@@ -1,4 +1,5 @@
 import scpp.compiler.movecheck;
+import scpp.mir;
 import scpp.parser;
 import scpp.ast;
 import std;
@@ -1724,6 +1725,37 @@ void test_dataflow_error_copy_construction_and_properties() {
            "dataflow_error: expected copy to preserve loc");
 }
 
+void test_statemap_place_hash_and_two_argument_unordered_map() {
+    cases_run++;
+    scpp::LocalId id1{1};
+    scpp::LocalId id2{2};
+    scpp::Place root1 = scpp::whole_local_place(id1);
+    scpp::Place root2 = scpp::whole_local_place(id2);
+    scpp::Place field1 = scpp::projected_field(root1, "alpha");
+    scpp::Place field2 = scpp::projected_field(root1, "beta");
+
+    std::hash<scpp::Place> hasher{};
+    std::size_t h_root1 = hasher(root1);
+    std::size_t h_root2 = hasher(root2);
+    std::size_t h_field1 = hasher(field1);
+    std::size_t h_field2 = hasher(field2);
+
+    expect(h_root1 == hasher(root1), "place_hash: hash of same place must be deterministic");
+    expect(h_root1 != h_root2, "place_hash: distinct roots expected distinct hashes");
+    expect(h_field1 != h_field2, "place_hash: distinct fields expected distinct hashes");
+
+    std::unordered_map<scpp::Place, int> place_map;
+    place_map[root1] = 100;
+    place_map[field1] = 200;
+    place_map[field2] = 300;
+
+    expect(place_map.size() == 3, "place_map: expected 3 entries");
+    expect(place_map.contains(root1) && place_map[root1] == 100, "place_map: expected root1 == 100");
+    expect(place_map.contains(field1) && place_map[field1] == 200, "place_map: expected field1 == 200");
+    expect(place_map.contains(field2) && place_map[field2] == 300, "place_map: expected field2 == 300");
+    expect(!place_map.contains(root2), "place_map: expected root2 not present");
+}
+
 // --- keying locals by declaration (mir.cppm's LocalId) ----------------
 //
 // Every case below has two declarations that share a spelling. Before
@@ -3445,6 +3477,7 @@ int main() {
     test_check_moves_returns_engaged_expected_on_success();
     test_check_moves_returns_disengaged_expected_on_failure_without_throwing();
     test_dataflow_error_copy_construction_and_properties();
+    test_statemap_place_hash_and_two_argument_unordered_map();
 
     test_borrow_violation_without_a_namesake_is_rejected();
     test_sibling_scope_namesake_does_not_hide_a_borrow();
