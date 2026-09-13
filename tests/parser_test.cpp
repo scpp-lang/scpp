@@ -3182,6 +3182,28 @@ void test_bare_extern_declaration_is_namespace_qualified() {
            "bare_extern_declaration_is_namespace_qualified: expected qualified name");
 }
 
+void test_nodiscard_extern_forward_declaration_requires_no_definition() {
+    scpp::Program program = expect_parse_ok(
+        "module mymod;\n"
+        "[[nodiscard]] extern int compute(int x);\n");
+    expect(program.functions.size() == 1,
+           "nodiscard_extern_forward_declaration_requires_no_definition: expected 1 function");
+    expect(program.functions[0].is_nodiscard,
+           "nodiscard_extern_forward_declaration_requires_no_definition: is_nodiscard is true");
+    expect(program.functions[0].is_module_extern,
+           "nodiscard_extern_forward_declaration_requires_no_definition: is_module_extern is true");
+    expect(program.functions[0].body == nullptr,
+           "nodiscard_extern_forward_declaration_requires_no_definition: body is null");
+}
+
+void test_parameter_attribute_after_name_parses() {
+    scpp::Program program = expect_parse_ok(
+        "int identity(int x [[maybe_unused]]) { return x; }\n");
+    expect(program.functions.size() == 1, "parameter_attribute_after_name_parses: expected 1 function");
+    expect(program.functions[0].params.size() == 1, "parameter_attribute_after_name_parses: expected 1 param");
+    expect(program.functions[0].params[0].name == "x", "parameter_attribute_after_name_parses: name is x");
+}
+
 void test_module_forward_declarations_reconcile_to_definitions() {
     scpp::Program program = expect_parse_ok(
         "export module mathlib;\n"
@@ -7094,6 +7116,8 @@ int main() {
     test_export_without_any_module_declaration_is_rejected();
     test_bare_extern_declaration_is_module_extern();
     test_bare_extern_declaration_is_namespace_qualified();
+    test_nodiscard_extern_forward_declaration_requires_no_definition();
+    test_parameter_attribute_after_name_parses();
     test_module_forward_declarations_reconcile_to_definitions();
     test_module_forward_declaration_mismatched_definition_is_rejected();
     test_partition_declaration_sets_partition_name();
