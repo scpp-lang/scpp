@@ -25,8 +25,8 @@ namespace scpp {
 // other.
 void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred);
 [[nodiscard]] bool is_reborrowable_local_type(const Type& type);
-[[nodiscard]] bool local_is_suspended_for_reborrow(std::string_view name, const DataflowState& state);
-[[nodiscard]] bool local_has_mutable_reborrow_suspended(std::string_view name, const DataflowState& state);
+[[nodiscard]] bool local_is_suspended_for_reborrow(LocalId local, const DataflowState& state);
+[[nodiscard]] bool local_has_mutable_reborrow_suspended(LocalId local, const DataflowState& state);
 [[nodiscard]] bool is_explicit_star_this(const Expr& expr);
 [[nodiscard]] Type by_reference_capture_type(const Type& captured_type, bool source_is_const);
 [[nodiscard]] Type by_value_capture_type(const LambdaCapture& capture, const Type& captured_type);
@@ -56,8 +56,8 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred);
 [[nodiscard]] bool literal_compatible_with_type(const Expr& literal, const Type& type);
 [[nodiscard]] bool literal_argument_adopts_parameter_type(const Expr& arg, const Type& param_type);
 [[nodiscard]] bool literal_argument_ranks_as_identity(const Expr& arg, const Type& param_type);
-[[nodiscard]] bool conditional_arm_types_agree(const Expr& then_arm, const Type& then_type, const Expr& else_arm,
-                                               const Type& else_type);
+[[nodiscard]] bool conditional_arm_types_agree(const Expr& then_arm, const Type& raw_then_type, const Expr& else_arm,
+                                               const Type& raw_else_type);
 
 [[nodiscard]] std::string enclosing_class_name(const Body& body);
 [[nodiscard]] bool is_interface_representation_type(const Type& type, const Program& program);
@@ -74,10 +74,8 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred);
 [[nodiscard]] bool is_lifetime_eligible_type(const Type& type) {
     return is_reference(type) || is_pointer(type) || is_span(type);
 }
-namespace {
 [[nodiscard]] bool unwrap_reference_wrapper_lifetime_source(const Type& type) {
     return type.is_reference_wrapper_lifetime_source;
-}
 }
 
 [[nodiscard]] bool is_pointer_return_lifetime_source_type(const Type& type) {
@@ -124,7 +122,7 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
 }
 [[nodiscard]] Type by_reference_capture_type(const Type& captured_type, bool source_is_const) {
     if (is_reference(captured_type)) return captured_type;
-    Type capture_type;
+    Type capture_type{};
     capture_type.kind = TypeKind::Reference;
     capture_type.pointee = std::make_shared<Type>(captured_type);
     capture_type.is_mutable_ref = !source_is_const;
@@ -251,7 +249,7 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
     }
     if (type.kind != TypeKind::Named) return false;
     if (!visiting.insert(type.name).second) return false;
-    if (const ClassDef* def = find_class_def(program, type.name)) {
+    if (const ClassDef* def = find_class_def(program, type.name); def != nullptr) {
         for (const ClassField& field : def->fields) {
             if (type_contains_lifetime_carrying_state(field.type, program, visiting)) return true;
         }
@@ -265,7 +263,7 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
     // captures -- all skipped it. `struct Holder { const int& ref; };`
     // stored a named-group reference and was accepted, in the returned
     // form and in the plain `Holder h{x};` form alike.
-    if (const StructDef* struct_def = find_struct_def(program, type.name)) {
+    if (const StructDef* struct_def = find_struct_def(program, type.name); struct_def != nullptr) {
         for (const StructField& field : struct_def->fields) {
             if (type_contains_lifetime_carrying_state(field.type, program, visiting)) return true;
         }

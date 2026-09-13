@@ -2904,6 +2904,31 @@ void test_if_not_consteval_parses() {
            "if_not_consteval_parses: if_mode should be ConstevalFalse");
 }
 
+void test_if_with_init_statement_and_condition_parses() {
+    scpp::Program program = expect_parse_ok(
+        "int f() {\n"
+        "    if (const int* p = nullptr; p != nullptr) { return 1; }\n"
+        "    return 0;\n"
+        "}\n");
+    expect(program.functions.size() == 1, "if_with_init_statement_and_condition_parses: expected 1 function");
+    const scpp::Stmt& outer = *program.functions[0].body->statements[0];
+    expect(outer.kind == scpp::StmtKind::Block, "if_with_init_statement_and_condition_parses: desugared into Block");
+    expect(outer.statements.size() == 2, "if_with_init_statement_and_condition_parses: Block has decl and if");
+    expect(outer.statements[0]->kind == scpp::StmtKind::VarDecl, "if_with_init_statement_and_condition_parses: statement 0 is VarDecl");
+    expect(outer.statements[1]->kind == scpp::StmtKind::If, "if_with_init_statement_and_condition_parses: statement 1 is If");
+}
+
+void test_forward_declaration_parameter_names_must_match() {
+    bool threw = false;
+    if (auto _r = scpp::parse("int add(int a, int b);\nint add(int x, int y) { return x + y; }\n"); !_r.has_value()) {
+        threw = true;
+    }
+    expect(threw, "forward_declaration_parameter_names_must_match: parameter name mismatch should be rejected");
+
+    scpp::Program program = expect_parse_ok("int add(int x, int y);\nint add(int x, int y) { return x + y; }\n");
+    expect(program.functions.size() == 1, "forward_declaration_parameter_names_must_match: matching names reconciled");
+}
+
 // ch11 §11.3: `export module name;` marks a primary interface unit.
 void test_export_module_declaration() {
     scpp::Program program = expect_parse_ok("export module std;\n");
@@ -7044,6 +7069,8 @@ int main() {
     test_constexpr_local_variable_without_initializer_is_rejected();
     test_if_consteval_parses();
     test_if_not_consteval_parses();
+    test_if_with_init_statement_and_condition_parses();
+    test_forward_declaration_parameter_names_must_match();
     test_export_module_declaration();
     test_dotted_module_name_declaration();
     test_plain_module_declaration_is_implementation_unit();
