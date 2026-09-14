@@ -2528,6 +2528,17 @@ private:
                a.is_defaulted == b.is_defaulted && a.is_deleted == b.is_deleted;
     }
 
+    [[nodiscard]] bool same_function_signature_ignoring_module_extern(const Function& a, const Function& b) const {
+        return a.name == b.name && types_equal(a.return_type, b.return_type) && params_equal(a.params, b.params) &&
+               lifetime_annotations_equivalent(a, b) &&
+               a.has_varargs == b.has_varargs && a.is_extern_c == b.is_extern_c &&
+               a.is_unsafe == b.is_unsafe &&
+               a.eval_mode == b.eval_mode && a.receiver_ref_qualifier == b.receiver_ref_qualifier &&
+               a.is_static == b.is_static && a.access == b.access && a.member_owner_class == b.member_owner_class &&
+               a.is_virtual == b.is_virtual && a.is_override == b.is_override && a.is_pure == b.is_pure &&
+               a.is_defaulted == b.is_defaulted && a.is_deleted == b.is_deleted;
+    }
+
     [[nodiscard]] bool same_template_param_shape(const std::vector<GenericTypeParam>& a,
                                                  const std::vector<GenericTypeParam>& b) const {
         if (a.size() != b.size()) return false;
@@ -5305,6 +5316,59 @@ private:
                     existing_fn->is_exported = existing_fn->is_exported || (is_reexport && fn.is_exported);
                     existing_fn->is_compile_time_dependency = existing_fn->is_compile_time_dependency || fn.is_compile_time_dependency;
                     continue;
+                }
+            }
+            Function* matching_fn = nullptr;
+            for (std::size_t i = 0; i < program.functions.size(); i++) {
+                if (program.functions[i].owning_module == fn.owning_module &&
+                    same_function_signature_ignoring_module_extern(program.functions[i], fn)) {
+                    matching_fn = &program.functions[i];
+                    break;
+                }
+            }
+            if (matching_fn != nullptr) {
+                [[scpp::unsafe]] {
+                    if (matching_fn->body == nullptr && !matching_fn->is_deleted && !matching_fn->is_pure &&
+                        fn.body != nullptr) {
+                        SourceLocation decl_loc = matching_fn->loc;
+                        bool was_exported = matching_fn->is_exported;
+                        bool was_ct_dep = matching_fn->is_compile_time_dependency;
+                        std::vector<SourceLocation> superseded = matching_fn->superseded_forward_declaration_locs;
+                        superseded.push_back(decl_loc);
+                        for (std::size_t p = 0; p < matching_fn->params.size() && p < fn.params.size(); p++) {
+                            if (fn.params[p].default_expr == nullptr && matching_fn->params[p].default_expr != nullptr) {
+                                fn.params[p].default_expr = std::shared_ptr<Expr>(deep_clone_expr(*matching_fn->params[p].default_expr).release());
+                            }
+                        }
+                        *matching_fn = std::move(fn);
+                        matching_fn->is_exported = was_exported || (is_reexport && matching_fn->is_exported);
+                        matching_fn->is_compile_time_dependency = was_ct_dep || matching_fn->is_compile_time_dependency;
+                        matching_fn->superseded_forward_declaration_locs = std::move(superseded);
+                        continue;
+                    }
+                    if (matching_fn->body != nullptr && fn.body == nullptr && !fn.is_deleted && !fn.is_pure) {
+                        matching_fn->is_exported = matching_fn->is_exported || (is_reexport && fn.is_exported);
+                        matching_fn->is_compile_time_dependency = matching_fn->is_compile_time_dependency || fn.is_compile_time_dependency;
+                        matching_fn->superseded_forward_declaration_locs.push_back(fn.loc);
+                        for (std::size_t p = 0; p < fn.params.size() && p < matching_fn->params.size(); p++) {
+                            if (matching_fn->params[p].default_expr == nullptr && fn.params[p].default_expr != nullptr) {
+                                matching_fn->params[p].default_expr = std::shared_ptr<Expr>(deep_clone_expr(*fn.params[p].default_expr).release());
+                            }
+                        }
+                        continue;
+                    }
+                    if (matching_fn->body == nullptr && !matching_fn->is_deleted && !matching_fn->is_pure &&
+                        fn.body == nullptr && !fn.is_deleted && !fn.is_pure) {
+                        matching_fn->is_exported = matching_fn->is_exported || (is_reexport && fn.is_exported);
+                        matching_fn->is_compile_time_dependency = matching_fn->is_compile_time_dependency || fn.is_compile_time_dependency;
+                        matching_fn->superseded_forward_declaration_locs.push_back(fn.loc);
+                        for (std::size_t p = 0; p < fn.params.size() && p < matching_fn->params.size(); p++) {
+                            if (matching_fn->params[p].default_expr == nullptr && fn.params[p].default_expr != nullptr) {
+                                matching_fn->params[p].default_expr = std::shared_ptr<Expr>(deep_clone_expr(*fn.params[p].default_expr).release());
+                            }
+                        }
+                        continue;
+                    }
                 }
             }
             fn.is_exported = is_reexport && fn.is_exported;
