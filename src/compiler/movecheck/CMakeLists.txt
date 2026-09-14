@@ -14,7 +14,5 @@ target_sources(scpp_movecheck
             threadsafety.cppm
             generics_support.cppm
             lambdas.cppm
-            monomorphize.cppm
-    PRIVATE
-            movecheck.cpp)
+            monomorphize.cppm)
 target_link_libraries(scpp_movecheck PUBLIC scpp_ast scpp_mir scpp_constexpr)
