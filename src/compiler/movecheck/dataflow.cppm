@@ -402,8 +402,8 @@ namespace scpp {
         }
     }
     bool write_through_mutable_reborrow = write_is_licensed_by_mutable_reborrow_lender(*expr.lhs, state, body, signatures);
-    RootSet write_roots;
-    if (std::optional<LocalId> root = direct_write_root(*expr.lhs, body)) {
+    RootSet write_roots{};
+    if (std::optional<LocalId> root = direct_write_root(*expr.lhs, body); root.has_value()) {
         write_roots = single_root(*root);
     } else {
         auto write_roots_result = resolve_borrow_source_root(*expr.lhs, state, body, signatures, /*report_errors=*/false);
@@ -579,7 +579,7 @@ namespace scpp {
 // so that every alias of one object resolves to one move-state key.
 // Handed to mir.cppm's place_of, which knows the syntax of a place but
 // nothing about bindings.
-[[nodiscard]] auto place_root_resolver(const DataflowState& state, std::vector<LocalId>* traversed = nullptr) {
+[[nodiscard]] std::function<std::optional<Place>(LocalId)> place_root_resolver(const DataflowState& state, std::vector<LocalId>* traversed = nullptr) {
     return [&state, traversed](LocalId local) -> std::optional<Place> {
         auto it = state.ref_targets.find(local);
         if (it == state.ref_targets.end()) return std::nullopt;
@@ -635,7 +635,9 @@ namespace scpp {
     int attributable_shared = 0;
     bool attributable_mutable = false;
     bool overlaps = false;
-    for (const auto& [ref_local, target] : state.ref_targets) {
+    for (const auto& entry : state.ref_targets) {
+        LocalId ref_local = entry.first;
+        const auto& target = entry.second;
         if (target.is_reborrow()) continue;
         if (std::ranges::find(target.roots, root) == target.roots.end()) continue;
         if (target.is_mutable) {
@@ -669,7 +671,7 @@ namespace scpp {
     if (body.program == nullptr) return nullptr;
     for (const ClassDef& def : body.program->classes) {
         if (def.name != record_name) continue;
-        if (auto base = def.direct_ordinary_base()) {
+        if (auto base = def.direct_ordinary_base(); base.has_value()) {
             return find_record_field_type(base->get().base_type.name, field_name, state, body);
         }
         return nullptr;
@@ -804,8 +806,10 @@ namespace scpp {
 [[nodiscard]] std::expected<void, DataflowError> check_moved_subobjects_were_restored(
     const DataflowState& state, const Body& body, const std::optional<LocalId>& scope_root,
     std::string_view when) {
-    std::optional<Place> worst;
-    for (const auto& [place, place_state] : state.locals) {
+    std::optional<Place> worst{};
+    for (const auto& entry : state.locals) {
+        const Place& place = entry.first;
+        LocalState place_state = entry.second;
         if (place.is_whole_local()) continue;
         if (place_state == LocalState::Initialized || place_state == LocalState::Bottom) continue;
         if (scope_root.has_value() ? place.local != *scope_root : false) continue;
@@ -829,7 +833,7 @@ namespace scpp {
     }
     if (!worst.has_value()) return {};
     std::string name = body.describe_place(*worst);
-    std::string message;
+    std::string message{};
     message += "'";
     message += name;
     message += "' was moved out and is still moved out ";
@@ -1592,7 +1596,7 @@ namespace scpp {
     // whole-local place is used, which is exactly the coarse answer
     // every argument used to get, so nothing that was rejected for
     // genuine overlap stops being.
-    std::vector<Place> borrowed_places;
+    std::vector<Place> borrowed_places{};
     if (std::optional<Place> exact = tracked_place_of(arg, state, body, nullptr, PlacePrecision::Exact);
         exact.has_value()) {
         // The place is preferred over the lender even for a tracked
@@ -1705,7 +1709,7 @@ struct ConvertingConstructorBinding {
 [[nodiscard]] std::expected<ConvertingConstructorBinding, DataflowError> resolve_converting_constructor_binding(
     const Type& destination_type, const Expr& source, const DataflowState& state, const Body& body,
     const Signatures& signatures, bool report_errors) {
-    ConvertingConstructorBinding binding;
+    ConvertingConstructorBinding binding{};
     if (!is_named_record_type(destination_type, body)) return binding;
     binding.ctor = find_single_argument_converting_constructor_signature(destination_type, source, body, signatures);
     if (binding.ctor == nullptr) return binding;
@@ -1919,9 +1923,9 @@ struct ConvertingConstructorBinding {
     // Scratch borrow record shared by every reference argument of *this*
     // call only (see apply_reference_argument) -- never merged into
     // `state`, since none of these transient borrows outlive the call.
-    InCallBorrows in_call_borrows;
+    InCallBorrows in_call_borrows{};
     auto apply_one_argument = [&](const Expr& arg, std::size_t param_index) -> std::expected<void, DataflowError> {
-        Type effective_param_type;
+        Type effective_param_type{};
         bool have_effective_param_type = false;
         if (sig != nullptr && param_index < sig->param_types.size()) {
             effective_param_type = sig->param_types[param_index];
@@ -2033,7 +2037,7 @@ struct ConvertingConstructorBinding {
                 // path), so tolerated here the same way as every other
                 // is_synthetic_check_only-only false positive in this
                 // file.
-                bool caller_is_synthetic_check_only = [&] {
+                bool caller_is_synthetic_check_only = [&]() {
                     if (body.program == nullptr) return false;
                     std::string owner_name = enclosing_class_name(body);
                     if (owner_name.empty()) return false;
@@ -2343,13 +2347,13 @@ struct ConvertingConstructorBinding {
                              "caller can guarantee (spec §5.1(1.2), §5.1(5.7), §5.1(6))",
             state.current_loc));
     }
-    InCallBorrows in_call_borrows;
+    InCallBorrows in_call_borrows{};
     bool constructed_state_can_carry_lifetimes =
         report_errors && body.program != nullptr &&
         type_contains_lifetime_carrying_state(constructed_type, *body.program) &&
         !constructed_type.is_reference_wrapper_lifetime_source;
     auto apply_one_argument = [&](const Expr& arg, std::size_t param_index) -> std::expected<void, DataflowError> {
-        Type effective_param_type;
+        Type effective_param_type{};
         bool have_effective_param_type = false;
         const Type* destination_type = &constructed_type;
         if (sig != nullptr && param_index < sig->param_types.size()) {
@@ -2584,7 +2588,7 @@ struct ConvertingConstructorBinding {
     // reached through a `const` object, say. Saying "declare
     // 'X::operator bool'" there would name a fix the program already
     // applied.
-    std::string key;
+    std::string key{};
     if (find_conversion_function_signature(operand_type, contextual_bool_type(), body, signatures, key) != nullptr) {
         return std::unexpected(DataflowError(
             unusable_conversion_function_message(describe_type_brief(*operand_type), describe_type_brief(operand),
@@ -2828,7 +2832,7 @@ struct ConvertingConstructorBinding {
             // all along: the assignment arm asks the same
             // tracked_place_of, and on std::nullopt reinitializes
             // nothing and carries on.
-            std::vector<LocalId> moved_through;
+            std::vector<LocalId> moved_through{};
             std::optional<Place> moved = tracked_place_of(*expr.lhs, state, body, &moved_through);
             if (!moved.has_value()) {
                 if (report_errors && expr.lhs->kind == ExprKind::Identifier &&
@@ -3225,7 +3229,7 @@ struct ConvertingConstructorBinding {
                         expr.lhs->loc));
                 }
                 bool target_is_movable_class = false;
-                std::optional<Type> target_class_type;
+                std::optional<Type> target_class_type{};
                 if (expr.lhs->kind == ExprKind::Identifier) {
                     const Type* target_type = body.type_if_local(*expr.lhs);
                     if (target_type != nullptr && is_named_record_type(*target_type, body)) {
@@ -3360,8 +3364,8 @@ struct ConvertingConstructorBinding {
                         }
                         bool write_through_mutable_reborrow =
                             write_is_licensed_by_mutable_reborrow_lender(*expr.lhs, state, body, signatures);
-                        RootSet write_roots;
-                        if (std::optional<LocalId> root = direct_write_root(*expr.lhs, body)) {
+                        RootSet write_roots{};
+                        if (std::optional<LocalId> root = direct_write_root(*expr.lhs, body); root.has_value()) {
                             write_roots = single_root(*root);
                         } else {
                             auto write_roots_result = resolve_borrow_source_root(*expr.lhs, state, body, signatures, /*report_errors=*/false);
@@ -3379,7 +3383,7 @@ struct ConvertingConstructorBinding {
                                 }
                             }
                         }
-                    };
+                    }
                 }
                 return {};
             }
@@ -3517,7 +3521,7 @@ struct ConvertingConstructorBinding {
                             }
                         }
                     }
-                };
+                }
             }
             // ch04 §4.2: real, unrestricted C++ access control -- a
             // member variable may be `public` or `private` in any
@@ -4100,7 +4104,7 @@ struct ConvertingConstructorBinding {
                 state.local_lifetime_sources[stmt.local] =
                     resolve_lifetime_source_roots(*(*stmt.ctor_args)[0], state, body, signatures, report_errors);
             } else if (stmt.type.kind == TypeKind::Pointer) {
-                state.local_lifetime_sources[stmt.local] = {};
+                state.local_lifetime_sources[stmt.local] = RootSet{};
             } else if (is_lifetime_eligible_type(stmt.type)) {
                 state.local_lifetime_sources.erase(stmt.local);
             }
@@ -4270,7 +4274,8 @@ struct ConvertingConstructorBinding {
                         if (state.class_field_types != nullptr) {
                             auto fields_it = state.class_field_types->find((*local_type).name);
                             if (fields_it != state.class_field_types->end()) {
-                                for (const auto& [field_name, field_type] : fields_it->second) {
+                                for (const auto& entry : fields_it->second) {
+                                    const auto& field_type = entry.second;
                                     if (is_reference(field_type)) {
                                         has_reference_member = true;
                                         break;
@@ -4422,7 +4427,7 @@ struct ConvertingConstructorBinding {
                     // what its by-reference captures hold has to persist
                     // for the rest of this function -- see
                     // apply_lambda_captures' own comment.
-                    std::vector<ClosureCaptureBorrow> closure_capture_borrows;
+                    std::vector<ClosureCaptureBorrow> closure_capture_borrows{};
                     if (auto _r = apply_lambda_captures(*stmt.expr, state, body, signatures, report_errors,
                                           &closure_capture_borrows);
                         !_r.has_value()) {
@@ -4542,7 +4547,7 @@ struct ConvertingConstructorBinding {
                                 own.has_value()) {
                                 return std::unexpected(std::move(*own));
                             }
-                            std::vector<ExprPtr> init_args;
+                            std::vector<ExprPtr> init_args{};
                             init_args.push_back(deep_clone_expr(*stmt.expr));
                             if (std::optional<std::string> failure = describe_constructor_selection_failure(
                                     (*local_type).name, init_args, body, signatures);
@@ -4635,7 +4640,7 @@ struct ConvertingConstructorBinding {
                 return std::unexpected(std::move(_r).error());
             }
             if (report_errors) {
-                if (const NodiscardInfo* info = nodiscard_info_for_discarded_call(*stmt.expr, body, signatures)) {
+                if (const NodiscardInfo* info = nodiscard_info_for_discarded_call(*stmt.expr, body, signatures); info != nullptr) {
                     std::string message = "discarded return value of nodiscard " + info->subject;
                     if (!info->reason.empty()) message += ": " + info->reason;
                     return std::unexpected(DataflowError(message, stmt.expr->loc));
@@ -4906,7 +4911,7 @@ struct ConvertingConstructorBinding {
                 // gap above doesn't affect their soundness).
                 bool is_synthetic_check_only_function =
                     !fn.member_owner_class.empty() && body.program != nullptr &&
-                    [&] {
+                    [&]() {
                         const ClassDef* owner = find_class_def(*body.program, fn.member_owner_class);
                         return owner != nullptr && owner->is_synthetic_check_only;
                     }();
@@ -5145,12 +5150,12 @@ struct ConvertingConstructorBinding {
 }
 
 struct SwitchCaseKey {
-    long long value = 0;
+    std::int64_t value = 0;
 };
 
-[[nodiscard]] std::optional<long long> integer_case_label_value(const Expr& expr) {
+[[nodiscard]] std::optional<std::int64_t> integer_case_label_value(const Expr& expr) {
     if (expr.kind == ExprKind::IntegerLiteral || expr.kind == ExprKind::CharLiteral) return expr.int_value;
-    if (expr.kind == ExprKind::BoolLiteral) return expr.bool_value ? 1LL : 0LL;
+    if (expr.kind == ExprKind::BoolLiteral) return expr.bool_value ? 1 : 0;
     if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Neg && expr.lhs &&
         expr.lhs->kind == ExprKind::IntegerLiteral) {
         return -expr.lhs->int_value;
@@ -5176,7 +5181,7 @@ struct SwitchCaseKey {
           (operand_type.name == "bool" || is_integral_scalar_type_name(operand_type.name)))) {
         return std::unexpected(DataflowError("switch requires an integral or enum condition expression", expr.loc));
     }
-    if (std::optional<long long> literal = integer_case_label_value(expr)) {
+    if (std::optional<std::int64_t> literal = integer_case_label_value(expr); literal.has_value()) {
         return SwitchCaseKey{*literal};
     }
     std::optional<Type> label_type = infer_expr_type(expr, body, signatures);
@@ -5264,7 +5269,7 @@ struct SwitchCaseKey {
                 if (!condition_ok) {
                     return std::unexpected(DataflowError("switch requires an integral or enum condition expression", stmt.condition->loc));
                 }
-                std::unordered_map<long long, SourceLocation> seen_labels;
+                std::unordered_map<std::int64_t, SourceLocation> seen_labels{};
                 for (const SwitchCase& switch_case : stmt.switch_cases) {
                     if (switch_case.value) {
                         auto key_result =
@@ -5309,7 +5314,7 @@ struct SwitchCaseKey {
                      const ClassFieldTypes& class_field_types, const ClassFieldAccess& class_field_access,
                      const std::unordered_set<std::string>& classes_with_copy_ctor,
                      const std::unordered_set<std::string>& classes_with_copy_assign,
-                     [[maybe_unused]] const std::unordered_set<std::string>& witness_class_names) {
+                     const std::unordered_set<std::string>& witness_class_names [[maybe_unused]]) {
     Body body = build_mir(fn);
     body.program = &program;
     if (auto _r = check_member_initializer_conversions(fn, body, signatures, class_field_types); !_r.has_value()) {
@@ -5323,7 +5328,8 @@ struct SwitchCaseKey {
 
     std::size_t n = body.blocks.size();
 
-    std::vector<std::vector<std::size_t>> preds(n);
+    std::vector<std::vector<std::size_t>> preds{};
+    preds.resize(n);
     for (std::size_t i = 0; i < n; i++) {
         for (std::size_t succ : successors(body.blocks[i].terminator)) {
             preds[succ].push_back(i);
@@ -5338,7 +5344,7 @@ struct SwitchCaseKey {
     // ScopeExit -- the NLL upgrade from spec ch05.3.
     std::vector<std::vector<LiveSet>> live_after = compute_reference_liveness(body, preds);
 
-    DataflowState entry_state;
+    DataflowState entry_state{};
     // ch01 §1.2/§1.3: every function is checked by default,
     // unconditionally -- there is no per-function way to start already
     // inside an implicit unsafe context via mere absence of any marker
@@ -5427,12 +5433,14 @@ struct SwitchCaseKey {
         }
     }
 
-    std::vector<DataflowState> in_states(n);
-    std::vector<DataflowState> out_states(n);
+    std::vector<DataflowState> in_states{};
+    in_states.resize(n);
+    std::vector<DataflowState> out_states{};
+    out_states.resize(n);
     if (n > 0) in_states[0] = entry_state;
 
     if (is_constructor_function(fn)) {
-        if (const ClassDef* owner = find_class_def(program, fn.member_owner_class)) {
+        if (const ClassDef* owner = find_class_def(program, fn.member_owner_class); owner != nullptr) {
             if (auto _r = validate_constructor_base_initialization(fn, *owner, body, signatures); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
@@ -5443,19 +5451,20 @@ struct SwitchCaseKey {
         }
     }
 
-    std::deque<std::size_t> worklist;
-    std::vector<bool> queued(n, false);
+    std::vector<std::size_t> worklist{};
+    std::vector<bool> queued{};
+    queued.resize(n, false);
     for (std::size_t i = 0; i < n; i++) {
         worklist.push_back(i);
         queued[i] = true;
     }
 
-    while (!worklist.empty()) {
-        std::size_t b = worklist.front();
-        worklist.pop_front();
+    std::size_t worklist_head = 0;
+    while (worklist_head < worklist.size()) {
+        std::size_t b = worklist[worklist_head++];
         queued[b] = false;
 
-        DataflowState new_in;
+        DataflowState new_in{};
         if (b == 0) {
             new_in = entry_state;
         } else {
@@ -5535,12 +5544,12 @@ struct SwitchCaseKey {
     // checking (apply_expr's own Member case) can tell a class-typed
     // base (access-controlled) apart from a struct-typed one (never
     // access-controlled, ch04 §4.1) -- see DataflowState::class_names.
-    std::unordered_set<std::string> class_names;
+    std::unordered_set<std::string> class_names{};
     for (const ClassDef& def : program.classes) {
         class_names.insert(def.name);
     }
     // See DataflowState::class_field_types' own comment.
-    ClassFieldTypes class_field_types;
+    ClassFieldTypes class_field_types{};
     for (const ClassDef& def : program.classes) {
         for (const ClassField& field : def.fields) {
             class_field_types[def.name][field.name] = field.type;
@@ -5554,7 +5563,7 @@ struct SwitchCaseKey {
     // See DataflowState::class_field_access's own comment -- struct
     // fields have no access control at all (ch04 §4.1), so only
     // program.classes populates this.
-    ClassFieldAccess class_field_access;
+    ClassFieldAccess class_field_access{};
     for (const ClassDef& def : program.classes) {
         for (const ClassField& field : def.fields) {
             class_field_access[def.name][field.name] = field.access;
@@ -5574,8 +5583,8 @@ struct SwitchCaseKey {
     // three gates that consult it -- field copy assignment, whole-local
     // copy assignment, and lambda capture-by-copy -- silently licensed
     // copies of structs the predicate says have no such operation at all.
-    std::unordered_set<std::string> classes_with_copy_ctor;
-    std::unordered_set<std::string> classes_with_copy_assign;
+    std::unordered_set<std::string> classes_with_copy_ctor{};
+    std::unordered_set<std::string> classes_with_copy_assign{};
     for (const ClassDef& def : program.classes) {
         if (is_copy_constructible(def.name, program)) classes_with_copy_ctor.insert(def.name);
         if (is_copy_assignable(def.name, program)) classes_with_copy_assign.insert(def.name);
@@ -5602,7 +5611,7 @@ struct SwitchCaseKey {
     // user-written one) -- see ClassDef::is_concept_witness and
     // check_function's own by-value-parameter/return-type exemption for
     // why this is needed.
-    std::unordered_set<std::string> witness_class_names;
+    std::unordered_set<std::string> witness_class_names{};
     for (const ClassDef& def : program.classes) {
         if (def.is_concept_witness) witness_class_names.insert(def.name);
     }
