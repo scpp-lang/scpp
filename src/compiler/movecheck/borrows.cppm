@@ -41,19 +41,19 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
                                                  const Signatures& signatures, bool report_errors);
 [[nodiscard]] RootSet resolve_lifetime_source_roots(const Expr& expr, DataflowState& state, const Body& body,
                                                     const Signatures& signatures, bool report_errors);
-[[nodiscard]] std::optional<std::size_t> find_function_param_by_root(const Function& fn, const std::string& root);
+[[nodiscard]] std::optional<std::size_t> find_function_param_by_root(const Function& fn, LocalId root);
 [[nodiscard]] bool roots_satisfy_named_lifetime_group(const RootSet& roots, const Function& fn,
                                                       std::string_view group_name);
-[[nodiscard]] bool roots_include_parameter_lifetime(const RootSet& roots, const DataflowState& state);
+[[nodiscard]] bool roots_include_parameter_lifetime(const RootSet& roots, const Body& body, const DataflowState& state);
 [[nodiscard]] std::expected<void, DataflowError> reject_lifetime_group_state_embedding(const Expr& expr, DataflowState& state, const Body& body,
                                            const Signatures& signatures, bool report_errors,
                                            std::string_view context,
                                            const Type* destination_type = nullptr);
 [[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
-[[nodiscard]] bool place_is_read_only(const Expr& expr, const Body& body, const Signatures& signatures);
-[[nodiscard]] std::expected<void, DataflowError> validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
+[[nodiscard]] extern bool place_is_read_only(const Expr& expr, const Body& body, const Signatures& signatures);
+[[nodiscard]] extern std::expected<void, DataflowError> validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
                          const Signatures& signatures);
-[[nodiscard]] std::expected<void, DataflowError> validate_subscript_expr(const Expr& expr, const DataflowState& state, const Body& body,
+[[nodiscard]] extern std::expected<void, DataflowError> validate_subscript_expr(const Expr& expr, const DataflowState& state, const Body& body,
                              const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> apply_address_of(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
                       bool report_errors);
@@ -271,13 +271,15 @@ std::expected<void, DataflowError> validate_reborrow_lender(LocalId lender, bool
     int live_holds = suspension_it->second.shared_count + (suspension_it->second.mutable_suspended ? 1 : 0);
     int attributed = 0;
     bool overlaps = false;
-    for (const auto& [ref_local, target] : state.ref_targets) {
+    for (const auto& entry : state.ref_targets) {
+        const auto& target = entry.second;
         if (!target.is_reborrow() || *target.lender != lender) continue;
         attributed++;
         if (!target.bound_place.has_value()) return true;
         if (target.bound_place->is_at_or_under(*written) || written->is_at_or_under(*target.bound_place)) overlaps = true;
     }
-    for (const auto& [closure_local, captures] : state.closure_capture_borrows) {
+    for (const auto& entry : state.closure_capture_borrows) {
+        const auto& captures = entry.second;
         for (const ClosureCaptureBorrow& capture_borrow : captures) {
             // A capture records no place at all, so it can never be
             // ruled out.
@@ -325,7 +327,7 @@ std::expected<void, DataflowError> validate_reborrow_lender_write(LocalId lender
 // reference's own release_reference_borrow, or a closure's
 // release_closure_capture_borrows -- and this then releases normally at
 // the next opportunity (ScopeExit at the latest).
-void release_reference_borrow(LocalId local, DataflowState& state, [[maybe_unused]] const Body& body) {
+void release_reference_borrow(LocalId local, DataflowState& state, const Body& body [[maybe_unused]]) {
     if (local_is_suspended_for_reborrow(local, state)) return;
     auto ref_it = state.ref_targets.find(local);
     if (ref_it == state.ref_targets.end()) return;
@@ -400,7 +402,7 @@ std::vector<std::size_t> successors(const Terminator& term) {
         case TerminatorKind::Goto: return {term.target};
         case TerminatorKind::Branch: return {term.true_target, term.false_target};
         case TerminatorKind::Switch: {
-            std::vector<std::size_t> out;
+            std::vector<std::size_t> out{};
             out.reserve(term.switch_targets.size());
             for (const SwitchTarget& target : term.switch_targets) out.push_back(target.block);
             return out;
@@ -544,7 +546,7 @@ std::optional<LocalId> reference_def(const MirStatement& stmt) {
 }
 
 LiveSet reference_uses(const MirStatement& stmt, const Body& body) {
-    LiveSet uses;
+    LiveSet uses{};
     switch (stmt.kind) {
         case MirStatementKind::BindReference:
         case MirStatementKind::Eval:
@@ -573,7 +575,7 @@ LiveSet reference_uses(const MirStatement& stmt, const Body& body) {
 }
 
 LiveSet reference_uses(const Terminator& term, const Body& body) {
-    LiveSet uses;
+    LiveSet uses{};
     switch (term.kind) {
         case TerminatorKind::Branch:
         case TerminatorKind::Switch:
@@ -618,26 +620,28 @@ LiveSet reference_uses(const Terminator& term, const Body& body) {
 std::vector<std::vector<LiveSet>> compute_reference_liveness(const Body& body,
                                                               const std::vector<std::vector<std::size_t>>& preds) {
     std::size_t n = body.blocks.size();
-    std::vector<LiveSet> block_live_in(n);
+    std::vector<LiveSet> block_live_in{};
+    block_live_in.resize(n);
 
     auto block_live_out = [&](std::size_t b) {
-        LiveSet live;
+        LiveSet live{};
         for (std::size_t succ : successors(body.blocks[b].terminator)) {
             live.insert(block_live_in[succ].begin(), block_live_in[succ].end());
         }
         return live;
     };
 
-    std::deque<std::size_t> worklist;
-    std::vector<bool> queued(n, false);
+    std::vector<std::size_t> worklist{};
+    std::vector<bool> queued{};
+    queued.resize(n, false);
     for (std::size_t i = 0; i < n; i++) {
         worklist.push_back(i);
         queued[i] = true;
     }
 
-    while (!worklist.empty()) {
-        std::size_t b = worklist.front();
-        worklist.pop_front();
+    std::size_t worklist_head = 0;
+    while (worklist_head < worklist.size()) {
+        std::size_t b = worklist[worklist_head++];
         queued[b] = false;
 
         LiveSet live = block_live_out(b);
@@ -646,7 +650,7 @@ std::vector<std::vector<LiveSet>> compute_reference_liveness(const Body& body,
             live.insert(use);
         }
         for (auto it = block.statements.rbegin(); it != block.statements.rend(); ++it) {
-            if (std::optional<LocalId> def = reference_def(*it)) live.erase(*def);
+            if (std::optional<LocalId> def = reference_def(*it); def.has_value()) live.erase(*def);
             for (LocalId use : reference_uses(*it, body)) live.insert(use);
         }
 
@@ -664,7 +668,8 @@ std::vector<std::vector<LiveSet>> compute_reference_liveness(const Body& body,
     // Fixed point reached (`block_live_in` is now stable): replay every
     // block once more, this time also recording the live-out-after-each-
     // statement snapshot the forward pass needs.
-    std::vector<std::vector<LiveSet>> live_after(n);
+    std::vector<std::vector<LiveSet>> live_after{};
+    live_after.resize(n);
     for (std::size_t b = 0; b < n; b++) {
         const BasicBlock& block = body.blocks[b];
         LiveSet live = block_live_out(b);
@@ -674,7 +679,7 @@ std::vector<std::vector<LiveSet>> compute_reference_liveness(const Body& body,
         live_after[b].resize(block.statements.size());
         for (std::size_t i = block.statements.size(); i-- > 0;) {
             live_after[b][i] = live;
-            if (std::optional<LocalId> def = reference_def(block.statements[i])) live.erase(*def);
+            if (std::optional<LocalId> def = reference_def(block.statements[i]); def.has_value()) live.erase(*def);
             for (LocalId use : reference_uses(block.statements[i], body)) live.insert(use);
         }
     }
@@ -687,7 +692,7 @@ std::vector<std::vector<LiveSet>> compute_reference_liveness(const Body& body,
 // use was this statement or earlier. Collects the locals to release
 // first rather than erasing while iterating `state.ref_targets` directly.
 void release_dead_references(DataflowState& state, const Body& body, const LiveSet& live_after_stmt) {
-    std::vector<LocalId> dead;
+    std::vector<LocalId> dead{};
     // Releasing a dead closure can drop the suspension that was keeping
     // a dead lender alive, and releasing a dead reborrow can do the same
     // -- so a single pass in a fixed order would leave whichever came
@@ -699,14 +704,16 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
     for (;;) {
         std::size_t before = state.ref_targets.size() + state.closure_capture_borrows.size();
         dead.clear();
-        for (const auto& [local, root] : state.ref_targets) {
+        for (const auto& entry : state.ref_targets) {
+            LocalId local = entry.first;
             if (!live_after_stmt.contains(local)) dead.push_back(local);
         }
         for (LocalId local : dead) {
             release_reference_borrow(local, state, body);
         }
         dead.clear();
-        for (const auto& [local, borrows] : state.closure_capture_borrows) {
+        for (const auto& entry : state.closure_capture_borrows) {
+            LocalId local = entry.first;
             if (!live_after_stmt.contains(local)) dead.push_back(local);
         }
         for (LocalId local : dead) {
@@ -716,7 +723,7 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
     }
 }
 
-[[nodiscard]] std::expected<void, DataflowError> apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
+[[nodiscard]] extern std::expected<void, DataflowError> apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
                  const Signatures& signatures, bool report_errors);
 
 // Checks every argument of a Call expression against its callee's
@@ -725,7 +732,7 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
 // statement or value sub-expression) and resolve_borrow_source_root's
 // Call case below (a call to a reference-returning function used
 // itself as a further reference-binding source).
-[[nodiscard]] std::expected<void, DataflowError> check_call_arguments(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
+[[nodiscard]] extern std::expected<void, DataflowError> check_call_arguments(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
                            bool report_errors);
 
 // Resolves the root place that `expr` would be borrowing from if used as
@@ -918,7 +925,7 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
             if (auto _r = check_call_arguments(expr, state, body, signatures, report_errors); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
-            RootSet roots;
+            RootSet roots{};
             for (std::size_t source_index : sig->returned_lifetime_param_indices) {
                 if (expr.name == "operator_deref" && expr.lhs != nullptr && source_index < callee.param_offset) {
                     if (expr.lhs->kind == ExprKind::Identifier) {
@@ -1053,7 +1060,7 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
             if (sig == nullptr) return {};
             if (sig->returned_lifetime_param_indices.empty() || !is_pointer_return_lifetime_source_type(sig->return_type)) return {};
-            RootSet roots;
+            RootSet roots{};
             for (std::size_t source_index : sig->returned_lifetime_param_indices) {
                 if (source_index < callee.param_offset) {
                     if (expr.lhs) {
