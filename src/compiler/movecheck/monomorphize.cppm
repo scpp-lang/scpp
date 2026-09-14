@@ -27,23 +27,12 @@ namespace scpp {
 // copyable, and their copy constructors deep-clone (Function's clones its
 // whole body), so a vector that reallocates by copy would silently free
 // the very tree being walked. std::vector only moves when the element
-// type is nothrow-move-constructible, hence this guard -- adding a
-// user-declared copy constructor/destructor to any of these without also
-// declaring the move operations suppresses the move constructor and
-// reintroduces that use-after-free.
-static_assert(std::is_nothrow_move_constructible_v<Function>);
-static_assert(std::is_nothrow_move_constructible_v<ClassDef>);
-static_assert(std::is_nothrow_move_constructible_v<StructDef>);
-static_assert(std::is_nothrow_move_constructible_v<EnumDef>);
-static_assert(std::is_nothrow_move_constructible_v<ConceptDef>);
-static_assert(std::is_nothrow_move_constructible_v<Stmt>);
-static_assert(std::is_nothrow_move_constructible_v<Expr>);
-static_assert(std::is_nothrow_move_constructible_v<Type>);
-static_assert(std::is_nothrow_move_constructible_v<Param>);
+// type is nothrow-move-constructible, hence this guard -- pinned by
+// static_asserts in movecheck.cpp.
 
 class Monomorphizer {
 public:
-    explicit Monomorphizer(Program& program) : program_(program) {
+    explicit Monomorphizer(Program& program) : program_{program} {
         for (const ConceptDef& c : program.concepts) concepts_by_name_[c.name] = &c;
         for (std::size_t i = 0; i < program.functions.size(); i++) {
             if (program.functions[i].is_generic_template) {
@@ -257,7 +246,7 @@ private:
     struct WalkReturnTypeScope {
         Type& slot;
         Type saved;
-        WalkReturnTypeScope(Type& slot_in, Type fresh) : slot(slot_in), saved(slot_in) { slot = std::move(fresh); }
+        WalkReturnTypeScope(Type& slot_in, Type fresh) : slot{slot_in}, saved{slot_in} { slot = std::move(fresh); }
         ~WalkReturnTypeScope() { slot = std::move(saved); }
         WalkReturnTypeScope(const WalkReturnTypeScope&) = delete;
         WalkReturnTypeScope& operator=(const WalkReturnTypeScope&) = delete;
@@ -493,16 +482,16 @@ private:
 
     [[nodiscard]] static std::string trim_copy(std::string text) {
         std::size_t start = 0;
-        while (start < text.size() && std::isspace(static_cast<unsigned char>(text[start]))) start++;
+        while (start < text.size() && std::isspace(static_cast<std::uint8_t>(text[start]))) start++;
         std::size_t end = text.size();
-        while (end > start && std::isspace(static_cast<unsigned char>(text[end - 1]))) end--;
+        while (end > start && std::isspace(static_cast<std::uint8_t>(text[end - 1]))) end--;
         return text.substr(start, end - start);
     }
 
     [[nodiscard]] std::optional<Type> parse_type_spelling(std::string_view spelling) const {
         std::string text = trim_copy(std::string(spelling));
         if (text.empty()) return std::nullopt;
-        Type type;
+        Type type{};
         type.kind = TypeKind::Named;
         std::size_t lt = text.find('<');
         if (lt == std::string::npos) {
@@ -546,7 +535,8 @@ private:
         if (owner.find('<') == std::string::npos) return std::nullopt;
         std::optional<Type> owner_type = parse_type_spelling(owner);
         if (!owner_type.has_value() || owner_type->template_args.empty()) return std::nullopt;
-        std::vector<Type> resolved_args;
+        std::vector<Type> resolved_args{};
+
         resolved_args.reserve(owner_type->template_args.size());
         for (const Type& arg : owner_type->template_args) {
             auto resolved = resolve_generic_type(arg, loc);
@@ -579,7 +569,7 @@ private:
         }
         Body body = build_mir(fn);
         body.program = &program_;
-        WalkReturnTypeScope return_type_scope(current_walk_return_type_, fn.return_type);
+        WalkReturnTypeScope return_type_scope{current_walk_return_type_, fn.return_type};
         std::optional<Type> enclosing_this_type = this_type_of(fn);
         bool allow_generic_monomorphization = !fn.is_generic_template;
         // Walked out of line and written back by index, not through
@@ -664,7 +654,8 @@ private:
         // default constructor. Missing this linked
         // `TagList<int, bool>{}` against an undefined `TagList.bool_new`.
         if (allow_generic_monomorphization && enclosing_is_constructor && enclosing_this_type.has_value()) {
-            std::vector<Type> implicit_bases;
+            std::vector<Type> implicit_bases{};
+
             for (const ClassDef& def : program_.classes) {
                 if (def.name != enclosing_this_type->name) continue;
                 for (const BaseSpecifier& base : def.base_specifiers) {
@@ -679,7 +670,8 @@ private:
             }
             for (const Type& base_type : implicit_bases) {
                 if (base_type.kind != TypeKind::Named) continue;
-                std::vector<ExprPtr> no_arguments;
+                std::vector<ExprPtr> no_arguments{};
+
                 if (auto _r = require_constructor_definition(base_type.name, no_arguments, body); !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
@@ -766,7 +758,8 @@ private:
     }
 
     [[nodiscard]] static std::vector<Expr*> initializer_exprs(std::optional<Initializer>& initializer) {
-        std::vector<Expr*> out;
+        std::vector<Expr*> out{};
+
         if (!initializer.has_value()) return out;
         if (initializer->expr != nullptr) out.push_back(initializer->expr.get());
         for (ExprPtr& arg : initializer->brace_args) {
@@ -783,7 +776,8 @@ private:
     [[nodiscard]] Body non_function_body(const std::string& owning_module,
                                          const std::vector<std::string>& namespace_path,
                                          const std::string& member_owner_class) {
-        Body body;
+        Body body{};
+
         body.program = &program_;
         body.function_owning_module = owning_module;
         body.function_visibility_module = owning_module;
@@ -935,7 +929,8 @@ private:
     void rewrite_implicit_member_field_access(Function& fn) {
         if (fn.body == nullptr || fn.member_owner_class.empty()) return;
 
-        std::unordered_set<std::string> member_field_names;
+        std::unordered_set<std::string> member_field_names{};
+
         for (const ClassDef& def : program_.classes) {
             if (def.name != fn.member_owner_class) continue;
             for (const ClassField& field : def.fields) member_field_names.insert(field.name);
@@ -950,7 +945,8 @@ private:
         }
         if (member_field_names.empty()) return;
 
-        std::unordered_set<std::string> excluded_names;
+        std::unordered_set<std::string> excluded_names{};
+
         for (const Param& param : fn.params) excluded_names.insert(param.name);
         collect_locally_declared_names(*fn.body, excluded_names);
         for (const std::string& excluded : excluded_names) member_field_names.erase(excluded);
@@ -988,8 +984,10 @@ private:
             }
         }
 
-        std::unordered_map<std::string, std::string> instance_methods;
-        std::unordered_map<std::string, std::string> static_methods;
+        std::unordered_map<std::string, std::string> instance_methods{};
+
+        std::unordered_map<std::string, std::string> static_methods{};
+
         for (const Function& candidate : program_.functions) {
             if (candidate.member_owner_class != fn.member_owner_class) continue;
             if (!candidate.name.starts_with(owner_prefix)) continue;
@@ -1005,7 +1003,8 @@ private:
         if (fn.is_static) instance_methods.clear();
         if (instance_methods.empty() && static_methods.empty()) return;
 
-        std::unordered_set<std::string> shadowing_names;
+        std::unordered_set<std::string> shadowing_names{};
+
         for (const Param& param : fn.params) shadowing_names.insert(param.name);
         collect_locally_declared_names(*fn.body, shadowing_names);
         for (const std::string& shadowed : shadowing_names) {
@@ -1054,7 +1053,8 @@ private:
             return type;
         }
         Type inner = *type.pointee;
-        Type collapsed;
+        Type collapsed{};
+
         collapsed.kind = TypeKind::Reference;
         collapsed.is_mutable_ref = type.is_mutable_ref && inner.is_mutable_ref;
         collapsed.is_rvalue_ref = type.is_rvalue_ref && inner.is_rvalue_ref;
@@ -1175,7 +1175,8 @@ private:
         }
         Type result = type;
         result.is_pack_expansion = false;
-        std::vector<Type> expanded_template_args;
+        std::vector<Type> expanded_template_args{};
+
         for (const Type& arg : result.template_args) {
             if (arg.is_pack_expansion && arg.kind == TypeKind::Named && arg.name == pack_name) {
                 for (const Type& concrete : pack_elems) expanded_template_args.push_back(concrete);
@@ -1197,7 +1198,8 @@ private:
             result.function_return =
                 std::make_shared<Type>(substitute_type_pack(*result.function_return, pack_name, pack_elems));
         }
-        std::vector<Type> expanded_function_params;
+        std::vector<Type> expanded_function_params{};
+
         for (const Type& param : result.function_params) {
             if (param.is_pack_expansion && param.kind == TypeKind::Named && param.name == pack_name) {
                 for (const Type& concrete : pack_elems) expanded_function_params.push_back(concrete);
@@ -1220,7 +1222,9 @@ private:
     [[nodiscard]] Type substitute_type_params(
         const Type& type, const std::vector<std::pair<std::string, Type>>& replacements) {
         Type result = type;
-        for (const auto& [param_name, replacement] : replacements) {
+        for (const auto& entry : replacements) {
+            const auto& param_name = entry.first;
+            const auto& replacement = entry.second;
             result = substitute_type_param(result, param_name, replacement);
         }
         return result;
@@ -1229,7 +1233,9 @@ private:
     [[nodiscard]] Type substitute_type_packs(
         const Type& type, const std::unordered_map<std::string, std::vector<Type>>& replacements) {
         Type result = type;
-        for (const auto& [pack_name, pack_elems] : replacements) {
+        for (const auto& entry : replacements) {
+            const auto& pack_name = entry.first;
+            const auto& pack_elems = entry.second;
             result = substitute_type_pack(result, pack_name, pack_elems);
         }
         return result;
@@ -1243,30 +1249,30 @@ private:
             }
         }
         for (const Type& arg : type.template_args) {
-            if (std::optional<std::string> found = referenced_type_pack_param_name(arg, template_params)) {
+            if (std::optional<std::string> found = referenced_type_pack_param_name(arg, template_params); found.has_value()) {
                 return found;
             }
         }
         if (type.pointee) {
             if (std::optional<std::string> found =
-                    referenced_type_pack_param_name(*type.pointee, template_params)) {
+                    referenced_type_pack_param_name(*type.pointee, template_params); found.has_value()) {
                 return found;
             }
         }
         if (type.element) {
             if (std::optional<std::string> found =
-                    referenced_type_pack_param_name(*type.element, template_params)) {
+                    referenced_type_pack_param_name(*type.element, template_params); found.has_value()) {
                 return found;
             }
         }
         if (type.function_return) {
             if (std::optional<std::string> found =
-                    referenced_type_pack_param_name(*type.function_return, template_params)) {
+                    referenced_type_pack_param_name(*type.function_return, template_params); found.has_value()) {
                 return found;
             }
         }
         for (const Type& param : type.function_params) {
-            if (std::optional<std::string> found = referenced_type_pack_param_name(param, template_params)) {
+            if (std::optional<std::string> found = referenced_type_pack_param_name(param, template_params); found.has_value()) {
                 return found;
             }
         }
@@ -1304,7 +1310,9 @@ private:
     }
 
     void substitute_type_params_in_expr(Expr& expr, const std::vector<std::pair<std::string, Type>>& replacements) {
-        for (const auto& [param_name, replacement] : replacements) {
+        for (const auto& entry : replacements) {
+            const auto& param_name = entry.first;
+            const auto& replacement = entry.second;
             substitute_type_param_in_expr(expr, param_name, replacement);
         }
     }
@@ -1331,7 +1339,9 @@ private:
 
     void substitute_type_packs_in_expr(Expr& expr,
                                        const std::unordered_map<std::string, std::vector<Type>>& replacements) {
-        for (const auto& [pack_name, pack_elems] : replacements) {
+        for (const auto& entry : replacements) {
+            const auto& pack_name = entry.first;
+            const auto& pack_elems = entry.second;
             substitute_type_pack_in_expr(expr, pack_name, pack_elems);
         }
     }
@@ -1374,13 +1384,17 @@ private:
     }
 
     void substitute_type_params_in_stmt(Stmt& stmt, const std::vector<std::pair<std::string, Type>>& replacements) {
-        for (const auto& [param_name, replacement] : replacements) {
+        for (const auto& entry : replacements) {
+            const auto& param_name = entry.first;
+            const auto& replacement = entry.second;
             substitute_type_param_in_stmt(stmt, param_name, replacement);
         }
     }
 
     void substitute_type_bindings_in_stmt(Stmt& stmt, const std::unordered_map<std::string, Type>& replacements) {
-        for (const auto& [param_name, replacement] : replacements) {
+        for (const auto& entry : replacements) {
+            const auto& param_name = entry.first;
+            const auto& replacement = entry.second;
             substitute_type_param_in_stmt(stmt, param_name, replacement);
         }
     }
@@ -1421,7 +1435,9 @@ private:
 
     void substitute_type_packs_in_stmt(Stmt& stmt,
                                        const std::unordered_map<std::string, std::vector<Type>>& replacements) {
-        for (const auto& [pack_name, pack_elems] : replacements) {
+        for (const auto& entry : replacements) {
+            const auto& pack_name = entry.first;
+            const auto& pack_elems = entry.second;
             substitute_type_pack_in_stmt(stmt, pack_name, pack_elems);
         }
     }
@@ -1486,7 +1502,8 @@ private:
     }
 
     [[nodiscard]] std::vector<Function> methods_of_type_name(const std::string& type_name) const {
-        std::vector<Function> result;
+        std::vector<Function> result{};
+
         for (const Function& fn : program_.functions) {
             if (fn.member_owner_class == type_name) {
                 result.push_back(clone_function(fn));
@@ -1502,7 +1519,8 @@ private:
     // This keeps distinct `function<...>` template definitions from
     // colliding once more than one shares the same `this` pointee spelling.
     [[nodiscard]] std::vector<Function> method_templates_of_owner(const std::string& owner_id) const {
-        std::vector<Function> result;
+        std::vector<Function> result{};
+
         for (const Function& fn : program_.functions) {
             if (fn.generic_method_owner_id == owner_id) result.push_back(clone_function(fn));
         }
@@ -1605,7 +1623,8 @@ private:
     // `const char[4]` argument had no conversion to it.
     [[nodiscard]] std::expected<void, DataflowError> register_deferred_member_definition(
         std::size_t function_index, std::function<std::expected<void, DataflowError>(Function&)> build) {
-        DeferredMemberDefinition deferred;
+        DeferredMemberDefinition deferred{};
+
         deferred.function_name = program_.functions[function_index].name;
         deferred.declaration_loc = program_.functions[function_index].loc;
         deferred.function_index = function_index;
@@ -1638,7 +1657,7 @@ private:
     // so the append watermark is dropped here too and the next sync
     // rebuilds the table outright.
     void forget_deferred_member_definitions_from(std::size_t first_function_index) {
-        signatures_function_count_ = std::numeric_limits<std::size_t>::max();
+        signatures_function_count_ = static_cast<std::size_t>(-1);
         for (std::size_t i = first_function_index; i < program_.functions.size(); i++) {
             program_.functions[i].definition_is_deferred = false;
         }
@@ -1664,7 +1683,8 @@ private:
         // substitution below resolves generic types, which can instantiate
         // a further generic class and push onto program_.functions,
         // reallocating it out from under a held reference.
-        Function scratch;
+        Function scratch{};
+
         auto build = deferred_member_definitions_[slot].build_definition;
         deferred_member_definitions_[slot].build_definition = nullptr;
         if (build == nullptr) return {};
@@ -1706,8 +1726,11 @@ private:
         if (deferred_member_definitions_.empty() || base_name.empty()) return {};
         if (!deferred_family_bases_.contains(base_name)) return {};
         std::string overload_prefix = base_name + ".";
-        std::vector<std::size_t> slots;
-        for (const auto& [name, name_slots] : deferred_by_function_name_) {
+        std::vector<std::size_t> slots{};
+
+        for (const auto& entry : deferred_by_function_name_) {
+            const auto& name = entry.first;
+            const auto& name_slots = entry.second;
             if (name != base_name && !name.starts_with(overload_prefix)) continue;
             slots.insert(slots.end(), name_slots.begin(), name_slots.end());
         }
@@ -1724,8 +1747,11 @@ private:
     // instantiation. Same direction of error as the family form above.
     [[nodiscard]] std::expected<void, DataflowError> require_member_definitions_named(const std::string& member_name) {
         if (deferred_member_definitions_.empty() || member_name.empty()) return {};
-        std::vector<std::size_t> slots;
-        for (const auto& [name, name_slots] : deferred_by_function_name_) {
+        std::vector<std::size_t> slots{};
+
+        for (const auto& entry : deferred_by_function_name_) {
+            const auto& name = entry.first;
+            const auto& name_slots = entry.second;
             std::string_view spelled{name};
             if (std::size_t overload_suffix = spelled.rfind('.'); overload_suffix != std::string_view::npos) {
                 spelled = spelled.substr(0, overload_suffix);
@@ -1873,7 +1899,8 @@ private:
         for (const ConstraintExcludedMember& recorded : program_.constraint_excluded_members) {
             if (recorded.class_name == class_name && recorded.member_name == member_name) return;
         }
-        ConstraintExcludedMember excluded;
+        ConstraintExcludedMember excluded{};
+
         excluded.class_name = class_name;
         excluded.member_name = std::move(member_name);
         excluded.concept_name = constraint.concept_name;
@@ -1922,14 +1949,16 @@ private:
                                       const std::vector<std::pair<std::string, Type>>& type_replacements,
                                       const std::unordered_map<std::string, std::vector<Type>>& pack_replacements,
                                       const std::vector<int>& non_type_args) {
-        std::vector<std::size_t> eagerly_defined_clones;
+        std::vector<std::size_t> eagerly_defined_clones{};
+
         for (const Function& method_tmpl : methods) {
             if (MethodConstraint constraint = unsatisfied_method_constraint(method_tmpl, type_replacements);
                 constraint.is_unsatisfied()) {
                 record_constraint_excluded_member(cache_key, method_tmpl, template_name, owner_id, constraint);
                 continue;
             }
-            Function clone;
+            Function clone{};
+
             clone.name = cache_key + method_suffix_after_owner_prefix(method_tmpl, template_name, owner_id);
             clone.loc = method_tmpl.loc;
             clone.namespace_path = method_tmpl.namespace_path;
@@ -1962,13 +1991,16 @@ private:
                 clone.return_type = std::move(resolved).value();
             }
             clone.return_lifetime = method_tmpl.return_lifetime;
-            std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
+            std::unordered_map<std::string, std::vector<std::string>> pack_param_names{};
+
             clone.params.reserve(method_tmpl.params.size());
             for (const Param& p : method_tmpl.params) {
                 if (p.name == "this") {
-                    Param np;
+                    Param np{};
+
                     np.name = p.name;
-                    Type this_type;
+                    Type this_type{};
+
                     this_type.kind = TypeKind::Reference;
                     this_type.pointee = std::make_shared<Type>(named_type(cache_key));
                     this_type.is_mutable_ref = p.type.is_mutable_ref;
@@ -1981,7 +2013,7 @@ private:
                         referenced_type_pack_param_name(p.type, template_params_copy);
                     auto pack_it = pack_name ? pack_replacements.find(*pack_name) : pack_replacements.end();
                     if (pack_name && pack_it != pack_replacements.end()) {
-                        pack_param_names[p.name] = {};
+                        pack_param_names[p.name] = std::vector<std::string>{};
                         for (std::size_t j = 0; j < pack_it->second.size(); j++) {
                             Param np = p;
                             np.is_parameter_pack = false;
@@ -2034,10 +2066,14 @@ private:
                         if (!template_params_copy[i].is_non_type) continue;
                         substitute_non_type_param_in_stmt(*into.body, template_params_copy[i].name, non_type_args[i]);
                     }
-                    for (const auto& [class_pack_name, concrete_pack_types] : pack_replacements) {
+                    for (const auto& entry : pack_replacements) {
+                        const auto& class_pack_name = entry.first;
+                        const auto& concrete_pack_types = entry.second;
                         expand_explicit_template_arg_packs_in_stmt(*into.body, class_pack_name, concrete_pack_types);
                     }
-                    for (const auto& [pack_param_name, concrete_names] : pack_param_names) {
+                    for (const auto& entry : pack_param_names) {
+                        const auto& pack_param_name = entry.first;
+                        const auto& concrete_names = entry.second;
                         if (auto _r = expand_pack_expansions_in_stmt(*into.body, pack_param_name, concrete_names); !_r.has_value()) {
                             return std::unexpected(std::move(_r).error());
                         }
@@ -2094,7 +2130,9 @@ private:
 
     [[nodiscard]] static const Type* find_type_replacement(const std::vector<std::pair<std::string, Type>>& replacements,
                                                            const std::string& name) {
-        for (const auto& [param_name, replacement] : replacements) {
+        for (const auto& entry : replacements) {
+            const auto& param_name = entry.first;
+            const auto& replacement = entry.second;
             if (param_name == name) return &replacement;
         }
         return nullptr;
@@ -2105,11 +2143,12 @@ private:
         const std::unordered_map<std::string, std::vector<Type>>& pack_replacements) {
         if (!type.is_pack_expansion && type.kind == TypeKind::Named && type.template_args.empty() &&
             type.non_type_args.empty()) {
-            if (const Type* replacement = find_type_replacement(replacements, type.name)) return *replacement;
+            if (const Type* replacement = find_type_replacement(replacements, type.name); replacement != nullptr) return *replacement;
         }
         Type result = type;
         result.is_pack_expansion = false;
-        std::vector<Type> new_template_args;
+        std::vector<Type> new_template_args{};
+
         new_template_args.reserve(result.template_args.size());
         for (const Type& arg : result.template_args) {
             if (arg.is_pack_expansion && arg.kind == TypeKind::Named && pack_replacements.contains(arg.name)) {
@@ -2134,7 +2173,8 @@ private:
             result.function_return = std::make_shared<Type>(
                 instantiate_type_pattern(*result.function_return, replacements, pack_replacements));
         }
-        std::vector<Type> new_function_params;
+        std::vector<Type> new_function_params{};
+
         new_function_params.reserve(result.function_params.size());
         for (const Type& param : result.function_params) {
             if (param.is_pack_expansion && param.kind == TypeKind::Named && pack_replacements.contains(param.name)) {
@@ -2160,7 +2200,7 @@ private:
 
     [[nodiscard]] static bool bind_type_pattern(
         const std::string& name, const Type& concrete, TemplateInstantiationBindings& bindings) {
-        if (const Type* existing = find_type_replacement(bindings.type_replacements, name)) {
+        if (const Type* existing = find_type_replacement(bindings.type_replacements, name); existing != nullptr) {
             return types_equal(*existing, concrete);
         }
         bindings.type_replacements.emplace_back(name, concrete);
@@ -2184,8 +2224,10 @@ private:
     [[nodiscard]] static bool match_type_pattern_list(
         const std::vector<Type>& patterns, const std::vector<Type>& concretes, const std::vector<GenericTypeParam>& params,
         TemplateInstantiationBindings& bindings) {
-        std::function<bool(const Type&, const Type&)> match_one;
-        std::function<bool(const std::vector<Type>&, const std::vector<Type>&)> match_list;
+        std::function<bool(const Type&, const Type&)> match_one{};
+
+        std::function<bool(const std::vector<Type>&, const std::vector<Type>&)> match_list{};
+
         match_list = [&](const std::vector<Type>& inner_patterns, const std::vector<Type>& inner_concretes) -> bool {
             if (!inner_patterns.empty()) {
                 const Type& last = inner_patterns.back();
@@ -2196,9 +2238,10 @@ private:
                         for (std::size_t i = 0; i + 1 < inner_patterns.size(); i++) {
                             if (!match_one(inner_patterns[i], inner_concretes[i])) return false;
                         }
-                        std::vector<Type> pack_slice(
-                            inner_concretes.begin() + static_cast<std::ptrdiff_t>(inner_patterns.size() - 1),
-                            inner_concretes.end());
+                        std::vector<Type> pack_slice{};
+                        for (std::size_t i = inner_patterns.size() - 1; i < inner_concretes.size(); ++i) {
+                            pack_slice.push_back(inner_concretes[i]);
+                        }
                         return bind_type_pack_pattern(param.name, pack_slice, bindings);
                     }
                 }
@@ -2258,10 +2301,12 @@ private:
 
     [[nodiscard]] std::expected<OrdinaryClassTemplateSelection, DataflowError> select_ordinary_class_template(
         const std::string& template_name, const std::vector<Type>& concrete_args, SourceLocation loc) const {
-        OrdinaryClassTemplateSelection primary_selection;
+        OrdinaryClassTemplateSelection primary_selection{};
+
         bool have_primary_definition = false;
         bool have_primary_forward_decl = false;
-        std::vector<OrdinaryClassTemplateSelection> matching_specializations;
+        std::vector<OrdinaryClassTemplateSelection> matching_specializations{};
+
 
         auto owner_it = ordinary_class_template_owner_ids_by_name_.find(template_name);
         if (owner_it == ordinary_class_template_owner_ids_by_name_.end()) {
@@ -2275,7 +2320,8 @@ private:
             }
             if (candidate->is_partial_specialization) {
                 if (candidate->specialization_template_args.size() != concrete_args.size()) continue;
-                TemplateInstantiationBindings bindings;
+                TemplateInstantiationBindings bindings{};
+
                 if (!match_type_pattern_list(candidate->specialization_template_args, concrete_args, candidate->template_params,
                                              bindings)) {
                     continue;
@@ -2284,7 +2330,8 @@ private:
                 continue;
             }
             if (candidate->template_params.size() != concrete_args.size()) continue;
-            TemplateInstantiationBindings bindings;
+            TemplateInstantiationBindings bindings{};
+
             bool valid = true;
             for (std::size_t param_index = 0; param_index < candidate->template_params.size(); ++param_index) {
                 const GenericTypeParam& param = candidate->template_params[param_index];
@@ -2392,7 +2439,8 @@ private:
                     }
                     if (already_defined) continue;
 
-                    Function forward;
+                    Function forward{};
+
                     forward.name = derived_method_name;
                     forward.loc = base_method.loc;
                     forward.return_type = base_method.return_type;
@@ -2403,9 +2451,11 @@ private:
                     forward.access = base_method.access;
                     forward.forwards_to = base_method.name;
                     forward.body = nullptr;
-                    Param this_param;
+                    Param this_param{};
+
                     this_param.name = "this";
-                    Type this_type;
+                    Type this_type{};
+
                     this_type.kind = TypeKind::Reference;
                     this_type.pointee = std::make_shared<Type>(named_type(derived_name));
                     this_type.is_mutable_ref = base_method.params[0].type.is_mutable_ref;
@@ -2591,12 +2641,14 @@ private:
                 // zero size, when a real, concrete instantiation would
                 // never see that failure to begin with.
                 std::size_t classes_before_method = program_.classes.size();
-                std::vector<std::pair<std::string, Type>> type_replacements;
+                std::vector<std::pair<std::string, Type>> type_replacements{};
+
                 type_replacements.reserve(template_params.size());
                 for (std::size_t param_index = 0; param_index < template_params.size(); ++param_index) {
                     const GenericTypeParam& param = template_params[param_index];
                     if (param.is_non_type) continue;
-                    std::string witness_name;
+                    std::string witness_name{};
+
                     if (param.name == method_tmpl.method_requires_param && !method_tmpl.method_requires_concept.empty()) {
                         witness_name = method_tmpl.method_requires_concept;
                     } else if (!param.concept_name.empty()) {
@@ -2608,7 +2660,8 @@ private:
                 }
 
                 std::string check_class_name = "__genchk" + std::to_string(generic_check_counter_++);
-                ClassDef check_class;
+                ClassDef check_class{};
+
                 check_class.name = check_class_name;
                 check_class.is_synthetic_check_only = true;
                 check_class.thread_movable_override = program_.classes[i].thread_movable_override;
@@ -2627,9 +2680,11 @@ private:
                         return std::unexpected(std::move(_r).error());
                     }
                 }
-                std::unordered_map<std::string, Type> field_types;
+                std::unordered_map<std::string, Type> field_types{};
+
                 for (const ClassField& f : fields_copy) {
-                    ClassField nf;
+                    ClassField nf{};
+
                     nf.name = f.name;
                     nf.access = f.access;
                     // Witness substitution alone leaves a field type like
@@ -2668,7 +2723,8 @@ private:
                 }
                 program_.classes.push_back(std::move(check_class));
 
-                Function check_fn;
+                Function check_fn{};
+
                 // Keeps the "_methodName" suffix (e.g. "_push"), just
                 // against the checking class's own synthesized name
                 // instead of the template's -- mirrors ClassName_
@@ -2709,11 +2765,13 @@ private:
                 check_fn.return_lifetime = method_tmpl.return_lifetime;
                 check_fn.params.reserve(method_tmpl.params.size());
                 for (const Param& p : method_tmpl.params) {
-                    Param np;
+                    Param np{};
+
                     np.name = p.name;
                     np.lifetime = p.lifetime;
                     if (p.name == "this") {
-                        Type this_type;
+                        Type this_type{};
+
                         this_type.kind = TypeKind::Reference;
                         this_type.pointee = std::make_shared<Type>(named_type(check_class_name));
                         this_type.is_mutable_ref = p.type.is_mutable_ref;
@@ -2765,7 +2823,8 @@ private:
                 // own comment for why check_moves's ordinary call-
                 // argument-checking can't already catch this on its own.
                 bool uses_bare_witness = false;
-                for (const auto& [_, replacement] : type_replacements) {
+                for (const auto& entry : type_replacements) {
+                    const auto& replacement = entry.second;
                     if (replacement.kind == TypeKind::Named && replacement.name == bare_witness_struct_name()) {
                         uses_bare_witness = true;
                         break;
@@ -2916,7 +2975,8 @@ private:
     [[nodiscard]] std::string bare_witness_struct_name() {
         if (bare_witness_struct_name_.empty()) {
             bare_witness_struct_name_ = "__generic_bare_witness";
-            StructDef witness;
+            StructDef witness{};
+
             witness.name = bare_witness_struct_name_;
             witness.is_concept_witness = true;
             program_.structs.push_back(std::move(witness));
@@ -3234,7 +3294,8 @@ private:
     };
 
     [[nodiscard]] InvokeReceiverCategory invoke_receiver_category(const Type& callable) {
-        InvokeReceiverCategory category;
+        InvokeReceiverCategory category{};
+
         if (callable.kind == TypeKind::Reference) {
             category.is_lvalue = !callable.is_rvalue_ref;
             // An lvalue reference spells its constness as `const T&`
@@ -3287,7 +3348,8 @@ private:
         const Type& callable = args.front();
         const Type& underlying =
             callable.kind == TypeKind::Reference && callable.pointee != nullptr ? *callable.pointee : callable;
-        std::vector<Type> arg_types(args.begin() + 1, args.end());
+        std::vector<Type> arg_types{};
+        for (std::size_t i = 1; i < args.size(); ++i) arg_types.push_back(args[i]);
         if (underlying.kind == TypeKind::FunctionPointer || underlying.kind == TypeKind::Function) {
             if (underlying.function_return == nullptr) {
                 return std::unexpected(DataflowError(
@@ -3332,8 +3394,10 @@ private:
             return overloads.front().return_type;
         }
         const InvokeReceiverCategory category = invoke_receiver_category(callable);
-        std::vector<const FunctionSignature*> viable;
-        std::vector<const FunctionSignature*> exact;
+        std::vector<const FunctionSignature*> viable{};
+
+        std::vector<const FunctionSignature*> exact{};
+
         for (const FunctionSignature& sig : overloads) {
             if (!signature_accepts_argument_count(sig, arg_types.size(), 1)) continue;
             if (!invoke_receiver_matches(sig, category)) continue;
@@ -3397,7 +3461,8 @@ private:
         // generic type -- whatever its argument count, e.g.
         // `std::expected<T, E>`'s two -- can never reach this branch.
         if (variadic_generic_type_names_.contains(type.name)) {
-            std::vector<Type> resolved_args;
+            std::vector<Type> resolved_args{};
+
             resolved_args.reserve(type.template_args.size());
             for (const Type& arg : type.template_args) {
                 auto resolved = resolve_generic_type(arg, loc);
@@ -3414,7 +3479,8 @@ private:
             // all, see run()'s own guard) -- evaluated with an empty
             // parameter-value scope, against the declared type of the
             // parameter each one binds to (see evaluate_non_type_arg).
-            std::vector<int> resolved_non_type_args;
+            std::vector<int> resolved_non_type_args{};
+
             resolved_non_type_args.reserve(type.non_type_args.size());
             for (std::size_t k = 0; k < type.non_type_args.size(); k++) {
                 auto value = evaluate_non_type_arg(*type.non_type_args[k], {},
@@ -3432,7 +3498,8 @@ private:
         }
         if (type.template_args.empty()) {
             if (!type.non_type_args.empty()) {
-                std::vector<int> resolved_non_type_args;
+                std::vector<int> resolved_non_type_args{};
+
                 resolved_non_type_args.reserve(type.non_type_args.size());
                 for (std::size_t k = 0; k < type.non_type_args.size(); k++) {
                     auto value = evaluate_non_type_arg(*type.non_type_args[k], {},
@@ -3493,7 +3560,8 @@ private:
             }
             return type;
         }
-        std::vector<Type> resolved_args;
+        std::vector<Type> resolved_args{};
+
         resolved_args.reserve(type.template_args.size());
         for (const Type& arg : type.template_args) {
             auto resolved = resolve_generic_type(arg, loc);
@@ -3613,7 +3681,8 @@ private:
             return std::unexpected(std::move(err));
         };
 
-        std::vector<Type> named_concretes;
+        std::vector<Type> named_concretes{};
+
         named_concretes.reserve(concrete_args.size());
         for (const Type& concrete_arg : concrete_args) {
             named_concretes.push_back(concrete_arg.kind == TypeKind::Reference ? *concrete_arg.pointee : concrete_arg);
@@ -3630,7 +3699,8 @@ private:
                                         std::to_string(tmpl.template_params.size()) + " template argument(s)",
                                     loc));
             }
-            std::vector<std::pair<std::string, Type>> type_replacements;
+            std::vector<std::pair<std::string, Type>> type_replacements{};
+
             type_replacements.reserve(tmpl.template_params.size());
             for (std::size_t param_index = 0; param_index < tmpl.template_params.size(); ++param_index) {
                 const GenericTypeParam& type_param = tmpl.template_params[param_index];
@@ -3644,13 +3714,15 @@ private:
                 }
                 type_replacements.emplace_back(type_param.name, named_concretes[param_index]);
             }
-            StructDef concrete;
+            StructDef concrete{};
+
             concrete.name = cache_key;
             concrete.namespace_path = tmpl.namespace_path;
             concrete.is_nodiscard = tmpl.is_nodiscard;
             concrete.nodiscard_reason = tmpl.nodiscard_reason;
             for (const StructField& f : tmpl.fields) {
-                StructField nf;
+                StructField nf{};
+
                 nf.name = f.name;
                 nf.type = substitute_type_params(f.type, type_replacements);
                 {
@@ -3724,7 +3796,8 @@ private:
             }
 
             std::vector<ClassField> fields_copy = tmpl.fields;
-            ClassDef concrete;
+            ClassDef concrete{};
+
             concrete.name = cache_key;
             concrete.namespace_path = tmpl_namespace_path;
             concrete.is_interface = tmpl.is_interface;
@@ -3751,7 +3824,8 @@ private:
                 }
             }
             for (const ClassField& f : fields_copy) {
-                ClassField nf;
+                ClassField nf{};
+
                 nf.name = f.name;
                 nf.access = f.access;
                 nf.type = instantiate_type_pattern(f.type, class_selection.bindings.type_replacements,
@@ -3779,7 +3853,8 @@ private:
             }
             program_.classes.push_back(std::move(concrete));
             ordinary_generic_instance_info_[cache_key] = OrdinaryGenericInstanceInfo{template_name, named_concretes};
-            std::vector<std::size_t> eagerly_defined_clones;
+            std::vector<std::size_t> eagerly_defined_clones{};
+
             for (const Function& method_tmpl : methods) {
                 // [temp.constr.decl], [over.match.viable]/1 -- one
                 // implementation, asked by every clone loop (see
@@ -3790,7 +3865,8 @@ private:
                     record_constraint_excluded_member(cache_key, method_tmpl, template_name, tmpl_owner_id, constraint);
                     continue;
                 }
-                Function clone;
+                Function clone{};
+
                 clone.name = cache_key + method_suffix_after_owner_prefix(method_tmpl, template_name, tmpl_owner_id);
                 clone.loc = method_tmpl.loc;
                 clone.namespace_path = method_tmpl.namespace_path;
@@ -3826,13 +3902,16 @@ private:
                     clone.return_type = std::move(_resolved).value();
                 }
                 clone.return_lifetime = method_tmpl.return_lifetime;
-                std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
+                std::unordered_map<std::string, std::vector<std::string>> pack_param_names{};
+
                 clone.params.reserve(method_tmpl.params.size());
                 for (const Param& p : method_tmpl.params) {
                     if (p.name == "this") {
-                        Param np;
+                        Param np{};
+
                         np.name = p.name;
-                        Type this_type;
+                        Type this_type{};
+
                         this_type.kind = TypeKind::Reference;
                         this_type.pointee = std::make_shared<Type>(named_type(cache_key));
                         this_type.is_mutable_ref = p.type.is_mutable_ref;
@@ -3846,7 +3925,7 @@ private:
                         auto pack_it = pack_name ? class_selection.bindings.type_pack_replacements.find(*pack_name)
                                                  : class_selection.bindings.type_pack_replacements.end();
                         if (pack_name && pack_it != class_selection.bindings.type_pack_replacements.end()) {
-                            pack_param_names[p.name] = {};
+                            pack_param_names[p.name] = std::vector<std::string>{};
                             for (std::size_t j = 0; j < pack_it->second.size(); j++) {
                                 Param np = p;
                                 np.is_parameter_pack = false;
@@ -3892,10 +3971,14 @@ private:
                     into.body = method_tmpl.body ? deep_clone_stmt(*method_tmpl.body) : nullptr;
                     if (into.body) {
                         substitute_type_params_in_stmt(*into.body, type_replacements);
-                        for (const auto& [class_pack_name, concrete_pack_types] : pack_replacements) {
+                        for (const auto& entry : pack_replacements) {
+                            const auto& class_pack_name = entry.first;
+                            const auto& concrete_pack_types = entry.second;
                             expand_explicit_template_arg_packs_in_stmt(*into.body, class_pack_name, concrete_pack_types);
                         }
-                        for (const auto& [pack_param_name, concrete_names] : pack_param_names) {
+                        for (const auto& entry : pack_param_names) {
+                            const auto& pack_param_name = entry.first;
+                            const auto& concrete_names = entry.second;
                             if (auto _r = expand_pack_expansions_in_stmt(*into.body, pack_param_name, concrete_names); !_r.has_value()) {
                                 return std::unexpected(std::move(_r).error());
                             }
@@ -3986,7 +4069,8 @@ private:
                 tmpl.template_params.empty() || !tmpl.template_params[0].is_non_type) {
                 continue;
             }
-            StructDef concrete;
+            StructDef concrete{};
+
             concrete.name = cache_key;
             concrete.namespace_path = tmpl.namespace_path;
             concrete.fields = tmpl.fields;
@@ -4004,7 +4088,8 @@ private:
             std::vector<GenericTypeParam> params_copy = tmpl.template_params;
             std::string owner_id_copy = tmpl.template_owner_id;
             std::vector<ClassField> fields_copy = tmpl.fields;
-            ClassDef concrete;
+            ClassDef concrete{};
+
             concrete.name = cache_key;
             concrete.namespace_path = tmpl.namespace_path;
             concrete.thread_movable_override = tmpl.thread_movable_override;
@@ -4027,7 +4112,8 @@ private:
             program_.classes.push_back(std::move(concrete));
 
             std::vector<Function> methods = method_templates_of_owner(owner_id_copy);
-            std::vector<std::size_t> eagerly_defined_clones;
+            std::vector<std::size_t> eagerly_defined_clones{};
+
             for (const Function& method_tmpl : methods) {
                 // A class template reaching here has a *non-type* first
                 // template parameter, and a requires-clause may constrain
@@ -4041,7 +4127,8 @@ private:
                     record_constraint_excluded_member(cache_key, method_tmpl, template_name, owner_id_copy, constraint);
                     continue;
                 }
-                Function clone;
+                Function clone{};
+
                 clone.name = cache_key + method_suffix_after_owner_prefix(method_tmpl, template_name, owner_id_copy);
                 clone.loc = method_tmpl.loc;
                 clone.namespace_path = method_tmpl.namespace_path;
@@ -4074,7 +4161,8 @@ private:
                     Param new_param = param;
                     new_param.name = param.name;
                     if (param.name == "this") {
-                        Type this_type;
+                        Type this_type{};
+
                         this_type.kind = TypeKind::Reference;
                         this_type.pointee = std::make_shared<Type>(named_type(cache_key));
                         this_type.is_mutable_ref = param.type.is_mutable_ref;
@@ -4235,7 +4323,8 @@ private:
             std::string owner_id_copy = base_case_tmpl->template_owner_id;
             std::vector<ClassField> fields_copy = base_case_tmpl->fields;
             std::vector<Function> methods = method_templates_of_owner(owner_id_copy);
-            ClassDef concrete;
+            ClassDef concrete{};
+
             concrete.name = cache_key;
             concrete.namespace_path = base_case_tmpl->namespace_path;
             concrete.thread_movable_override = base_case_tmpl->thread_movable_override;
@@ -4290,8 +4379,10 @@ private:
         // (see this class's other generic-type methods' identical
         // concern).
         std::size_t leading_non_type_count = non_type_args.size();
-        std::vector<GenericTypeParam> leading_non_type_params(
-            recursive_tmpl->template_params.begin(), recursive_tmpl->template_params.begin() + leading_non_type_count);
+        std::vector<GenericTypeParam> leading_non_type_params{};
+        for (std::size_t i = 0; i < leading_non_type_count && i < recursive_tmpl->template_params.size(); ++i) {
+            leading_non_type_params.push_back(recursive_tmpl->template_params[i]);
+        }
         GenericTypeParam head_param = recursive_tmpl->template_params[leading_non_type_count];
         auto recursive_base = recursive_tmpl->direct_ordinary_base();
         std::string base_template_name = recursive_base.has_value() ? recursive_base->get().base_type.name : std::string();
@@ -4318,12 +4409,13 @@ private:
         std::vector<Function> methods = method_templates_of_owner(owner_id_copy);
 
         Type head_concrete = type_args[0];
-        std::vector<Type> tail_concrete(type_args.begin() + 1, type_args.end());
+        std::vector<Type> tail_concrete{};
+        for (std::size_t i = 1; i < type_args.size(); ++i) tail_concrete.push_back(type_args[i]);
         if (auto _r = check_type_param_constraint(head_param, head_concrete, template_name, loc); !_r.has_value()) {
             return fail(std::move(_r).error());
         }
         std::vector<std::pair<std::string, Type>> type_replacements = {{head_param.name, head_concrete}};
-        std::unordered_map<std::string, std::vector<Type>> pack_replacements;
+        std::unordered_map<std::string, std::vector<Type>> pack_replacements{};
         pack_replacements[template_params_copy[leading_non_type_count + 1].name] = tail_concrete;
 
         // The base's own non-type argument (e.g. "Idx + 1"
@@ -4334,11 +4426,14 @@ private:
         // `: private Tuple<Tail...>`). It binds the *base* template's
         // own first constant parameter, so that is the type
         // [temp.arg.nontype]/2 measures it against.
-        std::string base_concrete_name;
+        std::string base_concrete_name{};
+
         if (!base_template_name.empty()) {
-            std::vector<int> base_non_type_args;
+            std::vector<int> base_non_type_args{};
+
             if (base_non_type_arg_expr) {
-                std::unordered_map<std::string, int> param_values;
+                std::unordered_map<std::string, int> param_values{};
+
                 for (std::size_t i = 0; i < leading_non_type_params.size(); i++) {
                     param_values[leading_non_type_params[i].name] = non_type_args[i];
                 }
@@ -4353,11 +4448,13 @@ private:
             base_concrete_name = std::move(_base_concrete_name).value();
         }
 
-        ClassDef concrete;
+        ClassDef concrete{};
+
         concrete.name = cache_key;
         concrete.namespace_path = namespace_path_copy;
         if (!base_concrete_name.empty()) {
-            BaseSpecifier base;
+            BaseSpecifier base{};
+
             base.base_type = named_type(base_concrete_name);
             base.access = base_access;
             base.kind = BaseClassKind::OrdinaryClass;
@@ -4384,7 +4481,8 @@ private:
             }
         }
         for (const ClassField& f : fields_copy) {
-            ClassField nf;
+            ClassField nf{};
+
             nf.name = f.name;
             nf.access = f.access;
             nf.type = instantiate_type_pattern(f.type, type_replacements, pack_replacements);
@@ -4517,7 +4615,9 @@ private:
                 scalar_conversion_error_message("bool", param_type_name, std::string(argument_role)), expr.loc));
         }
         ExprPtr closed = deep_clone_expr(expr);
-        for (const auto& [param_name, param_value] : param_values) {
+        for (const auto& entry : param_values) {
+            const auto& param_name = entry.first;
+            const auto& param_value = entry.second;
             substitute_non_type_param_in_expr(*closed, param_name, param_value);
         }
         auto evaluated = evaluate_immediate_expr(program_, *closed);
@@ -4592,7 +4692,8 @@ private:
                                       std::unordered_map<std::string, int>& value_bindings,
                                       std::unordered_map<std::string, std::vector<Type>>& pack_bindings,
                                       std::vector<std::pair<std::size_t, Type>>& upcasts) {
-        std::vector<int> search_non_type_values;
+        std::vector<int> search_non_type_values{};
+
         search_non_type_values.reserve(pattern.non_type_args.size());
         for (std::size_t k = 0; k < pattern.non_type_args.size(); k++) {
             auto value = evaluate_non_type_arg(*pattern.non_type_args[k], value_bindings,
@@ -4612,7 +4713,8 @@ private:
 
         std::string current_name = named.name;
         const VariadicInstanceInfo* matched = nullptr;
-        std::string matched_name;
+        std::string matched_name{};
+
         while (true) {
             auto it = variadic_instance_info_.find(current_name);
             if (it == variadic_instance_info_.end()) break;
@@ -4642,7 +4744,8 @@ private:
         std::size_t ti = 0;
         for (const Type& sym : pattern.template_args) {
             if (sym.is_pack_expansion) {
-                std::vector<Type> remaining_types;
+                std::vector<Type> remaining_types{};
+
                 for (; ti < matched->type_args.size(); ti++) remaining_types.push_back(matched->type_args[ti]);
                 if (!bind_type_pack_binding(pack_bindings, sym.name, remaining_types)) {
                     return std::unexpected(DataflowError("deduced types for template parameter pack '" + sym.name +
@@ -4661,7 +4764,8 @@ private:
             }
         }
 
-        Type target;
+        Type target{};
+
         target.kind = TypeKind::Named;
         target.name = matched_name;
         upcasts.emplace_back(arg_index, std::move(target));
@@ -4739,7 +4843,8 @@ private:
         Type named = arg_type.kind == TypeKind::Reference ? *arg_type.pointee : arg_type;
         if (produces_rvalue_of_type(arg, named, body, signatures_)) return named;
         if (arg_type.kind == TypeKind::Reference && !arg_type.is_rvalue_ref) return arg_type;
-        Type deduced;
+        Type deduced{};
+
         deduced.kind = TypeKind::Reference;
         deduced.is_mutable_ref = !is_read_only_reachable(arg, body, signatures_);
         deduced.is_rvalue_ref = false;
@@ -4796,8 +4901,10 @@ private:
                                 return false;
                             }
                         }
-                        std::vector<Type> pack_slice(
-                            concretes.begin() + static_cast<std::ptrdiff_t>(patterns.size() - 1), concretes.end());
+                        std::vector<Type> pack_slice{};
+                        for (std::size_t i = patterns.size() - 1; i < concretes.size(); ++i) {
+                            pack_slice.push_back(concretes[i]);
+                        }
                         return bind_type_pack_binding(pack_bindings, tp.name, pack_slice);
                     }
                 }
@@ -4936,7 +5043,11 @@ private:
         Type type, const std::vector<GenericTypeParam>& template_params,
         const std::unordered_map<std::string, Type>& type_bindings,
         const std::unordered_map<std::string, std::vector<Type>>& pack_bindings) {
-        for (const auto& [name, replacement] : type_bindings) type = substitute_type_param(type, name, replacement);
+        for (const auto& entry : type_bindings) {
+            const auto& name = entry.first;
+            const auto& replacement = entry.second;
+            type = substitute_type_param(type, name, replacement);
+        }
         type = substitute_type_packs(type, pack_bindings);
         return type_depends_on_template_params(type, template_params);
     }
@@ -4944,7 +5055,11 @@ private:
     [[nodiscard]] std::expected<Type, DataflowError> apply_template_bindings_to_type(
         Type type, const std::unordered_map<std::string, Type>& type_bindings,
         const std::unordered_map<std::string, std::vector<Type>>& pack_bindings, SourceLocation loc) {
-        for (const auto& [name, replacement] : type_bindings) type = substitute_type_param(type, name, replacement);
+        for (const auto& entry : type_bindings) {
+            const auto& name = entry.first;
+            const auto& replacement = entry.second;
+            type = substitute_type_param(type, name, replacement);
+        }
         type = substitute_type_packs(type, pack_bindings);
         return resolve_generic_type(std::move(type), loc);
     }
@@ -5179,7 +5294,8 @@ private:
         // one place this pass already visits every argument/parameter
         // pair.
         {
-            std::vector<ExprPtr> single_argument;
+            std::vector<ExprPtr> single_argument{};
+
             single_argument.push_back(deep_clone_expr(source));
             if (auto _r = require_constructor_definition(concrete_destination.name, single_argument, body);
                 !_r.has_value()) {
@@ -5206,7 +5322,8 @@ private:
         const FunctionSignature* ctor =
             find_single_argument_converting_constructor_signature(concrete_destination, source, body, signatures_);
         if (ctor == nullptr || !ctor->is_generic_template) return {};
-        std::vector<ExprPtr> converting_args;
+        std::vector<ExprPtr> converting_args{};
+
         converting_args.push_back(deep_clone_expr(source));
         maybe_instantiate_generic_constructor_overloads(concrete_destination.name, converting_args, body, loc);
         return {};
@@ -5229,7 +5346,8 @@ private:
         // Each instantiation appends to `signatures_`, which rehashes the
         // map and reallocates the overload vector `sig` points into, so
         // reading `sig->param_types` again afterwards is a use-after-free.
-        std::vector<Type> destination_types;
+        std::vector<Type> destination_types{};
+
         for (std::size_t i = 0; i < call.args.size(); i++) {
             std::size_t param_index = i + callee.param_offset;
             if (param_index >= sig->param_types.size()) break;
@@ -5253,7 +5371,8 @@ private:
         const FunctionSignature* sig = find_ordinary_constructor_overload(class_name, args, body);
         if (sig == nullptr) return {};
         // Snapshot first -- see the call-argument boundary above for why.
-        std::vector<Type> destination_types;
+        std::vector<Type> destination_types{};
+
         for (std::size_t i = 0; i < args.size() && i + 1 < sig->param_types.size(); i++) {
             destination_types.push_back(sig->param_types[i + 1]);
         }
@@ -5304,7 +5423,8 @@ private:
         // implicit conversions started instantiating constructors too, it
         // began crashing the compiler outright on programs as small as a
         // single `sink(3)`.
-        std::vector<std::size_t> candidate_indices;
+        std::vector<std::size_t> candidate_indices{};
+
         for (std::size_t index = 0; index < program_.functions.size(); index++) {
             const Function& candidate = program_.functions[index];
             if (!(candidate.name == ctor_name || candidate.name.starts_with(ctor_name + ".")) ||
@@ -5316,11 +5436,12 @@ private:
         for (std::size_t candidate_index : candidate_indices) {
             const Function& tmpl = program_.functions[candidate_index];
             auto _candidate = [&, this]() -> std::expected<void, DataflowError> {
-                std::unordered_map<std::string, Type> type_bindings;
-                std::unordered_map<std::string, int> value_bindings;
-                std::unordered_map<std::string, std::vector<Type>> pack_bindings;
-                std::vector<std::pair<std::size_t, Type>> upcasts;
-                std::vector<std::vector<Type>> concrete_pack_param_types(tmpl.params.size());
+                std::unordered_map<std::string, Type> type_bindings{};
+                std::unordered_map<std::string, int> value_bindings{};
+                std::unordered_map<std::string, std::vector<Type>> pack_bindings{};
+                std::vector<std::pair<std::size_t, Type>> upcasts{};
+                std::vector<std::vector<Type>> concrete_pack_param_types{};
+                concrete_pack_param_types.resize(tmpl.params.size());
 
                 std::size_t arg_cursor = 0;
                 for (std::size_t i = 1; i < tmpl.params.size() && arg_cursor < args.size(); i++) {
@@ -5340,9 +5461,12 @@ private:
                                                underlying.template_args.empty() && underlying.non_type_args.empty() &&
                                                underlying.name == *pack_type_name;
                             if (pack_type_name.has_value() && !direct_pack) {
-                                std::unordered_map<std::string, Type> arg_type_bindings;
-                                std::unordered_map<std::string, int> arg_value_bindings;
-                                std::unordered_map<std::string, std::vector<Type>> arg_pack_bindings;
+                                std::unordered_map<std::string, Type> arg_type_bindings{};
+
+                                std::unordered_map<std::string, int> arg_value_bindings{};
+
+                                std::unordered_map<std::string, std::vector<Type>> arg_pack_bindings{};
+
                                 if (!deduce_template_bindings_from_type_pattern(underlying, named, tmpl.template_params,
                                                                                 arg_type_bindings, arg_value_bindings,
                                                                                 arg_pack_bindings)) {
@@ -5374,7 +5498,8 @@ private:
                         // `f(T)` deduces `T = const char*`, not `T = const char[5]`.
                         if (param_type.kind != TypeKind::Reference) concrete = deduced_type_for_by_value_param(std::move(concrete));
                         if (underlying.kind == TypeKind::Named && variadic_generic_type_names_.contains(underlying.name)) {
-                            Expr fake_call;
+                            Expr fake_call{};
+
                             fake_call.loc = loc;
                             for (const ExprPtr& arg : args) fake_call.args.push_back(deep_clone_expr(*arg));
                             auto _deduced = deduce_via_base_class_chain(fake_call, arg_cursor, underlying, body, type_bindings,
@@ -5395,7 +5520,8 @@ private:
                     if (!bound) return std::unexpected(DataflowError("constructor template parameter not deduced", loc));
                 }
 
-                Expr fake_call;
+                Expr fake_call{};
+
                 fake_call.loc = loc;
                 if (auto _r = check_thread_safety_constraints(fake_call, tmpl, type_bindings, {}); !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
@@ -5422,9 +5548,9 @@ private:
                 if (generic_function_clone_cache_.contains(cache_key)) return {};
                 generic_function_clone_cache_[cache_key] = tmpl.name;
 
-                Function clone;
+                Function clone{};
                 std::string concrete_ctor_owner_name = class_name;
-                if (std::optional<Type> this_type = this_type_of(tmpl)) concrete_ctor_owner_name = this_type->name;
+                if (std::optional<Type> this_type = this_type_of(tmpl); this_type.has_value()) concrete_ctor_owner_name = this_type->name;
                 clone.name = cache_key;
                 clone.loc = tmpl.loc;
                 clone.namespace_path = tmpl.namespace_path;
@@ -5438,17 +5564,20 @@ private:
                 clone.access = tmpl.access;
                 clone.return_type = tmpl.return_type;
                 clone.return_lifetime = tmpl.return_lifetime;
-                for (const auto& [name, replacement] : type_bindings) {
+                for (const auto& entry : type_bindings) {
+                    const auto& name = entry.first;
+                    const auto& replacement = entry.second;
                     clone.return_type = substitute_type_param(clone.return_type, name, replacement);
                 }
                 auto _return_type = resolve_generic_type(clone.return_type, tmpl.loc);
                 if (!_return_type.has_value()) return std::unexpected(std::move(_return_type).error());
                 clone.return_type = std::move(_return_type).value();
                 clone.params.reserve(tmpl.params.size());
-                std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
+                std::unordered_map<std::string, std::vector<std::string>> pack_param_names{};
+
                 for (std::size_t i = 0; i < tmpl.params.size(); i++) {
                     if (tmpl.params[i].is_parameter_pack) {
-                        pack_param_names[tmpl.params[i].name] = {};
+                        pack_param_names[tmpl.params[i].name] = std::vector<std::string>{};
                         for (std::size_t j = 0; j < concrete_pack_param_types[i].size(); j++) {
                             Param p = tmpl.params[i];
                             p.name = tmpl.params[i].name + "$" + std::to_string(j);
@@ -5467,7 +5596,9 @@ private:
                     p.require_thread_movable = tmpl.params[i].require_thread_movable;
                     p.require_thread_shareable = tmpl.params[i].require_thread_shareable;
                     bool upcasted = false;
-                    for (const auto& [idx, target] : upcasts) {
+                    for (const auto& entry : upcasts) {
+                        const auto& idx = entry.first;
+                        const auto& target = entry.second;
                         if (idx != i) continue;
                         if (p.type.kind == TypeKind::Reference) {
                             p.type.pointee = std::make_shared<Type>(target);
@@ -5478,7 +5609,9 @@ private:
                         break;
                     }
                     if (!upcasted) {
-                        for (const auto& [name, replacement] : type_bindings) {
+                        for (const auto& entry : type_bindings) {
+                            const auto& name = entry.first;
+                            const auto& replacement = entry.second;
                             p.type = substitute_type_param(p.type, name, replacement);
                         }
                     }
@@ -5495,7 +5628,9 @@ private:
                 }
                 if (auto _r = clone_member_initializers(tmpl, clone,
                                                         [&](Expr& e) -> std::expected<void, DataflowError> {
-                                                            for (const auto& [name, replacement] : type_bindings) {
+                                                            for (const auto& entry : type_bindings) {
+                                                                const auto& name = entry.first;
+                                                                const auto& replacement = entry.second;
                                                                 substitute_type_param_in_expr(e, name, replacement);
                                                             }
                                                             return resolve_generic_types_in_expr(e);
@@ -5505,10 +5640,14 @@ private:
                 }
                 clone.body = tmpl.body ? deep_clone_stmt(*tmpl.body) : nullptr;
                 if (clone.body) {
-                    for (const auto& [name, replacement] : type_bindings) {
+                    for (const auto& entry : type_bindings) {
+                        const auto& name = entry.first;
+                        const auto& replacement = entry.second;
                         substitute_type_param_in_stmt(*clone.body, name, replacement);
                     }
-                    for (const auto& [pack_name, concrete_names] : pack_param_names) {
+                    for (const auto& entry : pack_param_names) {
+                        const auto& pack_name = entry.first;
+                        const auto& concrete_names = entry.second;
                         if (auto _r = expand_pack_expansions_in_stmt(*clone.body, pack_name, concrete_names); !_r.has_value()) {
                             return std::unexpected(std::move(_r).error());
                         }
@@ -5570,7 +5709,8 @@ private:
         }
         generic_function_clone_cache_[cache_key] = cache_key;
 
-        Function clone;
+        Function clone{};
+
         clone.name = cache_key;
         clone.loc = tmpl.loc;
         clone.namespace_path = tmpl.namespace_path;
@@ -5590,10 +5730,11 @@ private:
         clone.return_type = std::move(_clone_return_type).value();
         clone.return_lifetime = tmpl.return_lifetime;
         clone.params.reserve(tmpl.params.size());
-        std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
+        std::unordered_map<std::string, std::vector<std::string>> pack_param_names{};
+
         for (std::size_t i = 0; i < tmpl.params.size(); i++) {
             if (tmpl.params[i].is_parameter_pack) {
-                pack_param_names[tmpl.params[i].name] = {};
+                pack_param_names[tmpl.params[i].name] = std::vector<std::string>{};
                 for (std::size_t j = 0; j < concrete_pack_param_types[i].size(); j++) {
                     Param p = tmpl.params[i];
                     p.name = tmpl.params[i].name + "$" + std::to_string(j);
@@ -5611,7 +5752,9 @@ private:
             p.require_thread_movable = tmpl.params[i].require_thread_movable;
             p.require_thread_shareable = tmpl.params[i].require_thread_shareable;
             bool upcasted = false;
-            for (const auto& [idx, target] : upcasts) {
+            for (const auto& entry : upcasts) {
+                const auto& idx = entry.first;
+                const auto& target = entry.second;
                 if (idx != i) continue;
                 if (p.type.kind == TypeKind::Reference) {
                     p.type.pointee = std::make_shared<Type>(target);
@@ -5634,7 +5777,9 @@ private:
         }
         if (auto _r = clone_member_initializers(tmpl, clone,
                                                 [&](Expr& e) -> std::expected<void, DataflowError> {
-                                                    for (const auto& [name, replacement] : type_bindings) {
+                                                    for (const auto& entry : type_bindings) {
+                                                        const auto& name = entry.first;
+                                                        const auto& replacement = entry.second;
                                                         substitute_type_param_in_expr(e, name, replacement);
                                                     }
                                                     substitute_type_packs_in_expr(e, pack_bindings);
@@ -5647,7 +5792,9 @@ private:
         if (clone.body) {
             substitute_type_bindings_in_stmt(*clone.body, type_bindings);
             substitute_type_packs_in_stmt(*clone.body, pack_bindings);
-            for (const auto& [pack_name, concrete_names] : pack_param_names) {
+            for (const auto& entry : pack_param_names) {
+                const auto& pack_name = entry.first;
+                const auto& concrete_names = entry.second;
                 if (auto _r = expand_pack_expansions_in_stmt(*clone.body, pack_name, concrete_names); !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
@@ -5675,7 +5822,8 @@ private:
         for (std::size_t p = 0; p < tmpl.template_params.size(); p++) {
             const GenericTypeParam& tp = tmpl.template_params[p];
             if (tp.is_pack) {
-                std::vector<Type> pack;
+                std::vector<Type> pack{};
+
                 while (explicit_index < expr.explicit_template_args.size()) {
                     const ExplicitTemplateArg& arg = expr.explicit_template_args[explicit_index++];
                     if (!arg.is_type) {
@@ -5787,7 +5935,8 @@ private:
                 bool direct_pack = pack_type_name.has_value() && underlying.is_pack_expansion &&
                                    underlying.kind == TypeKind::Named && underlying.template_args.empty() &&
                                    underlying.non_type_args.empty() && underlying.name == *pack_type_name;
-                std::vector<Type> deduced_pack_types;
+                std::vector<Type> deduced_pack_types{};
+
                 for (; arg_cursor < expr.args.size(); arg_cursor++) {
                     std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
                     if (!arg_type.has_value()) return false;
@@ -5797,15 +5946,20 @@ private:
                     // [temp.deduct.call]/2 array-to-pointer, as above.
                     if (pack_param_type.kind != TypeKind::Reference) concrete = deduced_type_for_by_value_param(std::move(concrete));
                     if (pack_type_name.has_value() && !direct_pack) {
-                        std::unordered_map<std::string, Type> arg_type_bindings;
-                        std::unordered_map<std::string, int> arg_value_bindings;
-                        std::unordered_map<std::string, std::vector<Type>> arg_pack_bindings;
+                        std::unordered_map<std::string, Type> arg_type_bindings{};
+
+                        std::unordered_map<std::string, int> arg_value_bindings{};
+
+                        std::unordered_map<std::string, std::vector<Type>> arg_pack_bindings{};
+
                         if (!deduce_template_bindings_from_type_pattern(
                                 underlying, concrete, stable_tmpl.template_params, arg_type_bindings,
                                 arg_value_bindings, arg_pack_bindings)) {
                             return false;
                         }
-                        for (const auto& [name, type] : arg_type_bindings) {
+                        for (const auto& entry : arg_type_bindings) {
+                            const auto& name = entry.first;
+                            const auto& type = entry.second;
                             if (!bind_type_binding(resolution.type_bindings, name, type)) return false;
                         }
                         auto pack_it = arg_pack_bindings.find(*pack_type_name);
@@ -6021,14 +6175,18 @@ private:
     [[nodiscard]] std::expected<Type, DataflowError> apply_explicit_generic_type_arguments(const std::string& template_name,
                                                              const std::vector<GenericTypeParam>& template_params,
                                                              const Expr& expr) {
-        std::unordered_map<std::string, Type> type_bindings;
-        std::unordered_map<std::string, int> value_bindings;
-        std::unordered_map<std::string, std::vector<Type>> pack_bindings;
+        std::unordered_map<std::string, Type> type_bindings{};
+
+        std::unordered_map<std::string, int> value_bindings{};
+
+        std::unordered_map<std::string, std::vector<Type>> pack_bindings{};
+
         std::size_t explicit_index = 0;
         for (std::size_t p = 0; p < template_params.size(); p++) {
             const GenericTypeParam& tp = template_params[p];
             if (tp.is_pack) {
-                std::vector<Type> pack;
+                std::vector<Type> pack{};
+
                 while (explicit_index < expr.explicit_template_args.size()) {
                     const ExplicitTemplateArg& arg = expr.explicit_template_args[explicit_index++];
                     if (!arg.is_type) {
@@ -6068,7 +6226,8 @@ private:
             return std::unexpected(DataflowError("too many explicit template arguments for generic type '" + template_name + "'",
                                 expr.loc));
         }
-        Type type;
+        Type type{};
+
         type.kind = TypeKind::Named;
         type.name = template_name;
         for (const GenericTypeParam& tp : template_params) {
@@ -6104,7 +6263,8 @@ private:
                                                   const std::vector<GenericTypeParam>& template_params,
                                                   const FullHeaderGenericCallResolution& resolution,
                                                   SourceLocation loc) {
-        Type type;
+        Type type{};
+
         type.kind = TypeKind::Named;
         type.name = template_name;
         for (const GenericTypeParam& tp : template_params) {
@@ -6162,7 +6322,8 @@ private:
                                 expr.loc));
         }
 
-        std::optional<Type> resolved_type;
+        std::optional<Type> resolved_type{};
+
         for (const Function& tmpl : program_.functions) {
             if (!((tmpl.name == expr.name + "_new") ||
                   (tmpl.name.starts_with(expr.name + "_new.") ||
@@ -6179,7 +6340,8 @@ private:
             for (std::size_t i = 1; i < deduction_tmpl.params.size(); i++) {
                 normalize_ctad_constructor_param_type(deduction_tmpl.params[i].type, *template_params);
             }
-            FullHeaderGenericCallResolution resolution;
+            FullHeaderGenericCallResolution resolution{};
+
             if (!try_resolve_full_header_generic_function_call(expr, deduction_tmpl, body, /*param_offset=*/1, resolution)) {
                 continue;
             }
@@ -6226,9 +6388,10 @@ private:
         // clones get created in between.
         Function tmpl_snapshot = clone_function(tmpl);
         const Function& stable_tmpl = tmpl_snapshot;
-        std::vector<Type> concrete_param_types;
+        std::vector<Type> concrete_param_types{};
         concrete_param_types.reserve(stable_tmpl.params.size());
-        std::vector<std::vector<Type>> concrete_pack_param_types(stable_tmpl.params.size());
+        std::vector<std::vector<Type>> concrete_pack_param_types{};
+        concrete_pack_param_types.resize(stable_tmpl.params.size());
         std::size_t arg_cursor = 0;
         for (std::size_t i = 0; i < stable_tmpl.params.size(); i++) {
             const Param& param = stable_tmpl.params[i];
@@ -6349,10 +6512,11 @@ private:
     }
 
     [[nodiscard]] std::expected<void, DataflowError> monomorphize_generic_function_designator(Expr& expr, const Function& tmpl) {
-        std::unordered_map<std::string, Type> type_bindings;
-        std::unordered_map<std::string, int> value_bindings;
-        std::unordered_map<std::string, std::vector<Type>> explicit_pack_bindings;
-        std::vector<std::vector<Type>> concrete_pack_param_types(tmpl.params.size());
+        std::unordered_map<std::string, Type> type_bindings{};
+        std::unordered_map<std::string, int> value_bindings{};
+        std::unordered_map<std::string, std::vector<Type>> explicit_pack_bindings{};
+        std::vector<std::vector<Type>> concrete_pack_param_types{};
+        concrete_pack_param_types.resize(tmpl.params.size());
 
         if (auto _r = seed_explicit_template_arguments(expr, tmpl, type_bindings, value_bindings, explicit_pack_bindings);
             !_r.has_value()) {
@@ -6397,9 +6561,21 @@ private:
         for (std::size_t i = expr.args.size() + param_offset; i < tmpl.params.size(); i++) {
             if (tmpl.params[i].is_parameter_pack || tmpl.params[i].default_expr == nullptr) break;
             ExprPtr default_arg = deep_clone_expr_with_loc(*tmpl.params[i].default_expr, expr.loc);
-            for (const auto& [name, type] : type_bindings) substitute_type_param_in_expr(*default_arg, name, type);
-            for (const auto& [name, value] : value_bindings) substitute_non_type_param_in_expr(*default_arg, name, value);
-            for (const auto& [name, pack] : pack_bindings) substitute_type_pack_in_expr(*default_arg, name, pack);
+            for (const auto& entry : type_bindings) {
+                const auto& name = entry.first;
+                const auto& type = entry.second;
+                substitute_type_param_in_expr(*default_arg, name, type);
+            }
+            for (const auto& entry : value_bindings) {
+                const auto& name = entry.first;
+                const auto& value = entry.second;
+                substitute_non_type_param_in_expr(*default_arg, name, value);
+            }
+            for (const auto& entry : pack_bindings) {
+                const auto& name = entry.first;
+                const auto& pack = entry.second;
+                substitute_type_pack_in_expr(*default_arg, name, pack);
+            }
             expr.args.push_back(std::move(default_arg));
         }
     }
@@ -6421,14 +6597,17 @@ private:
                                             const std::string& member_name_prefix = "") {
         Function tmpl_snapshot = clone_function(tmpl);
         const Function& stable_tmpl = tmpl_snapshot;
-        std::unordered_map<std::string, Type> type_bindings;
-        std::unordered_map<std::string, int> value_bindings;
-        std::unordered_map<std::string, std::vector<Type>> pack_bindings;
-        std::vector<std::pair<std::size_t, Type>> upcasts;
-        std::vector<DeferredTemplateObligation> deferred_obligations;
-        std::vector<Type> concrete_param_types(stable_tmpl.params.size());
-        std::vector<bool> have_concrete_param_types(stable_tmpl.params.size(), false);
-        std::vector<std::vector<Type>> concrete_pack_param_types(stable_tmpl.params.size());
+        std::unordered_map<std::string, Type> type_bindings{};
+        std::unordered_map<std::string, int> value_bindings{};
+        std::unordered_map<std::string, std::vector<Type>> pack_bindings{};
+        std::vector<std::pair<std::size_t, Type>> upcasts{};
+        std::vector<DeferredTemplateObligation> deferred_obligations{};
+        std::vector<Type> concrete_param_types{};
+        concrete_param_types.resize(stable_tmpl.params.size());
+        std::vector<bool> have_concrete_param_types{};
+        have_concrete_param_types.resize(stable_tmpl.params.size(), false);
+        std::vector<std::vector<Type>> concrete_pack_param_types{};
+        concrete_pack_param_types.resize(stable_tmpl.params.size());
 
         if (auto _r = seed_explicit_template_arguments(expr, stable_tmpl, type_bindings, value_bindings, pack_bindings);
             !_r.has_value()) {
@@ -6447,7 +6626,8 @@ private:
                 bool direct_pack = pack_type_name.has_value() && underlying.is_pack_expansion &&
                                    underlying.kind == TypeKind::Named && underlying.template_args.empty() &&
                                    underlying.non_type_args.empty() && underlying.name == *pack_type_name;
-                std::vector<Type> deduced_pack_types;
+                std::vector<Type> deduced_pack_types{};
+
                 for (; arg_cursor < expr.args.size(); arg_cursor++) {
                     std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
                     if (!arg_type.has_value()) continue;
@@ -6458,9 +6638,12 @@ private:
                     // [temp.deduct.call]/2 array-to-pointer, as above.
                     if (pack_param_type.kind != TypeKind::Reference) concrete = deduced_type_for_by_value_param(std::move(concrete));
                     if (pack_type_name.has_value() && !direct_pack) {
-                        std::unordered_map<std::string, Type> arg_type_bindings;
-                        std::unordered_map<std::string, int> arg_value_bindings;
-                        std::unordered_map<std::string, std::vector<Type>> arg_pack_bindings;
+                        std::unordered_map<std::string, Type> arg_type_bindings{};
+
+                        std::unordered_map<std::string, int> arg_value_bindings{};
+
+                        std::unordered_map<std::string, std::vector<Type>> arg_pack_bindings{};
+
                         if (!deduce_template_bindings_from_type_pattern(
                                 underlying, concrete, stable_tmpl.template_params, arg_type_bindings,
                                 arg_value_bindings, arg_pack_bindings)) {
@@ -6468,7 +6651,9 @@ private:
                                                     stable_tmpl.name + "' from this argument list",
                                 expr.loc));
                         }
-                        for (const auto& [name, type] : arg_type_bindings) {
+                        for (const auto& entry : arg_type_bindings) {
+                            const auto& name = entry.first;
+                            const auto& type = entry.second;
                             if (!bind_type_binding(type_bindings, name, type)) {
                                 return std::unexpected(DataflowError("deduced type for template parameter of generic function '" +
                                                         stable_tmpl.name + "' disagrees across arguments",
@@ -6734,7 +6919,8 @@ private:
                         (inferred->kind == TypeKind::Named && body.program != nullptr &&
                          !is_copy_constructible(inferred->name, *body.program));
                     if (is_synthesized_for_range_storage(stmt.var_name) && range_needs_reference) {
-                        Type inferred_ref;
+                        Type inferred_ref{};
+
                         inferred_ref.kind = TypeKind::Reference;
                         inferred_ref.pointee = std::make_shared<Type>(*inferred);
                         // The Array case keeps its pre-existing unconditional
@@ -7322,16 +7508,17 @@ private:
         if (expr.kind == ExprKind::Identifier && !expr.explicit_template_args.empty()) {
             auto template_it = generic_template_indices_.find(expr.name);
             if (template_it == generic_template_indices_.end()) return {};
-            std::vector<std::size_t> matching_candidates;
+            std::vector<std::size_t> matching_candidates{};
             for (std::size_t candidate_index : template_it->second) {
                 const Function& tmpl = program_.functions[candidate_index];
                 if (!compile_time_dependency_visible(tmpl, body)) continue;
                 if (tmpl.template_params.empty()) continue;
                 ExprPtr expr_copy = deep_clone_expr(expr);
-                std::unordered_map<std::string, Type> type_bindings;
-                std::unordered_map<std::string, int> value_bindings;
-                std::unordered_map<std::string, std::vector<Type>> explicit_pack_bindings;
-                std::vector<std::vector<Type>> concrete_pack_param_types(tmpl.params.size());
+                std::unordered_map<std::string, Type> type_bindings{};
+                std::unordered_map<std::string, int> value_bindings{};
+                std::unordered_map<std::string, std::vector<Type>> explicit_pack_bindings{};
+                std::vector<std::vector<Type>> concrete_pack_param_types{};
+                concrete_pack_param_types.resize(tmpl.params.size());
                 if (auto _r = seed_explicit_template_arguments(*expr_copy, tmpl, type_bindings, value_bindings, explicit_pack_bindings);
                     !_r.has_value()) {
                     continue;
@@ -7361,7 +7548,8 @@ private:
         if (expr.kind != ExprKind::Call) return {};
         std::string generic_template_name = expr.name;
         std::size_t param_offset = 0;
-        std::string cloned_method_suffix_prefix;
+        std::string cloned_method_suffix_prefix{};
+
         if (expr.lhs != nullptr) {
             std::optional<Type> receiver = infer_expr_type(*expr.lhs, body, signatures_);
             if (!receiver.has_value()) return {};
@@ -7382,7 +7570,8 @@ private:
             }
             return false;
         }();
-        std::vector<std::size_t> visible_template_candidates;
+        std::vector<std::size_t> visible_template_candidates{};
+
         for (std::size_t candidate_index : template_it->second) {
             if (compile_time_dependency_visible(program_.functions[candidate_index], body)) {
                 visible_template_candidates.push_back(candidate_index);
@@ -7410,17 +7599,20 @@ private:
             return {};
         }
 
-        std::vector<std::size_t> matching_candidates;
+        std::vector<std::size_t> matching_candidates{};
+
         for (std::size_t candidate_index : visible_template_candidates) {
             const Function& tmpl = program_.functions[candidate_index];
             if (!tmpl.template_params.empty()) {
-                FullHeaderGenericCallResolution resolution;
+                FullHeaderGenericCallResolution resolution{};
+
                 if (try_resolve_full_header_generic_function_call(expr, tmpl, body, param_offset, resolution)) {
                     matching_candidates.push_back(candidate_index);
                 }
                 continue;
             }
-            AbbreviatedGenericCallResolution resolution;
+            AbbreviatedGenericCallResolution resolution{};
+
             if (try_resolve_abbreviated_generic_function_call(expr, tmpl, body, param_offset, resolution)) {
                 matching_candidates.push_back(candidate_index);
             }
@@ -7501,7 +7693,8 @@ private:
     // like an ordinary class construction (see codegen's own Lambda
     // case).
     [[nodiscard]] std::expected<void, DataflowError> resolve_lambda(Expr& expr, Body& enclosing_body, const std::optional<Type>& enclosing_this_type) {
-        std::unordered_set<std::string> excluded;
+        std::unordered_set<std::string> excluded{};
+
         for (const Param& p : expr.lambda_params) excluded.insert(p.name);
         for (const LambdaCapture& c : expr.lambda_captures) excluded.insert(c.name);
         if (expr.lambda_body) collect_locally_declared_names(*expr.lambda_body, excluded);
@@ -7512,7 +7705,8 @@ private:
         // ch05 §5.12 check below applies to `[]` and `[x]` exactly as it
         // does to `[&]`, and an explicitly captured `this` is already in
         // `excluded`, so a list that names it never reaches the check.
-        FreeIdentifierMap free_names;
+        FreeIdentifierMap free_names{};
+
         if (expr.lambda_body) collect_free_identifiers(*expr.lambda_body, excluded, free_names);
 
         // ch05 §5.12's own hard rule: `this` is never captured
@@ -7548,7 +7742,9 @@ private:
 
         if (expr.lambda_blanket_mode != LambdaCaptureMode::None) {
             bool by_reference = expr.lambda_blanket_mode == LambdaCaptureMode::ByReference;
-            for (const auto& [name, resolved] : free_names) {
+            for (const auto& entry : free_names) {
+                const auto& name = entry.first;
+                const auto& resolved = entry.second;
                 // Handled above, for every capture list rather than
                 // only a blanket one: `this` is never implicitly
                 // captured (ch05 §5.12). Reaching here with it would
@@ -7562,14 +7758,16 @@ private:
                 // than guessed at here.
                 if (resolved == 0) {
                     if (!enclosing_closure_field_type(enclosing_this_type, name).has_value()) continue;
-                    LambdaCapture chained_capture;
+                    LambdaCapture chained_capture{};
+
                     chained_capture.name = name;
                     chained_capture.by_reference = by_reference;
                     chained_capture.from_enclosing_closure = true;
                     expr.lambda_captures.push_back(std::move(chained_capture));
                     continue;
                 }
-                LambdaCapture capture;
+                LambdaCapture capture{};
+
                 capture.name = name;
                 // The synthesized capture inherits the binding of the use
                 // that produced it, so it captures the declaration that
@@ -7581,9 +7779,11 @@ private:
             }
         }
 
-        std::vector<Type> field_types;
+        std::vector<Type> field_types{};
+
         field_types.reserve(expr.lambda_captures.size());
-        std::unordered_set<std::string> captured_names;
+        std::unordered_set<std::string> captured_names{};
+
         // ch05 §5.12: every by-*value*-captured name other than `this`
         // (`[*this]`'s own copy semantics are a separate concern --
         // see below) -- used after the loop to reject a direct
@@ -7595,10 +7795,12 @@ private:
         // constness is independent of its enclosing object's) -- see
         // `this_type.is_mutable_ref`'s own comment below for why the
         // "call" method's receiver itself is unconditionally mutable.
-        std::unordered_set<std::string> by_value_names;
+        std::unordered_set<std::string> by_value_names{};
+
         for (LambdaCapture& capture : expr.lambda_captures) {
             captured_names.insert(capture.name);
-            Type captured_type;
+            Type captured_type{};
+
             // Only a plain `[x]`/`[&x]` capture of a genuinely `const`
             // local yields a read-only reference field; `this` and an
             // init-capture both name something that is never a `const`
@@ -7688,12 +7890,14 @@ private:
 
         std::string class_name = "__lambda" + std::to_string(lambda_counter_++);
         expr.name = class_name;
-        ClassDef closure_class;
+        ClassDef closure_class{};
+
         closure_class.name = class_name;
         closure_class.is_closure = true;
         closure_class.fields.reserve(expr.lambda_captures.size());
         for (std::size_t i = 0; i < expr.lambda_captures.size(); i++) {
-            ClassField field;
+            ClassField field{};
+
             field.name = expr.lambda_captures[i].name;
             field.type = field_types[i];
             field.access = AccessSpecifier::Private;
@@ -7702,7 +7906,8 @@ private:
         program_.classes.push_back(std::move(closure_class));
         known_type_names_.insert(class_name);
 
-        Function lambda_ctor;
+        Function lambda_ctor{};
+
         lambda_ctor.name = class_name + "_new";
         lambda_ctor.loc = expr.loc;
         lambda_ctor.member_owner_class = class_name;
@@ -7713,20 +7918,24 @@ private:
         // constructor call) doesn't currently exercise the gap in
         // practice.
         lambda_ctor.namespace_path = enclosing_body.function_namespace_path;
-        Param ctor_this;
+        Param ctor_this{};
+
         ctor_this.name = "this";
-        Type ctor_this_type;
+        Type ctor_this_type{};
+
         ctor_this_type.kind = TypeKind::Reference;
         ctor_this_type.is_mutable_ref = true;
         ctor_this_type.pointee = std::make_shared<Type>(named_type(class_name));
         ctor_this.type = std::move(ctor_this_type);
         lambda_ctor.params.push_back(std::move(ctor_this));
         for (std::size_t i = 0; i < expr.lambda_captures.size(); i++) {
-            Param capture_param;
+            Param capture_param{};
+
             capture_param.name = expr.lambda_captures[i].name;
             capture_param.type = field_types[i];
             lambda_ctor.params.push_back(std::move(capture_param));
-            MemberInitializer init;
+            MemberInitializer init{};
+
             init.member_name = expr.lambda_captures[i].name;
             init.loc = expr.loc;
             auto capture_expr = std::make_unique<Expr>();
@@ -7751,7 +7960,8 @@ private:
             return std::unexpected(std::move(_r).error());
         }
 
-        Function call_method;
+        Function call_method{};
+
         call_method.name = class_name + "_call";
         call_method.loc = expr.loc;
         // A lambda's synthesized closure-call method is lexically
@@ -7786,9 +7996,11 @@ private:
         call_method.access_context_class = !enclosing_body.function_access_context_class.empty()
                                                 ? enclosing_body.function_access_context_class
                                                 : enclosing_body.function_member_owner_class;
-        Param this_param;
+        Param this_param{};
+
         this_param.name = "this";
-        Type this_type;
+        Type this_type{};
+
         this_type.kind = TypeKind::Reference;
         this_type.pointee = std::make_shared<Type>(named_type(class_name));
         // The "call" method's own receiver is unconditionally mutable --
@@ -7899,8 +8111,8 @@ private:
             resolve_locals(program_.functions[synthesized_index]);
             Body synthesized_body = build_mir(program_.functions[synthesized_index]);
             synthesized_body.program = &program_;
-            WalkReturnTypeScope synthesized_return_type_scope(current_walk_return_type_,
-                                                              program_.functions[synthesized_index].return_type);
+            WalkReturnTypeScope synthesized_return_type_scope{current_walk_return_type_,
+                                                              program_.functions[synthesized_index].return_type};
             Stmt& synthesized_stmt = *program_.functions[synthesized_index].body;
             const std::optional<Type> synthesized_this_type = this_type_of(program_.functions[synthesized_index]);
             const bool synthesized_is_generic = program_.functions[synthesized_index].is_generic_template;
@@ -8216,14 +8428,16 @@ private:
     [[nodiscard]] std::expected<std::vector<ExprPtr>, DataflowError> expand_pack_argument(const Expr& expr, const std::string& pack_name,
                                                             const std::vector<std::string>& concrete_names) {
         if (expr.kind != ExprKind::PackExpansion || expr.lhs == nullptr) {
-            std::vector<ExprPtr> single;
+            std::vector<ExprPtr> single{};
+
             single.push_back(deep_clone_expr(expr));
             return single;
         }
         if (!expr_mentions_identifier(*expr.lhs, pack_name)) {
             return std::unexpected(DataflowError("pack expansion does not mention parameter pack '" + pack_name + "'", expr.loc));
         }
-        std::vector<ExprPtr> expanded;
+        std::vector<ExprPtr> expanded{};
+
         expanded.reserve(concrete_names.size());
         for (const std::string& concrete_name : concrete_names) {
             ExprPtr arg = instantiate_pack_operand(*expr.lhs, pack_name, concrete_name);
@@ -8238,7 +8452,8 @@ private:
         if (expr.rhs) expand_explicit_template_arg_packs_in_expr(*expr.rhs, pack_name, concrete_types);
         for (ExprPtr& arg : expr.args) expand_explicit_template_arg_packs_in_expr(*arg, pack_name, concrete_types);
         if (!expr.explicit_template_args.empty()) {
-            std::vector<ExplicitTemplateArg> expanded_template_args;
+            std::vector<ExplicitTemplateArg> expanded_template_args{};
+
             for (ExplicitTemplateArg& arg : expr.explicit_template_args) {
                 if (arg.is_type && arg.type.is_pack_expansion && arg.type.kind == TypeKind::Named && arg.type.name == pack_name) {
                     // Copy each concrete pack element's *full* Type (kind,
@@ -8261,7 +8476,8 @@ private:
                     // own templated constructor, forwarding its
                     // enclosing class's already-concrete `Args...`).
                     for (const Type& concrete_type : concrete_types) {
-                        ExplicitTemplateArg expanded_arg;
+                        ExplicitTemplateArg expanded_arg{};
+
                         expanded_arg.is_type = true;
                         expanded_arg.type = concrete_type;
                         expanded_template_args.push_back(std::move(expanded_arg));
@@ -8327,11 +8543,13 @@ private:
             }
         }
         if (!expr.explicit_template_args.empty()) {
-            std::vector<ExplicitTemplateArg> expanded_template_args;
+            std::vector<ExplicitTemplateArg> expanded_template_args{};
+
             for (ExplicitTemplateArg& arg : expr.explicit_template_args) {
                 if (arg.is_type && arg.type.is_pack_expansion && arg.type.kind == TypeKind::Named && arg.type.name == pack_name) {
                     for (const std::string& concrete_name : concrete_names) {
-                        ExplicitTemplateArg expanded_arg;
+                        ExplicitTemplateArg expanded_arg{};
+
                         expanded_arg.is_type = true;
                         expanded_arg.type.kind = TypeKind::Named;
                         expanded_arg.type.name = concrete_name;
@@ -8344,7 +8562,8 @@ private:
             expr.explicit_template_args = std::move(expanded_template_args);
         }
         if (!expr.args.empty()) {
-            std::vector<ExprPtr> expanded_args;
+            std::vector<ExprPtr> expanded_args{};
+
             for (ExprPtr& arg : expr.args) {
                 auto _expanded = expand_pack_argument(*arg, pack_name, concrete_names);
                 if (!_expanded.has_value()) return std::unexpected(std::move(_expanded).error());
@@ -8536,7 +8755,8 @@ private:
                             return std::unexpected(std::move(_r).error());
                         }
                     }
-                    std::vector<ExprPtr> expanded_args;
+                    std::vector<ExprPtr> expanded_args{};
+
                     for (ExprPtr& arg : stmt.ctor_args) {
                         auto _expanded = expand_pack_argument(*arg, pack_name, concrete_names);
                         if (!_expanded.has_value()) return std::unexpected(std::move(_expanded).error());
@@ -8624,7 +8844,8 @@ private:
         // about than proving that independently).
         clone_cache_[cache_key] = cache_key;
 
-        Function clone;
+        Function clone{};
+
         clone.return_type = tmpl.return_type;
         clone.return_lifetime = tmpl.return_lifetime;
         clone.name = cache_key;
@@ -8645,7 +8866,8 @@ private:
         clone.receiver_ref_qualifier = tmpl.receiver_ref_qualifier;
         clone.is_static = tmpl.is_static;
         clone.access = tmpl.access;
-        std::unordered_map<std::string, Type> witness_replacements;
+        std::unordered_map<std::string, Type> witness_replacements{};
+
         for (std::size_t i = 0; i < tmpl.params.size() && i < concrete_param_types.size(); i++) {
             if (!tmpl.params[i].generic_concept.empty()) {
                 const Type& concrete = concrete_param_types[i].kind == TypeKind::Reference
@@ -8654,14 +8876,17 @@ private:
                 witness_replacements[tmpl.params[i].generic_concept] = concrete;
             }
         }
-        for (const auto& [witness_name, concrete] : witness_replacements) {
+        for (const auto& entry : witness_replacements) {
+            const auto& witness_name = entry.first;
+            const auto& concrete = entry.second;
             clone.return_type = substitute_type_param(clone.return_type, witness_name, concrete);
         }
         clone.params.reserve(tmpl.params.size());
-        std::unordered_map<std::string, std::vector<std::string>> pack_param_names;
+        std::unordered_map<std::string, std::vector<std::string>> pack_param_names{};
+
         for (std::size_t i = 0; i < tmpl.params.size(); i++) {
             if (tmpl.params[i].is_parameter_pack) {
-                pack_param_names[tmpl.params[i].name] = {};
+                pack_param_names[tmpl.params[i].name] = std::vector<std::string>{};
                 for (std::size_t j = 0; j < concrete_pack_param_types[i].size(); j++) {
                     Param p = tmpl.params[i];
                     p.name = tmpl.params[i].name + "$" + std::to_string(j);
@@ -8678,7 +8903,9 @@ private:
         }
         if (auto _r = clone_member_initializers(tmpl, clone,
                                                 [&](Expr& e) -> std::expected<void, DataflowError> {
-                                                    for (const auto& [witness_name, concrete] : witness_replacements) {
+                                                    for (const auto& entry : witness_replacements) {
+                                                        const auto& witness_name = entry.first;
+                                                        const auto& concrete = entry.second;
                                                         substitute_type_param_in_expr(e, witness_name, concrete);
                                                     }
                                                     return {};
@@ -8688,10 +8915,14 @@ private:
         }
         clone.body = tmpl.body ? deep_clone_stmt(*tmpl.body) : nullptr;
         if (clone.body) {
-            for (const auto& [witness_name, concrete] : witness_replacements) {
+            for (const auto& entry : witness_replacements) {
+                const auto& witness_name = entry.first;
+                const auto& concrete = entry.second;
                 substitute_type_param_in_stmt(*clone.body, witness_name, concrete);
             }
-            for (const auto& [pack_name, concrete_names] : pack_param_names) {
+            for (const auto& entry : pack_param_names) {
+                const auto& pack_name = entry.first;
+                const auto& concrete_names = entry.second;
                 if (auto _r = expand_pack_folds_in_stmt(*clone.body, pack_name, concrete_names); !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
@@ -8740,7 +8971,7 @@ private:
     // too -- check_moves takes the Program by const reference and cannot
     // do it itself.
     resolve_program_locals(program);
-    Monomorphizer monomorphizer(program);
+    Monomorphizer monomorphizer{program};
     auto result = monomorphizer.run();
     resolve_program_locals(program);
     return result;
