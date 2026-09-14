@@ -40,9 +40,9 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
 [[nodiscard]] std::expected<void, DataflowError> reject_write_to_nonmutable_by_value_capture(const Stmt& stmt,
                                                  const std::unordered_set<std::string>& by_value_names);
 
-[[nodiscard]] std::expected<void, DataflowError> apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
+[[nodiscard]] extern std::expected<void, DataflowError> apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
                 const Signatures& signatures, bool report_errors);
-[[nodiscard]] std::expected<void, DataflowError> apply_reference_argument(const Expr& arg, const Type& param_type, DataflowState& state,
+[[nodiscard]] extern std::expected<void, DataflowError> apply_reference_argument(const Expr& arg, const Type& param_type, DataflowState& state,
                               InCallBorrows& in_call_borrows, const Body& body,
                               const Signatures& signatures, bool report_errors);
 
@@ -92,7 +92,7 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
 [[nodiscard]] std::expected<void, DataflowError> apply_lambda_captures(const Expr& expr, DataflowState& state,
                             const Body& body, const Signatures& signatures, bool report_errors,
                             std::vector<ClosureCaptureBorrow>* out_closure_capture_borrows) {
-    InCallBorrows reference_capture_borrows;
+    InCallBorrows reference_capture_borrows{};
     auto apply_by_value_capture_source = [&](const Expr& source, const Type& declared_type, const LambdaCapture& capture,
                                              const std::string& capture_display) -> std::expected<void, DataflowError> {
         // ch05 §5.12: what a by-value capture stores is the *referent* --
