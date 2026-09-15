@@ -36,7 +36,7 @@ constexpr unsigned int kDwAteSigned = 0x05;
 constexpr unsigned int kDwAteSignedChar = 0x06;
 constexpr unsigned int kDwAteUnsigned = 0x07;
 
-llvm::LLVMTargetDataRef data_layout_ref(llvm::LLVMModuleRef mod) { return llvm::LLVMGetModuleDataLayout(mod); }
+inline llvm::LLVMTargetDataRef data_layout_ref(llvm::LLVMModuleRef mod) { return llvm::LLVMGetModuleDataLayout(mod); }
 
 // llvm::DataLayout::getPointerABIAlignment(address_space).value() has no
 // function in llvm-c/Target.h with this exact shape (a data layout plus a
@@ -48,7 +48,7 @@ llvm::LLVMTargetDataRef data_layout_ref(llvm::LLVMModuleRef mod) { return llvm::
 // and address spaces, including a synthetic one with an unusual, non-
 // default alignment. So this composes two already-official llvm::LLVM-C calls
 // instead of needing any wrapper of our own.
-unsigned int pointer_abi_alignment_for_as(llvm::LLVMModuleRef mod, unsigned int address_space) {
+inline unsigned int pointer_abi_alignment_for_as(llvm::LLVMModuleRef mod, unsigned int address_space) {
     return llvm::LLVMABIAlignmentOfType(llvm::LLVMGetModuleDataLayout(mod),
                                   llvm::LLVMPointerTypeInContext(llvm::LLVMGetModuleContext(mod), address_space));
 }
