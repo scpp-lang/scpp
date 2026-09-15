@@ -11,4 +11,4 @@ llvm = { path = "../../../libs/llvm" }
 
 [[lib]]
 name = "scpp-codegen"
-sources = ["codegen.cppm", "errors.cppm", "api.cppm", "debug.cppm"]
+sources = ["codegen.cppm", "errors.cppm", "api.cppm", "debug.cppm", "functions.cppm"]
