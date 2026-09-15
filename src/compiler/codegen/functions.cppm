@@ -18,7 +18,7 @@ namespace scpp {
             if (auto r = validate_c_abi_compatible(fn.return_type, fn.name, "return type"); !r.has_value())
                 return std::unexpected(std::move(r).error());
         }
-        std::vector<llvm::LLVMTypeRef> param_types;
+        std::vector<llvm::LLVMTypeRef> param_types{};
         param_types.reserve(fn.params.size());
         for (std::size_t i = 0; i < fn.params.size(); ++i) {
             const Param& param = fn.params[i];
@@ -40,7 +40,7 @@ namespace scpp {
         auto return_llvm_type_result = to_llvm_type(fn.return_type);
         if (!return_llvm_type_result.has_value()) return std::unexpected(std::move(return_llvm_type_result).error());
         llvm::LLVMTypeRef fn_type = llvm::LLVMFunctionType(std::move(return_llvm_type_result).value(), param_types.data(),
-                                               static_cast<unsigned>(param_types.size()), fn.has_varargs);
+                                               static_cast<unsigned int>(param_types.size()), fn.has_varargs);
         // ch11 §11.9: a module-private (non-exported) function *defined*
         // in this same translation unit never needs to be visible
         // outside it -- llvm::LLVM internal linkage (the same mechanism as C's
@@ -107,7 +107,8 @@ namespace scpp {
         full_expression_temporaries_.clear();
         full_expression_start_blocks_.clear();
         std::size_t index = 0;
-        for (unsigned i = 0, n = llvm::LLVMCountParams(llvm_fn); i < n; ++i) {
+        const unsigned int n = llvm::LLVMCountParams(llvm_fn);
+        for (unsigned int i = 0; i < n; ++i) {
             llvm::LLVMValueRef arg = llvm::LLVMGetParam(llvm_fn, i);
             const Param& param = fn.params[index++];
             llvm::LLVMSetValueName2(arg, param.name.c_str(), param.name.size());
@@ -116,7 +117,7 @@ namespace scpp {
                 auto param_llvm_type_result = to_llvm_type(param.type);
                 if (!param_llvm_type_result.has_value()) return std::unexpected(std::move(param_llvm_type_result).error());
                 slot = llvm::LLVMBuildAlloca(builder_, std::move(param_llvm_type_result).value(), param.name.c_str());
-                if (std::optional<unsigned> align = alignment_for_type(param.type)) llvm::LLVMSetAlignment(slot, *align);
+                if (std::optional<unsigned int> align = alignment_for_type(param.type); align.has_value()) llvm::LLVMSetAlignment(slot, *align);
                 llvm::LLVMValueRef fat_this = build_interface_value(
                     arg, llvm::LLVMConstPointerNull(llvm::LLVMPointerTypeInContext(context_, 0)));
                 create_store(fat_this, slot, alignment_for_type(param.type));
@@ -124,11 +125,11 @@ namespace scpp {
                 auto param_llvm_type_result = to_llvm_type(param.type);
                 if (!param_llvm_type_result.has_value()) return std::unexpected(std::move(param_llvm_type_result).error());
                 slot = llvm::LLVMBuildAlloca(builder_, std::move(param_llvm_type_result).value(), param.name.c_str());
-                if (std::optional<unsigned> align = alignment_for_type(param.type)) llvm::LLVMSetAlignment(slot, *align);
+                if (std::optional<unsigned int> align = alignment_for_type(param.type); align.has_value()) llvm::LLVMSetAlignment(slot, *align);
                 llvm::LLVMBuildStore(builder_, arg, slot);
             } else {
                 slot = llvm::LLVMBuildAlloca(builder_, llvm::LLVMTypeOf(arg), param.name.c_str());
-                if (std::optional<unsigned> align = alignment_for_type(param.type)) llvm::LLVMSetAlignment(slot, *align);
+                if (std::optional<unsigned int> align = alignment_for_type(param.type); align.has_value()) llvm::LLVMSetAlignment(slot, *align);
                 llvm::LLVMBuildStore(builder_, arg, slot);
             }
             if (!has_param_local(param)) {
@@ -144,7 +145,7 @@ namespace scpp {
             // `const int v` parameter selected `f(int&)` and wrote 99
             // into it.
             locals_[param_local(param)] = LocalSlot{slot, param.type, param.is_const};
-            if (auto r = maybe_emit_parameter_debug_decl(param, slot, static_cast<unsigned>(index)); !r.has_value())
+            if (auto r = maybe_emit_parameter_debug_decl(param, slot, static_cast<unsigned int>(index)); !r.has_value())
                 return std::unexpected(std::move(r).error());
             if (param.type.kind == TypeKind::Named && find_class_def(param.type.name) != nullptr) {
                 locals_[param_local(param)].set_whole_moved_flag(create_moved_flag_if_has_destructor(param.type.name));
@@ -255,7 +256,8 @@ namespace scpp {
         full_expression_temporaries_.clear();
         full_expression_start_blocks_.clear();
         std::size_t index = 0;
-        for (unsigned i = 0, n = llvm::LLVMCountParams(llvm_fn); i < n; ++i) {
+        const unsigned int n = llvm::LLVMCountParams(llvm_fn);
+        for (unsigned int i = 0; i < n; ++i) {
             llvm::LLVMValueRef arg = llvm::LLVMGetParam(llvm_fn, i);
             const Param& param = fn.params[index++];
             llvm::LLVMSetValueName2(arg, param.name.c_str(), param.name.size());
@@ -264,7 +266,7 @@ namespace scpp {
                 auto param_llvm_type_result = to_llvm_type(param.type);
                 if (!param_llvm_type_result.has_value()) return std::unexpected(std::move(param_llvm_type_result).error());
                 slot = llvm::LLVMBuildAlloca(builder_, std::move(param_llvm_type_result).value(), param.name.c_str());
-                if (std::optional<unsigned> align = alignment_for_type(param.type)) llvm::LLVMSetAlignment(slot, *align);
+                if (std::optional<unsigned int> align = alignment_for_type(param.type); align.has_value()) llvm::LLVMSetAlignment(slot, *align);
                 llvm::LLVMValueRef fat_this = build_interface_value(
                     arg, llvm::LLVMConstPointerNull(llvm::LLVMPointerTypeInContext(context_, 0)));
                 create_store(fat_this, slot, alignment_for_type(param.type));
@@ -272,11 +274,11 @@ namespace scpp {
                 auto param_llvm_type_result = to_llvm_type(param.type);
                 if (!param_llvm_type_result.has_value()) return std::unexpected(std::move(param_llvm_type_result).error());
                 slot = llvm::LLVMBuildAlloca(builder_, std::move(param_llvm_type_result).value(), param.name.c_str());
-                if (std::optional<unsigned> align = alignment_for_type(param.type)) llvm::LLVMSetAlignment(slot, *align);
+                if (std::optional<unsigned int> align = alignment_for_type(param.type); align.has_value()) llvm::LLVMSetAlignment(slot, *align);
                 llvm::LLVMBuildStore(builder_, arg, slot);
             } else {
                 slot = llvm::LLVMBuildAlloca(builder_, llvm::LLVMTypeOf(arg), param.name.c_str());
-                if (std::optional<unsigned> align = alignment_for_type(param.type)) llvm::LLVMSetAlignment(slot, *align);
+                if (std::optional<unsigned int> align = alignment_for_type(param.type); align.has_value()) llvm::LLVMSetAlignment(slot, *align);
                 llvm::LLVMBuildStore(builder_, arg, slot);
             }
             if (!has_param_local(param)) {
@@ -292,7 +294,7 @@ namespace scpp {
             // `const int v` parameter selected `f(int&)` and wrote 99
             // into it.
             locals_[param_local(param)] = LocalSlot{slot, param.type, param.is_const};
-            if (auto r = maybe_emit_parameter_debug_decl(param, slot, static_cast<unsigned>(index)); !r.has_value())
+            if (auto r = maybe_emit_parameter_debug_decl(param, slot, static_cast<unsigned int>(index)); !r.has_value())
                 return std::unexpected(std::move(r).error());
             if (param.type.kind == TypeKind::Named && find_class_def(param.type.name) != nullptr) {
                 locals_[param_local(param)].set_whole_moved_flag(create_moved_flag_if_has_destructor(param.type.name));
@@ -313,7 +315,7 @@ namespace scpp {
         if (!this_llvm_type_result.has_value()) return std::unexpected(std::move(this_llvm_type_result).error());
         llvm::LLVMValueRef this_ptr =
             llvm::LLVMBuildLoad2(builder_, std::move(this_llvm_type_result).value(), locals_.at(param_local(fn.params[0])).alloca, "thisptr");
-        const StructInfo& info = info_it->second;
+        const auto& info = info_it->second;
 
         if (is_defaulted_default_constructor) {
             if (auto r = emit_default_initializers_for_record_storage(this_ptr, class_name, /*initialize_virtual_interface_bases=*/true);
@@ -396,7 +398,7 @@ namespace scpp {
                 llvm::LLVMTypeRef i32 = llvm::LLVMInt32TypeInContext(context_);
                 llvm::LLVMValueRef equal = llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 1, 0);
                 for (std::size_t i = 0; i < static_cast<std::size_t>(type.array_size); ++i) {
-                    llvm::LLVMValueRef indices[] = {llvm::LLVMConstInt(i32, 0, 0), llvm::LLVMConstInt(i32, i, 0)};
+                    llvm::LLVMValueRef indices[2] = {llvm::LLVMConstInt(i32, 0, 0), llvm::LLVMConstInt(i32, i, 0)};
                     llvm::LLVMValueRef lhs_elem =
                         llvm::LLVMBuildGEP2(builder_, array_type, lhs_ptr, indices, 2, "eq.elem.lhs");
                     llvm::LLVMValueRef rhs_elem =
@@ -497,10 +499,10 @@ namespace scpp {
         llvm::LLVMPositionBuilderAtEnd(builder_, entry);
         current_loc_ = fn.loc;
         llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
-        std::vector<llvm::LLVMValueRef> args;
-        unsigned arg_count = llvm::LLVMCountParams(llvm_fn);
+        std::vector<llvm::LLVMValueRef> args{};
+        unsigned int arg_count = llvm::LLVMCountParams(llvm_fn);
         args.reserve(arg_count);
-        for (unsigned i = 0; i < arg_count; ++i) args.push_back(llvm::LLVMGetParam(llvm_fn, i));
+        for (unsigned int i = 0; i < arg_count; ++i) args.push_back(llvm::LLVMGetParam(llvm_fn, i));
         llvm::LLVMValueRef call_result = nullptr;
         if (!fn.params.empty() && is_interface_reference_type(fn.params.front().type)) {
             auto slot_index_result = interface_method_slot_index(fn.member_owner_class, fn);
@@ -517,12 +519,12 @@ namespace scpp {
             llvm::LLVMValueRef table_ptr = llvm::LLVMBuildBitCast(builder_, dispatch_ptr, llvm::LLVMPointerTypeInContext(context_, 0),
                                                       "ifacetable");
             llvm::LLVMTypeRef i32_ty = llvm::LLVMInt32TypeInContext(context_);
-            llvm::LLVMValueRef slot_indices[] = {llvm::LLVMConstInt(i32_ty, 0, /*SignExtend=*/0),
-                                           llvm::LLVMConstInt(i32_ty, static_cast<unsigned>(*slot_index), /*SignExtend=*/0)};
+            llvm::LLVMValueRef slot_indices[2] = {llvm::LLVMConstInt(i32_ty, 0, /*SignExtend=*/0),
+                                           llvm::LLVMConstInt(i32_ty, static_cast<unsigned int>(*slot_index), /*SignExtend=*/0)};
             llvm::LLVMValueRef slot_ptr = llvm::LLVMBuildGEP2(builder_, table_type, table_ptr, slot_indices, 2, "ifaceslot");
             llvm::LLVMValueRef target_ptr =
                 create_load(llvm::LLVMPointerTypeInContext(context_, 0), slot_ptr, std::nullopt, "ifacemethod");
-            std::vector<llvm::LLVMValueRef> dispatch_args;
+            std::vector<llvm::LLVMValueRef> dispatch_args{};
             dispatch_args.reserve(args.size());
             dispatch_args.push_back(extract_interface_object_ptr(receiver_value));
             for (std::size_t i = 1; i < args.size(); ++i) dispatch_args.push_back(args[i]);
@@ -535,7 +537,7 @@ namespace scpp {
             auto dispatch_table_result = get_or_create_interface_dispatch_table(concrete_class_name, target_interface_name);
             if (!dispatch_table_result.has_value()) return std::unexpected(std::move(dispatch_table_result).error());
             llvm::LLVMValueRef fat_receiver = build_interface_value(args.front(), std::move(dispatch_table_result).value());
-            std::vector<llvm::LLVMValueRef> direct_args;
+            std::vector<llvm::LLVMValueRef> direct_args{};
             direct_args.reserve(args.size());
             direct_args.push_back(fat_receiver);
             for (std::size_t i = 1; i < args.size(); ++i) direct_args.push_back(args[i]);
