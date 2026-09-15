@@ -2050,6 +2050,24 @@ void test_generate_returns_disengaged_expected_on_failure_without_throwing() {
            "message");
 }
 
+void test_codegen_error_copy_construction_and_properties() {
+    cases_run++;
+    scpp::SourceLocation loc;
+    loc.line = 42;
+    loc.column = 7;
+    scpp::CodegenError err1("test codegen message", loc);
+    expect(std::string(err1.what()) == "test codegen message",
+           "codegen_error: expected matching what()");
+    expect(err1.loc.line == 42 && err1.loc.column == 7,
+           "codegen_error: expected matching loc");
+
+    scpp::CodegenError err2 = err1;
+    expect(std::string(err2.what()) == "test codegen message",
+           "codegen_error: expected copy to preserve what()");
+    expect(err2.loc.line == 42 && err2.loc.column == 7,
+           "codegen_error: expected copy to preserve loc");
+}
+
 // Exercises scpp.constexpression's public API directly against its new
 // std::expected<T, ConstexprError> return type (rather than only indirectly,
 // via the .scpp/.expected `throws: ConstexprError` case above), to confirm
@@ -5725,6 +5743,7 @@ int main() {
     test_a_deleted_virtual_is_emitted_as_a_trapping_definition();
     test_generate_returns_engaged_expected_on_success();
     test_generate_returns_disengaged_expected_on_failure_without_throwing();
+    test_codegen_error_copy_construction_and_properties();
     run_constexpr_engine_direct_api_tests();
     run_switch_end_block_reachability_tests();
     run_local_shadowing_tests();
