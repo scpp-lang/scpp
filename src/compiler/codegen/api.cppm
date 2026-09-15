@@ -512,7 +512,7 @@ private:
 
     [[nodiscard]] static std::size_t align_up(std::size_t value, std::size_t alignment);
 
-    [[nodiscard]] std::expected<std::size_t, CodegenError> alignment_bytes_for_type(const Type& type) const;
+    [[nodiscard]] std::expected<std::size_t, CodegenError> alignment_bytes_for_type(const Type& type);
 
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> codegen_sizeof_value(const Expr& expr);
 
