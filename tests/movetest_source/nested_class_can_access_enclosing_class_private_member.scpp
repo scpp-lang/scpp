@@ -1,0 +1,22 @@
+class Outer {
+private:
+    int secret{};
+public:
+    Outer() = default;
+    virtual ~Outer() = default;
+
+    class Inner {
+    public:
+        Inner() = default;
+        virtual ~Inner() = default;
+        int read_secret(const Outer& o) const {
+            return o.secret;
+        }
+    };
+};
+
+int f() {
+    Outer out{};
+    Outer::Inner in{};
+    return in.read_secret(out);
+}

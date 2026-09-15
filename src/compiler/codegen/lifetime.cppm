@@ -671,7 +671,7 @@ namespace scpp {
         for (std::int64_t i = type.array_size; i > 0; i--) {
             Place element = projected_index(place, i - 1);
             llvm::LLVMValueRef element_ptr = build_array_element_gep(
-                array_llvm_type, ptr, llvm::LLVMConstInt(i64, static_cast<unsigned long long>(i - 1), /*SignExtend=*/0));
+                array_llvm_type, ptr, llvm::LLVMConstInt(i64, static_cast<std::uint64_t>(i - 1), /*SignExtend=*/0));
             if (old_state) {
                 codegen_destroy_old_state_for_move_assign(*type.element, element_ptr, /*moved_flag=*/nullptr, &element);
             } else {

@@ -26,3 +26,7 @@ target_compile_definitions(scpp_codegen PUBLIC ${LLVM_DEFINITIONS_LIST})
 # real LLVM-C symbols every partition's own declarations ultimately
 # resolve to.
 target_link_libraries(scpp_codegen PUBLIC scpp_ast scpp_mir scpp_constexpr llvm ${LLVM_LIBS})
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(scpp_codegen PRIVATE -Wno-unknown-attributes)
+endif()
