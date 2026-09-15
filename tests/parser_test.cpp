@@ -988,6 +988,25 @@ void test_static_member_function_parses_without_this() {
            "static_member_function_parses_without_this: private static access should parse");
 }
 
+void test_static_member_function_declaration_without_body_is_not_treated_as_free_function() {
+    scpp::Program program = expect_parse_ok(
+        "class Box {\n"
+        "public:\n"
+        "    virtual ~Box() = default;\n"
+        "    static int make(int value);\n"
+        "};\n"
+        "int Box::make(int value) { return value; }\n"
+        "int main() { return Box::make(3); }\n");
+    const scpp::Function* make_fn = find_function_named(program, "Box_make");
+    expect(make_fn != nullptr, "static_member_function_declaration_without_body: expected Box_make");
+    if (make_fn != nullptr) {
+        expect(make_fn->is_static, "static_member_function_declaration_without_body: should be static");
+        expect(make_fn->member_owner_class == "Box",
+               "static_member_function_declaration_without_body: owner class should be Box");
+        expect(make_fn->body != nullptr, "static_member_function_declaration_without_body: should have body merged");
+    }
+}
+
 void test_template_specialization_static_member_call_parses() {
     scpp::Program program = expect_parse_ok(
         "template<typename T>\n"
@@ -7110,6 +7129,7 @@ int main() {
     test_default_parameter_expression_parses();
     test_default_parameter_trailing_rule_is_enforced();
     test_static_member_function_parses_without_this();
+    test_static_member_function_declaration_without_body_is_not_treated_as_free_function();
     test_template_specialization_static_member_call_parses();
     test_full_class_template_specialization_parses_as_concrete_specialization();
     test_struct_forward_declaration_parses_and_reconciles();

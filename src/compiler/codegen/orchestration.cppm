@@ -378,6 +378,21 @@ namespace scpp {
     }
 
 
+    [[nodiscard]] const Codegen::LocalSlot* Codegen::find_local(const Expr& expr) const {
+        if (!has_resolved_local(expr)) return nullptr;
+        auto it = locals_.find(resolved_local_of(expr));
+        return it == locals_.end() ? nullptr : &it->second;
+    }
+
+
+    [[nodiscard]] std::optional<LocalId> Codegen::this_param_local() const {
+        if (current_function_def_ == nullptr || current_function_def_->params.empty()) return std::nullopt;
+        const Param& first = current_function_def_->params.front();
+        if (first.name != "this" || !has_param_local(first)) return std::nullopt;
+        return param_local(first);
+    }
+
+
     [[nodiscard]] std::string Codegen::mangle_global_symbol_name(const std::string& name) const
 {
         std::string result = "__scpp_global.";

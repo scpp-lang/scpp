@@ -2799,7 +2799,7 @@ private:
         // deleted free function is never a forward declaration awaiting
         // one (and, by /4, must be the first declaration).
         return !parsing_compiled_module_interface() && fn.body == nullptr && fn.owning_module.empty() && !fn.is_extern_c &&
-               !fn.is_module_extern && !fn.is_deleted && (fn.params.empty() || fn.params[0].name != "this");
+               !fn.is_module_extern && !fn.is_deleted && fn.member_owner_class.empty() && (fn.params.empty() || fn.params[0].name != "this");
     }
 
     [[nodiscard]] bool is_bodyless_member_forward_decl(const Function& fn) const {

@@ -1644,6 +1644,22 @@ namespace scpp {
 [[nodiscard]] bool grants_private_access(const DataflowState& state, std::string_view target_class) {
     if (state.current_class == target_class) return true;
     if (!state.lexical_access_context_class.empty() && state.lexical_access_context_class == target_class) return true;
+    std::string_view enclosing = state.current_class;
+    while (true) {
+        std::size_t pos = enclosing.rfind("::");
+        if (pos == std::string_view::npos) break;
+        enclosing = enclosing.substr(0, pos);
+        if (enclosing == target_class) return true;
+    }
+    if (!state.lexical_access_context_class.empty()) {
+        std::string_view lex_enclosing = state.lexical_access_context_class;
+        while (true) {
+            std::size_t pos = lex_enclosing.rfind("::");
+            if (pos == std::string_view::npos) break;
+            lex_enclosing = lex_enclosing.substr(0, pos);
+            if (lex_enclosing == target_class) return true;
+        }
+    }
     // [class.access]/1 grants access to the *class*, not to one object of
     // it: a member of `C` reads any `C`'s private members, which is what
     // makes `bool operator==(const C& other) const { return p_ ==

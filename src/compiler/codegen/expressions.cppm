@@ -1382,7 +1382,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             std::optional<unsigned int> element_alignment = alignment_for_type(element_type);
             while (covered < target.type.array_size && index < args.size()) {
                 llvm::LLVMValueRef element_index =
-                    llvm::LLVMConstInt(i64, static_cast<unsigned long long>(covered), /*SignExtend=*/0);
+                    llvm::LLVMConstInt(i64, static_cast<std::uint64_t>(covered), /*SignExtend=*/0);
                 llvm::LLVMValueRef element_ptr = build_array_element_gep(array_llvm_type, target.ptr, element_index);
                 if (auto r = initialize_storage_from_brace_args_cursor(
                         LValue{element_ptr, element_type, element_alignment}, args, index);
@@ -2010,7 +2010,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     }
 
 
-    [[nodiscard]] std::expected<bool, CodegenError> Codegen::enum_value_fits_source_type(const Type& source_type, long long enum_value)
+    [[nodiscard]] std::expected<bool, CodegenError> Codegen::enum_value_fits_source_type(const Type& source_type, std::int64_t enum_value)
 {
         if (source_type.kind != TypeKind::Named || !is_integral_scalar_type_name(source_type.name)) return false;
         auto integer_type_result = to_llvm_type(source_type);
@@ -2026,13 +2026,13 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             return static_cast<std::uint64_t>(enum_value) <= max_value;
         }
         if (bits >= 64) return true;
-        long long min_value = -(std::int64_t{1} << (bits - 1));
-        long long max_value = (std::int64_t{1} << (bits - 1)) - 1;
+        std::int64_t min_value = -(std::int64_t{1} << (bits - 1));
+        std::int64_t max_value = (std::int64_t{1} << (bits - 1)) - 1;
         return enum_value >= min_value && enum_value <= max_value;
     }
 
 
-    [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::build_integral_enum_match(llvm::LLVMValueRef source, const Type& source_type, long long enum_value)
+    [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::build_integral_enum_match(llvm::LLVMValueRef source, const Type& source_type, std::int64_t enum_value)
 {
         llvm::LLVMTypeRef source_integer_type = llvm::LLVMTypeOf(source);
         auto fits_result = enum_value_fits_source_type(source_type, enum_value);
@@ -2050,7 +2050,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     }
 
 
-    llvm::LLVMValueRef Codegen::enum_variant_constant(llvm::LLVMTypeRef enum_storage_type, const Type& underlying_type, long long enum_value)
+    llvm::LLVMValueRef Codegen::enum_variant_constant(llvm::LLVMTypeRef enum_storage_type, const Type& underlying_type, std::int64_t enum_value)
 {
         if (is_unsigned_for_cast(underlying_type.name)) {
             return llvm::LLVMConstInt(enum_storage_type, static_cast<std::uint64_t>(enum_value), 0);
@@ -3326,7 +3326,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     }
 
 
-    [[nodiscard]] std::optional<long long> Codegen::try_eval_constant_index(const Expr& expr) const
+    [[nodiscard]] std::optional<std::int64_t> Codegen::try_eval_constant_index(const Expr& expr) const
 {
         if (expr.kind == ExprKind::IntegerLiteral) return expr.int_value;
         // `-1` (a negated literal, ExprKind::Unary/Neg over a bare
@@ -3341,7 +3341,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     }
 
 
-    void Codegen::emit_array_bounds_check(llvm::LLVMValueRef index, long long bound)
+    void Codegen::emit_array_bounds_check(llvm::LLVMValueRef index, std::int64_t bound)
 {
         emit_span_bounds_check(index, llvm::LLVMConstInt(llvm::LLVMInt64TypeInContext(context_), static_cast<std::uint64_t>(bound), /*SignExtend=*/1));
     }
@@ -3914,7 +3914,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     // never skipped inside `unsafe { }` (this is a detected-at-
                     // compile-time ill-formed program, not a scpp-inserted
                     // runtime check being opted out of).
-                    std::optional<long long> constant_index = try_eval_constant_index(*expr.rhs);
+                    std::optional<std::int64_t> constant_index = try_eval_constant_index(*expr.rhs);
                     if (constant_index.has_value() &&
                         (*constant_index < 0 || *constant_index >= base.type.array_size)) {
                         return std::unexpected(CodegenError("array subscript " + std::to_string(*constant_index) +
