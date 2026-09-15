@@ -299,7 +299,7 @@ std::expected<void, DataflowError> check_enum_conversion_compatibility(const Typ
     bool target_is_enum = is_enum_type(target_operand, body.program);
     bool source_is_enum = is_enum_type(source_operand, body.program);
     if (!(target_is_enum || source_is_enum)) return {};
-    if (types_equal(target_operand, source_operand)) return {};
+    if (types_equal_ignoring_top_level_const(target_operand, source_operand)) return {};
     // An enum value bound to a target that is neither an enum nor a scalar
     // is not this rule's question. The rule is about enum<->integer and
     // enum<->enum conversions (ch06 §6); binding `Mode` to a

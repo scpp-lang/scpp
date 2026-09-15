@@ -3419,6 +3419,7 @@ private:
 
     std::ostringstream out;
     std::size_t line_start = 0;
+    bool skipping_clang = false;
     while (line_start <= source.size()) {
         std::size_t line_end = source.find('\n', line_start);
         bool had_newline = line_end != std::string::npos;
@@ -3426,7 +3427,21 @@ private:
             had_newline ? std::string_view(source).substr(line_start, line_end - line_start)
                         : std::string_view(source).substr(line_start);
         std::string trimmed = trim_copy(line);
-        bool is_module_decl = starts_with(trimmed, "export module ") || starts_with(trimmed, "module ");
+        if (trimmed == "#ifdef __clang__") {
+            skipping_clang = true;
+            if (!had_newline) break;
+            line_start = line_end + 1;
+            continue;
+        }
+        if (skipping_clang) {
+            if (trimmed == "#endif") {
+                skipping_clang = false;
+            }
+            if (!had_newline) break;
+            line_start = line_end + 1;
+            continue;
+        }
+        bool is_module_decl = starts_with(trimmed, "export module ") || starts_with(trimmed, "module ") || trimmed == "module;";
         if (is_module_decl) {
             if (keep_module_declaration) {
                 out << std::string(line);
@@ -3463,6 +3478,7 @@ std::string hoist_non_partition_imports(std::string source) {
     bool module_line_set = false;
 
     std::size_t line_start = 0;
+    bool skipping_clang = false;
     while (line_start <= source.size()) {
         std::size_t line_end = source.find('\n', line_start);
         bool had_newline = line_end != std::string::npos;
@@ -3471,6 +3487,20 @@ std::string hoist_non_partition_imports(std::string source) {
                         : std::string_view(source).substr(line_start);
         std::string line_text(line);
         std::string trimmed = trim_copy(line);
+        if (trimmed == "#ifdef __clang__") {
+            skipping_clang = true;
+            if (!had_newline) break;
+            line_start = line_end + 1;
+            continue;
+        }
+        if (skipping_clang) {
+            if (trimmed == "#endif") {
+                skipping_clang = false;
+            }
+            if (!had_newline) break;
+            line_start = line_end + 1;
+            continue;
+        }
         bool is_module_decl = starts_with(trimmed, "export module ") || starts_with(trimmed, "module ");
         if (is_module_decl && !module_line_set) {
             module_line = line_text;

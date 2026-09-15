@@ -7,10 +7,17 @@ import scpp.ast;
 
 export namespace scpp {
 
-struct CodegenError : std::runtime_error {
+class CodegenError : public std::runtime_error {
+public:
     explicit CodegenError(const std::string& message, SourceLocation loc = {})
-        : std::runtime_error(message), loc(loc) {}
-    SourceLocation loc;
+        : runtime_error{message}, loc{loc} {}
+
+    CodegenError(const CodegenError& other)
+        : runtime_error{std::string{other.what()}}, loc{other.loc} {}
+
+    virtual ~CodegenError() override = default;
+
+    SourceLocation loc{};
 };
 
 } // namespace scpp

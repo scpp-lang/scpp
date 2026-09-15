@@ -1,0 +1,14 @@
+manifest-version = 1
+
+[package]
+name = "scpp-codegen"
+version = "0.1.0"
+
+[dependencies]
+std = { path = "../../../libs/std" }
+scpp-compiler = { path = "../.." }
+llvm = { path = "../../../libs/llvm" }
+
+[[lib]]
+name = "scpp-codegen"
+sources = ["codegen.cppm", "errors.cppm"]
