@@ -49,7 +49,7 @@ namespace scpp {
 {
         if (interface_representation_llvm_type_ != nullptr) return interface_representation_llvm_type_;
         llvm::LLVMTypeRef ptr_type = llvm::LLVMPointerTypeInContext(context_, 0);
-        llvm::LLVMTypeRef fields[] = {ptr_type, ptr_type};
+        llvm::LLVMTypeRef fields[2] = {ptr_type, ptr_type};
         interface_representation_llvm_type_ =
             llvm::LLVMStructTypeInContext(context_, fields, 2, /*Packed=*/0);
         return interface_representation_llvm_type_;
@@ -129,13 +129,15 @@ namespace scpp {
         if (def == nullptr || !def->is_interface) {
             return std::unexpected(CodegenError("unknown interface '" + interface_name + "' for dispatch table generation", current_loc_));
         }
-        std::vector<const Function*> methods;
-        std::unordered_map<std::string, std::size_t> slot_indices;
+        std::vector<const Function*> methods{};
+        std::unordered_map<std::string, std::size_t> slot_indices{};
         for (const BaseSpecifier& base : def->base_specifiers) {
             if (base.kind != BaseClassKind::Interface) continue;
             auto base_methods_result = interface_dispatch_methods(base.base_type.name);
             if (!base_methods_result.has_value()) return std::unexpected(std::move(base_methods_result).error());
-            for (const Function* method : *base_methods_result.value()) {
+            const std::vector<const Function*>* base_methods = base_methods_result.value();
+            for (std::size_t i = 0; i < base_methods->size(); ++i) {
+                const Function* method = (*base_methods)[i];
                 std::string slot_key = interface_method_slot_key(*method);
                 if (!slot_indices.contains(slot_key)) {
                     slot_indices.emplace(slot_key, methods.size());
@@ -156,8 +158,8 @@ namespace scpp {
             }
         }
         interface_slot_indices_cache_.emplace(interface_name, std::move(slot_indices));
-        auto [it, _] = interface_dispatch_methods_cache_.emplace(interface_name, std::move(methods));
-        return &it->second;
+        auto emplace_result = interface_dispatch_methods_cache_.emplace(interface_name, std::move(methods));
+        return &emplace_result.first->second;
     }
 
 
@@ -200,7 +202,7 @@ namespace scpp {
 
     [[nodiscard]] std::expected<const Function*, CodegenError> Codegen::resolve_interface_slot_provider(const std::string& class_name, const std::string& slot_key) const
 {
-        if (const Function* direct = find_direct_method_by_slot(class_name, slot_key)) return direct;
+        if (const Function* direct = find_direct_method_by_slot(class_name, slot_key); direct != nullptr) return direct;
         const ClassDef* def = find_class_def(class_name);
         if (def == nullptr) return nullptr;
         const Function* chosen = nullptr;
@@ -224,7 +226,7 @@ namespace scpp {
 
     [[nodiscard]] std::expected<llvm::LLVMTypeRef, CodegenError> Codegen::interface_dispatch_function_type(const Function& method)
 {
-        std::vector<llvm::LLVMTypeRef> params;
+        std::vector<llvm::LLVMTypeRef> params{};
         params.reserve(method.params.size());
         params.push_back(llvm::LLVMPointerTypeInContext(context_, 0));
         for (std::size_t i = 1; i < method.params.size(); i++) {
@@ -234,7 +236,7 @@ namespace scpp {
         }
         auto return_type_result = to_llvm_type(method.return_type);
         if (!return_type_result.has_value()) return std::unexpected(std::move(return_type_result).error());
-        return llvm::LLVMFunctionType(std::move(return_type_result).value(), params.data(), static_cast<unsigned>(params.size()),
+        return llvm::LLVMFunctionType(std::move(return_type_result).value(), params.data(), static_cast<unsigned int>(params.size()),
                                 /*IsVarArg=*/0);
     }
 
@@ -287,10 +289,10 @@ namespace scpp {
         if (!dispatch_ptr_result.has_value()) return std::unexpected(std::move(dispatch_ptr_result).error());
         llvm::LLVMValueRef dispatch_ptr = std::move(dispatch_ptr_result).value();
         llvm::LLVMValueRef fat_this = build_interface_value(raw_this, dispatch_ptr);
-        std::vector<llvm::LLVMValueRef> args;
+        std::vector<llvm::LLVMValueRef> args{};
         args.reserve(target.params.size());
         args.push_back(fat_this);
-        for (unsigned i = 1; i < llvm::LLVMCountParams(thunk); ++i) {
+        for (unsigned int i = 1; i < llvm::LLVMCountParams(thunk); ++i) {
             args.push_back(llvm::LLVMGetParam(thunk, i));
         }
         llvm::LLVMValueRef target_fn = llvm::LLVMGetNamedFunction(module_, overload_names_.at(&target).c_str());
@@ -339,12 +341,14 @@ namespace scpp {
         if (def == nullptr || def->is_interface) {
             return std::unexpected(CodegenError("unknown ordinary class '" + class_name + "' for vtable generation", current_loc_));
         }
-        std::vector<const Function*> methods;
-        std::unordered_map<std::string, std::size_t> slot_indices;
-        if (auto base = def->direct_ordinary_base()) {
+        std::vector<const Function*> methods{};
+        std::unordered_map<std::string, std::size_t> slot_indices{};
+        if (auto base = def->direct_ordinary_base(); base.has_value()) {
             auto base_methods_result = ordinary_virtual_methods(base->get().base_type.name);
             if (!base_methods_result.has_value()) return std::unexpected(std::move(base_methods_result).error());
-            for (const Function* method : *base_methods_result.value()) {
+            const std::vector<const Function*>* base_methods = base_methods_result.value();
+            for (std::size_t i = 0; i < base_methods->size(); ++i) {
+                const Function* method = (*base_methods)[i];
                 slot_indices.emplace(interface_method_slot_key(*method), methods.size());
                 methods.push_back(method);
             }
@@ -365,8 +369,8 @@ namespace scpp {
             }
         }
         ordinary_slot_indices_cache_.emplace(class_name, std::move(slot_indices));
-        auto [it, _] = ordinary_virtual_methods_cache_.emplace(class_name, std::move(methods));
-        return &it->second;
+        auto emplace_result = ordinary_virtual_methods_cache_.emplace(class_name, std::move(methods));
+        return &emplace_result.first->second;
     }
 
 
@@ -426,13 +430,15 @@ namespace scpp {
         if (!table_type_result.has_value()) return std::unexpected(std::move(table_type_result).error());
         llvm::LLVMTypeRef table_type = std::move(table_type_result).value();
         llvm::LLVMTypeRef ptr_type = llvm::LLVMPointerTypeInContext(context_, 0);
-        std::vector<llvm::LLVMValueRef> entries;
+        std::vector<llvm::LLVMValueRef> entries{};
         auto methods_result = ordinary_virtual_methods(class_name);
         if (!methods_result.has_value()) return std::unexpected(std::move(methods_result).error());
         entries.reserve(methods_result.value()->size() + 1);
         entries.push_back(
             llvm::LLVMConstBitCast(get_or_create_ordinary_destructor_thunk(class_name), ptr_type));
-        for (const Function* method : *methods_result.value()) {
+        const std::vector<const Function*>* methods = methods_result.value();
+        for (std::size_t i = 0; i < methods->size(); ++i) {
+            const Function* method = (*methods)[i];
             llvm::LLVMValueRef target_fn = llvm::LLVMGetNamedFunction(module_, overload_names_.at(method).c_str());
             if (target_fn == nullptr) {
                 return std::unexpected(CodegenError("missing vtable target for ordinary virtual method '" + method->name + "'",
@@ -453,7 +459,7 @@ namespace scpp {
     [[nodiscard]] std::expected<void, CodegenError> Codegen::initialize_ordinary_vtable_pointer(const std::string& class_name, llvm::LLVMValueRef object_ptr)
 {
         if (!class_has_ordinary_vtable(class_name)) return {};
-        const StructInfo& info = structs_.at(class_name);
+        const auto& info = structs_.at(class_name);
         llvm::LLVMValueRef vptr_slot = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, object_ptr, 0, "vptr");
         auto vtable_result = get_or_create_ordinary_vtable(class_name);
         if (!vtable_result.has_value()) return std::unexpected(std::move(vtable_result).error());
@@ -501,10 +507,12 @@ namespace scpp {
         llvm::LLVMSetGlobalConstant(global, /*IsConstant=*/1);
         llvm::LLVMSetInitializer(global, llvm::LLVMConstNull(table_type));
         interface_dispatch_tables_.emplace(cache_key, global);
-        std::vector<llvm::LLVMValueRef> entries;
+        std::vector<llvm::LLVMValueRef> entries{};
         auto methods_result = interface_dispatch_methods(interface_name);
         if (!methods_result.has_value()) return std::unexpected(std::move(methods_result).error());
-        for (const Function* method : *methods_result.value()) {
+        const std::vector<const Function*>* methods = methods_result.value();
+        for (std::size_t i = 0; i < methods->size(); ++i) {
+            const Function* method = (*methods)[i];
             auto entry_result = interface_dispatch_entry_for(concrete_class_name, *method);
             if (!entry_result.has_value()) return std::unexpected(std::move(entry_result).error());
             entries.push_back(std::move(entry_result).value());
@@ -554,8 +562,8 @@ namespace scpp {
 
     [[nodiscard]] std::vector<const ClassDef*> Codegen::collect_virtual_interface_bases_in_construction_order(const ClassDef& def) const
 {
-        std::vector<const ClassDef*> out;
-        std::unordered_set<std::string> seen;
+        std::vector<const ClassDef*> out{};
+        std::unordered_set<std::string> seen{};
         collect_virtual_interface_bases_in_construction_order(def, out, seen);
         return out;
     }
@@ -577,7 +585,7 @@ namespace scpp {
     std::expected<std::vector<Codegen::SavedLocalSlot>, CodegenError>
     Codegen::bind_constructor_parameters(const Function& ctor_def, const std::vector<llvm::LLVMValueRef>& args)
 {
-        std::vector<SavedLocalSlot> saved;
+        std::vector<Codegen::SavedLocalSlot> saved{};
         // params[0] is the constructor's `this`, which the construction
         // site does not supply as an argument.
         for (std::size_t i = 0; i < args.size() && i + 1 < ctor_def.params.size(); i++) {
@@ -587,7 +595,7 @@ namespace scpp {
                     "internal error: parameter '" + param.name + "' was never resolved to a local", ctor_def.loc));
             }
             LocalId id = param_local(param);
-            SavedLocalSlot entry;
+            Codegen::SavedLocalSlot entry{};
             entry.id = id;
             if (auto it = locals_.find(id); it != locals_.end()) {
                 entry.was_bound = true;
@@ -595,17 +603,17 @@ namespace scpp {
             }
             saved.push_back(std::move(entry));
             llvm::LLVMValueRef slot = create_entry_block_alloca(llvm::LLVMTypeOf(args[i]), param.name);
-            if (std::optional<unsigned> align = alignment_for_type(param.type)) llvm::LLVMSetAlignment(slot, *align);
+            if (std::optional<unsigned int> align = alignment_for_type(param.type); align.has_value()) llvm::LLVMSetAlignment(slot, *align);
             llvm::LLVMBuildStore(builder_, args[i], slot);
-            locals_[id] = LocalSlot{slot, param.type};
+            locals_[id] = Codegen::LocalSlot{slot, param.type};
         }
         return saved;
     }
 
-    void Codegen::restore_bound_locals(const std::vector<SavedLocalSlot>& saved)
+    void Codegen::restore_bound_locals(const std::vector<Codegen::SavedLocalSlot>& saved)
 {
         for (std::size_t i = saved.size(); i > 0; i--) {
-            const SavedLocalSlot& entry = saved[i - 1];
+            const auto& entry = saved[i - 1];
             if (entry.was_bound) {
                 locals_[entry.id] = entry.slot;
             } else {
@@ -624,7 +632,7 @@ namespace scpp {
         std::vector<llvm::LLVMValueRef> arg_values = std::move(args_result).value();
         const ClassDef* class_def = find_class_def(class_name);
         if (class_def == nullptr) return arg_values;
-        std::vector<SavedLocalSlot> saved;
+        std::vector<Codegen::SavedLocalSlot> saved{};
         if (ctor_def != nullptr) {
             auto saved_result = bind_constructor_parameters(*ctor_def, arg_values);
             if (!saved_result.has_value()) return std::unexpected(std::move(saved_result).error());
@@ -640,7 +648,7 @@ namespace scpp {
     [[nodiscard]] std::expected<void, CodegenError> Codegen::emit_complete_object_interface_initializers(const ClassDef& most_derived_def, const Function* ctor_def,
                                                      llvm::LLVMValueRef object_ptr)
 {
-        static const std::vector<ExprPtr> no_base_args;
+        static const std::vector<ExprPtr> no_base_args{};
         for (const ClassDef* interface_def : collect_virtual_interface_bases_in_construction_order(most_derived_def)) {
             if (interface_def == nullptr) continue;
             const MemberInitializer* explicit_init =
@@ -691,14 +699,14 @@ namespace scpp {
         if (info_it == structs_.end()) {
             return std::unexpected(CodegenError("unknown class '" + class_name + "'", current_loc_));
         }
-        const StructInfo& info = info_it->second;
+        const auto& info = info_it->second;
         std::optional<std::size_t> field_index = info.find_field_index(field.name);
         if (!field_index.has_value()) {
             return std::unexpected(CodegenError("class '" + class_name + "' has no field '" + field.name + "'", current_loc_));
         }
         llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, object_ptr,
                                                      info.physical_field_index(*field_index), field.name.c_str());
-        return LValue{field_ptr, field.type, alignment_for_type(field.type)};
+        return Codegen::LValue{field_ptr, field.type, alignment_for_type(field.type)};
     }
 
 
@@ -709,14 +717,14 @@ namespace scpp {
         if (info_it == structs_.end()) {
             return std::unexpected(CodegenError("unknown class '" + class_name + "'", current_loc_));
         }
-        const StructInfo& info = info_it->second;
+        const auto& info = info_it->second;
         std::optional<std::size_t> field_index = info.find_field_index(field.name);
         if (!field_index.has_value()) {
             return std::unexpected(CodegenError("class '" + class_name + "' has no field '" + field.name + "'", current_loc_));
         }
         llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, object_ptr,
                                                      info.physical_field_index(*field_index), field.name.c_str());
-        return LValue{field_ptr, field.type, alignment_for_type(field.type)};
+        return Codegen::LValue{field_ptr, field.type, alignment_for_type(field.type)};
     }
 
 
@@ -732,7 +740,7 @@ namespace scpp {
         if (!object_ptr_result.has_value()) return std::unexpected(std::move(object_ptr_result).error());
         llvm::LLVMValueRef object_ptr = std::move(object_ptr_result).value();
         if (class_def != nullptr) {
-            if (auto base = class_def->direct_ordinary_base()) {
+            if (auto base = class_def->direct_ordinary_base(); base.has_value()) {
                 const MemberInitializer* explicit_base_init = nullptr;
                 for (const MemberInitializer& init : fn.member_initializers) {
                     if (names_direct_base(init.member_name, *class_def)) {
@@ -744,7 +752,7 @@ namespace scpp {
                 if (base_def == nullptr) {
                     return std::unexpected(CodegenError("unknown base class '" + base->get().base_type.name + "'", current_loc_));
                 }
-                static const std::vector<ExprPtr> no_base_args;
+                static const std::vector<ExprPtr> no_base_args{};
                 const std::vector<ExprPtr>* base_args =
                     explicit_base_init != nullptr ? &explicit_base_init->initializer.brace_args : nullptr;
                 const Function* base_ctor =
@@ -792,7 +800,7 @@ namespace scpp {
                 return std::unexpected(std::move(init_result).error());
             }
         }
-        if (auto base = class_def.direct_ordinary_base()) {
+        if (auto base = class_def.direct_ordinary_base(); base.has_value()) {
             const ClassDef* base_def = find_class_def(base->get().base_type.name);
             if (base_def == nullptr) {
                 return std::unexpected(CodegenError("unknown base class '" + base->get().base_type.name + "'", current_loc_));
@@ -821,14 +829,14 @@ namespace scpp {
     [[nodiscard]] std::expected<void, CodegenError> Codegen::emit_default_initializers_for_record_storage(llvm::LLVMValueRef object_ptr, const std::string& type_name,
                                                      bool initialize_virtual_interface_bases)
 {
-        if (const ClassDef* class_def = find_class_def(type_name)) {
+        if (const ClassDef* class_def = find_class_def(type_name); class_def != nullptr) {
             return emit_default_initializers_for_class_storage(object_ptr, *class_def, initialize_virtual_interface_bases);
         }
         // A struct has no bases, no vtable and no virtual interface
         // subobjects, so its whole default-initialization is its fields
         // -- through the same field walk the class path ends with, not a
         // second copy of it.
-        if (const StructDef* struct_def = find_struct_def(type_name)) {
+        if (const StructDef* struct_def = find_struct_def(type_name); struct_def != nullptr) {
             return emit_record_field_initializers(object_ptr, struct_def->name, struct_def->fields, /*member_initializers=*/nullptr);
         }
         return {};
