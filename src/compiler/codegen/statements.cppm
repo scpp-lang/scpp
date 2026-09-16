@@ -41,7 +41,7 @@ namespace scpp {
                     // ([intro.execution]): anything it materializes that
                     // no declaration takes ownership of dies at the
                     // semicolon.
-                    FullExpressionFrame frame(this);
+                    Codegen::FullExpressionFrame frame{this};
                     // Every declaration is resolved (resolve_program_locals runs
                     // over the whole program before this point, and again after
                     // monomorphization synthesizes new functions), so an
@@ -56,9 +56,9 @@ namespace scpp {
                         !r.has_value()) {
                         return std::unexpected(std::move(r).error());
                     }
-                    std::optional<unsigned> declared_alignment = alignment_for_type(stmt.type);
+                    std::optional<unsigned int> declared_alignment = alignment_for_type(stmt.type);
                     if (stmt.resolved_alignment != 0) {
-                        unsigned explicit_align = stmt.resolved_alignment;
+                        unsigned int explicit_align = stmt.resolved_alignment;
                         if (!declared_alignment.has_value() || explicit_align > *declared_alignment) {
                             declared_alignment = explicit_align;
                         }
@@ -109,7 +109,7 @@ namespace scpp {
                         std::string static_base = "__scpp_static_local." + overload_names_.at(current_function_def_) + "." +
                                                   stmt.var_name + "." + std::to_string(stmt.loc.line) + "." +
                                                   std::to_string(stmt.loc.column);
-                        llvm::LLVMTypeRef storage_type;
+                        llvm::LLVMTypeRef storage_type{};
                         if (stmt.type.kind == TypeKind::Reference) {
                             storage_type = llvm::LLVMPointerTypeInContext(context_, 0);
                         } else {
@@ -133,7 +133,7 @@ namespace scpp {
                         }
 
                         llvm::LLVMTypeRef guard_ptr_type = llvm::LLVMPointerTypeInContext(context_, 0);
-                        llvm::LLVMTypeRef guard_acquire_params[] = {guard_ptr_type};
+                        llvm::LLVMTypeRef guard_acquire_params[1] = {guard_ptr_type};
                         llvm::LLVMValueRef guard_acquire = get_or_declare_runtime_fn(
                             "__cxa_guard_acquire",
                             llvm::LLVMFunctionType(llvm::LLVMInt32TypeInContext(context_), guard_acquire_params, 1,
@@ -144,8 +144,8 @@ namespace scpp {
                                                    /*IsVarArg=*/0));
                         llvm::LLVMValueRef atexit_fn = get_or_declare_runtime_fn(
                             "atexit",
-                            [&, this] {
-                                llvm::LLVMTypeRef atexit_params[] = {guard_ptr_type};
+                            [&, this]() {
+                                llvm::LLVMTypeRef atexit_params[1] = {guard_ptr_type};
                                 return llvm::LLVMFunctionType(llvm::LLVMInt32TypeInContext(context_), atexit_params,
                                                               1, /*IsVarArg=*/0);
                             }());
@@ -171,7 +171,7 @@ namespace scpp {
                                     current_loc_));
                             }
                             if (auto r = validate_reference_pointee(*stmt.type.pointee); !r.has_value()) return std::unexpected(std::move(r).error());
-                            llvm::LLVMValueRef referent_addr;
+                            llvm::LLVMValueRef referent_addr = nullptr;
                             if (!stmt.type.is_mutable_ref && produces_rvalue_of_type(*stmt.init, *stmt.type.pointee)) {
                                 auto addr_result = codegen_materialize_rvalue_reference_source(*stmt.init);
                                 if (!addr_result.has_value()) return std::unexpected(std::move(addr_result).error());
@@ -197,10 +197,10 @@ namespace scpp {
                         } else if (stmt.has_ctor_args) {
                             if (auto r = zero_initialize_storage(storage, stmt.type, declared_alignment); !r.has_value()) return std::unexpected(std::move(r).error());
                             if (stmt.type.kind != TypeKind::Named || !structs_.contains(stmt.type.name)) {
-                                if (auto r = initialize_storage_from_brace_args(LValue{storage, stmt.type, declared_alignment}, stmt.ctor_args); !r.has_value()) return std::unexpected(std::move(r).error());
+                                if (auto r = initialize_storage_from_brace_args(Codegen::LValue{storage, stmt.type, declared_alignment}, stmt.ctor_args); !r.has_value()) return std::unexpected(std::move(r).error());
                             } else {
                                 auto same_type_result = try_initialize_class_storage_from_same_type_source(
-                                           LValue{storage, stmt.type, declared_alignment}, stmt.ctor_args);
+                                           Codegen::LValue{storage, stmt.type, declared_alignment}, stmt.ctor_args);
                                 if (!same_type_result.has_value()) return std::unexpected(std::move(same_type_result).error());
                                 if (!std::move(same_type_result).value()) {
                                 std::string ctor_name = stmt.type.name + "_new";
@@ -225,7 +225,7 @@ namespace scpp {
                                     // appears in. Deciding it here too
                                     // would be a second copy of that rule.
                                         if (auto r = initialize_storage_from_brace_args(
-                                                LValue{storage, stmt.type, declared_alignment}, stmt.ctor_args); !r.has_value())
+                                                Codegen::LValue{storage, stmt.type, declared_alignment}, stmt.ctor_args); !r.has_value())
                                             return std::unexpected(std::move(r).error());
                                     } else {
                                         return std::unexpected(CodegenError(
@@ -281,8 +281,8 @@ namespace scpp {
                                     *stmt.init;
                                 auto src_result = codegen_lvalue(source_expr);
                                 if (!src_result.has_value()) return std::unexpected(std::move(src_result).error());
-                                LValue src = std::move(src_result).value();
-                                if (const Function* user_ctor = find_user_declared_copy_ctor_ast(stmt.type.name)) {
+                                Codegen::LValue src = std::move(src_result).value();
+                                if (const Function* user_ctor = find_user_declared_copy_ctor_ast(stmt.type.name); user_ctor != nullptr) {
                                     llvm::LLVMValueRef ctor =
                                         llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
                                     build_call(ctor, {storage, src.ptr});
@@ -294,7 +294,7 @@ namespace scpp {
                                 // array or record target has no single
                                 // loadable value (see the same dispatch in
                                 // define_global_initializers).
-                                LValue target{storage, stmt.type, declared_alignment};
+                                Codegen::LValue target{storage, stmt.type, declared_alignment};
                                 if (auto r = initialize_storage_from_brace_args(target, stmt.init->args); !r.has_value())
                                     return std::unexpected(std::move(r).error());
                             } else if (stmt.type.kind == TypeKind::Array) {
@@ -311,7 +311,7 @@ namespace scpp {
                                 // nothing about arrays and produced a
                                 // *pointer*, which check_store_type then
                                 // reported as a scalar-conversion error.
-                                LValue target{storage, stmt.type, declared_alignment};
+                                Codegen::LValue target{storage, stmt.type, declared_alignment};
                                 if (auto r = initialize_storage_from_expr(target, *stmt.init); !r.has_value())
                                     return std::unexpected(std::move(r).error());
                             } else {
@@ -325,7 +325,7 @@ namespace scpp {
                         } else if (stmt.type.kind == TypeKind::Named && structs_.contains(stmt.type.name)) {
                             if (auto r = zero_initialize_storage(storage, stmt.type, declared_alignment); !r.has_value()) return std::unexpected(std::move(r).error());
                             const ClassDef* class_def = find_class_def(stmt.type.name);
-                            std::vector<ExprPtr> no_args;
+                            std::vector<ExprPtr> no_args{};
                             std::string ctor_name = stmt.type.name + "_new";
                             const Function* ctor_def = resolve_overload_by_type(ctor_name, no_args, /*param_offset=*/1);
                             if (ctor_def != nullptr) {
@@ -347,7 +347,7 @@ namespace scpp {
                                     describe_constructor_resolution_failure(stmt.type.name, no_args), current_loc_));
                             }
                         } else {
-                            if (auto r = initialize_storage_from_brace_args(LValue{storage, stmt.type, declared_alignment}, {}); !r.has_value()) return std::unexpected(std::move(r).error());
+                            if (auto r = initialize_storage_from_brace_args(Codegen::LValue{storage, stmt.type, declared_alignment}, {}); !r.has_value()) return std::unexpected(std::move(r).error());
                         }
 
                         if (moved_flag != nullptr) {
@@ -362,7 +362,7 @@ namespace scpp {
 
                         llvm::LLVMPositionBuilderAtEnd(builder_, cont_bb);
                         refresh_debug_location(stmt.loc);
-                        locals_[declared_local_of(stmt)] = LocalSlot{storage, stmt.type};
+                        locals_[declared_local_of(stmt)] = Codegen::LocalSlot{storage, stmt.type};
                         locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
                         locals_[declared_local_of(stmt)].is_static_storage = true;
                         locals_[declared_local_of(stmt)].set_whole_moved_flag(moved_flag);
@@ -389,7 +389,7 @@ namespace scpp {
                             auto interface_value_result = codegen_interface_value_for_target(*stmt.init, stmt.type);
                             if (!interface_value_result.has_value()) return std::unexpected(std::move(interface_value_result).error());
                             create_store(std::move(interface_value_result).value(), slot, alignment_for_type(stmt.type));
-                            locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
+                            locals_[declared_local_of(stmt)] = Codegen::LocalSlot{slot, stmt.type};
                             locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
                             if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                             if (!scope_stack_.empty()) {
@@ -412,7 +412,7 @@ namespace scpp {
                         // address directly, and also enforces it resolves to
                         // a real, addressable place (a plain variable, or a
                         // further member/subscript chain off one).
-                        llvm::LLVMValueRef referent_addr;
+                        llvm::LLVMValueRef referent_addr = nullptr;
                         if (!stmt.type.is_mutable_ref && produces_rvalue_of_type(*stmt.init, *stmt.type.pointee)) {
                             auto addr_result = codegen_materialize_rvalue_reference_source(*stmt.init);
                             if (!addr_result.has_value()) return std::unexpected(std::move(addr_result).error());
@@ -430,7 +430,7 @@ namespace scpp {
                         llvm::LLVMValueRef slot =
                             create_entry_block_alloca(llvm::LLVMPointerTypeInContext(context_, 0), stmt.var_name, declared_alignment);
                         llvm::LLVMBuildStore(builder_, referent_addr, slot);
-                        locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
+                        locals_[declared_local_of(stmt)] = Codegen::LocalSlot{slot, stmt.type};
                         locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
                         // Remember what this reference was bound to, so a
                         // place spelled through it names the referent
@@ -463,7 +463,7 @@ namespace scpp {
                         llvm::LLVMValueRef span_value = std::move(span_value_result).value();
                         llvm::LLVMValueRef slot = create_entry_block_alloca(span_type, stmt.var_name, declared_alignment);
                         llvm::LLVMBuildStore(builder_, span_value, slot);
-                        locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
+                        locals_[declared_local_of(stmt)] = Codegen::LocalSlot{slot, stmt.type};
                         locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
                         if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                         if (!scope_stack_.empty()) {
@@ -494,7 +494,7 @@ namespace scpp {
                         llvm::LLVMValueRef closure_ptr =
                             create_entry_block_alloca(std::move(closure_type_result).value(), stmt.var_name, declared_alignment);
                         if (auto r = codegen_construct_lambda(*stmt.init, closure_ptr); !r.has_value()) return std::unexpected(std::move(r).error());
-                        locals_[declared_local_of(stmt)] = LocalSlot{closure_ptr, stmt.type};
+                        locals_[declared_local_of(stmt)] = Codegen::LocalSlot{closure_ptr, stmt.type};
                         locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
                         if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, closure_ptr, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                         if (!scope_stack_.empty()) {
@@ -521,14 +521,14 @@ namespace scpp {
                         // storage-layout logic beyond what every other
                         // Named-type VarDecl already does above.
                         if (auto r = zero_initialize_storage(slot, stmt.type, declared_alignment); !r.has_value()) return std::unexpected(std::move(r).error());
-                        locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
+                        locals_[declared_local_of(stmt)] = Codegen::LocalSlot{slot, stmt.type};
                         locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
                         locals_[declared_local_of(stmt)].set_whole_moved_flag(create_moved_flag_if_type_has_destructor(stmt.type));
                         if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
                         if (!scope_stack_.empty()) {
                             scope_stack_.back().push_back(declared_local_of(stmt));
                         }
-                        return construct_record_in_place(LValue{slot, stmt.type, declared_alignment}, stmt.type,
+                        return construct_record_in_place(Codegen::LValue{slot, stmt.type, declared_alignment}, stmt.type,
                                                         stmt.ctor_args);
                     }
                     if (stmt.init) {
@@ -555,14 +555,14 @@ namespace scpp {
                             const Expr& source_expr = *stmt.init;
                             auto src_result = codegen_lvalue(source_expr);
                             if (!src_result.has_value()) return std::unexpected(std::move(src_result).error());
-                            LValue src = std::move(src_result).value();
-                            if (const Function* user_ctor = find_user_declared_copy_ctor_ast(stmt.type.name)) {
+                            Codegen::LValue src = std::move(src_result).value();
+                            if (const Function* user_ctor = find_user_declared_copy_ctor_ast(stmt.type.name); user_ctor != nullptr) {
                                 llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
                                 build_call(ctor, {slot, src.ptr});
                             } else {
                                 if (auto r = codegen_memberwise_copy_construct(slot, src.ptr, stmt.type.name); !r.has_value()) return std::unexpected(std::move(r).error());
                             }
-                            locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
+                            locals_[declared_local_of(stmt)] = Codegen::LocalSlot{slot, stmt.type};
                             locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
                             locals_[declared_local_of(stmt)].set_whole_moved_flag(create_moved_flag_if_has_destructor(stmt.type.name));
                             if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
@@ -574,10 +574,10 @@ namespace scpp {
                         if (stmt.init->kind == ExprKind::BracedInitList) {
                             // See the static-storage path above: a braced
                             // list initializes the slot in place.
-                            LValue target{slot, stmt.type, declared_alignment};
+                            Codegen::LValue target{slot, stmt.type, declared_alignment};
                             if (auto r = initialize_storage_from_brace_args(target, stmt.init->args); !r.has_value())
                                 return std::unexpected(std::move(r).error());
-                            locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
+                            locals_[declared_local_of(stmt)] = Codegen::LocalSlot{slot, stmt.type};
                             locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
                             locals_[declared_local_of(stmt)].set_whole_moved_flag(create_moved_flag_if_has_destructor(stmt.type.name));
                             if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value())
@@ -591,7 +591,7 @@ namespace scpp {
                             // place; it has no single loadable value for
                             // codegen_value_for_target to produce. See the
                             // static-storage path's note.
-                            LValue target{slot, stmt.type, declared_alignment};
+                            Codegen::LValue target{slot, stmt.type, declared_alignment};
                             if (auto r = initialize_storage_from_expr(target, *stmt.init); !r.has_value())
                                 return std::unexpected(std::move(r).error());
                         } else {
@@ -622,9 +622,9 @@ namespace scpp {
                         // initialize_storage_from_brace_args answers for a
                         // field, so it answers it here too rather than a
                         // second copy deciding differently.
-                        if (auto r = initialize_storage_from_brace_args(LValue{slot, stmt.type, declared_alignment}, {}); !r.has_value()) return std::unexpected(std::move(r).error());
+                        if (auto r = initialize_storage_from_brace_args(Codegen::LValue{slot, stmt.type, declared_alignment}, {}); !r.has_value()) return std::unexpected(std::move(r).error());
                     }
-                    locals_[declared_local_of(stmt)] = LocalSlot{slot, stmt.type};
+                    locals_[declared_local_of(stmt)] = Codegen::LocalSlot{slot, stmt.type};
                     locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
                     locals_[declared_local_of(stmt)].set_whole_moved_flag(create_moved_flag_if_type_has_destructor(stmt.type));
                     if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
@@ -641,7 +641,7 @@ namespace scpp {
                     // operand's temporaries are destroyed, *then* the
                     // block's locals -- so the frame is popped between
                     // computing `value` and emit_function_exit_cleanup.
-                    FullExpressionFrame frame(this);
+                    Codegen::FullExpressionFrame frame{this};
                     // Evaluate the return value *before* freeing owned locals:
                     // `return std::move(a);` nulls out `a`'s slot as a side
                     // effect of the move, so by the time we free every
@@ -669,7 +669,7 @@ namespace scpp {
                             current_function_def_->return_type.name == "void") {
                             auto value_result = codegen_expr(*stmt.expr);
                             if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
-                            if (llvm::LLVMValueRef evaluated = std::move(value_result).value())
+                            if (llvm::LLVMValueRef evaluated = std::move(value_result).value(); evaluated != nullptr)
                                 returned_type = llvm::LLVMTypeOf(evaluated);
                         } else if (current_function_def_ != nullptr && is_interface_reference_type(current_function_def_->return_type)) {
                             auto value_result = codegen_interface_value_for_target(*stmt.expr, current_function_def_->return_type);
@@ -682,7 +682,7 @@ namespace scpp {
                         } else if (current_function_def_ != nullptr &&
                                               is_named_record_type(current_function_def_->return_type) &&
                                               is_implicit_move_return_source(*stmt.expr, current_function_def_->return_type)) {
-                            Expr implicit_move;
+                            Expr implicit_move{};
                             implicit_move.kind = ExprKind::Move;
                             implicit_move.loc = stmt.expr->loc;
                             implicit_move.lhs = deep_clone_expr(*stmt.expr);
@@ -737,7 +737,7 @@ namespace scpp {
                     if (stmt.expr && stmt.expr->kind == ExprKind::Destroy) {
                         return codegen_destroy_expr(*stmt.expr);
                     }
-                    FullExpressionFrame frame(this);
+                    Codegen::FullExpressionFrame frame{this};
                     auto value_result = codegen_expr(*stmt.expr);
                     if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                     // A discarded class prvalue is a temporary like any
@@ -763,7 +763,7 @@ namespace scpp {
                     // temporaries die before either branch runs.
                     llvm::LLVMValueRef cond = nullptr;
                     {
-                        FullExpressionFrame frame(this);
+                        Codegen::FullExpressionFrame frame{this};
                         auto cond_result = codegen_contextual_bool_i1(*stmt.condition);
                         if (!cond_result.has_value()) return std::unexpected(std::move(cond_result).error());
                         cond = std::move(cond_result).value();
@@ -841,7 +841,7 @@ namespace scpp {
                         // and the same per-evaluation full-expression: a
                         // temporary the condition creates is destroyed on
                         // every iteration, not accumulated.
-                        FullExpressionFrame frame(this);
+                        Codegen::FullExpressionFrame frame{this};
                         auto cond_result = codegen_contextual_bool_i1(*stmt.condition);
                         if (!cond_result.has_value()) return std::unexpected(std::move(cond_result).error());
                         llvm::LLVMValueRef cond = std::move(cond_result).value();
@@ -856,7 +856,7 @@ namespace scpp {
                     // previous iteration's allocation.
                     llvm::LLVMPositionBuilderAtEnd(builder_, body_block);
                     push_scope();
-                    control_flow_stack_.push_back(ControlFlowFrame{cond_block, end_block, scope_stack_.size()});
+                    control_flow_stack_.push_back(Codegen::ControlFlowFrame{cond_block, end_block, scope_stack_.size()});
                     if (auto r = codegen_stmt(*stmt.then_branch, current_function); !r.has_value()) return std::unexpected(std::move(r).error());
                     pop_scope();
                     control_flow_stack_.pop_back();
@@ -875,20 +875,20 @@ namespace scpp {
                 return [&, this]() -> std::expected<void, CodegenError> {
                     llvm::LLVMValueRef condition = nullptr;
                     {
-                        FullExpressionFrame frame(this);
+                        Codegen::FullExpressionFrame frame{this};
                         auto condition_result = codegen_switch_condition(*stmt.condition);
                         if (!condition_result.has_value()) return std::unexpected(std::move(condition_result).error());
                         condition = std::move(condition_result).value();
                         frame.pop();
                     }
                     llvm::LLVMBasicBlockRef end_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "switch.end");
-                    std::vector<llvm::LLVMBasicBlockRef> case_blocks;
+                    std::vector<llvm::LLVMBasicBlockRef> case_blocks{};
                     case_blocks.reserve(stmt.switch_cases.size());
-                    for ([[maybe_unused]] const SwitchCase& switch_case : stmt.switch_cases) {
+                    for (std::size_t i = 0; i < stmt.switch_cases.size(); i++) {
                         case_blocks.push_back(llvm::LLVMAppendBasicBlockInContext(context_, current_function, "switch.case"));
                     }
                     llvm::LLVMBasicBlockRef default_block = end_block;
-                    std::vector<std::pair<llvm::LLVMValueRef, llvm::LLVMBasicBlockRef>> value_cases;
+                    std::vector<std::pair<llvm::LLVMValueRef, llvm::LLVMBasicBlockRef>> value_cases{};
                     for (std::size_t i = 0; i < stmt.switch_cases.size(); i++) {
                         if (stmt.switch_cases[i].value) {
                             auto case_value_result = codegen_expr(*stmt.switch_cases[i].value);
@@ -922,7 +922,7 @@ namespace scpp {
                     for (std::size_t i = 0; i < stmt.switch_cases.size(); i++) {
                         llvm::LLVMPositionBuilderAtEnd(builder_, case_blocks[i]);
                         push_scope();
-                        control_flow_stack_.push_back(ControlFlowFrame{std::nullopt, end_block, scope_stack_.size()});
+                        control_flow_stack_.push_back(Codegen::ControlFlowFrame{std::nullopt, end_block, scope_stack_.size()});
                         for (const StmtPtr& child : stmt.switch_cases[i].statements) {
                             if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) != nullptr) break;
                             if (auto r = codegen_stmt(*child, current_function); !r.has_value()) return std::unexpected(std::move(r).error());
@@ -1050,7 +1050,7 @@ namespace scpp {
         if (ptr == nullptr) return;
         if (!type_has_destructor(type)) return;
         if (full_expression_temporaries_.empty()) return;
-        PendingTemporary pending;
+        Codegen::PendingTemporary pending{};
         pending.type = type;
         pending.ptr = ptr;
         // Created in a block the full-expression did not start in, so
@@ -1071,7 +1071,7 @@ namespace scpp {
         if (ptr == nullptr) return;
         if (!type_has_destructor(type)) return;
         if (scope_temporaries_.empty()) return;
-        PendingTemporary pending;
+        Codegen::PendingTemporary pending{};
         pending.type = type;
         pending.ptr = ptr;
         pending.locals_before = scope_stack_.back().size();
@@ -1081,7 +1081,7 @@ namespace scpp {
 
     void Codegen::pop_full_expression()
 {
-        std::vector<PendingTemporary> pending = std::move(full_expression_temporaries_.back());
+        std::vector<Codegen::PendingTemporary> pending = std::move(full_expression_temporaries_.back());
         full_expression_temporaries_.pop_back();
         full_expression_start_blocks_.pop_back();
         // A `return` already ran emit_function_exit_cleanup and terminated
@@ -1116,7 +1116,7 @@ namespace scpp {
         if (!produces_rvalue_of_type(expr, *type)) return {};
         auto llvm_type_result = to_llvm_type(*type);
         if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
-        std::optional<unsigned> align = alignment_for_type(*type);
+        std::optional<unsigned int> align = alignment_for_type(*type);
         llvm::LLVMValueRef temp = create_entry_block_alloca(std::move(llvm_type_result).value(), "discardedtmp", align);
         create_store(value, temp, align);
         register_full_expression_temporary(*type, temp);
@@ -1124,7 +1124,7 @@ namespace scpp {
     }
 
 
-    void Codegen::emit_pending_temporary_teardown(const PendingTemporary& pending)
+    void Codegen::emit_pending_temporary_teardown(const Codegen::PendingTemporary& pending)
 {
         if (pending.live_flag == nullptr) {
             emit_storage_destruction(pending.type, pending.ptr, /*place=*/nullptr);
@@ -1148,7 +1148,7 @@ namespace scpp {
     }
 
 
-    void Codegen::emit_scope_temporaries_teardown(const std::vector<PendingTemporary>& pending, std::size_t locals_before)
+    void Codegen::emit_scope_temporaries_teardown(const std::vector<Codegen::PendingTemporary>& pending, std::size_t locals_before)
 {
         for (auto it = pending.rbegin(); it != pending.rend(); ++it) {
             if (it->locals_before != locals_before) continue;
@@ -1158,7 +1158,7 @@ namespace scpp {
 
 
     void Codegen::emit_one_scope_cleanup(const std::vector<LocalId>& declared,
-                                         const std::vector<PendingTemporary>& temporaries)
+                                         const std::vector<Codegen::PendingTemporary>& temporaries)
 {
         // Reverse of construction order across both kinds at once: a
         // lifetime-extended temporary was created just before the
@@ -1182,7 +1182,7 @@ namespace scpp {
 {
         std::vector<LocalId> declared = std::move(scope_stack_.back());
         scope_stack_.pop_back();
-        std::vector<PendingTemporary> temporaries = std::move(scope_temporaries_.back());
+        std::vector<Codegen::PendingTemporary> temporaries = std::move(scope_temporaries_.back());
         scope_temporaries_.pop_back();
 
         bool already_terminated = llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) != nullptr;
@@ -1208,7 +1208,7 @@ namespace scpp {
 
 
     [[nodiscard]] std::expected<void, CodegenError> Codegen::construct_record_in_place(
-        const LValue& target, const Type& type, const std::vector<ExprPtr>& ctor_args)
+        const Codegen::LValue& target, const Type& type, const std::vector<ExprPtr>& ctor_args)
 {
     if (type.kind != TypeKind::Named || !structs_.contains(type.name)) {
         if (auto r = initialize_storage_from_brace_args(target, ctor_args); !r.has_value()) return std::unexpected(std::move(r).error());
