@@ -8,6 +8,8 @@ import :api;
 
 namespace scpp {
 
+inline bool ignore_result(std::expected<void, CodegenError> result) { return result.has_value(); }
+
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::codegen_materialize_rvalue_reference_source(const Expr& expr)
 {
         if (expr.kind == ExprKind::Lambda) return codegen_expr(expr);
@@ -48,7 +50,7 @@ namespace scpp {
             auto llvm_type_result = to_llvm_type(target_type);
             if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
             llvm::LLVMValueRef temp = create_entry_block_alloca(std::move(llvm_type_result).value(), "listreftmp");
-            LValue target{temp, target_type, alignment_for_type(target_type)};
+            Codegen::LValue target{temp, target_type, alignment_for_type(target_type)};
             if (auto r = initialize_storage_from_brace_args(target, expr.args); !r.has_value()) {
                 return std::unexpected(std::move(r).error());
             }
@@ -76,7 +78,7 @@ namespace scpp {
 
     [[nodiscard]] std::expected<void, CodegenError> Codegen::codegen_copy_construct_class(llvm::LLVMValueRef dest_ptr, llvm::LLVMValueRef src_ptr, const std::string& class_name)
 {
-        if (const Function* user_ctor = find_user_declared_copy_ctor_ast(class_name)) {
+        if (const Function* user_ctor = find_user_declared_copy_ctor_ast(class_name); user_ctor != nullptr) {
             llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
             build_call(ctor, {dest_ptr, src_ptr});
             return {};
@@ -121,8 +123,8 @@ namespace scpp {
         if (!table_type_result.has_value()) return std::unexpected(std::move(table_type_result).error());
         llvm::LLVMTypeRef table_type = std::move(table_type_result).value();
         llvm::LLVMTypeRef i32_ty = llvm::LLVMInt32TypeInContext(context_);
-        llvm::LLVMValueRef slot_indices[] = {llvm::LLVMConstInt(i32_ty, 0, /*SignExtend=*/0),
-                                       llvm::LLVMConstInt(i32_ty, static_cast<unsigned>(*slot_index), /*SignExtend=*/0)};
+        llvm::LLVMValueRef slot_indices[2] = {llvm::LLVMConstInt(i32_ty, 0, /*SignExtend=*/0),
+                                       llvm::LLVMConstInt(i32_ty, static_cast<unsigned int>(*slot_index), /*SignExtend=*/0)};
         llvm::LLVMValueRef slot_ptr = llvm::LLVMBuildGEP2(builder_, table_type, dispatch_ptr, slot_indices, 2, "iface.dtor.slot");
         llvm::LLVMValueRef target_ptr = llvm::LLVMBuildLoad2(builder_, llvm::LLVMPointerTypeInContext(context_, 0), slot_ptr, "iface.dtor.target");
         build_call(thunk_type, target_ptr, {object_ptr});
@@ -248,7 +250,7 @@ namespace scpp {
     [[nodiscard]] std::expected<void, CodegenError> Codegen::codegen_memberwise_copy_construct(llvm::LLVMValueRef dest_ptr, llvm::LLVMValueRef src_ptr,
                                             const std::string& class_name)
 {
-        const StructInfo& info = structs_.at(class_name);
+        const auto& info = structs_.at(class_name);
         if (info.has_ordinary_vtable) {
             if (auto vtable_result = initialize_ordinary_vtable_pointer(class_name, dest_ptr); !vtable_result.has_value()) {
                 return std::unexpected(std::move(vtable_result).error());
@@ -289,7 +291,7 @@ namespace scpp {
                 });
         }
         if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
-            if (const Function* user_ctor = find_user_declared_copy_ctor_ast(field_type.name)) {
+            if (const Function* user_ctor = find_user_declared_copy_ctor_ast(field_type.name); user_ctor != nullptr) {
                 llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
                 build_call(ctor, {dest_ptr, src_ptr});
                 return {};
@@ -321,7 +323,7 @@ namespace scpp {
                 });
         }
         if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
-            if (const Function* user_assign = find_user_declared_copy_assign_ast(field_type.name)) {
+            if (const Function* user_assign = find_user_declared_copy_assign_ast(field_type.name); user_assign != nullptr) {
                 llvm::LLVMValueRef op = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_assign).c_str());
                 build_call(op, {dest_ptr, src_ptr});
                 return {};
@@ -340,14 +342,14 @@ namespace scpp {
     llvm::LLVMValueRef Codegen::build_array_element_gep(llvm::LLVMTypeRef array_llvm_type, llvm::LLVMValueRef array_ptr,
                                                llvm::LLVMValueRef index)
 {
-        llvm::LLVMValueRef indices[] = {llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), 0, /*SignExtend=*/0), index};
+        llvm::LLVMValueRef indices[2] = {llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), 0, /*SignExtend=*/0), index};
         return llvm::LLVMBuildGEP2(builder_, array_llvm_type, array_ptr, indices, 2, "arrayelem");
     }
 
 
     [[nodiscard]] std::expected<void, CodegenError> Codegen::codegen_memberwise_copy_assign(llvm::LLVMValueRef dest_ptr, llvm::LLVMValueRef src_ptr, const std::string& class_name)
 {
-        const StructInfo& info = structs_.at(class_name);
+        const auto& info = structs_.at(class_name);
         for (std::size_t i = 0; i < info.field_names.size(); i++) {
             const Type& field_type = info.field_types[i];
             llvm::LLVMValueRef dest_field = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, dest_ptr, info.physical_field_index(i),
@@ -376,18 +378,18 @@ namespace scpp {
 
     void Codegen::emit_destructor_chain_calls(const std::string& class_name, llvm::LLVMValueRef object_ptr)
 {
-        if (llvm::LLVMValueRef dtor = find_destructor(class_name)) {
+        if (llvm::LLVMValueRef dtor = find_destructor(class_name); dtor != nullptr) {
             build_call(dtor, {object_ptr});
         }
         const ClassDef* def = find_class_def(class_name);
         if (def != nullptr) {
-            if (auto base = def->direct_ordinary_base()) {
+            if (auto base = def->direct_ordinary_base(); base.has_value()) {
                 emit_destructor_chain_calls(base->get().base_type.name, object_ptr);
             }
             std::vector<const ClassDef*> interface_bases = collect_virtual_interface_bases_in_construction_order(*def);
             for (auto it = interface_bases.rbegin(); it != interface_bases.rend(); ++it) {
                 if (*it == nullptr) continue;
-                if (llvm::LLVMValueRef dtor = find_destructor((*it)->name)) {
+                if (llvm::LLVMValueRef dtor = find_destructor((*it)->name); dtor != nullptr) {
                     build_call(dtor, {object_ptr});
                 }
             }
@@ -437,14 +439,14 @@ namespace scpp {
         }
         auto struct_it = structs_.find(class_name);
         if (struct_it == structs_.end()) return;
-        const StructInfo& info = struct_it->second;
-        (void)get_or_declare_free();
+        const auto& info = struct_it->second;
+        get_or_declare_free();
         // A record with no destructor of its own is torn down by walking
         // its fields here, so "this whole object was moved out" has to be
         // honoured here too -- the destructor-chain branch above is the
         // only place that used to consume `moved_flag`, which left a
         // moved-out struct's owning members released anyway.
-        emit_unless_moved(moved_flag, [&, this] {
+        emit_unless_moved(moved_flag, [&, this]() {
             // [class.dtor]/12: members are destroyed in the reverse order
             // of their declaration. emit_class_member_teardown -- the same
             // walk for a record that *does* declare a destructor -- has
@@ -499,7 +501,7 @@ namespace scpp {
         // makes B non-trivial to default-initialize even though nothing
         // is written on `a`. A struct cannot contain itself, so this
         // terminates.
-        if (const StructDef* struct_def = find_struct_def(type.name)) {
+        if (const StructDef* struct_def = find_struct_def(type.name); struct_def != nullptr) {
             for (const StructField& field : struct_def->fields) {
                 if (field.default_initializer.has_value()) return true;
                 if (type_needs_nontrivial_default_init(field.type)) return true;
@@ -525,7 +527,7 @@ namespace scpp {
         // consulting the flag in more than one of them produced two
         // nested branches on the same i1.
         emit_unless_moved(place != nullptr ? moved_flag_for_place(*place) : nullptr,
-                          [&, this] { emit_storage_destruction_unguarded(type, ptr, place); });
+                          [&, this]() { emit_storage_destruction_unguarded(type, ptr, place); });
     }
 
 
@@ -542,16 +544,16 @@ namespace scpp {
             // giving each element its own place. Every other array keeps
             // the loop, unchanged.
             if (place != nullptr && place_has_moved_descendants(*place)) {
-                (void)emit_unrolled_array_teardown(type, ptr, *place, /*old_state=*/false);
+                ignore_result(emit_unrolled_array_teardown(type, ptr, *place, /*old_state=*/false));
                 return;
             }
             // Reverse of construction order, exactly as for a derived
             // object's base subobjects.
-            (void)emit_array_element_loop(type, ptr, /*reverse=*/true, /*begin_index=*/0,
-                                          [&, this](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef) -> std::expected<void, CodegenError> {
+            ignore_result(emit_array_element_loop(type, ptr, /*reverse=*/true, /*begin_index=*/0,
+                                          [&, this](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef index [[maybe_unused]]) -> std::expected<void, CodegenError> {
                                               emit_storage_destruction(*type.element, element_ptr);
                                               return {};
-                                          });
+                                          }));
             return;
         }
         if (type.kind != TypeKind::Named) return;
@@ -576,7 +578,7 @@ namespace scpp {
             emit_storage_destruction(type, ptr, place);
             return;
         }
-        emit_unless_moved(moved_flag, [&, this] { emit_storage_destruction_unguarded(type, ptr, place); });
+        emit_unless_moved(moved_flag, [&, this]() { emit_storage_destruction_unguarded(type, ptr, place); });
     }
 
 
@@ -587,16 +589,16 @@ namespace scpp {
         if (type.kind == TypeKind::Array) {
             if (!type_has_destructor(type)) return;
             if (place != nullptr && place_has_moved_descendants(*place)) {
-                emit_unless_moved(moved_flag, [&, this] {
-                    (void)emit_unrolled_array_teardown(type, ptr, *place, /*old_state=*/true);
+                emit_unless_moved(moved_flag, [&, this]() {
+                    ignore_result(emit_unrolled_array_teardown(type, ptr, *place, /*old_state=*/true));
                 });
                 return;
             }
-            (void)emit_array_element_loop(type, ptr, /*reverse=*/true, /*begin_index=*/0,
-                                          [&, this](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef) -> std::expected<void, CodegenError> {
+            ignore_result(emit_array_element_loop(type, ptr, /*reverse=*/true, /*begin_index=*/0,
+                                          [&, this](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef index [[maybe_unused]]) -> std::expected<void, CodegenError> {
                                               codegen_destroy_old_state_for_move_assign(*type.element, element_ptr);
                                               return {};
-                                          });
+                                          }));
             return;
         }
         if (type.kind != TypeKind::Named) return;
@@ -694,7 +696,7 @@ namespace scpp {
 {
         auto it = locals_.find(place.local);
         if (it == locals_.end()) return false;
-        for (const MovedFlag& entry : it->second.moved_flags) {
+        for (const auto& entry : it->second.moved_flags) {
             Place candidate{place.local, entry.path};
             if (candidate.is_strictly_under(place)) return true;
         }
@@ -709,7 +711,7 @@ namespace scpp {
         if (!type_has_destructor(place_type) && !type_needs_subobject_teardown(place_type)) return;
         auto it = locals_.find(place.local);
         if (it == locals_.end()) return;
-        LocalSlot& slot = it->second;
+        auto& slot = it->second;
         llvm::LLVMValueRef flag = slot.moved_flag_for(place.path);
         if (flag == nullptr) {
             flag = create_zeroed_flag_in_entry_block("movedflag");
@@ -741,7 +743,7 @@ namespace scpp {
         auto it = locals_.find(place.local);
         if (it == locals_.end()) return;
         llvm::LLVMValueRef zero = llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, /*SignExtend=*/0);
-        for (const MovedFlag& entry : it->second.moved_flags) {
+        for (const auto& entry : it->second.moved_flags) {
             Place candidate{place.local, entry.path};
             if (!candidate.is_strictly_under(place)) continue;
             if (entry.flag != nullptr) llvm::LLVMBuildStore(builder_, zero, entry.flag);
@@ -797,7 +799,7 @@ namespace scpp {
         if (info_it == structs_.end()) {
             return std::unexpected(CodegenError("destructor of unknown class '" + class_name + "'", current_loc_));
         }
-        const StructInfo& info = info_it->second;
+        const auto& info = info_it->second;
         // A derived class's StructInfo carries its base's fields flattened
         // in front of its own (declare_class copies base_info.field_names/
         // field_types, then appends `def.fields`), so the class's own
