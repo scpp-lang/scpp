@@ -7,14 +7,12 @@ import :api;
 
 namespace scpp {
 
-namespace {
-
-[[nodiscard]] bool same_named_record_type_ignoring_top_level_const(const Type& source_type, const Type& target_type) {
+[[nodiscard]] inline bool same_named_record_type_ignoring_top_level_const(const Type& source_type, const Type& target_type) {
     if (source_type.kind != TypeKind::Named || target_type.kind != TypeKind::Named) return false;
     return source_type.name == target_type.name;
 }
 
-[[nodiscard]] bool pointer_to_void_parameter_accepts_pointer_in_unsafe_context(const Type& source_type,
+[[nodiscard]] inline bool pointer_to_void_parameter_accepts_pointer_in_unsafe_context(const Type& source_type,
                                                                                const Type& target_type,
                                                                                int unsafe_depth)
 {
@@ -30,11 +28,11 @@ namespace {
 // Both derive from `scpp.ast`'s scalar type model -- see
 // `scalar_type_info` for why that is the only place the twenty names of
 // ch06 §6 are listed.
-[[nodiscard]] bool is_float_scalar_name(std::string_view name) { return scpp::is_float_scalar_type_name(name); }
+[[nodiscard]] inline bool is_float_scalar_name(std::string_view name) { return scpp::is_float_scalar_type_name(name); }
 
-[[nodiscard]] bool is_integral_scalar_name(std::string_view name) { return scpp::is_integral_scalar_type_name(name); }
+[[nodiscard]] inline bool is_integral_scalar_name(std::string_view name) { return scpp::is_integral_scalar_type_name(name); }
 
-[[nodiscard]] bool function_accepts_argument_count(const Function& fn, std::size_t arg_count, std::size_t param_offset) {
+[[nodiscard]] inline bool function_accepts_argument_count(const Function& fn, std::size_t arg_count, std::size_t param_offset) {
     if (fn.params.size() < param_offset) return false;
     std::size_t fixed_param_count = fn.params.size() - param_offset;
     std::size_t min_required = fixed_param_count;
@@ -46,7 +44,7 @@ namespace {
     return fn.has_varargs || arg_count <= fixed_param_count;
 }
 
-[[nodiscard]] bool literal_matches_scalar_parameter(const Expr& arg, const Type& target_type) {
+[[nodiscard]] inline bool literal_matches_scalar_parameter(const Expr& arg, const Type& target_type) {
     auto is_negative_literal = [&](ExprKind kind) {
         return arg.kind == ExprKind::Unary && arg.unary_op == UnaryOp::Neg && arg.lhs != nullptr && arg.lhs->kind == kind;
     };
@@ -61,11 +59,9 @@ namespace {
            is_float_scalar_name(target_type.name);
 }
 
-[[nodiscard]] bool is_nullptr_literal(const Expr& expr) {
+[[nodiscard]] inline bool is_nullptr_literal(const Expr& expr) {
     return expr.kind == ExprKind::NullptrLiteral;
 }
-
-} // namespace
 
     const StructDef* Codegen::find_struct_def(const std::string& name) const {
         const StructDef* forward_decl = nullptr;
@@ -149,15 +145,16 @@ namespace {
             case ExprKind::StringLiteral: return string_literal_type(expr.name.size());
 
             case ExprKind::Identifier: {
-                if (const LocalSlot* local = find_local(expr)) return local->type;
-                if (const GlobalSlot* global = find_visible_global_slot(expr.name, expr.explicit_global_qualification)) {
+                if (const Codegen::LocalSlot* local = find_local(expr); local != nullptr) return local->type;
+                if (const Codegen::GlobalSlot* global = find_visible_global_slot(expr.name, expr.explicit_global_qualification);
+                    global != nullptr) {
                     return global->type;
                 }
                 if (const EnumDef* def = [&, this]() {
                         const EnumDef* enum_def = nullptr;
                         [[maybe_unused]] const EnumVariant* variant = find_enum_variant(program_, expr.name, &enum_def);
                         return enum_def;
-                    }()) {
+                    }(); def != nullptr) {
                     return named_type(def->name);
                 }
                 return resolve_function_designator_type(expr);
@@ -173,7 +170,7 @@ namespace {
                 return infer_lvalue_type(*expr.lhs);
 
             case ExprKind::New: {
-                Type result;
+                Type result{};
                 result.kind = TypeKind::Pointer;
                 result.pointee = std::make_shared<Type>(expr.type);
                 result.is_mutable_pointee = true;
@@ -209,7 +206,7 @@ namespace {
                 if (base_named.kind != TypeKind::Named) return std::nullopt;
                 auto struct_it = structs_.find(base_named.name);
                 if (struct_it == structs_.end()) return std::nullopt;
-                const StructInfo& info = struct_it->second;
+                const auto& info = struct_it->second;
                 std::optional<std::size_t> field_index = info.find_field_index(expr.name);
                 if (!field_index.has_value()) {
                     return resolve_function_designator_type(expr);
@@ -238,7 +235,7 @@ namespace {
                     if (effective.template_args.size() == 1) return effective.template_args[0];
                     auto struct_it = structs_.find(effective.name);
                     if (struct_it != structs_.end()) {
-                        const StructInfo& info = struct_it->second;
+                        const auto& info = struct_it->second;
                         if (std::optional<std::size_t> data_index_opt = info.find_field_index("data_"); data_index_opt.has_value()) {
                             const Type& field_type = info.field_types[*data_index_opt];
                             if (field_type.kind == TypeKind::Pointer && field_type.pointee) return *field_type.pointee;
@@ -264,7 +261,7 @@ namespace {
                     case UnaryOp::PostDec:
                         return infer_type(*expr.lhs);
                     case UnaryOp::AddressOf: {
-                        if (std::optional<Type> fn_ptr = resolve_function_designator_type(expr)) return fn_ptr;
+                        if (std::optional<Type> fn_ptr = resolve_function_designator_type(expr); fn_ptr.has_value()) return fn_ptr;
                         std::optional<Type> operand = infer_type(*expr.lhs);
                         if (!operand) return std::nullopt;
                         // [expr.unary.op]/3: "pointer to T" for T the
@@ -304,7 +301,7 @@ namespace {
                         const Type& underlying =
                             operand->kind == TypeKind::Reference && operand->pointee ? *operand->pointee : *operand;
                         if (underlying.kind == TypeKind::Named) {
-                            std::vector<ExprPtr> no_args;
+                            std::vector<ExprPtr> no_args{};
                             // Asked of the one predicate, like the two
                             // other receiver-mutability sites: a
                             // hand-rolled "is it a shared reference?" here
@@ -314,10 +311,11 @@ namespace {
                             bool receiver_is_mutable = !is_read_only_place(*expr.lhs);
                             if (const Function* callee =
                                     resolve_overload_by_type(underlying.name + "_operator_deref", no_args, 1,
-                                                         receiver_is_mutable, expr.lhs.get())) {
+                                                         receiver_is_mutable, expr.lhs.get());
+                                callee != nullptr) {
                                 return callee->return_type.kind == TypeKind::Reference
-                                           ? std::optional<Type>(*callee->return_type.pointee)
-                                           : std::optional<Type>(callee->return_type);
+                                           ? std::optional<Type>{*callee->return_type.pointee}
+                                           : std::optional<Type>{callee->return_type};
                             }
                         }
                         if (operand->kind != TypeKind::Pointer) {
@@ -349,8 +347,8 @@ namespace {
                 // The two operand types are inferred exactly once here
                 // and shared with the built-in arms below, for the 2^n
                 // reason the arithmetic arm documents.
-                std::optional<Type> binary_lhs_type;
-                std::optional<Type> binary_rhs_type;
+                std::optional<Type> binary_lhs_type{};
+                std::optional<Type> binary_rhs_type{};
                 if (expr.lhs != nullptr) binary_lhs_type = infer_type(*expr.lhs);
                 if (expr.rhs != nullptr) binary_rhs_type = infer_type(*expr.rhs);
                 if (expr.lhs != nullptr && expr.rhs != nullptr) {
@@ -401,7 +399,8 @@ namespace {
                         }
                         if (binary_lhs_type.has_value() && binary_rhs_type.has_value()) {
                             if (std::optional<Type> result = pointer_arithmetic_result_type(
-                                    expr.binary_op, *binary_lhs_type, *binary_rhs_type)) {
+                                    expr.binary_op, *binary_lhs_type, *binary_rhs_type);
+                                result.has_value()) {
                                 return result;
                             }
                         }
@@ -460,7 +459,7 @@ namespace {
                     return std::nullopt;
                 }
                 if (expr.lhs == nullptr) {
-                    if (const LocalSlot* callee_local = find_local(expr);
+                    if (const Codegen::LocalSlot* callee_local = find_local(expr);
                         callee_local != nullptr && callee_local->type.kind == TypeKind::FunctionPointer) {
                         return *callee_local->type.function_return;
                     }
@@ -470,7 +469,7 @@ namespace {
                     if (inferred.has_value()) return inferred;
                     if (arg.kind == ExprKind::Identifier && param_type.kind == TypeKind::Reference &&
                         !param_type.is_mutable_ref && !param_type.is_rvalue_ref && param_type.pointee != nullptr) {
-                        const LocalSlot* arg_local = find_local(arg);
+                        const Codegen::LocalSlot* arg_local = find_local(arg);
                         if (arg_local != nullptr && arg_local->type.kind == TypeKind::Reference &&
                             arg_local->type.is_rvalue_ref && arg_local->type.pointee != nullptr &&
                             types_equal(*arg_local->type.pointee, *param_type.pointee)) {
@@ -698,7 +697,7 @@ namespace {
     [[nodiscard]] bool Codegen::is_implicit_move_return_source(const Expr& expr, const Type& target_type)
 {
         if (expr.kind != ExprKind::Identifier) return false;
-        const LocalSlot* local = find_local(expr);
+        const Codegen::LocalSlot* local = find_local(expr);
         return local != nullptr && types_equal(local->type, target_type);
     }
 
@@ -710,7 +709,7 @@ namespace {
                    (!fn.member_owner_class.empty() && fn.member_owner_class == class_name &&
                     fn.name.starts_with(class_name + "_new."));
         };
-        std::vector<const Function*> matches;
+        std::vector<const Function*> matches{};
         for (const Function& fn : program_->functions) {
             if (!is_constructor_clone(fn)) continue;
             if (fn.member_owner_class != class_name || fn.params.size() != 2) continue;
@@ -732,9 +731,9 @@ namespace {
         // `program_->functions` happened to list first, and with
         // [over.match.best] unable to run, a genuine ambiguity between them
         // could not be reported at all.
-        std::vector<ExprPtr> single_arg;
+        std::vector<ExprPtr> single_arg{};
         single_arg.push_back(deep_clone_expr(arg));
-        std::vector<std::vector<ArgumentConversion>> conversions;
+        std::vector<std::vector<ArgumentConversion>> conversions{};
         for (const Function* fn : matches) {
             conversions.push_back(argument_conversions_for(*fn, single_arg, /*param_offset=*/1, /*receiver_expr=*/nullptr));
         }
@@ -890,7 +889,7 @@ namespace {
             std::optional<Type> inferred = infer_type(arg);
             if (inferred.has_value()) return inferred;
             if (arg.kind == ExprKind::Identifier) {
-                const LocalSlot* local = find_local(arg);
+                const Codegen::LocalSlot* local = find_local(arg);
                 if (local != nullptr && local->type.kind == TypeKind::Reference && local->type.is_rvalue_ref &&
                     local->type.pointee != nullptr) {
                     return *local->type.pointee;
@@ -939,21 +938,21 @@ namespace {
     // selected for a constant and a `x = 99` written through it.
     bool Codegen::is_read_only_place(const Expr& expr)
 {
-        ReadOnlyPlaceQuery query;
-        query.declared_variable = [&](const Expr& name_expr) -> std::optional<std::pair<bool, Type>> {
-            if (const LocalSlot* local = find_local(name_expr); local != nullptr) {
-                return std::pair<bool, Type>(local->is_const, local->type);
+        ReadOnlyPlaceQuery query{};
+        query.declared_variable = [&, this](const Expr& name_expr) -> std::optional<std::pair<bool, Type>> {
+            if (const Codegen::LocalSlot* local = find_local(name_expr); local != nullptr) {
+                return std::pair<bool, Type>{local->is_const, local->type};
             }
-            if (const GlobalSlot* global = find_visible_global_slot(name_expr.name, name_expr.explicit_global_qualification);
+            if (const Codegen::GlobalSlot* global = find_visible_global_slot(name_expr.name, name_expr.explicit_global_qualification);
                 global != nullptr) {
-                return std::pair<bool, Type>(global->is_const, global->type);
+                return std::pair<bool, Type>{global->is_const, global->type};
             }
             return std::nullopt;
         };
-        query.inferred_type = [&](const Expr& sub) { return infer_type(sub); };
-        query.call_return_type = [&](const Expr& call) { return infer_type(call); };
-        query.class_def = [&](const std::string& name) { return find_class_def(name); };
-        query.struct_def = [&](const std::string& name) { return find_struct_def(name); };
+        query.inferred_type = [&, this](const Expr& sub) { return infer_type(sub); };
+        query.call_return_type = [&, this](const Expr& call) { return infer_type(call); };
+        query.class_def = [&, this](const std::string& name) { return find_class_def(name); };
+        query.struct_def = [&, this](const std::string& name) { return find_struct_def(name); };
         return place_is_read_only(expr, query);
     }
 
@@ -1093,7 +1092,7 @@ namespace {
             return fn.member_owner_class == owner && fn.name == std::string(member) &&
                    owner.find('.') != std::string::npos;
         };
-        std::vector<const Function*> candidates;
+        std::vector<const Function*> candidates{};
         for (const Function& fn : program_->functions) {
             bool name_eq = fn.name == callee_name;
             bool concrete_helper = is_concrete_receiver_helper(fn);
@@ -1247,11 +1246,11 @@ namespace {
             return "call to unknown function '" + display_name + "': no function with that name is declared here";
         }
 
-        auto describe_signature = [&](const Function& fn) {
+        auto describe_signature = [&, this](const Function& fn) {
             return describe_candidate_signature(fn, display_name, param_offset);
         };
         auto candidate_list = [&]() {
-            std::string result;
+            std::string result{};
             for (const Function* fn : candidates) {
                 result += "\n  candidate: " + describe_signature(*fn);
             }
@@ -1266,7 +1265,7 @@ namespace {
         // is the defect shape #436 established for the ch06 cast
         // diagnostic.
         {
-            std::vector<const Function*> tied;
+            std::vector<const Function*> tied{};
             if (resolve_overload_by_type(callee_name, args, param_offset, receiver_is_mutable, receiver_expr, &tied) ==
                     nullptr &&
                 tied.size() > 1) {
@@ -1401,7 +1400,7 @@ namespace {
                        : nullptr;
         }
 
-        std::vector<const Function*> matches;
+        std::vector<const Function*> matches{};
         for (const Function* fn : candidates) {
             if (classify_call_candidate(*fn, args, param_offset, receiver_is_mutable, receiver_expr).reason ==
                 CallRejectionReason::None) {
@@ -1419,7 +1418,7 @@ namespace {
         // uninstantiated `f.T` and failed with "no generated code for
         // resolved function".)
         auto narrow_to = [&](auto&& accepts) {
-            std::vector<const Function*> selected;
+            std::vector<const Function*> selected{};
             for (const Function* fn : matches) {
                 if (accepts(fn)) selected.push_back(fn);
             }
@@ -1482,11 +1481,11 @@ namespace {
         //    arms and scored zero; those cells were the only ones that
         //    happened to reach the ambiguity report, i.e. the only
         //    correct ones.
-        std::vector<std::vector<ArgumentConversion>> conversions;
+        std::vector<std::vector<ArgumentConversion>> conversions{};
         for (const Function* fn : matches) conversions.push_back(argument_conversions_for(*fn, args, param_offset, receiver_expr));
         std::vector<std::size_t> best = best_viable_candidates(conversions);
         if (best.size() == 1) return matches[best[0]];
-        std::vector<const Function*> tied;
+        std::vector<const Function*> tied{};
         for (std::size_t index : best) tied.push_back(matches[index]);
         return ambiguous(std::move(tied));
     }
@@ -1513,7 +1512,7 @@ namespace {
             conversion.reference_is_mutable = type.is_mutable_ref && !type.is_rvalue_ref;
             conversion.reference_is_rvalue = type.is_rvalue_ref;
         };
-        std::vector<ArgumentConversion> result;
+        std::vector<ArgumentConversion> result{};
         if (param_offset == 1 && receiver_expr != nullptr && !fn.params.empty()) {
             ArgumentConversion receiver_conversion{};
             receiver_conversion.rank = ConversionRank::Identity;
@@ -1594,7 +1593,7 @@ namespace {
         // resolve_constructor_overload_exact -- and different call sites
         // use different ones. Ask both, so a tie is named whichever
         // resolver saw it.
-        std::vector<const Function*> tied;
+        std::vector<const Function*> tied{};
         resolve_overload_by_type(class_name + "_new", args, /*param_offset=*/1, /*receiver_is_mutable=*/false,
                                  /*receiver_expr=*/nullptr, &tied);
         if (tied.size() <= 1) resolve_constructor_overload_exact(class_name, args, &tied);
@@ -1638,7 +1637,7 @@ namespace {
                    (!fn.member_owner_class.empty() && fn.member_owner_class == class_name &&
                     fn.name.starts_with(class_name + "_new."));
         };
-        std::vector<const Function*> matches;
+        std::vector<const Function*> matches{};
         for (const Function& fn : program_->functions) {
             if (!is_constructor_clone(fn)) continue;
             if (!function_accepts_argument_count(fn, args.size(), 1)) continue;
@@ -1664,13 +1663,13 @@ namespace {
         // which of two equally good candidates wins -- and, with no
         // reference-axis rule at all here, how `S{x}` could quietly pick
         // a different constructor than `f(x)` picks an overload.
-        std::vector<std::vector<ArgumentConversion>> conversions;
+        std::vector<std::vector<ArgumentConversion>> conversions{};
         for (const Function* fn : matches) {
             conversions.push_back(argument_conversions_for(*fn, args, /*param_offset=*/1, /*receiver_expr=*/nullptr));
         }
         std::vector<std::size_t> best = best_viable_candidates(conversions);
         if (best.size() == 1) return matches[best[0]];
-        std::vector<const Function*> best_matches;
+        std::vector<const Function*> best_matches{};
         for (std::size_t index : best) best_matches.push_back(matches[index]);
         if (out_ambiguous != nullptr) *out_ambiguous = std::move(best_matches);
         return nullptr;
