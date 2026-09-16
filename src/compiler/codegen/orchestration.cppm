@@ -21,15 +21,21 @@ import std;
 import llvm;
 import :api;
 
+extern "C" {
+int open(const char* pathname, int flags, unsigned int mode);
+long write(int fd, const void* buf, unsigned long count);
+int close(int fd);
+}
+
 namespace scpp {
 
 
     Codegen::Codegen(const std::string& module_name, std::string source_path , bool emit_debug_info)
-        : context_(llvm::LLVMContextCreate()),
-          module_(llvm::LLVMModuleCreateWithNameInContext(module_name.c_str(), context_)),
-          builder_(llvm::LLVMCreateBuilderInContext(context_)),
-          source_path_(std::move(source_path)),
-          emit_debug_info_(emit_debug_info)
+        : context_{llvm::LLVMContextCreate()},
+          module_{llvm::LLVMModuleCreateWithNameInContext(module_name.c_str(), context_)},
+          builder_{llvm::LLVMCreateBuilderInContext(context_)},
+          source_path_{std::move(source_path)},
+          emit_debug_info_{emit_debug_info}
 {}
 
 
@@ -101,8 +107,8 @@ namespace scpp {
         // substituted artifact synthesized only so movecheck can check
         // one generic method's body once, abstractly, never meant to be
         // emitted either (see check_generic_type_methods_once).
-        std::unordered_set<std::string> witness_class_names;
-        std::unordered_set<std::string> generic_type_template_names;
+        std::unordered_set<std::string> witness_class_names{};
+        std::unordered_set<std::string> generic_type_template_names{};
         // ch05 §5.14 (witness-driven instantiation gap): a *real*,
         // concretely-named class instantiated purely as a side effect of
         // abstractly witness-checking some *other* generic class's method
@@ -124,7 +130,7 @@ namespace scpp {
         // define_function, which then needs its own (never-declared,
         // since its owner was skipped above) owner class's layout --
         // crashing with a bare, hard-to-place "unordered_map::at".
-        std::unordered_set<std::string> synthetic_check_only_class_names;
+        std::unordered_set<std::string> synthetic_check_only_class_names{};
         for (const StructDef& def : program.structs) {
             if (def.is_forward_declaration) continue;
             if (!def.template_params.empty()) {
@@ -287,7 +293,7 @@ namespace scpp {
         finalize_debug_info();
         char* error_message = nullptr;
         llvm::LLVMBool broken = llvm::LLVMVerifyModule(module_, llvm::LLVMReturnStatusAction, &error_message);
-        std::string error(error_message != nullptr ? error_message : "");
+        std::string error{error_message != nullptr ? error_message : ""};
         llvm::LLVMDisposeMessage(error_message);
         if (broken) {
             // A module-level verifier failure is a compiler bug, and the
@@ -300,18 +306,25 @@ namespace scpp {
             // directory didn't exist, silently wrote nothing at all while
             // still looking like it had. Neither is acceptable behaviour
             // for a compiler.
-            std::string dump_note;
+            std::string dump_note{};
             if (const char* dump_path = std::getenv("SCPP_DUMP_BROKEN_MODULE");
                 dump_path != nullptr && dump_path[0] != '\0') {
                 char* ir_dump = llvm::LLVMPrintModuleToString(module_);
-                std::ofstream dump_out(dump_path);
-                dump_out << (ir_dump != nullptr ? ir_dump : "");
-                dump_out.flush();
+                bool write_ok = false;
+                // O_WRONLY | O_CREAT | O_TRUNC = 01 | 0100 | 01000 = 01101 = 577 (0x241)
+                int fd = open(dump_path, 0x241, 0644);
+                if (fd >= 0) {
+                    if (ir_dump != nullptr) {
+                        (void)write(fd, ir_dump, std::strlen(ir_dump));
+                    }
+                    (void)close(fd);
+                    write_ok = true;
+                }
                 // A dump that failed to write is worse than no dump: it
                 // sends the reader to an empty or absent file believing
                 // the compiler produced one.
-                dump_note = dump_out ? "; module IR written to '" + std::string(dump_path) + "'"
-                                     : "; could not write module IR to '" + std::string(dump_path) + "'";
+                dump_note = write_ok ? "; module IR written to '" + std::string{dump_path} + "'"
+                                     : "; could not write module IR to '" + std::string{dump_path} + "'";
                 llvm::LLVMDisposeMessage(ir_dump);
             }
             // Anything reaching here is a *module*-level invariant (every
@@ -338,7 +351,7 @@ namespace scpp {
         // broken so far, so the text describes it.
         char* error_message = nullptr;
         (void)llvm::LLVMVerifyModule(module_, llvm::LLVMReturnStatusAction, &error_message);
-        std::string error(error_message != nullptr ? error_message : "");
+        std::string error{error_message != nullptr ? error_message : ""};
         llvm::LLVMDisposeMessage(error_message);
         while (!error.empty() && error.back() == '\n') error.pop_back();
         return std::unexpected(CodegenError("internal error: generated invalid IR for '" + fn.name + "': " + error,
@@ -349,7 +362,7 @@ namespace scpp {
     std::string Codegen::module_ir() const
 {
         char* ir_cstr = llvm::LLVMPrintModuleToString(module_);
-        std::string ir(ir_cstr != nullptr ? ir_cstr : "");
+        std::string ir{ir_cstr != nullptr ? ir_cstr : ""};
         llvm::LLVMDisposeMessage(ir_cstr);
         return ir;
     }
@@ -474,7 +487,7 @@ namespace scpp {
                                                                    const std::vector<Type>& param_types,
                                                                    bool is_unsafe)
 {
-        Type type;
+        Type type{};
         type.kind = TypeKind::FunctionPointer;
         type.function_return = std::make_shared<Type>(return_type);
         type.function_params = param_types;
@@ -504,12 +517,12 @@ namespace scpp {
         if (source->kind != ExprKind::Identifier || find_local(*source) != nullptr) {
             return std::nullopt;
         }
-        std::optional<Type> result;
+        std::optional<Type> result{};
         for (const Function& fn : program_->functions) {
             if (fn.name != source->name) continue;
             Type candidate =
                 function_pointer_type_from_signature(fn.return_type, [&]() {
-                    std::vector<Type> params;
+                    std::vector<Type> params{};
                     params.reserve(fn.params.size());
                     for (const Param& param : fn.params) params.push_back(param.type);
                     return params;
@@ -535,7 +548,7 @@ namespace scpp {
         for (const Function& fn : program_->functions) {
             if (fn.name != source->name) continue;
             Type candidate = function_pointer_type_from_signature(fn.return_type, [&]() {
-                std::vector<Type> params;
+                std::vector<Type> params{};
                 params.reserve(fn.params.size());
                 for (const Param& param : fn.params) params.push_back(param.type);
                 return params;
@@ -607,7 +620,7 @@ namespace scpp {
 
     [[nodiscard]] std::vector<std::string> Codegen::split_dotted(const std::string& dotted)
 {
-        std::vector<std::string> segments;
+        std::vector<std::string> segments{};
         std::size_t start = 0;
         while (start <= dotted.size()) {
             std::size_t dot = dotted.find('.', start);
@@ -677,7 +690,7 @@ namespace scpp {
         // have external or weak linkage!") once two colliding
         // declarations force llvm::LLVM to silently rename one of them.
         std::string bare_name = fn.name;
-        std::string namespace_prefix;
+        std::string namespace_prefix{};
         for (const std::string& segment : fn.namespace_path) namespace_prefix += segment + "::";
         if (!namespace_prefix.empty() && bare_name.starts_with(namespace_prefix)) {
             bare_name = bare_name.substr(namespace_prefix.size());
@@ -698,11 +711,13 @@ namespace scpp {
 
     [[nodiscard]] std::expected<void, CodegenError> Codegen::build_overload_names()
 {
-        std::unordered_map<std::string, std::vector<const Function*>> by_name;
+        std::unordered_map<std::string, std::vector<const Function*>> by_name{};
         for (const Function& fn : program_->functions) {
             by_name[fn.name].push_back(&fn);
         }
-        for (const auto& [name, fns] : by_name) {
+        for (const auto& entry : by_name) {
+            const std::string& name = entry.first;
+            const std::vector<const Function*>& fns = entry.second;
             if (!fns.empty() && fns[0]->is_extern_c) {
                 if (fns.size() != 1) {
                     return std::unexpected(CodegenError("'" + name +
@@ -800,9 +815,9 @@ namespace scpp {
                 // gives every global a zeroinitializer, which is what the
                 // block-scope path spells with zero_initialize_storage
                 // before running the constructor.
-                LValue target{it->second.global, global.decl->type,
+                Codegen::LValue target{it->second.global, global.decl->type,
                               global.decl->resolved_alignment != 0
-                                  ? std::optional<unsigned>(global.decl->resolved_alignment)
+                                  ? std::optional<unsigned int>(global.decl->resolved_alignment)
                                   : alignment_for_type(global.decl->type)};
                 if (auto r = construct_record_in_place(target, global.decl->type, global.decl->ctor_args);
                     !r.has_value()) {
@@ -823,9 +838,9 @@ namespace scpp {
             // record has no single loadable value to route through
             // codegen_value_for_target's materialize-then-copy.
             if (global.decl->init->kind == ExprKind::BracedInitList) {
-                LValue target{it->second.global, global.decl->type,
+                Codegen::LValue target{it->second.global, global.decl->type,
                               global.decl->resolved_alignment != 0
-                                  ? std::optional<unsigned>(global.decl->resolved_alignment)
+                                  ? std::optional<unsigned int>(global.decl->resolved_alignment)
                                   : alignment_for_type(global.decl->type)};
                 if (auto r = initialize_storage_from_brace_args(target, global.decl->init->args); !r.has_value()) {
                     return std::unexpected(std::move(r).error());
@@ -843,9 +858,9 @@ namespace scpp {
             // `const char*` was written straight into the 6-byte array,
             // overrunning it and leaving `g[0]` reading a pointer byte.
             if (global.decl->type.kind == TypeKind::Array) {
-                LValue target{it->second.global, global.decl->type,
+                Codegen::LValue target{it->second.global, global.decl->type,
                               global.decl->resolved_alignment != 0
-                                  ? std::optional<unsigned>(global.decl->resolved_alignment)
+                                  ? std::optional<unsigned int>(global.decl->resolved_alignment)
                                   : alignment_for_type(global.decl->type)};
                 if (auto r = initialize_storage_from_expr(target, *global.decl->init); !r.has_value()) {
                     return std::unexpected(std::move(r).error());
@@ -869,7 +884,7 @@ namespace scpp {
                 return std::unexpected(std::move(r).error());
             }
             create_store(init_value, it->second.global,
-                         global.decl->resolved_alignment != 0 ? std::optional<unsigned>(global.decl->resolved_alignment)
+                         global.decl->resolved_alignment != 0 ? std::optional<unsigned int>(global.decl->resolved_alignment)
                                                               : alignment_for_type(global.decl->type));
         }
 
@@ -877,12 +892,12 @@ namespace scpp {
         current_global_namespace_path_.clear();
 
         llvm::LLVMTypeRef ptr_type = llvm::LLVMPointerTypeInContext(context_, 0);
-        llvm::LLVMTypeRef ctor_field_types[] = {llvm::LLVMInt32TypeInContext(context_), ptr_type, ptr_type};
+        llvm::LLVMTypeRef ctor_field_types[3] = {llvm::LLVMInt32TypeInContext(context_), ptr_type, ptr_type};
         llvm::LLVMTypeRef ctor_ty = llvm::LLVMStructTypeInContext(context_, ctor_field_types, 3, /*Packed=*/0);
-        llvm::LLVMValueRef ctor_fields[] = {
+        llvm::LLVMValueRef ctor_fields[3] = {
             llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), 65535, /*SignExtend=*/0),
             llvm::LLVMConstBitCast(init_fn, ptr_type),
-            llvm::LLVMConstPointerNull(ptr_type),
+            llvm::LLVMConstPointerNull(ptr_type)
         };
         llvm::LLVMValueRef ctor_entry = llvm::LLVMConstStructInContext(context_, ctor_fields, 3, /*Packed=*/0);
         llvm::LLVMTypeRef array_ty = llvm::LLVMArrayType2(ctor_ty, 1);
