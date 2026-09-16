@@ -21,16 +21,14 @@ import :api;
 
 namespace scpp {
 
-namespace {
-
-llvm::LLVMTargetDataRef data_layout_ref(llvm::LLVMModuleRef module) { return llvm::LLVMGetModuleDataLayout(module); }
+inline llvm::LLVMTargetDataRef data_layout_ref(llvm::LLVMModuleRef mod) { return llvm::LLVMGetModuleDataLayout(mod); }
 
 // Every scalar type scpp's codegen ever casts between is either a plain
 // (non-vector) integer type or `float`/`double` (32/64-bit; see
 // is_float_scalar_type_name) -- so, unlike llvm::Type::getScalarSizeInBits
 // (which also has to handle vector types), this only ever needs to
 // distinguish those three cases via llvm::LLVMGetTypeKind.
-unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
+inline unsigned int scalar_bit_width(llvm::LLVMTypeRef ty)
 {
     llvm::LLVMTypeKind kind = llvm::LLVMGetTypeKind(ty);
     if (kind == llvm::LLVMIntegerTypeKind) return llvm::LLVMGetIntTypeWidth(ty);
@@ -39,23 +37,21 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     return 0;
 }
 
-[[nodiscard]] bool is_compound_assignment(BinaryOp op) {
+[[nodiscard]] inline bool is_compound_assignment(BinaryOp op) {
     return is_compound_assignment_operator(op);
 }
 
-[[nodiscard]] BinaryOp compound_base_operator(BinaryOp op) {
+[[nodiscard]] inline BinaryOp compound_base_operator(BinaryOp op) {
     return compound_assignment_base_operator(op);
 }
 
-[[nodiscard]] std::string integer_only_operator_message(BinaryOp op) {
+[[nodiscard]] inline std::string integer_only_operator_message(BinaryOp op) {
     std::string message{"'"};
     message += binary_operator_spelling(op);
     message += "' requires operands of integral type: [expr.mul]/2, [expr.shift]/1, [expr.bit.and]/1, [expr.xor]/1 "
                "and [expr.or]/1 each name one, so there is no built-in candidate for a floating-point operand";
     return message;
 }
-
-} // namespace
 
     [[nodiscard]] bool Codegen::is_enum_cast_store_builtin_name(const std::string& name)
 {
@@ -97,7 +93,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             llvm::LLVMTypeRef array_llvm_type = std::move(array_llvm_type_result).value();
             for (std::size_t i = 0; i < value.elements.size(); ++i) {
                 llvm::LLVMTypeRef i32 = llvm::LLVMInt32TypeInContext(context_);
-                llvm::LLVMValueRef indices[] = {llvm::LLVMConstInt(i32, 0, 0), llvm::LLVMConstInt(i32, static_cast<unsigned>(i), 0)};
+                llvm::LLVMValueRef indices[2] = {llvm::LLVMConstInt(i32, 0, 0), llvm::LLVMConstInt(i32, static_cast<unsigned int>(i), 0)};
                 llvm::LLVMValueRef elem_ptr = llvm::LLVMBuildGEP2(builder_, array_llvm_type, dest_ptr, indices, 2, "");
                 if (auto r = store_constexpr_value_into(elem_ptr, *dest_type.element, value.elements[i]); !r.has_value())
                     return std::unexpected(std::move(r).error());
@@ -106,7 +102,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         }
         if (dest_type.kind == TypeKind::Named && find_class_def(dest_type.name) != nullptr &&
             value.kind == ConstexprValueKind::Object) {
-            const StructInfo& info = structs_.at(dest_type.name);
+            const Codegen::StructInfo& info = structs_.at(dest_type.name);
             for (std::size_t i = 0; i < info.field_names.size(); ++i) {
                 auto it = std::find_if(value.object_fields.begin(), value.object_fields.end(),
                                        [&](const auto& field) { return field.first == info.field_names[i]; });
@@ -141,7 +137,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         auto llvm_type_result = to_llvm_type(named_type(class_name));
         if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
         llvm::LLVMTypeRef llvm_type = std::move(llvm_type_result).value();
-        std::optional<unsigned> align = alignment_for_type(named_type(class_name));
+        std::optional<unsigned int> align = alignment_for_type(named_type(class_name));
         llvm::LLVMValueRef temp = create_entry_block_alloca(llvm_type, "constevalclasstmp", align);
         if (auto r = zero_initialize_storage(temp, named_type(class_name), align); !r.has_value()) return std::unexpected(std::move(r).error());
         if (auto r = store_constexpr_value_into(temp, named_type(class_name), value); !r.has_value()) return std::unexpected(std::move(r).error());
@@ -155,9 +151,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         auto llvm_type_result = to_llvm_type(named_type(class_name));
         if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
         llvm::LLVMTypeRef llvm_type = std::move(llvm_type_result).value();
-        std::optional<unsigned> align = alignment_for_type(named_type(class_name));
+        std::optional<unsigned int> align = alignment_for_type(named_type(class_name));
         llvm::LLVMValueRef temp = create_entry_block_alloca(llvm_type, "classtmp", align);
-        LValue target{temp, named_type(class_name), align};
+        Codegen::LValue target{temp, named_type(class_name), align};
         if (auto r = zero_initialize_storage(target.ptr, target.type, target.alignment); !r.has_value()) return std::unexpected(std::move(r).error());
         auto same_type_source_result = try_initialize_class_storage_from_same_type_source(target, args);
         if (!same_type_source_result.has_value()) return std::unexpected(std::move(same_type_source_result).error());
@@ -166,7 +162,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         }
         if (ctor_def != nullptr) {
             if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
-                ExprPtr ctor_expr;
+                ExprPtr ctor_expr{};
                 if (original_expr != nullptr) {
                     ctor_expr = deep_clone_expr(*original_expr);
                 } else {
@@ -239,7 +235,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
                         std::vector<llvm::LLVMValueRef> args = std::move(args_result).value();
                         args.insert(args.begin(), receiver_value);
-                        return CallResult{build_call(target, args), callee};
+                        return Codegen::CallResult{build_call(target, args), callee};
                     }
                     auto slot_index_result = interface_method_slot_index(receiver_named.name, *callee);
                     if (!slot_index_result.has_value()) return std::unexpected(std::move(slot_index_result).error());
@@ -254,8 +250,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     llvm::LLVMValueRef table_ptr =
                         llvm::LLVMBuildBitCast(builder_, dispatch_ptr, llvm::LLVMPointerTypeInContext(context_, 0), "ifacetable");
                     llvm::LLVMTypeRef i32 = llvm::LLVMInt32TypeInContext(context_);
-                    llvm::LLVMValueRef slot_indices[] = {llvm::LLVMConstInt(i32, 0, 0),
-                                                   llvm::LLVMConstInt(i32, static_cast<unsigned>(*slot_index), 0)};
+                    llvm::LLVMValueRef slot_indices[2] = {llvm::LLVMConstInt(i32, 0, 0),
+                                                   llvm::LLVMConstInt(i32, static_cast<unsigned int>(*slot_index), 0)};
                     llvm::LLVMValueRef slot_ptr =
                         llvm::LLVMBuildGEP2(builder_, table_type, table_ptr, slot_indices, 2, "ifaceslot");
                     llvm::LLVMValueRef target_ptr =
@@ -266,7 +262,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     args.insert(args.begin(), extract_interface_object_ptr(receiver_value));
                     auto dispatch_fn_type_result = interface_dispatch_function_type(*callee);
                     if (!dispatch_fn_type_result.has_value()) return std::unexpected(std::move(dispatch_fn_type_result).error());
-                    return CallResult{build_call(std::move(dispatch_fn_type_result).value(), target_ptr, args), callee};
+                    return Codegen::CallResult{build_call(std::move(dispatch_fn_type_result).value(), target_ptr, args), callee};
                 }
             }
             // Deliberately a *type* query, not an emitted one: this asks
@@ -286,13 +282,13 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     : nullptr;
             if (receiver_named_or_null != nullptr && receiver_named_or_null->kind == TypeKind::Named &&
                 structs_.contains(receiver_named_or_null->name)) {
-                const StructInfo& info = structs_.at(receiver_named_or_null->name);
+                const Codegen::StructInfo& info = structs_.at(receiver_named_or_null->name);
                 std::optional<std::size_t> field_index_opt = info.find_field_index(expr.name);
                 if (field_index_opt.has_value() &&
                     info.field_types[*field_index_opt].kind == TypeKind::FunctionPointer) {
                     auto base_result = codegen_lvalue(*expr.lhs);
                     if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
-                    LValue base = std::move(base_result).value();
+                    Codegen::LValue base = std::move(base_result).value();
                     const Type& member_type = info.field_types[*field_index_opt];
                     llvm::LLVMValueRef field_ptr = info.is_union
                                                  ? llvm::LLVMBuildBitCast(builder_, base.ptr,
@@ -306,12 +302,12 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     llvm::LLVMValueRef callee_value =
                         create_load(std::move(member_llvm_type_result).value(), field_ptr,
                                     info.is_union ? base.alignment
-                                                  : std::optional<unsigned>(info.field_alignments[*field_index_opt]),
+                                                  : std::optional<unsigned int>(info.field_alignments[*field_index_opt]),
                                     expr.name + ".fn");
                     auto args_result = codegen_call_args_for_types(expr.args, member_type.function_params);
                     if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
                     std::vector<llvm::LLVMValueRef> args = std::move(args_result).value();
-                    std::vector<llvm::LLVMTypeRef> params;
+                    std::vector<llvm::LLVMTypeRef> params{};
                     params.reserve(member_type.function_params.size());
                     for (const Type& param : member_type.function_params) {
                         auto param_type_result = to_llvm_type(param);
@@ -322,8 +318,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     if (!return_type_result.has_value()) return std::unexpected(std::move(return_type_result).error());
                     llvm::LLVMTypeRef fn_type =
                         llvm::LLVMFunctionType(std::move(return_type_result).value(), params.data(),
-                                         static_cast<unsigned>(params.size()), /*IsVarArg=*/0);
-                    return CallResult{build_call(fn_type, callee_value, args), nullptr};
+                                         static_cast<unsigned int>(params.size()), /*IsVarArg=*/0);
+                    return Codegen::CallResult{build_call(fn_type, callee_value, args), nullptr};
                 }
             }
             if (receiver_type.has_value() && receiver_type->kind == TypeKind::FunctionPointer) {
@@ -333,7 +329,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 auto args_result = codegen_call_args_for_types(expr.args, receiver_type->function_params);
                 if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
                 std::vector<llvm::LLVMValueRef> args = std::move(args_result).value();
-                std::vector<llvm::LLVMTypeRef> params;
+                std::vector<llvm::LLVMTypeRef> params{};
                 params.reserve(receiver_type->function_params.size());
                 for (const Type& param : receiver_type->function_params) {
                     auto param_type_result = to_llvm_type(param);
@@ -343,8 +339,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 auto return_type_result = to_llvm_type(*receiver_type->function_return);
                 if (!return_type_result.has_value()) return std::unexpected(std::move(return_type_result).error());
                 llvm::LLVMTypeRef fn_type = llvm::LLVMFunctionType(std::move(return_type_result).value(), params.data(),
-                                                       static_cast<unsigned>(params.size()), /*IsVarArg=*/0);
-                return CallResult{build_call(fn_type, callee_value, args), nullptr};
+                                                       static_cast<unsigned int>(params.size()), /*IsVarArg=*/0);
+                return Codegen::CallResult{build_call(fn_type, callee_value, args), nullptr};
             }
         }
         if (expr.lhs != nullptr && expr.name.empty())
@@ -363,7 +359,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 auto args_result = codegen_call_args_for_types(expr.args, callee_type->function_params);
                 if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
                 std::vector<llvm::LLVMValueRef> args = std::move(args_result).value();
-                std::vector<llvm::LLVMTypeRef> params;
+                std::vector<llvm::LLVMTypeRef> params{};
                 params.reserve(callee_type->function_params.size());
                 for (const Type& param : callee_type->function_params) {
                     auto param_type_result = to_llvm_type(param);
@@ -373,8 +369,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 auto return_type_result = to_llvm_type(*callee_type->function_return);
                 if (!return_type_result.has_value()) return std::unexpected(std::move(return_type_result).error());
                 llvm::LLVMTypeRef fn_type = llvm::LLVMFunctionType(std::move(return_type_result).value(), params.data(),
-                                                       static_cast<unsigned>(params.size()), /*IsVarArg=*/0);
-                return CallResult{build_call(fn_type, callee_value, args), nullptr};
+                                                       static_cast<unsigned int>(params.size()), /*IsVarArg=*/0);
+                return Codegen::CallResult{build_call(fn_type, callee_value, args), nullptr};
             }();
         if (expr.lhs == nullptr) {
             if (const Function* builtin_callee = resolve_overload_by_type(expr.name, expr.args, /*param_offset=*/0);
@@ -406,7 +402,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 }
                 auto value_result = codegen_constructed_class_value(expr.name, expr.args, ctor_def, &expr);
                 if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
-                return CallResult{std::move(value_result).value(), nullptr};
+                return Codegen::CallResult{std::move(value_result).value(), nullptr};
             }
             // [expr.type.conv]/1: a simple-type-specifier "followed by
             // ... a braced-init-list (the initializer) constructs a
@@ -443,18 +439,18 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 auto struct_llvm_type_result = to_llvm_type(struct_type);
                 if (!struct_llvm_type_result.has_value()) return std::unexpected(std::move(struct_llvm_type_result).error());
                 llvm::LLVMTypeRef struct_llvm_type = std::move(struct_llvm_type_result).value();
-                std::optional<unsigned> struct_align = alignment_for_type(struct_type);
+                std::optional<unsigned int> struct_align = alignment_for_type(struct_type);
                 llvm::LLVMValueRef struct_temp = create_entry_block_alloca(struct_llvm_type, "structtmp", struct_align);
                 if (auto r = zero_initialize_storage(struct_temp, struct_type, struct_align); !r.has_value()) {
                     return std::unexpected(std::move(r).error());
                 }
-                if (auto r = construct_record_in_place(LValue{struct_temp, struct_type, struct_align}, struct_type, expr.args);
+                if (auto r = construct_record_in_place(Codegen::LValue{struct_temp, struct_type, struct_align}, struct_type, expr.args);
                     !r.has_value()) {
                     return std::unexpected(std::move(r).error());
                 }
-                return CallResult{llvm::LLVMBuildLoad2(builder_, struct_llvm_type, struct_temp, "structtmp.value"), nullptr};
+                return Codegen::CallResult{llvm::LLVMBuildLoad2(builder_, struct_llvm_type, struct_temp, "structtmp.value"), nullptr};
             }
-            const LocalSlot* callee_local = find_local(expr);
+            const Codegen::LocalSlot* callee_local = find_local(expr);
             if (callee_local != nullptr && callee_local->type.kind == TypeKind::FunctionPointer) {
                 auto local_llvm_type_result = to_llvm_type(callee_local->type);
                 if (!local_llvm_type_result.has_value()) return std::unexpected(std::move(local_llvm_type_result).error());
@@ -463,7 +459,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 auto args_result = codegen_call_args_for_types(expr.args, callee_local->type.function_params);
                 if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
                 std::vector<llvm::LLVMValueRef> args = std::move(args_result).value();
-                std::vector<llvm::LLVMTypeRef> params;
+                std::vector<llvm::LLVMTypeRef> params{};
                 params.reserve(callee_local->type.function_params.size());
                 for (const Type& param : callee_local->type.function_params) {
                     auto param_type_result = to_llvm_type(param);
@@ -473,19 +469,19 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 auto return_type_result = to_llvm_type(*callee_local->type.function_return);
                 if (!return_type_result.has_value()) return std::unexpected(std::move(return_type_result).error());
                 llvm::LLVMTypeRef fn_type = llvm::LLVMFunctionType(std::move(return_type_result).value(), params.data(),
-                                                       static_cast<unsigned>(params.size()), /*IsVarArg=*/0);
-                return CallResult{build_call(fn_type, callee_value, args), nullptr};
+                                                       static_cast<unsigned int>(params.size()), /*IsVarArg=*/0);
+                return Codegen::CallResult{build_call(fn_type, callee_value, args), nullptr};
             }
         }
         std::string callee_name = expr.name;
         llvm::LLVMValueRef this_arg = nullptr;
         std::size_t param_offset = 0;
         bool receiver_is_mutable = true;
-        std::string receiver_static_class_name;
+        std::string receiver_static_class_name{};
         if (expr.lhs != nullptr) {
             auto receiver_result = codegen_lvalue(*expr.lhs);
             if (!receiver_result.has_value()) return std::unexpected(std::move(receiver_result).error());
-            LValue receiver = std::move(receiver_result).value();
+            Codegen::LValue receiver = std::move(receiver_result).value();
             if (receiver.type.kind != TypeKind::Named) {
                 return std::unexpected(CodegenError("method call '." + expr.name + "(...)' is only supported on a class type",
                     current_loc_));
@@ -518,7 +514,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     if (expr.args[i]->kind == ExprKind::Identifier &&
                         param_type.kind == TypeKind::Reference && !param_type.is_mutable_ref &&
                         !param_type.is_rvalue_ref && param_type.pointee != nullptr) {
-                        const LocalSlot* arg_local = find_local(*expr.args[i]);
+                        const Codegen::LocalSlot* arg_local = find_local(*expr.args[i]);
                         all_match = arg_local != nullptr && arg_local->type.kind == TypeKind::Reference &&
                                     arg_local->type.is_rvalue_ref && arg_local->type.pointee != nullptr &&
                                     types_equal(*arg_local->type.pointee, *param_type.pointee);
@@ -597,7 +593,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 auto slot_index_result = ordinary_method_slot_index(receiver_static_class_name, *callee_def);
                 if (!slot_index_result.has_value()) return std::unexpected(std::move(slot_index_result).error());
                 if (std::optional<std::size_t> slot_index = std::move(slot_index_result).value(); slot_index.has_value()) {
-                    const StructInfo& info = structs_.at(receiver_static_class_name);
+                    const Codegen::StructInfo& info = structs_.at(receiver_static_class_name);
                     llvm::LLVMValueRef vptr_slot = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, this_arg, 0, "vptr");
                     llvm::LLVMValueRef vtable_ptr = create_load(llvm::LLVMPointerTypeInContext(context_, 0), vptr_slot, std::nullopt,
                                                           "vtable");
@@ -607,20 +603,20 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     llvm::LLVMValueRef table_ptr =
                         llvm::LLVMBuildBitCast(builder_, vtable_ptr, llvm::LLVMPointerTypeInContext(context_, 0), "vtable.array");
                     llvm::LLVMTypeRef i32 = llvm::LLVMInt32TypeInContext(context_);
-                    llvm::LLVMValueRef slot_indices[] = {llvm::LLVMConstInt(i32, 0, 0),
-                                                   llvm::LLVMConstInt(i32, static_cast<unsigned>(*slot_index), 0)};
+                    llvm::LLVMValueRef slot_indices[2] = {llvm::LLVMConstInt(i32, 0, 0),
+                                                   llvm::LLVMConstInt(i32, static_cast<unsigned int>(*slot_index), 0)};
                     llvm::LLVMValueRef slot_ptr =
                         llvm::LLVMBuildGEP2(builder_, table_type, table_ptr, slot_indices, 2, "vtable.slot");
                     llvm::LLVMValueRef target_ptr =
                         create_load(llvm::LLVMPointerTypeInContext(context_, 0), slot_ptr, std::nullopt, "virtfn");
                     auto dispatch_fn_type_result = interface_dispatch_function_type(*callee_def);
                     if (!dispatch_fn_type_result.has_value()) return std::unexpected(std::move(dispatch_fn_type_result).error());
-                    return CallResult{build_call(std::move(dispatch_fn_type_result).value(), target_ptr, args),
+                    return Codegen::CallResult{build_call(std::move(dispatch_fn_type_result).value(), target_ptr, args),
                                       callee_def};
                 }
             }
         }
-        return CallResult{build_call(callee, args), callee_def};
+        return Codegen::CallResult{build_call(callee, args), callee_def};
     }
 
 
@@ -636,7 +632,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             return {};
         }
         if (auto r = validate_reference_pointee(*target.type.pointee); !r.has_value()) return std::unexpected(std::move(r).error());
-        llvm::LLVMValueRef referent_addr;
+        llvm::LLVMValueRef referent_addr = nullptr;
         if (const_reference_binds_materialized_temporary(expr, target.type)) {
             auto materialized_result = codegen_materialize_const_reference_source(expr, *target.type.pointee);
             if (!materialized_result.has_value()) return std::unexpected(std::move(materialized_result).error());
@@ -726,7 +722,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         }
         auto src_result = codegen_lvalue(*args[0]);
         if (!src_result.has_value()) return std::unexpected(std::move(src_result).error());
-        LValue src = std::move(src_result).value();
+        Codegen::LValue src = std::move(src_result).value();
         if (auto r = codegen_copy_construct_class(target.ptr, src.ptr, target.type.name); !r.has_value())
             return std::unexpected(std::move(r).error());
         return true;
@@ -896,7 +892,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         }
         auto literal_result = codegen_lvalue(expr);
         if (!literal_result.has_value()) return std::unexpected(std::move(literal_result).error());
-        LValue literal = std::move(literal_result).value();
+        Codegen::LValue literal = std::move(literal_result).value();
         std::uint64_t byte_count = static_cast<std::uint64_t>(expr.name.size()) + 1;
         llvm::LLVMValueRef length =
             llvm::LLVMConstInt(llvm::LLVMInt64TypeInContext(context_), byte_count, /*SignExtend=*/0);
@@ -978,9 +974,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 type_needs_nontrivial_default_init(target.type)) {
                 return emit_array_element_loop(
                     target.type, target.ptr, /*reverse=*/false, /*begin_index=*/0,
-                    [&, this](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef) -> std::expected<void, CodegenError> {
+                    [&, this](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef index_val [[maybe_unused]]) -> std::expected<void, CodegenError> {
                         return initialize_storage_from_brace_args(
-                            LValue{element_ptr, *target.type.element, alignment_for_type(*target.type.element)}, {});
+                            Codegen::LValue{element_ptr, *target.type.element, alignment_for_type(*target.type.element)}, {});
                     });
             }
             // A struct reaches here rather than the class branch above,
@@ -1062,9 +1058,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             if (covered < element_count && type_needs_nontrivial_default_init(target.type)) {
                 if (auto r = emit_array_element_loop(
                         target.type, target.ptr, /*reverse=*/false, /*begin_index=*/covered,
-                        [&, this](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef) -> std::expected<void, CodegenError> {
+                        [&, this](llvm::LLVMValueRef element_ptr, llvm::LLVMValueRef index_val [[maybe_unused]]) -> std::expected<void, CodegenError> {
                             return initialize_storage_from_brace_args(
-                                LValue{element_ptr, element_type, element_alignment}, {});
+                                Codegen::LValue{element_ptr, element_type, element_alignment}, {});
                         });
                     !r.has_value()) {
                     return std::unexpected(std::move(r).error());
@@ -1385,7 +1381,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     llvm::LLVMConstInt(i64, static_cast<std::uint64_t>(covered), /*SignExtend=*/0);
                 llvm::LLVMValueRef element_ptr = build_array_element_gep(array_llvm_type, target.ptr, element_index);
                 if (auto r = initialize_storage_from_brace_args_cursor(
-                        LValue{element_ptr, element_type, element_alignment}, args, index);
+                        Codegen::LValue{element_ptr, element_type, element_alignment}, args, index);
                     !r.has_value()) {
                     return std::unexpected(std::move(r).error());
                 }
@@ -1412,14 +1408,14 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         if (record_info_it == structs_.end()) {
             return std::unexpected(CodegenError("unknown struct '" + target.type.name + "'", current_loc_));
         }
-        const StructInfo& record_info = record_info_it->second;
+        const Codegen::StructInfo& record_info = record_info_it->second;
         while (static_cast<std::size_t>(covered) < def->fields.size() && index < args.size()) {
             const StructField& field = def->fields[static_cast<std::size_t>(covered)];
             llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(
                 builder_, record_llvm_type, target.ptr,
                 record_info.physical_field_index(static_cast<std::size_t>(covered)), "agg.field");
             if (auto r = initialize_storage_from_brace_args_cursor(
-                    LValue{field_ptr, field.type, alignment_for_type(field.type)}, args, index);
+                    Codegen::LValue{field_ptr, field.type, alignment_for_type(field.type)}, args, index);
                 !r.has_value()) {
                 return std::unexpected(std::move(r).error());
             }
@@ -1556,7 +1552,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         if (allow_implicit_converting_ctor) {
             if (const Function* converting_ctor = resolve_converting_constructor_by_type(target_type.name, expr);
                 converting_ctor != nullptr) {
-                std::vector<ExprPtr> ctor_args;
+                std::vector<ExprPtr> ctor_args{};
                 ctor_args.push_back(deep_clone_expr(expr));
                 return codegen_constructed_class_value(target_type.name, ctor_args, converting_ctor);
             }
@@ -1590,7 +1586,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
         llvm::LLVMValueRef value = std::move(value_result).value();
         if (value == nullptr || llvm::LLVMTypeOf(value) != llvm_type) {
-            std::vector<ExprPtr> single_arg;
+            std::vector<ExprPtr> single_arg{};
             single_arg.push_back(deep_clone_expr(expr));
             return std::unexpected(
                 CodegenError(describe_constructor_resolution_failure(target_type.name, single_arg), expr.loc));
@@ -1669,7 +1665,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         }
         auto source_result = codegen_lvalue(expr);
         if (!source_result.has_value()) return std::unexpected(std::move(source_result).error());
-        LValue source = std::move(source_result).value();
+        Codegen::LValue source = std::move(source_result).value();
         if (source.type.kind != TypeKind::Array) {
             return std::unexpected(CodegenError("std::span<T> can currently only be constructed from a fixed-size array in this version",
                                current_loc_));
@@ -1827,9 +1823,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     [[nodiscard]] std::expected<std::vector<llvm::LLVMValueRef>, CodegenError> Codegen::codegen_call_args(const std::vector<ExprPtr>& args, const Function* callee_def,
                                                   std::size_t param_offset)
 {
-        std::vector<llvm::LLVMValueRef> result;
+        std::vector<llvm::LLVMValueRef> result{};
         auto emit_arg = [&, this](const Expr& arg, std::size_t i) -> std::expected<llvm::LLVMValueRef, CodegenError> {
-            Type effective_param_type;
+            Type effective_param_type{};
             bool have_effective_param_type = false;
             bool collapsed_forwarding_reference_value = false;
             if (callee_def != nullptr && i + param_offset < callee_def->params.size()) {
@@ -1927,7 +1923,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     [[nodiscard]] std::expected<std::vector<llvm::LLVMValueRef>, CodegenError> Codegen::codegen_call_args_for_types(const std::vector<ExprPtr>& args,
                                                           const std::vector<Type>& param_types)
 {
-        std::vector<llvm::LLVMValueRef> result;
+        std::vector<llvm::LLVMValueRef> result{};
         result.reserve(args.size());
         for (std::size_t i = 0; i < args.size(); i++) {
             bool param_is_reference = i < param_types.size() && param_types[i].kind == TypeKind::Reference;
@@ -2017,17 +2013,17 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         if (!integer_type_result.has_value()) return std::unexpected(std::move(integer_type_result).error());
         llvm::LLVMTypeRef integer_type = std::move(integer_type_result).value();
         if (llvm::LLVMGetTypeKind(integer_type) != llvm::LLVMIntegerTypeKind) return false;
-        unsigned bits = llvm::LLVMGetIntTypeWidth(integer_type);
+        unsigned int bits = llvm::LLVMGetIntTypeWidth(integer_type);
         bool source_is_unsigned = is_unsigned_for_cast(source_type.name);
         if (source_is_unsigned) {
             if (enum_value < 0) return false;
             if (bits >= 64) return true;
-            std::uint64_t max_value = (std::uint64_t{1} << bits) - 1;
+            std::uint64_t max_value = (static_cast<std::uint64_t>(1) << bits) - 1;
             return static_cast<std::uint64_t>(enum_value) <= max_value;
         }
         if (bits >= 64) return true;
-        std::int64_t min_value = -(std::int64_t{1} << (bits - 1));
-        std::int64_t max_value = (std::int64_t{1} << (bits - 1)) - 1;
+        std::int64_t min_value = -(static_cast<std::int64_t>(1) << (bits - 1));
+        std::int64_t max_value = (static_cast<std::int64_t>(1) << (bits - 1)) - 1;
         return enum_value >= min_value && enum_value <= max_value;
     }
 
@@ -2083,7 +2079,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         llvm::LLVMValueRef source_value = std::move(source_value_result).value();
         auto out_result = codegen_lvalue(*expr.args[1]);
         if (!out_result.has_value()) return std::unexpected(std::move(out_result).error());
-        LValue out = std::move(out_result).value();
+        Codegen::LValue out = std::move(out_result).value();
         auto enum_storage_type_result = to_llvm_type(*out_param_type.pointee);
         if (!enum_storage_type_result.has_value()) return std::unexpected(std::move(enum_storage_type_result).error());
         llvm::LLVMTypeRef enum_storage_type = std::move(enum_storage_type_result).value();
@@ -2100,7 +2096,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 "enumcastselect");
         }
         create_store(selected, out.ptr, out.alignment);
-        return CallResult{i1_to_bool(matched), &callee_def};
+        return Codegen::CallResult{i1_to_bool(matched), &callee_def};
     }
 
 
@@ -2122,11 +2118,11 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         std::optional<unsigned int> alignment = alignment_for_type(target_type);
         llvm::LLVMValueRef storage =
             create_entry_block_alloca(std::move(storage_type_result).value(), "listinit", alignment);
-        if (auto r = initialize_storage_from_brace_args(LValue{storage, target_type, alignment}, expr.args);
+        if (auto r = initialize_storage_from_brace_args(Codegen::LValue{storage, target_type, alignment}, expr.args);
             !r.has_value()) {
             return std::unexpected(std::move(r).error());
         }
-        return load_value(LValue{storage, target_type, alignment});
+        return load_value(Codegen::LValue{storage, target_type, alignment});
     }
 
     // [expr.cond]/4: "an attempt is made to form an implicit conversion
@@ -2217,14 +2213,14 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         // that type, defeating the point).
         if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Neg) {
             if (expr.lhs->kind == ExprKind::IntegerLiteral) {
-                Expr negated;
+                Expr negated{};
                 negated.kind = ExprKind::IntegerLiteral;
                 negated.loc = expr.loc;
                 negated.int_value = -expr.lhs->int_value;
                 return codegen_value_for_target(negated, target_type);
             }
             if (expr.lhs->kind == ExprKind::FloatLiteral) {
-                Expr negated;
+                Expr negated{};
                 negated.kind = ExprKind::FloatLiteral;
                 negated.loc = expr.loc;
                 negated.float_value = -expr.lhs->float_value;
@@ -2251,7 +2247,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             }
         }
         if (target_type.kind == TypeKind::FunctionPointer) {
-            if (llvm::LLVMValueRef fn = codegen_function_pointer_value_for_target(expr, target_type)) return fn;
+            if (llvm::LLVMValueRef fn = codegen_function_pointer_value_for_target(expr, target_type); fn != nullptr) return fn;
         }
         if (target_type.kind == TypeKind::Span) {
             return codegen_span_value_for_target(expr, target_type);
@@ -2447,7 +2443,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 // class-case handling); anything else (a scalar,
                 // pointer, ...) is simply zero-initialized.
                 if (expr.type.kind == TypeKind::Named && find_class_def(expr.type.name) != nullptr) {
-                    std::vector<ExprPtr> no_args;
+                    std::vector<ExprPtr> no_args{};
                     const Function* ctor_def = resolve_overload_by_type(expr.type.name + "_new", no_args, /*param_offset=*/1);
                     return codegen_constructed_class_value(expr.type.name, no_args, ctor_def, &expr);
                 }
@@ -2455,7 +2451,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     auto llvm_type_result = to_llvm_type(expr.type);
                     if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
                     llvm::LLVMTypeRef llvm_type = std::move(llvm_type_result).value();
-                    std::optional<unsigned> align = alignment_for_type(expr.type);
+                    std::optional<unsigned int> align = alignment_for_type(expr.type);
                     llvm::LLVMValueRef temp = create_entry_block_alloca(llvm_type, "valueinittmp", align);
                     // A struct or an array of them is not "anything
                     // else": `{}` on it still has to run its default
@@ -2466,7 +2462,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     // `void g(S s = {})` agreeing with it instead of
                     // being a seventh, quietly different answer.
                     if (type_needs_nontrivial_default_init(expr.type)) {
-                        if (auto r = initialize_storage_from_brace_args(LValue{temp, expr.type, align}, {}); !r.has_value())
+                        if (auto r = initialize_storage_from_brace_args(Codegen::LValue{temp, expr.type, align}, {}); !r.has_value())
                             return std::unexpected(std::move(r).error());
                     } else if (auto r = zero_initialize_storage(temp, expr.type, align); !r.has_value()) {
                         return std::unexpected(std::move(r).error());
@@ -2516,7 +2512,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     auto is_scalar_target = [](const std::optional<Type>& type) {
                         return type.has_value() && type->kind == TypeKind::Named && is_scalar_type_name(type->name);
                     };
-                    std::optional<Type> common_type;
+                    std::optional<Type> common_type{};
                     if (then_type.has_value() && else_type.has_value() && types_equal(*then_type, *else_type)) {
                         common_type = then_type;
                     } else if (is_scalar_target(then_type) && is_untyped_numeric_literal(*expr.third)) {
@@ -2591,8 +2587,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     // `h()` gets there, and no other use survives movecheck.
                     if (llvm::LLVMTypeOf(then_value) == llvm::LLVMVoidTypeInContext(context_)) return then_value;
                     llvm::LLVMValueRef phi = llvm::LLVMBuildPhi(builder_, llvm::LLVMTypeOf(then_value), "condtmp");
-                    llvm::LLVMValueRef incoming_values[] = {then_value, else_value};
-                    llvm::LLVMBasicBlockRef incoming_blocks[] = {then_end, else_end};
+                    llvm::LLVMValueRef incoming_values[2] = {then_value, else_value};
+                    llvm::LLVMBasicBlockRef incoming_blocks[2] = {then_end, else_end};
                     llvm::LLVMAddIncoming(phi, incoming_values, incoming_blocks, 2);
                     return phi;
                 }();
@@ -2687,8 +2683,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                                                           /*SignExtend=*/!is_unsigned_scalar_type_name(
                                                               enum_def->underlying_type.name));
                         }
-                        if (std::optional<Type> fn_type = resolve_function_designator_type(expr)) {
-                            if (llvm::LLVMValueRef fn = codegen_function_pointer_value_for_target(expr, *fn_type)) return fn;
+                        if (std::optional<Type> fn_type = resolve_function_designator_type(expr); fn_type.has_value()) {
+                            if (llvm::LLVMValueRef fn = codegen_function_pointer_value_for_target(expr, *fn_type); fn != nullptr) return fn;
                         }
                         if (expr.explicit_global_qualification) {
                             return std::unexpected(CodegenError("use of undeclared global name '" + expr.name + "'", current_loc_));
@@ -2725,7 +2721,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     if (base_underlying != nullptr && base_underlying->kind == TypeKind::Span && expr.name == "size") {
                         auto base_result = codegen_lvalue(*expr.lhs);
                         if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
-                        LValue base = std::move(base_result).value();
+                        Codegen::LValue base = std::move(base_result).value();
                         auto base_llvm_type_result = to_llvm_type(base.type);
                         if (!base_llvm_type_result.has_value()) return std::unexpected(std::move(base_llvm_type_result).error());
                         llvm::LLVMValueRef size_ptr = llvm::LLVMBuildStructGEP2(builder_, std::move(base_llvm_type_result).value(), base.ptr, 1, "sizeptr");
@@ -2754,7 +2750,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     {
                         auto operator_result = codegen_unary_operator_function_call(expr);
                         if (!operator_result.has_value()) return std::unexpected(std::move(operator_result).error());
-                        if (std::optional<llvm::LLVMValueRef> value = std::move(operator_result).value()) return *value;
+                        if (std::optional<llvm::LLVMValueRef> value = std::move(operator_result).value(); value.has_value()) return *value;
                     }
                     if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
                         auto lv_result = codegen_lvalue(expr);
@@ -2764,7 +2760,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     if (expr.unary_op == UnaryOp::PostInc || expr.unary_op == UnaryOp::PostDec) {
                         auto lv_result = codegen_lvalue(*expr.lhs);
                         if (!lv_result.has_value()) return std::unexpected(std::move(lv_result).error());
-                        LValue lv = std::move(lv_result).value();
+                        Codegen::LValue lv = std::move(lv_result).value();
                         auto old_value_result = load_value(lv);
                         if (!old_value_result.has_value()) return std::unexpected(std::move(old_value_result).error());
                         llvm::LLVMValueRef old_value = std::move(old_value_result).value();
@@ -2799,7 +2795,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         // reads the value stored there.
                         auto lv_result = codegen_lvalue(expr);
                         if (!lv_result.has_value()) return std::unexpected(std::move(lv_result).error());
-                        LValue lv = std::move(lv_result).value();
+                        Codegen::LValue lv = std::move(lv_result).value();
                         auto llvm_type_result = to_llvm_type(lv.type);
                         if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
                         return create_load(std::move(llvm_type_result).value(), lv.ptr, lv.alignment, "loadtmp");
@@ -2816,8 +2812,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                                 }
                             }
                         }
-                        if (std::optional<Type> fn_type = resolve_function_designator_type(expr)) {
-                            if (llvm::LLVMValueRef fn = codegen_function_pointer_value_for_target(expr, *fn_type)) return fn;
+                        if (std::optional<Type> fn_type = resolve_function_designator_type(expr); fn_type.has_value()) {
+                            if (llvm::LLVMValueRef fn = codegen_function_pointer_value_for_target(expr, *fn_type); fn != nullptr) return fn;
                         }
                         // [expr.const.imm], ch09 §9.1(4): an immediate
                         // function emits no code, so there is no address to
@@ -2957,7 +2953,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     }
                     auto result_result = codegen_call(expr);
                     if (!result_result.has_value()) return std::unexpected(std::move(result_result).error());
-                    CallResult result = std::move(result_result).value();
+                    Codegen::CallResult result = std::move(result_result).value();
                     if (result.callee_def != nullptr && is_interface_reference_type(result.callee_def->return_type)) {
                         return result.value;
                     }
@@ -2995,7 +2991,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     // moved-out member anyway.
                     auto lv_result = codegen_lvalue(*expr.lhs);
                     if (!lv_result.has_value()) return std::unexpected(std::move(lv_result).error());
-                    LValue lv = std::move(lv_result).value();
+                    Codegen::LValue lv = std::move(lv_result).value();
                     auto llvm_type_result = to_llvm_type(lv.type);
                     if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
                     llvm::LLVMTypeRef llvm_type = std::move(llvm_type_result).value();
@@ -3031,7 +3027,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::codegen_construct_lambda(const Expr& expr, llvm::LLVMValueRef existing_storage)
 {
-        const StructInfo& info = structs_.at(expr.name);
+        const Codegen::StructInfo& info = structs_.at(expr.name);
         llvm::LLVMValueRef closure =
             existing_storage != nullptr ? existing_storage : create_entry_block_alloca(info.llvm_type, "lambdatmp");
         if (info.has_ordinary_vtable) {
@@ -3091,7 +3087,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         }
 
         if (expr.type.kind == TypeKind::Named && structs_.contains(expr.type.name)) {
-            LValue target{heap_ptr, expr.type, std::nullopt};
+            Codegen::LValue target{heap_ptr, expr.type, std::nullopt};
             if (auto r = zero_initialize_storage(target.ptr, target.type, target.alignment); !r.has_value()) return std::unexpected(std::move(r).error());
             if (!expr.args.empty() || expr.has_paren_init) {
                 auto same_type_result = try_initialize_class_storage_from_same_type_source(target, expr.args);
@@ -3195,7 +3191,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 llvm::LLVMBasicBlockRef merge_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "delete.skip");
                 llvm::LLVMBuildCondBr(builder_, is_null, merge_bb, delete_bb);
                 llvm::LLVMPositionBuilderAtEnd(builder_, delete_bb);
-                const StructInfo& info = structs_.at(pointee.name);
+                const Codegen::StructInfo& info = structs_.at(pointee.name);
                 llvm::LLVMValueRef vptr_slot = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, ptr, 0, "vptr");
                 llvm::LLVMValueRef vtable_ptr = create_load(llvm::LLVMPointerTypeInContext(context_, 0), vptr_slot, std::nullopt,
                                                       "vtable");
@@ -3204,13 +3200,13 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 llvm::LLVMTypeRef table_type = std::move(table_type_result).value();
                 llvm::LLVMValueRef table_ptr =
                     llvm::LLVMBuildBitCast(builder_, vtable_ptr, llvm::LLVMPointerTypeInContext(context_, 0), "vtable.array");
-                llvm::LLVMValueRef gep_indices[] = {llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), 0, 0),
+                llvm::LLVMValueRef gep_indices[2] = {llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), 0, 0),
                                                llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), 0, 0)};
                 llvm::LLVMValueRef slot_ptr =
                     llvm::LLVMBuildGEP2(builder_, table_type, table_ptr, gep_indices, 2, "vtable.dtor.slot");
                 llvm::LLVMValueRef dtor_ptr =
                     create_load(llvm::LLVMPointerTypeInContext(context_, 0), slot_ptr, std::nullopt, "dtorfn");
-                llvm::LLVMTypeRef dtor_param_types[] = {llvm::LLVMPointerTypeInContext(context_, 0)};
+                llvm::LLVMTypeRef dtor_param_types[1] = {llvm::LLVMPointerTypeInContext(context_, 0)};
                 llvm::LLVMTypeRef dtor_type =
                     llvm::LLVMFunctionType(llvm::LLVMVoidTypeInContext(context_), dtor_param_types, 1, 0);
                 build_call(dtor_type, dtor_ptr, {ptr});
@@ -3263,11 +3259,11 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
     llvm::LLVMValueRef Codegen::get_or_declare_malloc()
 {
-        if (llvm::LLVMValueRef existing = llvm::LLVMGetNamedFunction(module_, "malloc")) {
+        if (llvm::LLVMValueRef existing = llvm::LLVMGetNamedFunction(module_, "malloc"); existing != nullptr) {
             return existing;
         }
         llvm::LLVMTypeRef ptr_type = llvm::LLVMPointerTypeInContext(context_, 0);
-        llvm::LLVMTypeRef malloc_param_types[] = {llvm::LLVMInt64TypeInContext(context_)};
+        llvm::LLVMTypeRef malloc_param_types[1] = {llvm::LLVMInt64TypeInContext(context_)};
         llvm::LLVMTypeRef malloc_type =
             llvm::LLVMFunctionType(ptr_type, malloc_param_types, 1, /*IsVarArg=*/0);
         return llvm::LLVMAddFunction(module_, "malloc", malloc_type);
@@ -3276,11 +3272,11 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
     llvm::LLVMValueRef Codegen::get_or_declare_free()
 {
-        if (llvm::LLVMValueRef existing = llvm::LLVMGetNamedFunction(module_, "free")) {
+        if (llvm::LLVMValueRef existing = llvm::LLVMGetNamedFunction(module_, "free"); existing != nullptr) {
             return existing;
         }
         llvm::LLVMTypeRef ptr_type = llvm::LLVMPointerTypeInContext(context_, 0);
-        llvm::LLVMTypeRef free_param_types[] = {ptr_type};
+        llvm::LLVMTypeRef free_param_types[1] = {ptr_type};
         llvm::LLVMTypeRef free_type =
             llvm::LLVMFunctionType(llvm::LLVMVoidTypeInContext(context_), free_param_types, 1, /*IsVarArg=*/0);
         return llvm::LLVMAddFunction(module_, "free", free_type);
@@ -3289,7 +3285,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
     llvm::LLVMValueRef Codegen::get_or_declare_abort()
 {
-        if (llvm::LLVMValueRef existing = llvm::LLVMGetNamedFunction(module_, "abort")) {
+        if (llvm::LLVMValueRef existing = llvm::LLVMGetNamedFunction(module_, "abort"); existing != nullptr) {
             return existing;
         }
         llvm::LLVMTypeRef abort_type = llvm::LLVMFunctionType(llvm::LLVMVoidTypeInContext(context_), nullptr, 0, /*IsVarArg=*/0);
@@ -3297,7 +3293,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         // libc's abort() never returns -- telling llvm::LLVM this lets it treat
         // the code right after a call to it as unreachable, same as real
         // Clang does.
-        unsigned noreturn_kind = llvm::LLVMGetEnumAttributeKindForName("noreturn", 8);
+        unsigned int noreturn_kind = llvm::LLVMGetEnumAttributeKindForName("noreturn", 8);
         llvm::LLVMAddAttributeAtIndex(fn, llvm::LLVMAttributeFunctionIndex, llvm::LLVMCreateEnumAttribute(context_, noreturn_kind, 0));
         return fn;
     }
@@ -3398,7 +3394,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     [[nodiscard]] std::string Codegen::scalar_name_for_cast(const Type& type) const
 {
         if (type.kind != TypeKind::Named) return {};
-        if (const EnumDef* def = find_enum_def(program_, type.name)) return def->underlying_type.name;
+        if (const EnumDef* def = find_enum_def(program_, type.name); def != nullptr) return def->underlying_type.name;
         return type.name;
     }
 
@@ -3498,8 +3494,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             : op == BinaryOp::Sub
                 ? (is_unsigned ? "llvm.usub.with.overflow" : "llvm.ssub.with.overflow")
                 : (is_unsigned ? "llvm.umul.with.overflow" : "llvm.smul.with.overflow");
-        unsigned intrinsic_id = llvm::LLVMLookupIntrinsicID(intrinsic_name, std::strlen(intrinsic_name));
-        llvm::LLVMTypeRef overload_types[] = {llvm::LLVMTypeOf(lhs)};
+        unsigned int intrinsic_id = llvm::LLVMLookupIntrinsicID(intrinsic_name, std::strlen(intrinsic_name));
+        llvm::LLVMTypeRef overload_types[1] = {llvm::LLVMTypeOf(lhs)};
         llvm::LLVMValueRef intrinsic =
             llvm::LLVMGetIntrinsicDeclaration(module_, intrinsic_id, overload_types, 1);
         llvm::LLVMValueRef pair = build_call(intrinsic, {lhs, rhs}, name);
@@ -3527,8 +3523,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         llvm::LLVMValueRef divides_by_zero = llvm::LLVMBuildICmp(builder_, llvm::LLVMIntEQ, rhs, zero, "divzero");
         llvm::LLVMValueRef traps = divides_by_zero;
         if (!is_unsigned) {
-            unsigned bit_width = llvm::LLVMGetIntTypeWidth(int_ty);
-            llvm::LLVMValueRef int_min = llvm::LLVMConstInt(int_ty, std::uint64_t{1} << (bit_width - 1), 0);
+            unsigned int bit_width = llvm::LLVMGetIntTypeWidth(int_ty);
+            llvm::LLVMValueRef int_min = llvm::LLVMConstInt(int_ty, static_cast<std::uint64_t>(1) << (bit_width - 1), 0);
             llvm::LLVMValueRef neg_one = llvm::LLVMConstInt(int_ty, static_cast<std::uint64_t>(-1), 1);
             llvm::LLVMValueRef overflows = llvm::LLVMBuildAnd(builder_, llvm::LLVMBuildICmp(builder_, llvm::LLVMIntEQ, lhs, int_min, "isintmin"),
                                                            llvm::LLVMBuildICmp(builder_, llvm::LLVMIntEQ, rhs, neg_one, "isnegone"),
@@ -3580,8 +3576,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         // below (which runs on the truncated value) still rejects it,
         // because the range it tests against is smaller than every width
         // this can truncate to.
-        unsigned value_bits = llvm::LLVMGetIntTypeWidth(value_ty);
-        unsigned count_bits = llvm::LLVMGetIntTypeWidth(llvm::LLVMTypeOf(rhs));
+        unsigned int value_bits = llvm::LLVMGetIntTypeWidth(value_ty);
+        unsigned int count_bits = llvm::LLVMGetIntTypeWidth(llvm::LLVMTypeOf(rhs));
         llvm::LLVMValueRef count = rhs;
         if (count_bits < value_bits) {
             count = llvm::LLVMBuildZExt(builder_, rhs, value_ty, "shiftcount");
@@ -3623,7 +3619,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
     [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> Codegen::codegen_pointer_offset(llvm::LLVMValueRef base_ptr, llvm::LLVMValueRef offset, const Type& pointer_type, bool negate_offset)
 {
         llvm::LLVMValueRef gep_offset = negate_offset ? llvm::LLVMBuildNeg(builder_, offset, "ptroffset") : offset;
-        llvm::LLVMValueRef gep_indices[] = {gep_offset};
+        llvm::LLVMValueRef gep_indices[1] = {gep_offset};
         auto pointee_llvm_type_result = to_llvm_type(*pointer_type.pointee);
         if (!pointee_llvm_type_result.has_value()) return std::unexpected(std::move(pointee_llvm_type_result).error());
         return llvm::LLVMBuildGEP2(builder_, std::move(pointee_llvm_type_result).value(), base_ptr, gep_indices, 1, "ptrarith");
@@ -3700,7 +3696,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         llvm::LLVMValueRef temp = create_entry_block_alloca(llvm::LLVMTypeOf(value), "materializedtmp");
         llvm::LLVMBuildStore(builder_, value, temp);
         register_full_expression_temporary(*result_type, temp);
-        return LValue{temp, *result_type, alignment_for_type(*result_type)};
+        return Codegen::LValue{temp, *result_type, alignment_for_type(*result_type)};
     }
 
 
@@ -3711,13 +3707,13 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         switch (expr.kind) {
             case ExprKind::Identifier:
                 return [&, this]() -> std::expected<Codegen::LValue, CodegenError> {
-                    const LocalSlot* local = find_local(expr);
+                    const Codegen::LocalSlot* local = find_local(expr);
                     if (local == nullptr) {
-                        if (const GlobalSlot* global = find_visible_global_slot(expr.name, expr.explicit_global_qualification)) {
-                            unsigned raw_alignment = llvm::LLVMGetAlignment(global->global);
-                            std::optional<unsigned> explicit_alignment =
-                                raw_alignment != 0 ? std::optional<unsigned>(raw_alignment) : std::nullopt;
-                            return LValue{global->global, global->type,
+                        if (const Codegen::GlobalSlot* global = find_visible_global_slot(expr.name, expr.explicit_global_qualification); global != nullptr) {
+                            unsigned int raw_alignment = llvm::LLVMGetAlignment(global->global);
+                            std::optional<unsigned int> explicit_alignment =
+                                raw_alignment != 0 ? std::optional<unsigned int>(raw_alignment) : std::nullopt;
+                            return Codegen::LValue{global->global, global->type,
                                           explicit_alignment.has_value() ? explicit_alignment : alignment_for_type(global->type)};
                         }
                         return std::unexpected(CodegenError("use of undeclared variable '" + expr.name + "'",
@@ -3725,7 +3721,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     }
                     if (local->type.kind == TypeKind::Reference) {
                         if (is_interface_reference_type(local->type)) {
-                            return LValue{local->alloca, local->type, alignment_for_type(local->type)};
+                            return Codegen::LValue{local->alloca, local->type, alignment_for_type(local->type)};
                         }
                         // A reference-typed local's own alloca just holds the
                         // address it's bound to (see the VarDecl case below,
@@ -3736,21 +3732,21 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         // referent, exactly like a real C++ reference.
                         llvm::LLVMValueRef referent_ptr =
                             create_load(llvm::LLVMPointerTypeInContext(context_, 0), local->alloca, std::nullopt, "deref");
-                        return LValue{referent_ptr, *local->type.pointee, alignment_for_type(*local->type.pointee)};
+                        return Codegen::LValue{referent_ptr, *local->type.pointee, alignment_for_type(*local->type.pointee)};
                     }
-                    return LValue{local->alloca, local->type, alignment_for_type(local->type)};
+                    return Codegen::LValue{local->alloca, local->type, alignment_for_type(local->type)};
                 }();
 
             case ExprKind::Member:
                 return [&, this]() -> std::expected<Codegen::LValue, CodegenError> {
                     auto base_result = codegen_lvalue(*expr.lhs);
                     if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
-                    LValue base = std::move(base_result).value();
+                    Codegen::LValue base = std::move(base_result).value();
                     if (base.type.kind != TypeKind::Named || !structs_.contains(base.type.name)) {
                         return std::unexpected(CodegenError("member access '." + expr.name + "' on a non-struct type",
                             current_loc_));
                     }
-                    const StructInfo& info = structs_.at(base.type.name);
+                    const Codegen::StructInfo& info = structs_.at(base.type.name);
                     std::optional<std::size_t> field_index_opt = info.find_field_index(expr.name);
                     if (!field_index_opt.has_value()) {
                         return std::unexpected(CodegenError(std::string(info.is_union ? "union '" : "struct '") + base.type.name +
@@ -3759,9 +3755,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     }
                     std::size_t field_index = *field_index_opt;
                     const Type& field_type = info.field_types[field_index];
-                    std::optional<unsigned> field_alignment =
+                    std::optional<unsigned int> field_alignment =
                         info.is_union ? (base.alignment.has_value() ? base.alignment : alignment_for_type(base.type))
-                                      : std::optional<unsigned>(info.field_alignments[field_index]);
+                                      : std::optional<unsigned int>(info.field_alignments[field_index]);
                     llvm::LLVMValueRef field_ptr = info.is_union
                                                  ? llvm::LLVMBuildBitCast(builder_, base.ptr, llvm::LLVMPointerTypeInContext(context_, 0),
                                                                            (expr.name + ".unionfield").c_str())
@@ -3770,7 +3766,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                                                                              expr.name.c_str());
                     if (field_type.kind == TypeKind::Reference) {
                         if (is_interface_reference_type(field_type)) {
-                            return LValue{field_ptr, field_type, field_alignment};
+                            return Codegen::LValue{field_ptr, field_type, field_alignment};
                         }
                         // ch05 §5.12: a Reference-typed field (e.g. a
                         // closure's own by-reference capture) stores just
@@ -3783,16 +3779,16 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         // storage slot.
                         llvm::LLVMValueRef referent_ptr =
                             create_load(llvm::LLVMPointerTypeInContext(context_, 0), field_ptr, field_alignment, "fieldderef");
-                        return LValue{referent_ptr, *field_type.pointee, alignment_for_type(*field_type.pointee)};
+                        return Codegen::LValue{referent_ptr, *field_type.pointee, alignment_for_type(*field_type.pointee)};
                     }
-                    return LValue{field_ptr, field_type, field_alignment};
+                    return Codegen::LValue{field_ptr, field_type, field_alignment};
                 }();
 
             case ExprKind::Subscript:
                 return [&, this]() -> std::expected<Codegen::LValue, CodegenError> {
                     auto base_result = codegen_lvalue(*expr.lhs);
                     if (!base_result.has_value()) return std::unexpected(std::move(base_result).error());
-                    LValue base = std::move(base_result).value();
+                    Codegen::LValue base = std::move(base_result).value();
                     if (base.type.kind == TypeKind::Named &&
                         (base.type.name == "std::vector" || base.type.name == "vector" ||
                          base.type.name.starts_with("std::vector.") || base.type.name.starts_with("vector."))) {
@@ -3800,7 +3796,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         if (struct_it == structs_.end()) {
                             return std::unexpected(CodegenError("unknown vector layout", current_loc_));
                         }
-                        const StructInfo& info = struct_it->second;
+                        const Codegen::StructInfo& info = struct_it->second;
                         std::optional<std::size_t> data_index_opt = info.find_field_index("data_");
                         std::optional<std::size_t> size_index_opt = info.find_field_index("size_");
                         if (!data_index_opt.has_value() || !size_index_opt.has_value()) {
@@ -3827,12 +3823,12 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         if (!index_result.has_value()) return std::unexpected(std::move(index_result).error());
                         llvm::LLVMValueRef index = std::move(index_result).value();
                         emit_span_bounds_check(index, size);
-                        llvm::LLVMValueRef gep_indices_vec[] = {index};
+                        llvm::LLVMValueRef gep_indices_vec[1] = {index};
                         auto element_llvm_type_result = to_llvm_type(element_type);
                         if (!element_llvm_type_result.has_value()) return std::unexpected(std::move(element_llvm_type_result).error());
                         llvm::LLVMValueRef elem_ptr =
                             llvm::LLVMBuildGEP2(builder_, std::move(element_llvm_type_result).value(), data, gep_indices_vec, 1, "vecelem");
-                        return LValue{elem_ptr, element_type, alignment_for_type(element_type)};
+                        return Codegen::LValue{elem_ptr, element_type, alignment_for_type(element_type)};
                     }
                     if (base.type.kind == TypeKind::Span) {
                         auto span_type_result = to_llvm_type(base.type);
@@ -3853,24 +3849,24 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         // out-of-bounds index at compile time; it's always this
                         // same runtime check instead.
                         emit_span_bounds_check(index, size);
-                        llvm::LLVMValueRef gep_indices_span[] = {index};
+                        llvm::LLVMValueRef gep_indices_span[1] = {index};
                         auto pointee_llvm_type_result = to_llvm_type(*base.type.pointee);
                         if (!pointee_llvm_type_result.has_value()) return std::unexpected(std::move(pointee_llvm_type_result).error());
                         llvm::LLVMValueRef elem_ptr =
                             llvm::LLVMBuildGEP2(builder_, std::move(pointee_llvm_type_result).value(), data, gep_indices_span, 1, "elemtmp");
-                        return LValue{elem_ptr, *base.type.pointee, alignment_for_type(*base.type.pointee)};
+                        return Codegen::LValue{elem_ptr, *base.type.pointee, alignment_for_type(*base.type.pointee)};
                     }
                     if (base.type.kind == TypeKind::Pointer) {
                         llvm::LLVMValueRef data = llvm::LLVMBuildLoad2(builder_, llvm::LLVMPointerTypeInContext(context_, 0), base.ptr, "data");
                         auto index_result = codegen_subscript_index(*expr.rhs);
                         if (!index_result.has_value()) return std::unexpected(std::move(index_result).error());
                         llvm::LLVMValueRef index = std::move(index_result).value();
-                        llvm::LLVMValueRef gep_indices_ptr[] = {index};
+                        llvm::LLVMValueRef gep_indices_ptr[1] = {index};
                         auto pointee_llvm_type_result = to_llvm_type(*base.type.pointee);
                         if (!pointee_llvm_type_result.has_value()) return std::unexpected(std::move(pointee_llvm_type_result).error());
                         llvm::LLVMValueRef elem_ptr =
                             llvm::LLVMBuildGEP2(builder_, std::move(pointee_llvm_type_result).value(), data, gep_indices_ptr, 1, "elemtmp");
-                        return LValue{elem_ptr, *base.type.pointee, alignment_for_type(*base.type.pointee)};
+                        return Codegen::LValue{elem_ptr, *base.type.pointee, alignment_for_type(*base.type.pointee)};
                     }
                     if (base.type.kind != TypeKind::Array) {
                         // [over.sub]: a class base means an operator[]
@@ -3880,7 +3876,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         const Function* subscript_fn = resolve_subscript_operator_function(expr);
                         auto operator_result = codegen_subscript_operator_call(expr);
                         if (!operator_result.has_value()) return std::unexpected(std::move(operator_result).error());
-                        if (std::optional<llvm::LLVMValueRef> value = std::move(operator_result).value()) {
+                        if (std::optional<llvm::LLVMValueRef> value = std::move(operator_result).value(); value.has_value()) {
                             std::optional<Type> result_type = infer_type(expr);
                             if (!result_type.has_value()) {
                                 return std::unexpected(CodegenError(describe_failed_subscript(expr, base.type), expr.loc));
@@ -3891,12 +3887,12 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                             // pointer itself and read the address as the
                             // element's value.
                             if (subscript_fn != nullptr && subscript_fn->return_type.kind == TypeKind::Reference) {
-                                return LValue{*value, *result_type, alignment_for_type(*result_type)};
+                                return Codegen::LValue{*value, *result_type, alignment_for_type(*result_type)};
                             }
                             llvm::LLVMValueRef temp =
                                 create_entry_block_alloca(llvm::LLVMTypeOf(*value), "subscriptlvaluetmp");
                             llvm::LLVMBuildStore(builder_, *value, temp);
-                            return LValue{temp, *result_type, alignment_for_type(*result_type)};
+                            return Codegen::LValue{temp, *result_type, alignment_for_type(*result_type)};
                         }
                         // [over.sub]/1: a class base has no built-in
                         // candidate, so no `operator[]` overload is the
@@ -3934,12 +3930,12 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         emit_array_bounds_check(index, base.type.array_size);
                     }
                     llvm::LLVMValueRef zero = llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), 0, 0);
-                    llvm::LLVMValueRef gep_indices_arr[] = {zero, index};
+                    llvm::LLVMValueRef gep_indices_arr[2] = {zero, index};
                     auto base_llvm_type_result = to_llvm_type(base.type);
                     if (!base_llvm_type_result.has_value()) return std::unexpected(std::move(base_llvm_type_result).error());
                     llvm::LLVMValueRef elem_ptr =
                         llvm::LLVMBuildGEP2(builder_, std::move(base_llvm_type_result).value(), base.ptr, gep_indices_arr, 2, "elemtmp");
-                    return LValue{elem_ptr, *base.type.element, alignment_for_type(*base.type.element)};
+                    return Codegen::LValue{elem_ptr, *base.type.element, alignment_for_type(*base.type.element)};
                 }();
 
             case ExprKind::Call:
@@ -3969,7 +3965,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     // in the by-value case) is harmless either way.
                     auto result_result = codegen_call(expr);
                     if (!result_result.has_value()) return std::unexpected(std::move(result_result).error());
-                    CallResult result = std::move(result_result).value();
+                    Codegen::CallResult result = std::move(result_result).value();
                     if (result.callee_def != nullptr && result.callee_def->return_type.kind == TypeKind::Reference) {
                         if (is_interface_reference_type(result.callee_def->return_type)) {
                             auto slot_type_result = to_llvm_type(result.callee_def->return_type);
@@ -3977,9 +3973,9 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                             llvm::LLVMValueRef slot =
                                 create_entry_block_alloca(std::move(slot_type_result).value(), "ifacereftmp");
                             create_store(result.value, slot, alignment_for_type(result.callee_def->return_type));
-                            return LValue{slot, result.callee_def->return_type, alignment_for_type(result.callee_def->return_type)};
+                            return Codegen::LValue{slot, result.callee_def->return_type, alignment_for_type(result.callee_def->return_type)};
                         }
-                        return LValue{result.value, *result.callee_def->return_type.pointee,
+                        return Codegen::LValue{result.value, *result.callee_def->return_type.pointee,
                                       alignment_for_type(*result.callee_def->return_type.pointee)};
                     }
                     // A by-value-returning call (e.g. a method call's own
@@ -3999,7 +3995,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     // [class.temporary]/4: `make().m()` materializes the
                     // receiver here and nothing else ever owns it.
                     register_full_expression_temporary(*result_type, temp);
-                    return LValue{temp, *result_type, alignment_for_type(*result_type)};
+                    return Codegen::LValue{temp, *result_type, alignment_for_type(*result_type)};
                 }();
 
             case ExprKind::Lambda:
@@ -4014,7 +4010,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     auto ptr_result = codegen_construct_lambda(expr);
                     if (!ptr_result.has_value()) return std::unexpected(std::move(ptr_result).error());
                     llvm::LLVMValueRef ptr = std::move(ptr_result).value();
-                    return LValue{ptr, named_type(expr.name),
+                    return Codegen::LValue{ptr, named_type(expr.name),
                                   alignment_for_type(named_type(expr.name))};
                 }();
 
@@ -4042,11 +4038,11 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                             if (!composite_llvm_type_result.has_value()) {
                                 return std::unexpected(std::move(composite_llvm_type_result).error());
                             }
-                            std::optional<unsigned> composite_align = alignment_for_type(*composite);
+                            std::optional<unsigned int> composite_align = alignment_for_type(*composite);
                             llvm::LLVMValueRef materialized = create_entry_block_alloca(
                                 std::move(composite_llvm_type_result).value(), "cond.materialized", composite_align);
                             create_store(std::move(value_result).value(), materialized, composite_align);
-                            return LValue{materialized, *composite, composite_align};
+                            return Codegen::LValue{materialized, *composite, composite_align};
                         }
                     }
                     auto cond_result = codegen_contextual_bool_i1(*expr.lhs);
@@ -4061,14 +4057,14 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     llvm::LLVMPositionBuilderAtEnd(builder_, then_block);
                     auto then_lvalue_result = codegen_lvalue(*expr.rhs);
                     if (!then_lvalue_result.has_value()) return std::unexpected(std::move(then_lvalue_result).error());
-                    LValue then_lvalue = std::move(then_lvalue_result).value();
+                    Codegen::LValue then_lvalue = std::move(then_lvalue_result).value();
                     llvm::LLVMBuildBr(builder_, merge_block);
                     llvm::LLVMBasicBlockRef then_end = llvm::LLVMGetInsertBlock(builder_);
 
                     llvm::LLVMPositionBuilderAtEnd(builder_, else_block);
                     auto else_lvalue_result = codegen_lvalue(*expr.third);
                     if (!else_lvalue_result.has_value()) return std::unexpected(std::move(else_lvalue_result).error());
-                    LValue else_lvalue = std::move(else_lvalue_result).value();
+                    Codegen::LValue else_lvalue = std::move(else_lvalue_result).value();
                     llvm::LLVMBuildBr(builder_, merge_block);
                     llvm::LLVMBasicBlockRef else_end = llvm::LLVMGetInsertBlock(builder_);
 
@@ -4078,10 +4074,10 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         return std::unexpected(CodegenError("expression is not assignable", current_loc_));
                     }
                     llvm::LLVMValueRef phi = llvm::LLVMBuildPhi(builder_, llvm::LLVMTypeOf(then_lvalue.ptr), "cond.lvalue");
-                    llvm::LLVMValueRef incoming_values[] = {then_lvalue.ptr, else_lvalue.ptr};
-                    llvm::LLVMBasicBlockRef incoming_blocks[] = {then_end, else_end};
+                    llvm::LLVMValueRef incoming_values[2] = {then_lvalue.ptr, else_lvalue.ptr};
+                    llvm::LLVMBasicBlockRef incoming_blocks[2] = {then_end, else_end};
                     llvm::LLVMAddIncoming(phi, incoming_values, incoming_blocks, 2);
-                    return LValue{phi, then_lvalue.type, then_lvalue.alignment};
+                    return Codegen::LValue{phi, then_lvalue.type, then_lvalue.alignment};
                 }();
 
             case ExprKind::Move:
@@ -4101,7 +4097,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     if (!expr_llvm_type_result.has_value()) return std::unexpected(std::move(expr_llvm_type_result).error());
                     llvm::LLVMValueRef slot = create_entry_block_alloca(std::move(expr_llvm_type_result).value(), "castptrtmp");
                     create_store(value, slot, alignment_for_type(expr.type));
-                    return LValue{slot, expr.type, alignment_for_type(expr.type)};
+                    return Codegen::LValue{slot, expr.type, alignment_for_type(expr.type)};
                 }();
 
             case ExprKind::Unary:
@@ -4121,18 +4117,18 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                                 expr.loc));
                         }
                         if (unary_fn->return_type.kind == TypeKind::Reference) {
-                            return LValue{value, *result_type, alignment_for_type(*result_type)};
+                            return Codegen::LValue{value, *result_type, alignment_for_type(*result_type)};
                         }
                         llvm::LLVMValueRef temp =
                             create_entry_block_alloca(llvm::LLVMTypeOf(value), "operatorlvaluetmp");
                         llvm::LLVMBuildStore(builder_, value, temp);
                         register_full_expression_temporary(*result_type, temp);
-                        return LValue{temp, *result_type, alignment_for_type(*result_type)};
+                        return Codegen::LValue{temp, *result_type, alignment_for_type(*result_type)};
                     }
                     if (expr.unary_op == UnaryOp::PreInc || expr.unary_op == UnaryOp::PreDec) {
                         auto lv_result = codegen_lvalue(*expr.lhs);
                         if (!lv_result.has_value()) return std::unexpected(std::move(lv_result).error());
-                        LValue lv = std::move(lv_result).value();
+                        Codegen::LValue lv = std::move(lv_result).value();
                         auto old_value_result = load_value(lv);
                         if (!old_value_result.has_value()) return std::unexpected(std::move(old_value_result).error());
                         llvm::LLVMValueRef old_value = std::move(old_value_result).value();
@@ -4168,12 +4164,13 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     if (operand_underlying.kind == TypeKind::Named) {
                         auto operand_result = codegen_lvalue(*expr.lhs);
                         if (!operand_result.has_value()) return std::unexpected(std::move(operand_result).error());
-                        LValue operand = std::move(operand_result).value();
-                        std::vector<ExprPtr> no_args;
+                        Codegen::LValue operand = std::move(operand_result).value();
+                        std::vector<ExprPtr> no_args{};
                         bool receiver_is_mutable = !is_read_only_place(*expr.lhs);
                         if (const Function* callee_def =
                                 resolve_overload_by_type(operand.type.name + "_operator_deref", no_args, 1,
-                                                         receiver_is_mutable, expr.lhs.get())) {
+                                                         receiver_is_mutable, expr.lhs.get());
+                            callee_def != nullptr) {
                             llvm::LLVMValueRef callee = llvm::LLVMGetNamedFunction(module_, overload_names_.at(callee_def).c_str());
                             if (callee == nullptr) {
                                 return std::unexpected(CodegenError("internal error: no generated code for '" +
@@ -4186,7 +4183,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                                                        "' must return a reference to be assignable",
                                     current_loc_));
                             }
-                            return LValue{referent_ptr, *callee_def->return_type.pointee,
+                            return Codegen::LValue{referent_ptr, *callee_def->return_type.pointee,
                                           alignment_for_type(*callee_def->return_type.pointee)};
                         }
                     }
@@ -4220,7 +4217,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     if (operand_has_storage) {
                         auto operand_result = codegen_lvalue(*expr.lhs);
                         if (!operand_result.has_value()) return std::unexpected(std::move(operand_result).error());
-                        LValue operand = std::move(operand_result).value();
+                        Codegen::LValue operand = std::move(operand_result).value();
                         pointee_ptr =
                            create_load(llvm::LLVMPointerTypeInContext(context_, 0), operand.ptr, operand.alignment, "deref");
                     } else {
@@ -4228,7 +4225,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                         if (!pointee_ptr_result.has_value()) return std::unexpected(std::move(pointee_ptr_result).error());
                         pointee_ptr = std::move(pointee_ptr_result).value();
                     }
-                    return LValue{pointee_ptr, *operand_underlying.pointee, alignment_for_type(*operand_underlying.pointee)};
+                    return Codegen::LValue{pointee_ptr, *operand_underlying.pointee, alignment_for_type(*operand_underlying.pointee)};
                 }();
 
             case ExprKind::Binary:
@@ -4257,7 +4254,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                     llvm::LLVMValueRef value = std::move(value_result).value();
                     if (operator_fn->return_type.kind == TypeKind::Reference) {
-                        return LValue{value, *result_type, alignment_for_type(*result_type)};
+                        return Codegen::LValue{value, *result_type, alignment_for_type(*result_type)};
                     }
                     llvm::LLVMValueRef temp = create_entry_block_alloca(llvm::LLVMTypeOf(value), "operatorlvaluetmp");
                     llvm::LLVMBuildStore(builder_, value, temp);
@@ -4265,7 +4262,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     // materialized only to serve as the second `+`'s
                     // receiver, so it dies with the full-expression.
                     register_full_expression_temporary(*result_type, temp);
-                    return LValue{temp, *result_type, alignment_for_type(*result_type)};
+                    return Codegen::LValue{temp, *result_type, alignment_for_type(*result_type)};
                 }();
 
             case ExprKind::StringLiteral: {
@@ -4277,7 +4274,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 // nowhere to subscript.
                 Type literal_type = string_literal_type(expr.name.size());
                 llvm::LLVMValueRef global = string_literal_global(expr.name);
-                return LValue{global, literal_type, alignment_for_type(literal_type)};
+                return Codegen::LValue{global, literal_type, alignment_for_type(literal_type)};
             }
 
             default:
@@ -4302,8 +4299,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
         llvm::LLVMValueRef arg = std::move(arg_result).value();
 
-        llvm::LLVMValueRef format;
-        llvm::LLVMValueRef printf_arg;
+        llvm::LLVMValueRef format = nullptr;
+        llvm::LLVMValueRef printf_arg = nullptr;
         if (expr.name == "print_int") {
             format = llvm::LLVMBuildGlobalString(builder_, "%d\n", "fmt_int");
             printf_arg = arg;
@@ -4332,11 +4329,11 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
     llvm::LLVMValueRef Codegen::get_or_declare_printf()
 {
-        if (llvm::LLVMValueRef existing = llvm::LLVMGetNamedFunction(module_, "printf")) {
+        if (llvm::LLVMValueRef existing = llvm::LLVMGetNamedFunction(module_, "printf"); existing != nullptr) {
             return existing;
         }
         llvm::LLVMTypeRef char_ptr_type = llvm::LLVMPointerTypeInContext(context_, 0);
-        llvm::LLVMTypeRef printf_param_types[] = {char_ptr_type};
+        llvm::LLVMTypeRef printf_param_types[1] = {char_ptr_type};
         llvm::LLVMTypeRef printf_type =
             llvm::LLVMFunctionType(llvm::LLVMInt32TypeInContext(context_), printf_param_types, 1, /*IsVarArg=*/1);
         return llvm::LLVMAddFunction(module_, "printf", printf_type);
@@ -4363,7 +4360,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         auto select_member = [&, this](const Expr& receiver_expr, const Expr& arg_expr,
                                        const Type* receiver_named) -> const Function* {
             if (receiver_named == nullptr || receiver_named->kind != TypeKind::Named) return nullptr;
-            std::vector<ExprPtr> overload_args;
+            std::vector<ExprPtr> overload_args{};
             overload_args.push_back(deep_clone_expr_with_loc(arg_expr, expr.loc));
             return resolve_overload_by_type(receiver_named->name + "_" + operator_name, overload_args,
                                             /*param_offset=*/1, !is_read_only_place(receiver_expr), &receiver_expr);
@@ -4378,11 +4375,11 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         // The non-member candidates ([over.match.oper]/2.2), looked up at
         // the point of use and in the operand types' own namespaces
         // ([basic.lookup.argdep]).
-        std::vector<std::string> keys;
+        std::vector<std::string> keys{};
         keys.push_back(operator_name);
         {
             const std::vector<std::string>& lookup_path = current_lookup_namespace_path();
-            std::string qualified;
+            std::string qualified{};
             for (std::size_t i = 0; i < lookup_path.size(); i++) {
                 qualified += lookup_path[i];
                 qualified += "::";
@@ -4398,7 +4395,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         add_associated(lhs_named);
         add_associated(rhs_named);
         for (const std::string& key : keys) {
-            std::vector<ExprPtr> free_args;
+            std::vector<ExprPtr> free_args{};
             free_args.push_back(deep_clone_expr_with_loc(*expr.lhs, expr.loc));
             free_args.push_back(deep_clone_expr_with_loc(*expr.rhs, expr.loc));
             if (const Function* free_fn = resolve_overload_by_type(key, free_args, /*param_offset=*/0);
@@ -4432,7 +4429,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         bool lhs_is_record = lhs_named != nullptr && lhs_named->kind == TypeKind::Named && is_named_record_type(*lhs_named);
         bool rhs_is_record = rhs_named != nullptr && rhs_named->kind == TypeKind::Named && is_named_record_type(*rhs_named);
         if (!lhs_is_record && !rhs_is_record) return std::optional<llvm::LLVMValueRef>{};
-        std::string key;
+        std::string key{};
         std::size_t param_offset = 0;
         bool receiver_is_rhs = false;
         const Function* selected =
@@ -4463,7 +4460,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                                              binary_operator_method_name(expr.binary_op), lhs_is_record),
                 current_loc_));
         }
-        ExprPtr operator_call;
+        ExprPtr operator_call{};
         if (param_offset == 1) {
             const Expr& receiver = receiver_is_rhs ? *expr.rhs : *expr.lhs;
             const Expr& argument = receiver_is_rhs ? *expr.lhs : *expr.rhs;
@@ -4488,7 +4485,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         std::optional<Type> base_type = infer_lvalue_type(*expr.lhs);
         const Type* base = operator_operand_type_or_null(base_type);
         if (base == nullptr || base->kind != TypeKind::Named || !is_named_record_type(*base)) return nullptr;
-        std::vector<ExprPtr> index_args;
+        std::vector<ExprPtr> index_args{};
         index_args.push_back(deep_clone_expr_with_loc(*expr.rhs, expr.loc));
         return resolve_overload_by_type(base->name + "_operator_subscript", index_args, /*param_offset=*/1,
                                         !is_read_only_place(*expr.lhs), expr.lhs.get());
@@ -4517,7 +4514,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         const Type* operand = operator_operand_type_or_null(operand_type);
         if (operand == nullptr || operand->kind != TypeKind::Named || !is_named_record_type(*operand)) return nullptr;
         std::string key = operand->name + "_" + operator_name;
-        std::vector<ExprPtr> no_args;
+        std::vector<ExprPtr> no_args{};
         const Function* selected = resolve_overload_by_type(key, no_args, /*param_offset=*/1,
                                                            !is_read_only_place(*expr.lhs), expr.lhs.get());
         if (selected != nullptr && out_key != nullptr) *out_key = operator_name;
@@ -4538,7 +4535,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         if (operand == nullptr || operand->kind != TypeKind::Named || !is_named_record_type(*operand)) {
             return std::optional<llvm::LLVMValueRef>{};
         }
-        std::string key;
+        std::string key{};
         const Function* selected = resolve_unary_operator_function(expr, &key);
         if (selected == nullptr) {
             // [expr.unary.op]/9: `!`'s operand is contextually converted
@@ -4573,7 +4570,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
             return [&, this]() -> std::expected<llvm::LLVMValueRef, CodegenError> {
                 auto lv_result = codegen_lvalue(*expr.lhs);
                 if (!lv_result.has_value()) return std::unexpected(std::move(lv_result).error());
-                LValue lv = std::move(lv_result).value();
+                Codegen::LValue lv = std::move(lv_result).value();
                 // spec §6.5: `y = x;` -- copy assignment (movecheck has
                 // already verified `x` is the exact same class type and
                 // that the class is copy-assignable) -- checked *before*
@@ -4590,7 +4587,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                     auto src_lv_result = codegen_lvalue(*expr.rhs);
                     if (!src_lv_result.has_value()) return std::unexpected(std::move(src_lv_result).error());
                     llvm::LLVMValueRef src_ptr = std::move(src_lv_result).value().ptr;
-                    if (const Function* user_assign = find_user_declared_copy_assign_ast(lv.type.name)) {
+                    if (const Function* user_assign = find_user_declared_copy_assign_ast(lv.type.name); user_assign != nullptr) {
                         llvm::LLVMValueRef op = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_assign).c_str());
                         build_call(op, {lv.ptr, src_ptr});
                     } else {
@@ -4722,11 +4719,11 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                 {
                     auto operator_result = codegen_binary_operator_function_call(expr, lhs_type, rhs_type);
                     if (!operator_result.has_value()) return std::unexpected(std::move(operator_result).error());
-                    if (std::optional<llvm::LLVMValueRef> value = std::move(operator_result).value()) return *value;
+                    if (std::optional<llvm::LLVMValueRef> value = std::move(operator_result).value(); value.has_value()) return *value;
                 }
                 auto lv_result = codegen_lvalue(*expr.lhs);
                 if (!lv_result.has_value()) return std::unexpected(std::move(lv_result).error());
-                LValue lv = std::move(lv_result).value();
+                Codegen::LValue lv = std::move(lv_result).value();
                 const Type& operand_type = lv.type.kind == TypeKind::Reference && lv.type.pointee ? *lv.type.pointee : lv.type;
                 auto lv_llvm_type_result = to_llvm_type(lv.type);
                 if (!lv_llvm_type_result.has_value()) return std::unexpected(std::move(lv_llvm_type_result).error());
@@ -4846,7 +4843,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
         {
             auto operator_result = codegen_binary_operator_function_call(expr, lhs_type, rhs_type);
             if (!operator_result.has_value()) return std::unexpected(std::move(operator_result).error());
-            if (std::optional<llvm::LLVMValueRef> value = std::move(operator_result).value()) return *value;
+            if (std::optional<llvm::LLVMValueRef> value = std::move(operator_result).value(); value.has_value()) return *value;
         }
 
         // `&&`/`||` short-circuit like ordinary C++; everything else is a
@@ -4958,7 +4955,7 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
                                    current_loc_));
             }
         }
-        std::optional<Type> context_type;
+        std::optional<Type> context_type{};
         if (!pointer_result_type.has_value() && lhs_is_literal && !rhs_is_literal) {
             context_type = lhs_type.has_value() && rhs_type.has_value() ? binary_operand_type(*rhs_type) : infer_type(*expr.rhs);
         } else if (!pointer_result_type.has_value() && rhs_is_literal && !lhs_is_literal) {
@@ -5119,8 +5116,8 @@ unsigned scalar_bit_width(llvm::LLVMTypeRef ty)
 
         llvm::LLVMPositionBuilderAtEnd(builder_, merge_block);
         llvm::LLVMValueRef phi = llvm::LLVMBuildPhi(builder_, llvm::LLVMInt8TypeInContext(context_), "logictmp");
-        llvm::LLVMValueRef incoming_values[] = {lhs, rhs};
-        llvm::LLVMBasicBlockRef incoming_blocks[] = {lhs_block, rhs_end_block};
+        llvm::LLVMValueRef incoming_values[2] = {lhs, rhs};
+        llvm::LLVMBasicBlockRef incoming_blocks[2] = {lhs_block, rhs_end_block};
         llvm::LLVMAddIncoming(phi, incoming_values, incoming_blocks, 2);
         return phi;
     }
