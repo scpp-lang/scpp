@@ -5822,7 +5822,7 @@ private:
                 advance(); // '{'
                 while (!check(TokenKind::RBrace) && !check(TokenKind::EndOfFile)) {
                     if (check(TokenKind::KwStruct)) {
-                        auto struct_result = parse_struct_def(program, /*is_exported=*/false);
+                        auto struct_result = parse_struct_def(program, is_exported);
                         if (!struct_result.has_value()) return std::unexpected(std::move(struct_result).error());
                         StructDef __struct_result_value = std::move(struct_result).value();
                         program.structs.push_back(std::move(__struct_result_value));
@@ -5832,6 +5832,7 @@ private:
                         auto union_result = parse_union_def();
                         if (!union_result.has_value()) return std::unexpected(std::move(union_result).error());
                         StructDef __union_result_value = std::move(union_result).value();
+                        __union_result_value.is_exported = is_exported;
                         program.structs.push_back(std::move(__union_result_value));
                         continue;
                     }
@@ -5840,6 +5841,8 @@ private:
                     if (!item_fn_result.has_value()) return std::unexpected(std::move(item_fn_result).error());
                     Function item_fn = std::move(item_fn_result).value();
                     item_fn.loc = item_loc;
+                    item_fn.is_exported = is_exported;
+                    item_fn.namespace_path = namespace_stack_;
                     program.functions.push_back(std::move(item_fn));
                 }
                 if (auto _r = expect(TokenKind::RBrace, "'}'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
@@ -5851,6 +5854,8 @@ private:
             if (!fn_result.has_value()) return std::unexpected(std::move(fn_result).error());
             Function fn = std::move(fn_result).value();
             fn.loc = loc;
+            fn.is_exported = is_exported;
+            fn.namespace_path = namespace_stack_;
             program.functions.push_back(std::move(fn));
             return {};
         }

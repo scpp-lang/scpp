@@ -6503,6 +6503,10 @@ private:
     return {};
 }
 
+} // namespace scpp
+
+export namespace scpp {
+
 [[nodiscard]] std::expected<void, ConstexprError> fold_immediate_calls(Program& program, ConstexprLimits limits) {
     ConstexprEngine engine{program, limits};
     AlignmentResolver aligner{program, engine};

@@ -1,0 +1,16 @@
+manifest-version = 1
+
+[package]
+name = "scpp-driver"
+version = "0.1.0"
+
+[dependencies]
+std = { path = "../../libs/std" }
+scpp-compiler = { path = ".." }
+scpp-movecheck = { path = "../compiler/movecheck" }
+scpp-codegen = { path = "../compiler/codegen" }
+llvm = { path = "../../libs/llvm" }
+
+[[lib]]
+name = "scpp-driver"
+sources = ["driver.cppm"]

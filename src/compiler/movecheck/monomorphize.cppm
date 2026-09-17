@@ -6323,13 +6323,15 @@ private:
         }
 
         std::optional<Type> resolved_type{};
+        const std::string ctor_name = expr.name + "_new";
+        const std::string ctor_dot = ctor_name + ".";
 
         for (const Function& tmpl : program_.functions) {
-            if (!((tmpl.name == expr.name + "_new") ||
-                  (tmpl.name.starts_with(expr.name + "_new.") ||
-                   (!tmpl.member_owner_class.empty() && tmpl.name.ends_with(expr.name + "_new") &&
-                    tmpl.name.size() > expr.name.size() + 4 &&
-                    tmpl.name[tmpl.name.size() - (expr.name.size() + 4) - 1] == '.'))) ||
+            if (!((tmpl.name == ctor_name) ||
+                  (tmpl.name.starts_with(ctor_dot) ||
+                   (!tmpl.member_owner_class.empty() && tmpl.name.ends_with(ctor_name) &&
+                    tmpl.name.size() > ctor_name.size() &&
+                    tmpl.name[tmpl.name.size() - ctor_name.size() - 1] == '.'))) ||
                 !compile_time_dependency_visible(tmpl, body)) {
                 continue;
             }

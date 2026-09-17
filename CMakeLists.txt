@@ -136,7 +136,7 @@ add_library(scpp_driver)
 target_sources(scpp_driver
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/driver.cppm)
+            src/driver/driver.cppm)
 # driver.cppm itself `import llvm;` (for LLVMTargetDataRef and the
 # native-target-init bridge from the `:target` partition, and for
 # target-triple lookup, target-machine creation, and object-file emission
@@ -144,6 +144,9 @@ target_sources(scpp_driver
 # `llvm` target is linked here explicitly, alongside ${LLVM_LIBS} for the
 # real LLVM-C symbols every partition's own declarations ultimately
 # resolve to.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(scpp_driver PRIVATE -Wno-error=unknown-attributes)
+endif()
 target_link_libraries(scpp_driver PUBLIC scpp_ast scpp_parser scpp_codegen scpp_movecheck scpp_constexpr llvm ${LLVM_LIBS})
 
 add_library(scpp_project)

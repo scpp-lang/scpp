@@ -314,6 +314,8 @@ private:
     std::unordered_map<std::string, GlobalSlot> globals_;
     std::unordered_map<std::string, StructInfo> structs_;
     std::unordered_set<std::string> declaring_aggregates_;
+    std::unordered_map<std::string, std::vector<const Function*>> call_candidates_cache_with_receiver_{};
+    std::unordered_map<std::string, std::vector<const Function*>> call_candidates_cache_no_receiver_{};
     // ch05 §5.10: each Function's actual llvm::LLVM symbol name -- the plain
     // `fn.name` unchanged for the overwhelmingly common case (exactly one
     // function under that name; critically, this is what keeps `main`/
