@@ -1,3 +1,4 @@
+import std;
 import scpp.cli;
 
 int main(int argc, char** argv) {
