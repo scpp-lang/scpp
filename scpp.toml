@@ -1,4 +1,4 @@
 manifest-version = 1
 
 [workspace]
-members = ["libs/std", "libs/scpp", "libs/llvm", "src", "src/compiler/movecheck", "src/compiler/codegen", "src/driver", "src/project", "applications/httpserver"]
+members = ["libs/std", "libs/scpp", "libs/llvm", "src", "src/compiler/movecheck", "src/compiler/codegen", "src/driver", "src/project", "applications/httpserver", "src/cli"]
