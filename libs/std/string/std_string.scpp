@@ -13,6 +13,8 @@
 // directly -- only `import std;`, then `std::string`.
 export module std:string;
 
+import :cstdlib;
+
 // The extern "C" wrapper functions stay at file scope, *outside*
 // `namespace std` -- they're plain C symbols (real C linkage, never
 // namespace-qualified or mangled regardless of enclosing namespace, ch02

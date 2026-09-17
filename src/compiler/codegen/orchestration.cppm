@@ -223,26 +223,20 @@ namespace scpp {
         for (const Function& fn : program.functions) {
             if (is_never_compiled(fn)) continue;
             bool defined_a_body = false;
-            if (fn.body != nullptr) {
-                if (auto r = define_function(fn); !r.has_value()) return std::unexpected(std::move(r).error());
-                defined_a_body = true;
-            } else if (!fn.owning_module.empty() && fn.is_exported) {
-                // A defaulted special member (e.g. `virtual ~X() = default;`)
-                // or an inherited-method forwarding stub recovered from an
-                // *imported and re-exported* module (`export import`, so
-                // this clone's own is_exported is true too -- see
-                // clone_function_declaration's `is_reexport && fn.is_exported`)
-                // keeps its is_defaulted/forwards_to flag through cloning
-                // (merge_imported_module only clears the clone's own body).
+            if (!fn.owning_module.empty() && fn.is_exported) {
+                // A defaulted special member (e.g. `virtual ~X() = default;`),
+                // an inherited-method forwarding stub, or a constexpr function
+                // whose body had to stay available for constant evaluation,
+                // recovered from an *imported and re-exported* module (`export import`,
+                // so this clone's own is_exported is true too -- see
+                // clone_function_declaration's `is_reexport && fn.is_exported`).
                 // Since it's also externally linked here (declare_function's
                 // own has_definition/is_exported linkage check), defining a
-                // fresh synthesized body for it too would collide at link
+                // fresh body for it too would collide at link
                 // time with the identical external definition its owning
                 // module's own compilation already emits -- only
-                // reproducible with a non-template exported class re-
-                // exported by a second package, which is why nothing before
-                // std's own `runtime_error` (re-exported by the "scpp"
-                // package) ever triggered it. A *plain* (non-reexporting)
+                // reproducible with an exported symbol re-
+                // exported by a second package. A *plain* (non-reexporting)
                 // `import`'s own clone keeps is_exported false, so it still
                 // falls through to the branches below exactly as before --
                 // deliberately so, since that gives it internal linkage (no
@@ -257,6 +251,9 @@ namespace scpp {
                 // defining this one; here there is nothing left to do
                 // beyond the plain declaration declare_function already
                 // emitted above.
+            } else if (fn.body != nullptr) {
+                if (auto r = define_function(fn); !r.has_value()) return std::unexpected(std::move(r).error());
+                defined_a_body = true;
             } else if (fn.is_deleted) {
                 if (auto r = define_deleted_function(fn); !r.has_value()) return std::unexpected(std::move(r).error());
                 defined_a_body = true;
