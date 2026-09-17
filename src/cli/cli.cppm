@@ -906,7 +906,7 @@ int run(int argc, char** argv) {
                 return 1;
             }
         }
-        return scpp::build_manifest_project(std::filesystem::current_path(), options);
+        return scpp::build_manifest_project(std::filesystem::current_path().string(), options);
     }
     if (argc >= 2) {
         std::string_view output_path = "a.out";
@@ -961,8 +961,8 @@ int run(int argc, char** argv) {
                          emit_debug_info);
     }
 
-    if (scpp::find_project_manifest(std::filesystem::current_path()).has_value()) {
-        return scpp::build_manifest_project(std::filesystem::current_path(), scpp::ProjectBuildOptions{});
+    if (scpp::find_project_manifest(std::filesystem::current_path().string()).has_value()) {
+        return scpp::build_manifest_project(std::filesystem::current_path().string(), scpp::ProjectBuildOptions{});
     }
 
     std::cout << "Hello from " << name << " " << version << "!\n";

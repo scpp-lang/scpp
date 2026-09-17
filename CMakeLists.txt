@@ -153,7 +153,10 @@ add_library(scpp_project)
 target_sources(scpp_project
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/project.cppm)
+            src/project/project.cppm)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(scpp_project PRIVATE -Wno-error=unknown-attributes)
+endif()
 target_include_directories(scpp_project PRIVATE ${SQLITE3_INCLUDE_DIR})
 target_link_libraries(scpp_project PUBLIC scpp_lexer scpp_driver ${SQLITE3_LIB})
 
