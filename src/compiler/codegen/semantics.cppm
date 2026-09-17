@@ -534,6 +534,7 @@ namespace scpp {
 
     bool Codegen::produces_rvalue_of_type(const Expr& arg, const Type& expected_type)
 {
+        std::optional<Type> known_arg_type{};
         switch (arg.kind) {
             case ExprKind::Move:
             case ExprKind::New:
@@ -559,8 +560,8 @@ namespace scpp {
                 // unconditional yes.
                 return braced_init_list_can_initialize(expected_type, arg.args);
             case ExprKind::Call: {
-                std::optional<Type> t = infer_type(arg);
-                if (!t.has_value() || t->kind == TypeKind::Reference) return false;
+                known_arg_type = infer_type(arg);
+                if (!known_arg_type.has_value() || known_arg_type->kind == TypeKind::Reference) return false;
                 break;
             }
             case ExprKind::Binary: {
@@ -573,6 +574,7 @@ namespace scpp {
                 const Function* op =
                     resolve_binary_operator_function(arg, infer_type(*arg.lhs), infer_type(*arg.rhs));
                 if (op == nullptr || op->return_type.kind == TypeKind::Reference) return false;
+                known_arg_type = op->return_type;
                 break;
             }
             case ExprKind::NullptrLiteral:
@@ -589,7 +591,7 @@ namespace scpp {
             default:
                 return false;
         }
-        std::optional<Type> arg_type = infer_type(arg);
+        std::optional<Type> arg_type = known_arg_type.has_value() ? std::move(known_arg_type) : infer_type(arg);
         if (!arg_type.has_value()) return false;
         // [dcl.init.ref]/5.4.2: a reference that does not bind directly
         // binds to a temporary of the referenced type, implicitly
@@ -704,15 +706,17 @@ namespace scpp {
 
     const Function* Codegen::find_single_argument_converting_constructor(const std::string& class_name, const Expr& arg)
 {
+        const std::string ctor_name = class_name + "_new";
+        const std::string ctor_prefix = ctor_name + ".";
         auto is_constructor_clone = [&](const Function& fn) {
-            return fn.name == class_name + "_new" ||
+            return fn.name == ctor_name ||
                    (!fn.member_owner_class.empty() && fn.member_owner_class == class_name &&
-                    fn.name.starts_with(class_name + "_new."));
+                    fn.name.starts_with(ctor_prefix));
         };
         std::vector<const Function*> matches{};
         for (const Function& fn : program_->functions) {
-            if (!is_constructor_clone(fn)) continue;
             if (fn.member_owner_class != class_name || fn.params.size() != 2) continue;
+            if (!is_constructor_clone(fn)) continue;
             const Type& ctor_param_type = fn.params[1].type;
             if (types_equal(ctor_param_type, named_type(class_name)) ||
                 (ctor_param_type.kind == TypeKind::Reference && ctor_param_type.pointee != nullptr &&
@@ -958,6 +962,9 @@ namespace scpp {
 
     bool Codegen::receiver_matches_method_qualifier(const Expr& receiver_expr, const Function& fn)
 {
+        if (fn.receiver_ref_qualifier == ReceiverRefQualifier::None) {
+            return true;
+        }
         if (fn.params.empty() || fn.params[0].type.kind != TypeKind::Reference || fn.params[0].type.pointee == nullptr) {
             return true;
         }
@@ -1045,65 +1052,62 @@ namespace scpp {
     std::vector<const Function*> Codegen::collect_call_candidates(const std::string& callee_name,
                                                                   std::size_t param_offset, const Expr* receiver_expr)
 {
-        auto is_constructor_clone = [&](const Function& fn) {
-            return callee_name.ends_with("_new") &&
-                   fn.name.starts_with(callee_name + ".");
-        };
-        auto is_dotted_clone = [&](const Function& fn) {
-            if (!fn.name.ends_with(callee_name) || fn.name.size() <= callee_name.size()) return false;
-            std::size_t separator = fn.name.size() - callee_name.size() - 1;
-            if (fn.name[separator] != '.') return false;
-            // ch05 §5.14: the text before that '.' has to be this
-            // function's own owner class -- the shape
-            // matches_receiver_method_name below validates
-            // ("Owner.Owner_member"). Without the check, a *different*
-            // class's monomorphized instantiation is mistaken for a clone
-            // of `callee_name` whenever its own mangled type argument
-            // happens to end with it: `std::shared_ptr<Bar>`'s own
-            // constructor is named `std::shared_ptr.Bar_new`, which ends
-            // with ".Bar_new" and so used to satisfy a plain `new Bar()`
-            // looking for `Bar_new` -- silently running shared_ptr's
-            // constructor over a Bar-sized allocation.
-            return fn.name.compare(0, separator, fn.member_owner_class) == 0;
-        };
-        auto matches_receiver_method_name = [&](const Function& fn) {
-            if (!receiver_expr || param_offset != 1) return true;
-            if (fn.name == callee_name) return true;
-            if (is_dotted_clone(fn)) {
-                std::size_t sep = callee_name.rfind('_');
-                if (sep == std::string::npos) return false;
-                std::string owner = callee_name.substr(0, sep);
-                if (fn.member_owner_class.empty() || fn.member_owner_class != owner) return false;
-                std::string member = callee_name.substr(sep + 1);
-                return fn.name == owner + "." + callee_name || fn.name == owner + "." + member;
-            }
-            std::size_t sep = callee_name.rfind('_');
-            return sep != std::string::npos && !fn.member_owner_class.empty() &&
-                   fn.member_owner_class == callee_name.substr(0, sep);
-        };
-        auto is_concrete_receiver_helper = [&](const Function& fn) {
-            if (!receiver_expr || param_offset != 1) return false;
-            if (fn.member_owner_class.empty()) return false;
-            if (fn.name == callee_name || is_dotted_clone(fn)) return false;
-            std::size_t sep = callee_name.rfind('_');
-            if (sep == std::string::npos) return false;
-            std::string_view owner = std::string_view(callee_name).substr(0, sep);
-            std::string_view member = std::string_view(callee_name).substr(sep + 1);
-            return fn.member_owner_class == owner && fn.name == std::string(member) &&
-                   owner.find('.') != std::string::npos;
-        };
+        bool has_receiver = (receiver_expr != nullptr && param_offset == 1);
+        auto& cache = has_receiver ? call_candidates_cache_with_receiver_ : call_candidates_cache_no_receiver_;
+        if (auto it = cache.find(callee_name); it != cache.end()) {
+            return it->second;
+        }
+
+        bool callee_is_ctor = callee_name.ends_with("_new");
+        std::string ctor_prefix = callee_is_ctor ? callee_name + "." : "";
+        std::size_t sep = callee_name.rfind('_');
+        std::string owner = sep != std::string::npos ? callee_name.substr(0, sep) : "";
+        std::string member = sep != std::string::npos ? callee_name.substr(sep + 1) : "";
+        std::string owner_dot_callee = sep != std::string::npos ? owner + "." + callee_name : "";
+        std::string owner_dot_member = sep != std::string::npos ? owner + "." + member : "";
+        bool owner_has_dot = owner.find('.') != std::string::npos;
+
         std::vector<const Function*> candidates{};
         for (const Function& fn : program_->functions) {
-            bool name_eq = fn.name == callee_name;
-            bool concrete_helper = is_concrete_receiver_helper(fn);
-            bool ctor_clone = is_constructor_clone(fn);
-            bool dotted = is_dotted_clone(fn);
-            bool receiver_ok = matches_receiver_method_name(fn);
-            if ((name_eq || concrete_helper || ctor_clone || dotted) &&
-                receiver_ok) {
+            if (fn.name == callee_name) {
                 candidates.push_back(&fn);
+                continue;
+            }
+            if (fn.is_extern_c && !fn.namespace_path.empty()) {
+                std::string qualified{};
+                for (std::size_t i = 0; i < fn.namespace_path.size(); ++i) {
+                    if (i != 0) qualified += "::";
+                    qualified += fn.namespace_path[i];
+                }
+                qualified += "::" + fn.name;
+                if (qualified == callee_name) {
+                    candidates.push_back(&fn);
+                    continue;
+                }
+            }
+            if (callee_is_ctor && fn.name.starts_with(ctor_prefix)) {
+                if (!has_receiver || (!owner.empty() && !fn.member_owner_class.empty() && fn.member_owner_class == owner)) {
+                    candidates.push_back(&fn);
+                    continue;
+                }
+            }
+            if (fn.name.size() > callee_name.size() + 1 && fn.name.ends_with(callee_name)) {
+                std::size_t separator = fn.name.size() - callee_name.size() - 1;
+                if (fn.name[separator] == '.' && fn.name.compare(0, separator, fn.member_owner_class) == 0) {
+                    if (!has_receiver || (!owner.empty() && !fn.member_owner_class.empty() && fn.member_owner_class == owner &&
+                        (fn.name == owner_dot_callee || fn.name == owner_dot_member))) {
+                        candidates.push_back(&fn);
+                        continue;
+                    }
+                }
+            }
+            if (has_receiver && owner_has_dot && !fn.member_owner_class.empty() && fn.member_owner_class == owner &&
+                fn.name == member) {
+                candidates.push_back(&fn);
+                continue;
             }
         }
+        cache.emplace(callee_name, candidates);
         return candidates;
     }
 

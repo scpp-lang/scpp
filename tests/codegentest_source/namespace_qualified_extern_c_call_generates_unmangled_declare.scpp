@@ -1,0 +1,11 @@
+namespace test {
+extern "C" {
+int c_helper(int n);
+}
+}
+
+int main() {
+    [[scpp::unsafe]] {
+        return test::c_helper(42);
+    }
+}

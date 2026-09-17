@@ -1,0 +1,1 @@
+sequence: declare i32 @c_helper(i32) | define i32 @main() | call i32 @c_helper(i32 42)

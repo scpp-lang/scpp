@@ -1463,7 +1463,10 @@ struct ConstructedOwner {
 // itself a reference/span) is always writable here -- move/
 // initialization-state legality is checked separately, this is purely
 // about const-ness.
+inline std::uint64_t g_signatures_version = 1;
+
 [[nodiscard]] std::expected<Signatures, DataflowError> build_signatures(const Program& program) {
+    ++g_signatures_version;
     Signatures signatures{};
     for (const Function& fn : program.functions) {
         if (auto _r = add_function_signature(signatures, fn); !_r.has_value()) {
@@ -1552,8 +1555,25 @@ struct ConstructedOwner {
         }
     }
     overloads.push_back(std::move(sig));
+    if (fn.is_extern_c && !fn.namespace_path.empty()) {
+        std::string qualified{};
+        for (std::size_t i = 0; i < fn.namespace_path.size(); ++i) {
+            if (i != 0) qualified += "::";
+            qualified += fn.namespace_path[i];
+        }
+        qualified += "::" + fn.name;
+        signatures[qualified].push_back(signatures[fn.name].back());
+    }
+    ++g_signatures_version;
     return {};
 }
+
+struct ConstructorOverloadCache {
+    std::uint64_t version = 0;
+    const Signatures* sigs = nullptr;
+    std::unordered_map<std::string, std::vector<const FunctionSignature*>> map{};
+};
+inline thread_local ConstructorOverloadCache g_ctor_cache{};
 
 // [class.ctor], [over.match.ctor]: every constructor overload
 // `class_name` declares -- the candidate set every constructor question
@@ -1577,17 +1597,34 @@ struct ConstructedOwner {
                                                                             const Signatures& signatures) {
     std::vector<const FunctionSignature*> overloads{};
     if (class_name.empty()) return overloads;
+
+    if (g_ctor_cache.version != g_signatures_version || g_ctor_cache.sigs != &signatures) {
+        g_ctor_cache.version = g_signatures_version;
+        g_ctor_cache.sigs = &signatures;
+        g_ctor_cache.map.clear();
+    }
+    if (auto it = g_ctor_cache.map.find(class_name); it != g_ctor_cache.map.end()) {
+        return it->second;
+    }
+
     const std::string constructor_name = class_name + "_new";
+    if (auto it = signatures.find(constructor_name); it != signatures.end()) {
+        for (const FunctionSignature& candidate : it->second) {
+            if (candidate.member_owner_class == class_name) {
+                overloads.push_back(&candidate);
+            }
+        }
+    }
     const std::string specialization_prefix = constructor_name + ".";
     for (const auto& entry : signatures) {
         const auto& name = entry.first;
-        const auto& candidates = entry.second;
-        if (name != constructor_name && !name.starts_with(specialization_prefix)) continue;
-        for (const FunctionSignature& candidate : candidates) {
+        if (!name.starts_with(specialization_prefix)) continue;
+        for (const FunctionSignature& candidate : entry.second) {
             if (candidate.member_owner_class != class_name) continue;
             overloads.push_back(&candidate);
         }
     }
+    g_ctor_cache.map[class_name] = overloads;
     return overloads;
 }
 

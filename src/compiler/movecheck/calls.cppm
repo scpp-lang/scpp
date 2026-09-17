@@ -1153,6 +1153,9 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
 
 [[nodiscard]] bool receiver_matches_method_qualifier(const Expr& receiver_expr, const FunctionSignature& candidate,
                                                      const Body& body, const Signatures& signatures) {
+    if (candidate.receiver_ref_qualifier == ReceiverRefQualifier::None) {
+        return true;
+    }
     if (candidate.param_types.empty() || candidate.param_types[0].kind != TypeKind::Reference ||
         candidate.param_types[0].pointee == nullptr) {
         return true;

@@ -26,6 +26,7 @@ import scpp.ast;
 import scpp.compiler.codegen;
 import scpp.constexpression;
 import scpp.lexer;
+import scpp.mir;
 import scpp.compiler.movecheck;
 import scpp.parser;
 
@@ -55,21 +56,30 @@ enum class DriverErrorKind {
 // that location survives the wrap -- matching the shape ParseError/
 // DataflowError/CodegenError already use. `kind` defaults to
 // DriverErrorKind::Driver for the same reason.
-struct DriverError : std::runtime_error {
+class DriverError : public std::runtime_error {
+public:
     explicit DriverError(const std::string& message, SourceLocation loc = {}, DriverErrorKind kind = DriverErrorKind::Driver)
-        : std::runtime_error(message), loc(loc), kind(kind) {}
-    SourceLocation loc;
-    DriverErrorKind kind;
+        : runtime_error{message}, loc{loc}, kind{kind} {}
+
+    DriverError(const DriverError& other)
+        : runtime_error{std::string{other.what()}}, loc{other.loc}, kind{other.kind} {}
+
+    virtual ~DriverError() override = default;
+
+    SourceLocation loc{};
+    DriverErrorKind kind{DriverErrorKind::Driver};
 };
 
-inline constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 11;
-inline constexpr std::string_view SCPPM_COMPILE_TIME_AST_MAGIC = "SAST";
+constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 11;
+constexpr std::string_view SCPPM_COMPILE_TIME_AST_MAGIC = "SAST";
 
-struct CompileTimePayloadPlan {
+class CompileTimePayloadPlan {
+public:
+    virtual ~CompileTimePayloadPlan() = default;
     std::uint32_t format_version = SCPPM_COMPILE_TIME_AST_VERSION;
-    std::vector<std::string> root_function_names;
-    std::vector<std::size_t> reachable_function_indices;
-    std::vector<std::string> reachable_type_names;
+    std::vector<std::string> root_function_names{};
+    std::vector<std::size_t> reachable_function_indices{};
+    std::vector<std::string> reachable_type_names{};
 };
 
 [[nodiscard]] CompileTimePayloadPlan plan_compile_time_payload(const Program& program);
@@ -84,14 +94,31 @@ struct CompileTimePayloadPlan {
 namespace scpp {
 
 [[nodiscard]] std::string module_key(const Program& program) {
-    if (program.partition_name.empty()) return program.module_name;
+    if (program.partition_name.empty()) {
+        std::string name = program.module_name;
+        return name;
+    }
     return program.module_name + ":" + program.partition_name;
 }
 
-struct ScannedModuleDecl {
-    std::string module_name;
-    std::string partition_name;
+class ScannedModuleDecl {
+public:
+    virtual ~ScannedModuleDecl() = default;
+    std::string module_name{};
+    std::string partition_name{};
 };
+
+inline std::string string_from_view(std::string_view sv) {
+    return std::string(sv.data(), sv.size());
+}
+
+inline bool is_ascii_space(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+inline bool is_ascii_alnum(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+}
 
 [[nodiscard]] std::optional<ScannedModuleDecl> scan_declared_module_from_tokens(const std::vector<Token>& tokens) {
     std::size_t i = 0;
@@ -105,20 +132,20 @@ struct ScannedModuleDecl {
     if (i >= tokens.size() || tokens[i].kind != TokenKind::KwModule) return std::nullopt;
     i++;
     if (i >= tokens.size() || tokens[i].kind != TokenKind::Identifier) return std::nullopt;
-    ScannedModuleDecl decl;
-    decl.module_name = std::string(tokens[i].text);
+    ScannedModuleDecl decl{};
+    decl.module_name = string_from_view(tokens[i].text);
     i++;
     while (i + 1 < tokens.size() && tokens[i].kind == TokenKind::Dot && tokens[i + 1].kind == TokenKind::Identifier) {
         decl.module_name += ".";
-        decl.module_name += std::string(tokens[i + 1].text);
+        decl.module_name += string_from_view(tokens[i + 1].text);
         i += 2;
     }
     if (i < tokens.size() && tokens[i].kind == TokenKind::Colon) {
         i++;
         if (i >= tokens.size() || tokens[i].kind != TokenKind::Identifier) return std::nullopt;
-        decl.partition_name = std::string(tokens[i].text);
+        decl.partition_name = string_from_view(tokens[i].text);
     }
-    return decl;
+    return std::optional<ScannedModuleDecl>{std::move(decl)};
 }
 
 [[nodiscard]] std::optional<ScannedModuleDecl> scan_declared_module_from_source(std::string_view source) {
@@ -132,20 +159,72 @@ struct ScannedModuleDecl {
     return std::nullopt;
 }
 
-void write_u32_le(std::ostream& out, std::uint32_t value) {
-    std::array<char, 4> bytes = {
+class ByteWriter {
+public:
+    virtual ~ByteWriter() = default;
+    std::string bytes{};
+    void put(char c) { bytes.push_back(c); }
+    void write(const char* data, std::size_t size) {
+        bytes.append(std::string(data, size));
+    }
+    std::string str() const {
+        std::string s = bytes;
+        return s;
+    }
+};
+
+class ByteReader {
+public:
+    virtual ~ByteReader() = default;
+    std::string_view data{};
+    std::size_t pos{0};
+    bool failed{false};
+
+    ByteReader(std::string_view d = {}) : data{d}, pos{0}, failed{false} {}
+
+    bool read(char* dest, std::size_t size) {
+        if (pos + size > data.size()) {
+            failed = true;
+            return false;
+        }
+        [[scpp::unsafe]] {
+            for (std::size_t i = 0; i < size; i++) {
+                dest[i] = data.at(pos + i);
+            }
+        }
+        pos += size;
+        return true;
+    }
+
+    bool read(std::uint8_t* dest, std::size_t size) {
+        if (pos + size > data.size()) {
+            failed = true;
+            return false;
+        }
+        [[scpp::unsafe]] {
+            for (std::size_t i = 0; i < size; i++) {
+                dest[i] = static_cast<std::uint8_t>(data.at(pos + i));
+            }
+        }
+        pos += size;
+        return true;
+    }
+
+    explicit operator bool() const { return !failed; }
+};
+
+inline void write_u32_le(ByteWriter& out, std::uint32_t value) {
+    char bytes[4] = {
         static_cast<char>(value & 0xffu),
         static_cast<char>((value >> 8) & 0xffu),
         static_cast<char>((value >> 16) & 0xffu),
-        static_cast<char>((value >> 24) & 0xffu),
+        static_cast<char>((value >> 24) & 0xffu)
     };
-    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    out.write(&bytes[0], 4);
 }
 
 
-namespace {
-
-[[nodiscard]] bool is_exported_generic_type_name(const scpp::Program& program, std::string_view name) {
+[[nodiscard]] inline bool is_exported_generic_type_name(const scpp::Program& program, std::string_view name) {
     for (const scpp::StructDef& def : program.structs) {
         if (!def.is_exported || def.name != name) continue;
         if (!def.template_params.empty()) return true;
@@ -160,7 +239,7 @@ namespace {
     return false;
 }
 
-[[nodiscard]] bool is_compile_time_root(const scpp::Program& program, const scpp::Function& fn) {
+[[nodiscard]] inline bool is_compile_time_root(const scpp::Program& program, const scpp::Function& fn) {
     if (!fn.member_owner_class.empty() && is_exported_generic_type_name(program, fn.member_owner_class)) {
         return true;
     }
@@ -171,29 +250,29 @@ namespace {
     return false;
 }
 
-void collect_type_names(const scpp::Type& type, std::unordered_set<std::string>& out) {
-    if (type.kind == scpp::TypeKind::Named && !type.name.empty()) out.insert(type.name);
+inline void collect_type_names(const scpp::Type& type, std::vector<std::string>& out) {
+    if (type.kind == scpp::TypeKind::Named && !type.name.empty()) out.push_back(type.name);
     if (type.pointee) collect_type_names(*type.pointee, out);
     if (type.function_return) collect_type_names(*type.function_return, out);
     for (const scpp::Type& arg : type.template_args) collect_type_names(arg, out);
     for (const scpp::Type& param : type.function_params) collect_type_names(param, out);
 }
 
-void collect_stmt_edges(const scpp::Stmt& stmt, const std::unordered_set<std::string>& known_function_names,
-                        const std::unordered_set<std::string>& bound_names,
-                        std::unordered_set<std::string>& function_names,
-                        std::unordered_set<std::string>& type_names);
+inline void collect_stmt_edges(const scpp::Stmt& stmt, const std::unordered_set<std::string>& known_function_names,
+                               const std::unordered_set<std::string>& bound_names,
+                               std::vector<std::string>& function_names,
+                               std::vector<std::string>& type_names);
 
-void collect_expr_edges(const scpp::Expr& expr, const std::unordered_set<std::string>& known_function_names,
-                        const std::unordered_set<std::string>& bound_names,
-                        std::unordered_set<std::string>& function_names,
-                        std::unordered_set<std::string>& type_names);
+inline void collect_expr_edges(const scpp::Expr& expr, const std::unordered_set<std::string>& known_function_names,
+                               const std::unordered_set<std::string>& bound_names,
+                               std::vector<std::string>& function_names,
+                               std::vector<std::string>& type_names);
 
-void collect_type_edges(const scpp::Type& type, const std::unordered_set<std::string>& known_function_names,
-                        const std::unordered_set<std::string>& bound_names,
-                        std::unordered_set<std::string>& function_names,
-                        std::unordered_set<std::string>& type_names) {
-    if (type.kind == scpp::TypeKind::Named && !type.name.empty()) type_names.insert(type.name);
+inline void collect_type_edges(const scpp::Type& type, const std::unordered_set<std::string>& known_function_names,
+                               const std::unordered_set<std::string>& bound_names,
+                               std::vector<std::string>& function_names,
+                               std::vector<std::string>& type_names) {
+    if (type.kind == scpp::TypeKind::Named && !type.name.empty()) type_names.push_back(type.name);
     if (type.pointee) collect_type_edges(*type.pointee, known_function_names, bound_names, function_names, type_names);
     if (type.function_return) {
         collect_type_edges(*type.function_return, known_function_names, bound_names, function_names, type_names);
@@ -209,23 +288,23 @@ void collect_type_edges(const scpp::Type& type, const std::unordered_set<std::st
     }
 }
 
-[[nodiscard]] bool identifier_expr_might_name_function(const scpp::Expr& expr,
-                                                       const std::unordered_set<std::string>& known_function_names,
-                                                       const std::unordered_set<std::string>& bound_names) {
+[[nodiscard]] inline bool identifier_expr_might_name_function(const scpp::Expr& expr,
+                                                              const std::unordered_set<std::string>& known_function_names,
+                                                              const std::unordered_set<std::string>& bound_names) {
     if (expr.kind != scpp::ExprKind::Identifier || expr.name.empty()) return false;
     if (!known_function_names.contains(expr.name)) return false;
     if (expr.explicit_global_qualification || expr.name.find("::") != std::string::npos) return true;
     return !bound_names.contains(expr.name);
 }
 
-void collect_expr_edges(const scpp::Expr& expr, const std::unordered_set<std::string>& known_function_names,
+inline void collect_expr_edges(const scpp::Expr& expr, const std::unordered_set<std::string>& known_function_names,
                         const std::unordered_set<std::string>& bound_names,
-                        std::unordered_set<std::string>& function_names,
-                        std::unordered_set<std::string>& type_names) {
+                        std::vector<std::string>& function_names,
+                        std::vector<std::string>& type_names) {
     collect_type_edges(expr.type, known_function_names, bound_names, function_names, type_names);
     if ((expr.kind == scpp::ExprKind::Call || identifier_expr_might_name_function(expr, known_function_names, bound_names)) &&
         !expr.name.empty()) {
-        function_names.insert(expr.name);
+        function_names.push_back(expr.name);
     }
     if (expr.kind == scpp::ExprKind::New) {
         collect_type_edges(expr.type, known_function_names, bound_names, function_names, type_names);
@@ -257,17 +336,17 @@ void collect_expr_edges(const scpp::Expr& expr, const std::unordered_set<std::st
     }
 }
 
-void collect_stmt_edges(const scpp::Stmt& stmt, const std::unordered_set<std::string>& known_function_names,
+inline void collect_stmt_edges(const scpp::Stmt& stmt, const std::unordered_set<std::string>& known_function_names,
                         const std::unordered_set<std::string>& bound_names,
-                        std::unordered_set<std::string>& function_names,
-                        std::unordered_set<std::string>& type_names) {
+                        std::vector<std::string>& function_names,
+                        std::vector<std::string>& type_names) {
     collect_type_edges(stmt.type, known_function_names, bound_names, function_names, type_names);
     if (stmt.init) collect_expr_edges(*stmt.init, known_function_names, bound_names, function_names, type_names);
     for (const auto& ctor_arg : stmt.ctor_args) {
         collect_expr_edges(*ctor_arg, known_function_names, bound_names, function_names, type_names);
     }
     if (stmt.has_ctor_args && stmt.type.kind == scpp::TypeKind::Named && !stmt.type.name.empty()) {
-        function_names.insert(stmt.type.name + "_new");
+        function_names.push_back(stmt.type.name + "_new");
     }
     if (stmt.expr) collect_expr_edges(*stmt.expr, known_function_names, bound_names, function_names, type_names);
     if (stmt.condition) {
@@ -303,22 +382,22 @@ void collect_stmt_edges(const scpp::Stmt& stmt, const std::unordered_set<std::st
     }
 }
 
-void collect_function_signature_types(const scpp::Function& fn,
+inline void collect_function_signature_types(const scpp::Function& fn,
                                      const std::unordered_set<std::string>& known_function_names,
-                                     std::unordered_set<std::string>& function_names,
-                                     std::unordered_set<std::string>& type_names) {
-    std::unordered_set<std::string> empty_bound_names;
+                                     std::vector<std::string>& function_names,
+                                     std::vector<std::string>& type_names) {
+    std::unordered_set<std::string> empty_bound_names{};
     collect_type_edges(fn.return_type, known_function_names, empty_bound_names, function_names, type_names);
     for (const scpp::Param& param : fn.params) {
         collect_type_edges(param.type, known_function_names, empty_bound_names, function_names, type_names);
     }
 }
 
-void collect_function_reachable_edges(const scpp::Function& fn, const std::unordered_set<std::string>& known_function_names,
-                                     std::unordered_set<std::string>& function_names,
-                                     std::unordered_set<std::string>& type_names) {
+inline void collect_function_reachable_edges(const scpp::Function& fn, const std::unordered_set<std::string>& known_function_names,
+                                     std::vector<std::string>& function_names,
+                                     std::vector<std::string>& type_names) {
     collect_function_signature_types(fn, known_function_names, function_names, type_names);
-    std::unordered_set<std::string> bound_names;
+    std::unordered_set<std::string> bound_names{};
     for (const scpp::Param& param : fn.params) {
         if (!param.name.empty()) bound_names.insert(param.name);
     }
@@ -333,17 +412,18 @@ void collect_function_reachable_edges(const scpp::Function& fn, const std::unord
     if (fn.body) collect_stmt_edges(*fn.body, known_function_names, bound_names, function_names, type_names);
 }
 
-void collect_class_reachable_edges(const scpp::ClassDef& def, const std::unordered_set<std::string>& known_function_names,
-                                   std::unordered_set<std::string>& function_names,
-                                   std::unordered_set<std::string>& type_names) {
+inline void collect_class_reachable_edges(const scpp::ClassDef& def, const std::unordered_set<std::string>& known_function_names,
+                                   const std::vector<std::string>& known_function_names_list,
+                                   std::vector<std::string>& function_names,
+                                   std::vector<std::string>& type_names) {
     if (!def.name.empty()) {
-        function_names.insert(def.name + "_new");
-        function_names.insert(def.name + "_delete");
-        for (const std::string& known_name : known_function_names) {
-            if (known_name.starts_with(def.name + "_")) function_names.insert(known_name);
+        function_names.push_back(def.name + "_new");
+        function_names.push_back(def.name + "_delete");
+        for (const std::string& known_name : known_function_names_list) {
+            if (known_name.starts_with(def.name + "_")) function_names.push_back(known_name);
         }
     }
-    std::unordered_set<std::string> empty_bound_names;
+    std::unordered_set<std::string> empty_bound_names{};
     for (const scpp::ClassField& field : def.fields) {
         collect_type_edges(field.type, known_function_names, empty_bound_names, function_names, type_names);
         if (!field.default_initializer) continue;
@@ -355,7 +435,7 @@ void collect_class_reachable_edges(const scpp::ClassDef& def, const std::unorder
             collect_expr_edges(*arg, known_function_names, empty_bound_names, function_names, type_names);
         }
         if (field.default_initializer->has_brace_args && field.type.kind == scpp::TypeKind::Named && !field.type.name.empty()) {
-            function_names.insert(field.type.name + "_new");
+            function_names.push_back(field.type.name + "_new");
         }
     }
     for (const scpp::BaseSpecifier& base : def.base_specifiers) {
@@ -374,222 +454,263 @@ void collect_class_reachable_edges(const scpp::ClassDef& def, const std::unorder
     }
 }
 
-void reject_not_yet_lowerable_constexpr_surface(const Program& program) {
-    std::function<void(const Stmt&)> walk_stmt = [&](const Stmt& stmt) {
-        if (stmt.init) {
-            // nothing to validate inside expressions yet
-        }
-        if (stmt.then_branch) walk_stmt(*stmt.then_branch);
-        if (stmt.else_branch) walk_stmt(*stmt.else_branch);
-        for (const StmtPtr& nested : stmt.statements) walk_stmt(*nested);
-    };
+inline void walk_constexpr_stmt(const Stmt& stmt) {
+    if (stmt.then_branch) walk_constexpr_stmt(*stmt.then_branch);
+    if (stmt.else_branch) walk_constexpr_stmt(*stmt.else_branch);
+    for (const StmtPtr& nested : stmt.statements) walk_constexpr_stmt(*nested);
+}
+
+inline void reject_not_yet_lowerable_constexpr_surface(const Program& program) {
     for (const Function& fn : program.functions) {
-        if (fn.body) walk_stmt(*fn.body);
+        if (fn.body) walk_constexpr_stmt(*fn.body);
     }
 }
 
-} // namespace
+class PayloadCollector {
+public:
+    virtual ~PayloadCollector() = default;
+    const Program& program;
+    const std::unordered_map<std::string, std::vector<std::size_t>>& function_indices_by_name;
+    std::unordered_set<std::size_t> visited_function_indices{};
+    std::unordered_set<std::string> visited_types{};
+    std::vector<std::string> pending_types{};
+    std::vector<std::size_t> worklist{};
+    std::vector<std::string> reachable_type_names{};
+    std::vector<std::size_t> reachable_function_indices{};
+    std::vector<std::string> root_function_names{};
 
-CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
-    CompileTimePayloadPlan plan;
-    std::unordered_map<std::string, std::vector<std::size_t>> function_indices_by_name;
-    std::unordered_set<std::string> known_function_names;
-    std::unordered_map<std::string, const EnumDef*> enums_by_name;
-    std::unordered_map<std::string, const StructDef*> structs_by_name;
-    std::unordered_map<std::string, const ClassDef*> classes_by_name;
-    std::unordered_multimap<std::string, std::size_t> methods_by_owner;
-    for (std::size_t i = 0; i < program.functions.size(); i++) {
-        function_indices_by_name[program.functions[i].name].push_back(i);
-        known_function_names.insert(program.functions[i].name);
-        if (!program.functions[i].member_owner_class.empty()) {
-            methods_by_owner.emplace(program.functions[i].member_owner_class, i);
-        }
-    }
-    for (const EnumDef& def : program.enums) enums_by_name.emplace(def.name, &def);
-    for (const StructDef& def : program.structs) structs_by_name.emplace(def.name, &def);
-    for (const ClassDef& def : program.classes) classes_by_name.emplace(def.name, &def);
+    PayloadCollector(const Program& p, const std::unordered_map<std::string, std::vector<std::size_t>>& f)
+        : program{p}, function_indices_by_name{f} {}
 
-    std::unordered_set<std::size_t> visited_function_indices;
-    std::unordered_set<std::string> visited_types;
-    std::unordered_set<std::string> pending_types;
-    std::vector<std::size_t> worklist;
-
-    auto enqueue_type = [&](const std::string& name) {
+    void enqueue_type(const std::string& name) {
         if (name.empty()) return;
         if (visited_types.insert(name).second) {
-            plan.reachable_type_names.push_back(name);
-            pending_types.insert(name);
+            reachable_type_names.push_back(name);
+            pending_types.push_back(name);
         }
-    };
+    }
 
-    auto enqueue_function_index = [&](std::size_t index, bool is_root = false) {
+    void enqueue_function_index(std::size_t index, bool is_root = false) {
         if (index >= program.functions.size()) return;
         const Function& fn = program.functions[index];
         if (visited_function_indices.insert(index).second) {
-            plan.reachable_function_indices.push_back(index);
+            reachable_function_indices.push_back(index);
             worklist.push_back(index);
         }
-        if (is_root && std::find(plan.root_function_names.begin(), plan.root_function_names.end(), fn.name) ==
-                           plan.root_function_names.end()) {
-            plan.root_function_names.push_back(fn.name);
+        if (is_root) {
+            bool found = false;
+            for (const std::string& root : root_function_names) {
+                if (root == fn.name) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                root_function_names.push_back(fn.name);
+            }
         }
-    };
-    auto enqueue_functions_by_name = [&](const std::string& name) {
+    }
+
+    void enqueue_functions_by_name(const std::string& name) {
         if (name.empty()) return;
         auto it = function_indices_by_name.find(name);
         if (it == function_indices_by_name.end()) return;
         for (std::size_t index : it->second) enqueue_function_index(index);
-    };
+    }
+};
+
+CompileTimePayloadPlan plan_compile_time_payload(const Program& program) {
+    CompileTimePayloadPlan plan{};
+    std::unordered_map<std::string, std::vector<std::size_t>> function_indices_by_name{};
+    std::unordered_set<std::string> known_function_names{};
+    std::vector<std::string> known_function_names_list{};
+    std::unordered_map<std::string, std::size_t> enums_by_name{};
+    std::unordered_map<std::string, std::size_t> structs_by_name{};
+    std::unordered_map<std::string, std::size_t> classes_by_name{};
+    std::unordered_map<std::string, std::vector<std::size_t>> methods_by_owner{};
+    for (std::size_t i = 0; i < program.functions.size(); i++) {
+        function_indices_by_name[program.functions[i].name].push_back(i);
+        known_function_names.insert(program.functions[i].name);
+        known_function_names_list.push_back(program.functions[i].name);
+        if (!program.functions[i].member_owner_class.empty()) {
+            methods_by_owner[program.functions[i].member_owner_class].push_back(i);
+        }
+    }
+    for (std::size_t i = 0; i < program.enums.size(); i++) enums_by_name.emplace(program.enums[i].name, i);
+    for (std::size_t i = 0; i < program.structs.size(); i++) structs_by_name.emplace(program.structs[i].name, i);
+    for (std::size_t i = 0; i < program.classes.size(); i++) classes_by_name.emplace(program.classes[i].name, i);
+
+    PayloadCollector collector{program, function_indices_by_name};
 
     for (std::size_t i = 0; i < program.functions.size(); i++) {
-        if (is_compile_time_root(program, program.functions[i])) enqueue_function_index(i, true);
+        if (is_compile_time_root(program, program.functions[i])) collector.enqueue_function_index(i, true);
     }
 
     std::size_t next_function_index = 0;
-    while (next_function_index < worklist.size() || !pending_types.empty()) {
-        while (next_function_index < worklist.size()) {
-            const Function& fn = program.functions[worklist[next_function_index++]];
-            std::unordered_set<std::string> local_function_names;
-            std::unordered_set<std::string> local_type_names;
+    while (next_function_index < collector.worklist.size() || !collector.pending_types.empty()) {
+        while (next_function_index < collector.worklist.size()) {
+            const Function& fn = program.functions[collector.worklist[next_function_index++]];
+            std::vector<std::string> local_function_names{};
+            std::vector<std::string> local_type_names{};
             collect_function_reachable_edges(fn, known_function_names, local_function_names, local_type_names);
-            for (const std::string& callee : local_function_names) enqueue_functions_by_name(callee);
-            for (const std::string& type_name : local_type_names) enqueue_type(type_name);
+            for (const std::string& callee : local_function_names) collector.enqueue_functions_by_name(callee);
+            for (const std::string& type_name : local_type_names) collector.enqueue_type(type_name);
         }
 
-        if (pending_types.empty()) continue;
-        std::vector<std::string> batch(pending_types.begin(), pending_types.end());
-        pending_types.clear();
+        if (collector.pending_types.empty()) continue;
+        std::vector<std::string> batch = collector.pending_types;
+        collector.pending_types.clear();
         for (const std::string& type_name : batch) {
             if (auto it = enums_by_name.find(type_name); it != enums_by_name.end()) {
-                std::unordered_set<std::string> nested;
-                collect_type_names(it->second->underlying_type, nested);
-                for (const std::string& nested_name : nested) enqueue_type(nested_name);
+                const EnumDef& def = program.enums[it->second];
+                std::vector<std::string> nested{};
+                collect_type_names(def.underlying_type, nested);
+                for (const std::string& nested_name : nested) collector.enqueue_type(nested_name);
             }
             if (auto it = structs_by_name.find(type_name); it != structs_by_name.end()) {
-                for (const StructField& field : it->second->fields) {
-                    std::unordered_set<std::string> nested;
+                const StructDef& def = program.structs[it->second];
+                for (const StructField& field : def.fields) {
+                    std::vector<std::string> nested{};
                     collect_type_names(field.type, nested);
-                    for (const std::string& nested_name : nested) enqueue_type(nested_name);
+                    for (const std::string& nested_name : nested) collector.enqueue_type(nested_name);
                 }
             }
             if (auto it = classes_by_name.find(type_name); it != classes_by_name.end()) {
-                std::unordered_set<std::string> nested_function_names;
-                std::unordered_set<std::string> nested_type_names;
-                collect_class_reachable_edges(*it->second, known_function_names, nested_function_names, nested_type_names);
-                for (const std::string& nested_name : nested_type_names) enqueue_type(nested_name);
-                for (const std::string& function_name : nested_function_names) enqueue_functions_by_name(function_name);
-                auto [begin, end] = methods_by_owner.equal_range(type_name);
-                for (auto method = begin; method != end; ++method) {
-                    enqueue_function_index(method->second);
+                const ClassDef& def = program.classes[it->second];
+                std::vector<std::string> nested_function_names{};
+                std::vector<std::string> nested_type_names{};
+                collect_class_reachable_edges(def, known_function_names, known_function_names_list, nested_function_names, nested_type_names);
+                for (const std::string& nested_name : nested_type_names) collector.enqueue_type(nested_name);
+                for (const std::string& function_name : nested_function_names) collector.enqueue_functions_by_name(function_name);
+                if (auto method_it = methods_by_owner.find(type_name); method_it != methods_by_owner.end()) {
+                    for (std::size_t method_index : method_it->second) {
+                        collector.enqueue_function_index(method_index);
+                    }
                 }
             }
         }
     }
 
+    plan.reachable_type_names = collector.reachable_type_names;
+    plan.reachable_function_indices = collector.reachable_function_indices;
+    plan.root_function_names = collector.root_function_names;
     return plan;
 }
 
-struct StructuredCompileTimePayload {
-    std::vector<std::string> root_function_names;
-    std::vector<EnumDef> enums;
-    std::vector<StructDef> structs;
-    std::vector<ClassDef> classes;
-    std::vector<Function> functions;
+class StructuredCompileTimePayload {
+public:
+    virtual ~StructuredCompileTimePayload() = default;
+    std::vector<std::string> root_function_names{};
+    std::vector<EnumDef> enums{};
+    std::vector<StructDef> structs{};
+    std::vector<ClassDef> classes{};
+    std::vector<Function> functions{};
 };
 
-struct LoadedModuleFile {
-    std::string interface_source;
-    bool is_scppm = false;
-    bool has_compile_time_payload = false;
-    std::string compile_time_payload_bytes;
+class LoadedModuleFile {
+public:
+    virtual ~LoadedModuleFile() = default;
+    std::string interface_source{};
+    bool is_scppm{false};
+    bool has_compile_time_payload{false};
+    std::string compile_time_payload_bytes{};
 };
 
-void write_u8(std::ostream& out, std::uint8_t value) { out.put(static_cast<char>(value)); }
+inline void write_u8(ByteWriter& out, std::uint8_t value) { out.put(static_cast<char>(value)); }
+inline void write_u8(ByteWriter& out, int value) { out.put(static_cast<char>(value)); }
+inline void write_u8(ByteWriter& out, unsigned int value) { out.put(static_cast<char>(value)); }
 
-[[nodiscard]] std::expected<std::uint8_t, DriverError> read_u8(std::istream& in, const std::string& context) {
+[[nodiscard]] inline std::expected<std::uint8_t, DriverError> read_u8(ByteReader& in, const std::string& context) {
     char byte = '\0';
-    in.read(&byte, 1);
-    if (!in) return std::unexpected(DriverError("invalid " + context + ": truncated byte"));
-    return static_cast<std::uint8_t>(static_cast<unsigned char>(byte));
+    if (!in.read(&byte, 1)) return std::unexpected(DriverError("invalid " + context + ": truncated byte"));
+    return static_cast<std::uint8_t>(byte);
 }
 
-void write_i64_le(std::ostream& out, std::int64_t value) {
-    std::array<char, 8> bytes = {};
+inline void write_i64_le(ByteWriter& out, std::int64_t value) {
+    char bytes[8] = {};
     std::uint64_t raw = static_cast<std::uint64_t>(value);
-    for (std::size_t i = 0; i < bytes.size(); i++) bytes[i] = static_cast<char>((raw >> (8 * i)) & 0xffu);
-    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    for (std::size_t i = 0; i < 8; i++) bytes[i] = static_cast<char>((raw >> (8 * i)) & 0xffu);
+    out.write(&bytes[0], 8);
 }
 
-void write_u64_le(std::ostream& out, std::uint64_t value) {
-    std::array<char, 8> bytes = {};
-    for (std::size_t i = 0; i < bytes.size(); i++) bytes[i] = static_cast<char>((value >> (8 * i)) & 0xffu);
-    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+inline void write_u64_le(ByteWriter& out, std::uint64_t value) {
+    char bytes[8] = {};
+    for (std::size_t i = 0; i < 8; i++) bytes[i] = static_cast<char>((value >> (8 * i)) & 0xffu);
+    out.write(&bytes[0], 8);
 }
 
-[[nodiscard]] std::expected<std::uint32_t, DriverError> read_u32_le(std::istream& in, const std::string& context) {
-    std::array<unsigned char, 4> bytes = {};
-    in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    if (!in) return std::unexpected(DriverError("invalid " + context + ": truncated u32"));
+[[nodiscard]] inline std::expected<std::uint32_t, DriverError> read_u32_le(ByteReader& in, const std::string& context) {
+    std::uint8_t bytes[4] = {};
+    if (!in.read(bytes, 4)) return std::unexpected(DriverError("invalid " + context + ": truncated u32"));
     return static_cast<std::uint32_t>(bytes[0]) | (static_cast<std::uint32_t>(bytes[1]) << 8) |
            (static_cast<std::uint32_t>(bytes[2]) << 16) | (static_cast<std::uint32_t>(bytes[3]) << 24);
 }
 
-[[nodiscard]] std::expected<std::int64_t, DriverError> read_i64_le(std::istream& in, const std::string& context) {
-    std::array<unsigned char, 8> bytes = {};
-    in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    if (!in) return std::unexpected(DriverError("invalid " + context + ": truncated i64"));
+[[nodiscard]] inline std::expected<std::int64_t, DriverError> read_i64_le(ByteReader& in, const std::string& context) {
+    std::uint8_t bytes[8] = {};
+    if (!in.read(bytes, 8)) return std::unexpected(DriverError("invalid " + context + ": truncated i64"));
     std::uint64_t raw = 0;
-    for (std::size_t i = 0; i < bytes.size(); i++) raw |= static_cast<std::uint64_t>(bytes[i]) << (8 * i);
+    for (std::size_t i = 0; i < 8; i++) raw |= static_cast<std::uint64_t>(bytes[i]) << (8 * i);
     return static_cast<std::int64_t>(raw);
 }
 
-[[nodiscard]] std::expected<std::uint64_t, DriverError> read_u64_le(std::istream& in, const std::string& context) {
-    std::array<unsigned char, 8> bytes = {};
-    in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    if (!in) return std::unexpected(DriverError("invalid " + context + ": truncated u64"));
+[[nodiscard]] inline std::expected<std::uint64_t, DriverError> read_u64_le(ByteReader& in, const std::string& context) {
+    std::uint8_t bytes[8] = {};
+    if (!in.read(bytes, 8)) return std::unexpected(DriverError("invalid " + context + ": truncated u64"));
     std::uint64_t raw = 0;
-    for (std::size_t i = 0; i < bytes.size(); i++) raw |= static_cast<std::uint64_t>(bytes[i]) << (8 * i);
+    for (std::size_t i = 0; i < 8; i++) raw |= static_cast<std::uint64_t>(bytes[i]) << (8 * i);
     return raw;
 }
 
-void write_double_le(std::ostream& out, double value) {
-    static_assert(sizeof(double) == sizeof(std::uint64_t));
+inline void write_double_le(ByteWriter& out, double value) {
     std::uint64_t raw = 0;
-    std::memcpy(&raw, &value, sizeof(raw));
+    [[scpp::unsafe]] {
+        const void* ptr = &value;
+        const std::uint64_t* raw_ptr = static_cast<const std::uint64_t*>(ptr);
+        raw = *raw_ptr;
+    }
     write_i64_le(out, static_cast<std::int64_t>(raw));
 }
 
-[[nodiscard]] std::expected<double, DriverError> read_double_le(std::istream& in, const std::string& context) {
+[[nodiscard]] inline std::expected<double, DriverError> read_double_le(ByteReader& in, const std::string& context) {
     auto raw_result = read_i64_le(in, context);
     if (!raw_result.has_value()) return std::unexpected(std::move(raw_result).error());
     std::uint64_t raw = static_cast<std::uint64_t>(raw_result.value());
     double value = 0.0;
-    std::memcpy(&value, &raw, sizeof(value));
+    [[scpp::unsafe]] {
+        const void* raw_ptr = &raw;
+        const double* ptr = static_cast<const double*>(raw_ptr);
+        value = *ptr;
+    }
     return value;
 }
 
-void write_string(std::ostream& out, std::string_view text) {
+inline void write_string(ByteWriter& out, std::string_view text) {
     write_u32_le(out, static_cast<std::uint32_t>(text.size()));
-    out.write(text.data(), static_cast<std::streamsize>(text.size()));
+    out.write(text.data(), text.size());
 }
 
-[[nodiscard]] std::expected<std::string, DriverError> read_string(std::istream& in, const std::string& context) {
+[[nodiscard]] inline std::expected<std::string, DriverError> read_string(ByteReader& in, const std::string& context) {
     auto size_result = read_u32_le(in, context + " string length");
     if (!size_result.has_value()) return std::unexpected(std::move(size_result).error());
-    std::string text(size_result.value(), '\0');
-    in.read(text.data(), static_cast<std::streamsize>(size_result.value()));
-    if (!in) return std::unexpected(DriverError("invalid " + context + ": truncated string"));
+    std::size_t size = static_cast<std::size_t>(size_result.value());
+    if (in.pos + size > in.data.size()) {
+        in.failed = true;
+        return std::unexpected(DriverError("invalid " + context + ": truncated string"));
+    }
+    std::string text = string_from_view(in.data.substr(in.pos, size));
+    in.pos += size;
     return text;
 }
 
-void write_source_location(std::ostream& out, const SourceLocation& loc) {
-    write_i64_le(out, loc.line);
-    write_i64_le(out, loc.column);
+inline void write_source_location(ByteWriter& out, const SourceLocation& loc) {
+    write_i64_le(out, static_cast<std::int64_t>(loc.line));
+    write_i64_le(out, static_cast<std::int64_t>(loc.column));
     write_string(out, loc.source_path_text());
 }
 
-[[nodiscard]] std::expected<SourceLocation, DriverError> read_source_location(std::istream& in, const std::string& context) {
-    SourceLocation loc;
+[[nodiscard]] inline std::expected<SourceLocation, DriverError> read_source_location(ByteReader& in, const std::string& context) {
+    SourceLocation loc{};
     auto line_result = read_i64_le(in, context + " line");
     if (!line_result.has_value()) return std::unexpected(std::move(line_result).error());
     loc.line = static_cast<int>(line_result.value());
@@ -604,26 +725,41 @@ void write_source_location(std::ostream& out, const SourceLocation& loc) {
 }
 
 template<typename Enum>
-void write_enum(std::ostream& out, Enum value) {
+inline void write_enum(ByteWriter& out, Enum value) {
     write_u8(out, static_cast<std::uint8_t>(value));
 }
 
-template<typename Enum>
-[[nodiscard]] std::expected<Enum, DriverError> read_enum(std::istream& in, const std::string& context) {
-    auto value_result = read_u8(in, context);
-    if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
-    return static_cast<Enum>(value_result.value());
+template<typename T, typename U>
+bool __enum_cast_store(U value [[maybe_unused]], T& out [[maybe_unused]]) {
+#ifdef __clang__
+    out = static_cast<T>(value);
+    return true;
+#else
+    return false;
+#endif
 }
 
-void write_type(std::ostream& out, const Type& type);
-[[nodiscard]] std::expected<ExprPtr, DriverError> read_expr(std::istream& in, const std::string& context);
-void write_expr(std::ostream& out, const Expr& expr);
-[[nodiscard]] std::expected<StmtPtr, DriverError> read_stmt(std::istream& in, const std::string& context);
-void write_stmt(std::ostream& out, const Stmt& stmt);
-void write_alignment_specifier(std::ostream& out, const AlignmentSpecifier& spec);
-[[nodiscard]] std::expected<AlignmentSpecifier, DriverError> read_alignment_specifier(std::istream& in, const std::string& context);
+template<typename Enum>
+[[nodiscard]] inline std::expected<Enum, DriverError> read_enum(ByteReader& in, const std::string& context) {
+    auto value_result = read_u8(in, context);
+    if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+    Enum converted{};
+    if (!scpp::__enum_cast_store<Enum>(value_result.value(), converted)) {
+        return std::unexpected(DriverError("invalid " + context + ": unknown enum tag " + std::to_string(static_cast<std::int64_t>(value_result.value()))));
+    }
+    std::expected<Enum, DriverError> result{converted};
+    return std::move(result);
+}
 
-void write_type(std::ostream& out, const Type& type) {
+inline void write_type(ByteWriter& out, const Type& type);
+[[nodiscard]] inline std::expected<ExprPtr, DriverError> read_expr(ByteReader& in, const std::string& context);
+inline void write_expr(ByteWriter& out, const Expr& expr);
+[[nodiscard]] inline std::expected<StmtPtr, DriverError> read_stmt(ByteReader& in, const std::string& context);
+inline void write_stmt(ByteWriter& out, const Stmt& stmt);
+inline void write_alignment_specifier(ByteWriter& out, const AlignmentSpecifier& spec);
+[[nodiscard]] inline std::expected<AlignmentSpecifier, DriverError> read_alignment_specifier(ByteReader& in, const std::string& context);
+
+inline void write_type(ByteWriter& out, const Type& type) {
     write_enum(out, type.kind);
     write_string(out, type.name);
     write_u8(out, type.pointee ? 1u : 0u);
@@ -662,10 +798,10 @@ void write_type(std::ostream& out, const Type& type) {
     write_u8(out, type.is_pack_expansion ? 1u : 0u);
 }
 
-[[nodiscard]] std::expected<Type, DriverError> read_type(std::istream& in, const std::string& context) {
-    Type type;
+[[nodiscard]] inline std::expected<Type, DriverError> read_type(ByteReader& in, const std::string& context) {
+    Type type{};
     {
-        auto kind_result = read_enum<TypeKind>(in, context + " kind");
+        auto kind_result = scpp::read_enum<TypeKind>(in, context + " kind");
         if (!kind_result.has_value()) return std::unexpected(std::move(kind_result).error());
         type.kind = kind_result.value();
     }
@@ -721,7 +857,7 @@ void write_type(std::ostream& out, const Type& type) {
         if (!count_result.has_value()) return std::unexpected(std::move(count_result).error());
         param_count = count_result.value();
     }
-    type.function_params.reserve(param_count);
+    type.function_params.reserve(static_cast<std::size_t>(param_count));
     for (std::uint32_t i = 0; i < param_count; i++) {
         auto param_result = read_type(in, context + " function param");
         if (!param_result.has_value()) return std::unexpected(std::move(param_result).error());
@@ -738,7 +874,7 @@ void write_type(std::ostream& out, const Type& type) {
         type.is_const_function = flag_result.value() != 0u;
     }
     {
-        auto qualifier_result = read_enum<ReceiverRefQualifier>(in, context + " fn ref qualifier");
+        auto qualifier_result = scpp::read_enum<ReceiverRefQualifier>(in, context + " fn ref qualifier");
         if (!qualifier_result.has_value()) return std::unexpected(std::move(qualifier_result).error());
         type.function_ref_qualifier = qualifier_result.value();
     }
@@ -773,7 +909,7 @@ void write_type(std::ostream& out, const Type& type) {
         if (!count_result.has_value()) return std::unexpected(std::move(count_result).error());
         template_arg_count = count_result.value();
     }
-    type.template_args.reserve(template_arg_count);
+    type.template_args.reserve(static_cast<std::size_t>(template_arg_count));
     for (std::uint32_t i = 0; i < template_arg_count; i++) {
         auto arg_result = read_type(in, context + " template arg");
         if (!arg_result.has_value()) return std::unexpected(std::move(arg_result).error());
@@ -785,7 +921,7 @@ void write_type(std::ostream& out, const Type& type) {
         if (!count_result.has_value()) return std::unexpected(std::move(count_result).error());
         non_type_arg_count = count_result.value();
     }
-    type.non_type_args.reserve(non_type_arg_count);
+    type.non_type_args.reserve(static_cast<std::size_t>(non_type_arg_count));
     for (std::uint32_t i = 0; i < non_type_arg_count; i++) {
         auto present_result = read_u8(in, context + " non-type arg present");
         if (!present_result.has_value()) return std::unexpected(std::move(present_result).error());
@@ -806,7 +942,7 @@ void write_type(std::ostream& out, const Type& type) {
 }
 
 
-void write_generic_type_param(std::ostream& out, const GenericTypeParam& param) {
+inline void write_generic_type_param(ByteWriter& out, const GenericTypeParam& param) {
     write_string(out, param.name);
     write_string(out, param.concept_name);
     write_u8(out, param.is_pack ? 1u : 0u);
@@ -814,8 +950,8 @@ void write_generic_type_param(std::ostream& out, const GenericTypeParam& param) 
     write_type(out, param.non_type_type);
 }
 
-[[nodiscard]] std::expected<GenericTypeParam, DriverError> read_generic_type_param(std::istream& in, const std::string& context) {
-    GenericTypeParam param;
+[[nodiscard]] inline std::expected<GenericTypeParam, DriverError> read_generic_type_param(ByteReader& in, const std::string& context) {
+    GenericTypeParam param{};
     auto name_r = read_string(in, context + " name");
     if (!name_r.has_value()) return std::unexpected(std::move(name_r).error());
     param.name = std::move(name_r).value();
@@ -835,25 +971,23 @@ void write_generic_type_param(std::ostream& out, const GenericTypeParam& param) 
 }
 
 // Structurally bound; see `write_expr`.
-void write_param(std::ostream& out, const Param& param) {
-    const auto& [type, name, resolved_local, lifetime, default_expr, generic_concept, require_thread_movable,
-                 require_thread_shareable, is_parameter_pack, is_const, loc] = param;
-    write_type(out, type);
-    write_string(out, name);
-    write_u64_le(out, static_cast<std::uint64_t>(resolved_local));
-    write_string(out, lifetime.name);
-    write_u8(out, default_expr ? 1u : 0u);
-    if (default_expr) write_expr(out, *default_expr);
-    write_string(out, generic_concept);
-    write_u8(out, require_thread_movable ? 1u : 0u);
-    write_u8(out, require_thread_shareable ? 1u : 0u);
-    write_u8(out, is_parameter_pack ? 1u : 0u);
-    write_u8(out, is_const ? 1u : 0u);
-    write_source_location(out, loc);
+inline void write_param(ByteWriter& out, const Param& param) {
+    write_type(out, param.type);
+    write_string(out, param.name);
+    write_u64_le(out, static_cast<std::uint64_t>(param.resolved_local));
+    write_string(out, param.lifetime.name);
+    write_u8(out, param.default_expr ? 1u : 0u);
+    if (param.default_expr) write_expr(out, *param.default_expr);
+    write_string(out, param.generic_concept);
+    write_u8(out, param.require_thread_movable ? 1u : 0u);
+    write_u8(out, param.require_thread_shareable ? 1u : 0u);
+    write_u8(out, param.is_parameter_pack ? 1u : 0u);
+    write_u8(out, param.is_const ? 1u : 0u);
+    write_source_location(out, param.loc);
 }
 
-[[nodiscard]] std::expected<Param, DriverError> read_param(std::istream& in, const std::string& context) {
-    Param param;
+[[nodiscard]] inline std::expected<Param, DriverError> read_param(ByteReader& in, const std::string& context) {
+    Param param{};
     auto type_r = read_type(in, context + " type");
     if (!type_r.has_value()) return std::unexpected(std::move(type_r).error());
     param.type = std::move(type_r).value();
@@ -895,18 +1029,17 @@ void write_param(std::ostream& out, const Param& param) {
 }
 
 // Structurally bound; see `write_expr`.
-void write_lambda_capture(std::ostream& out, const LambdaCapture& capture) {
-    const auto& [name, by_reference, init, resolved_local, from_enclosing_closure] = capture;
-    write_string(out, name);
-    write_u8(out, by_reference ? 1u : 0u);
-    write_u64_le(out, static_cast<std::uint64_t>(resolved_local));
-    write_u8(out, from_enclosing_closure ? 1u : 0u);
-    write_u8(out, init ? 1u : 0u);
-    if (init) write_expr(out, *init);
+inline void write_lambda_capture(ByteWriter& out, const LambdaCapture& capture) {
+    write_string(out, capture.name);
+    write_u8(out, capture.by_reference ? 1u : 0u);
+    write_u64_le(out, static_cast<std::uint64_t>(capture.resolved_local));
+    write_u8(out, capture.from_enclosing_closure ? 1u : 0u);
+    write_u8(out, capture.init ? 1u : 0u);
+    if (capture.init) write_expr(out, *capture.init);
 }
 
-[[nodiscard]] std::expected<LambdaCapture, DriverError> read_lambda_capture(std::istream& in, const std::string& context) {
-    LambdaCapture capture;
+[[nodiscard]] inline std::expected<LambdaCapture, DriverError> read_lambda_capture(ByteReader& in, const std::string& context) {
+    LambdaCapture capture{};
     auto name_r = read_string(in, context + " name");
     if (!name_r.has_value()) return std::unexpected(std::move(name_r).error());
     capture.name = std::move(name_r).value();
@@ -929,15 +1062,15 @@ void write_lambda_capture(std::ostream& out, const LambdaCapture& capture) {
     return capture;
 }
 
-void write_explicit_template_arg(std::ostream& out, const ExplicitTemplateArg& arg) {
+inline void write_explicit_template_arg(ByteWriter& out, const ExplicitTemplateArg& arg) {
     write_u8(out, arg.is_type ? 1u : 0u);
     write_type(out, arg.type);
     write_u8(out, arg.value ? 1u : 0u);
     if (arg.value) write_expr(out, *arg.value);
 }
 
-[[nodiscard]] std::expected<ExplicitTemplateArg, DriverError> read_explicit_template_arg(std::istream& in, const std::string& context) {
-    ExplicitTemplateArg arg;
+[[nodiscard]] inline std::expected<ExplicitTemplateArg, DriverError> read_explicit_template_arg(ByteReader& in, const std::string& context) {
+    ExplicitTemplateArg arg{};
     auto is_type_r = read_u8(in, context + " is_type");
     if (!is_type_r.has_value()) return std::unexpected(std::move(is_type_r).error());
     arg.is_type = is_type_r.value() != 0u;
@@ -971,55 +1104,49 @@ void write_explicit_template_arg(std::ostream& out, const ExplicitTemplateArg& a
 // SCPPM_COMPILE_TIME_AST_VERSION so stale caches are rejected rather than
 // misread, and extend the round-trip case in tests/driver_test.cpp. The reader
 // has no equivalent compile-time guard -- the round-trip test is what covers it.
-void write_expr(std::ostream& out, const Expr& expr) {
-    const auto& [kind, resolved_local, loc, int_value, float_value, bool_value, name,
-                 explicit_global_qualification, binary_op, lhs, rhs, third, fold_ellipsis_on_left, unary_op,
-                 args, explicit_template_args, type, sizeof_operand_is_type, has_paren_init,
-                 destroy_through_pointer, through_arrow, implicit_arrow_deref, implicit_arrow_chain_safe,
-                 lambda_captures, lambda_blanket_mode, lambda_params, has_lambda_explicit_return_type,
-                 lambda_is_mutable, lambda_body] = expr;
-    write_enum(out, kind);
-    write_u64_le(out, static_cast<std::uint64_t>(resolved_local));
-    write_source_location(out, loc);
-    write_i64_le(out, int_value);
-    write_double_le(out, float_value);
-    write_u8(out, bool_value ? 1u : 0u);
-    write_string(out, name);
-    write_u8(out, explicit_global_qualification ? 1u : 0u);
-    write_enum(out, binary_op);
-    write_u8(out, lhs ? 1u : 0u);
-    if (lhs) write_expr(out, *lhs);
-    write_u8(out, rhs ? 1u : 0u);
-    if (rhs) write_expr(out, *rhs);
-    write_u8(out, third ? 1u : 0u);
-    if (third) write_expr(out, *third);
-    write_u8(out, fold_ellipsis_on_left ? 1u : 0u);
-    write_enum(out, unary_op);
-    write_u32_le(out, static_cast<std::uint32_t>(args.size()));
-    for (const auto& arg : args) write_expr(out, *arg);
-    write_u32_le(out, static_cast<std::uint32_t>(explicit_template_args.size()));
-    for (const ExplicitTemplateArg& arg : explicit_template_args) write_explicit_template_arg(out, arg);
-    write_type(out, type);
-    write_u8(out, sizeof_operand_is_type ? 1u : 0u);
-    write_u8(out, has_paren_init ? 1u : 0u);
-    write_u8(out, destroy_through_pointer ? 1u : 0u);
-    write_u8(out, through_arrow ? 1u : 0u);
-    write_u8(out, implicit_arrow_deref ? 1u : 0u);
-    write_u8(out, implicit_arrow_chain_safe ? 1u : 0u);
-    write_u32_le(out, static_cast<std::uint32_t>(lambda_captures.size()));
-    for (const LambdaCapture& capture : lambda_captures) write_lambda_capture(out, capture);
-    write_enum(out, lambda_blanket_mode);
-    write_u32_le(out, static_cast<std::uint32_t>(lambda_params.size()));
-    for (const Param& param : lambda_params) write_param(out, param);
-    write_u8(out, has_lambda_explicit_return_type ? 1u : 0u);
-    write_u8(out, lambda_is_mutable ? 1u : 0u);
-    write_u8(out, lambda_body ? 1u : 0u);
-    if (lambda_body) write_stmt(out, *lambda_body);
+inline void write_expr(ByteWriter& out, const Expr& expr) {
+    write_enum(out, expr.kind);
+    write_u64_le(out, static_cast<std::uint64_t>(expr.resolved_local));
+    write_source_location(out, expr.loc);
+    write_i64_le(out, expr.int_value);
+    write_double_le(out, expr.float_value);
+    write_u8(out, expr.bool_value ? 1u : 0u);
+    write_string(out, expr.name);
+    write_u8(out, expr.explicit_global_qualification ? 1u : 0u);
+    write_enum(out, expr.binary_op);
+    write_u8(out, expr.lhs ? 1u : 0u);
+    if (expr.lhs) write_expr(out, *expr.lhs);
+    write_u8(out, expr.rhs ? 1u : 0u);
+    if (expr.rhs) write_expr(out, *expr.rhs);
+    write_u8(out, expr.third ? 1u : 0u);
+    if (expr.third) write_expr(out, *expr.third);
+    write_u8(out, expr.fold_ellipsis_on_left ? 1u : 0u);
+    write_enum(out, expr.unary_op);
+    write_u32_le(out, static_cast<std::uint32_t>(expr.args.size()));
+    for (const auto& arg : expr.args) write_expr(out, *arg);
+    write_u32_le(out, static_cast<std::uint32_t>(expr.explicit_template_args.size()));
+    for (const ExplicitTemplateArg& arg : expr.explicit_template_args) write_explicit_template_arg(out, arg);
+    write_type(out, expr.type);
+    write_u8(out, expr.sizeof_operand_is_type ? 1u : 0u);
+    write_u8(out, expr.has_paren_init ? 1u : 0u);
+    write_u8(out, expr.destroy_through_pointer ? 1u : 0u);
+    write_u8(out, expr.through_arrow ? 1u : 0u);
+    write_u8(out, expr.implicit_arrow_deref ? 1u : 0u);
+    write_u8(out, expr.implicit_arrow_chain_safe ? 1u : 0u);
+    write_u32_le(out, static_cast<std::uint32_t>(expr.lambda_captures.size()));
+    for (const LambdaCapture& capture : expr.lambda_captures) write_lambda_capture(out, capture);
+    write_enum(out, expr.lambda_blanket_mode);
+    write_u32_le(out, static_cast<std::uint32_t>(expr.lambda_params.size()));
+    for (const Param& param : expr.lambda_params) write_param(out, param);
+    write_u8(out, expr.has_lambda_explicit_return_type ? 1u : 0u);
+    write_u8(out, expr.lambda_is_mutable ? 1u : 0u);
+    write_u8(out, expr.lambda_body ? 1u : 0u);
+    if (expr.lambda_body) write_stmt(out, *expr.lambda_body);
 }
 
-[[nodiscard]] std::expected<ExprPtr, DriverError> read_expr(std::istream& in, const std::string& context) {
+[[nodiscard]] inline std::expected<ExprPtr, DriverError> read_expr(ByteReader& in, const std::string& context) {
     auto expr = std::make_unique<Expr>();
-    auto kind_r = read_enum<ExprKind>(in, context + " kind");
+    auto kind_r = scpp::read_enum<ExprKind>(in, context + " kind");
     if (!kind_r.has_value()) return std::unexpected(std::move(kind_r).error());
     expr->kind = kind_r.value();
     auto resolved_local_r = read_u64_le(in, context + " resolved local");
@@ -1043,7 +1170,7 @@ void write_expr(std::ostream& out, const Expr& expr) {
     auto global_qual_r = read_u8(in, context + " global qualification");
     if (!global_qual_r.has_value()) return std::unexpected(std::move(global_qual_r).error());
     expr->explicit_global_qualification = global_qual_r.value() != 0u;
-    auto binary_op_r = read_enum<BinaryOp>(in, context + " binary op");
+    auto binary_op_r = scpp::read_enum<BinaryOp>(in, context + " binary op");
     if (!binary_op_r.has_value()) return std::unexpected(std::move(binary_op_r).error());
     expr->binary_op = binary_op_r.value();
     auto lhs_present_r = read_u8(in, context + " lhs present");
@@ -1051,41 +1178,41 @@ void write_expr(std::ostream& out, const Expr& expr) {
     if (lhs_present_r.value() != 0u) {
         auto lhs_r = read_expr(in, context + " lhs");
         if (!lhs_r.has_value()) return std::unexpected(std::move(lhs_r).error());
-        expr->lhs = std::move(lhs_r).value();
+        expr->lhs = std::move(lhs_r.value());
     }
     auto rhs_present_r = read_u8(in, context + " rhs present");
     if (!rhs_present_r.has_value()) return std::unexpected(std::move(rhs_present_r).error());
     if (rhs_present_r.value() != 0u) {
         auto rhs_r = read_expr(in, context + " rhs");
         if (!rhs_r.has_value()) return std::unexpected(std::move(rhs_r).error());
-        expr->rhs = std::move(rhs_r).value();
+        expr->rhs = std::move(rhs_r.value());
     }
     auto third_present_r = read_u8(in, context + " third present");
     if (!third_present_r.has_value()) return std::unexpected(std::move(third_present_r).error());
     if (third_present_r.value() != 0u) {
         auto third_r = read_expr(in, context + " third");
         if (!third_r.has_value()) return std::unexpected(std::move(third_r).error());
-        expr->third = std::move(third_r).value();
+        expr->third = std::move(third_r.value());
     }
     auto fold_left_r = read_u8(in, context + " fold left");
     if (!fold_left_r.has_value()) return std::unexpected(std::move(fold_left_r).error());
     expr->fold_ellipsis_on_left = fold_left_r.value() != 0u;
-    auto unary_op_r = read_enum<UnaryOp>(in, context + " unary op");
+    auto unary_op_r = scpp::read_enum<UnaryOp>(in, context + " unary op");
     if (!unary_op_r.has_value()) return std::unexpected(std::move(unary_op_r).error());
     expr->unary_op = unary_op_r.value();
     auto arg_count_r = read_u32_le(in, context + " arg count");
     if (!arg_count_r.has_value()) return std::unexpected(std::move(arg_count_r).error());
     std::uint32_t arg_count = arg_count_r.value();
-    expr->args.reserve(arg_count);
+    expr->args.reserve(static_cast<std::size_t>(arg_count));
     for (std::uint32_t i = 0; i < arg_count; i++) {
         auto arg_r = read_expr(in, context + " arg");
         if (!arg_r.has_value()) return std::unexpected(std::move(arg_r).error());
-        expr->args.push_back(std::move(arg_r).value());
+        expr->args.push_back(std::move(arg_r.value()));
     }
     auto explicit_arg_count_r = read_u32_le(in, context + " explicit arg count");
     if (!explicit_arg_count_r.has_value()) return std::unexpected(std::move(explicit_arg_count_r).error());
     std::uint32_t explicit_arg_count = explicit_arg_count_r.value();
-    expr->explicit_template_args.reserve(explicit_arg_count);
+    expr->explicit_template_args.reserve(static_cast<std::size_t>(explicit_arg_count));
     for (std::uint32_t i = 0; i < explicit_arg_count; i++) {
         auto explicit_arg_r = read_explicit_template_arg(in, context + " explicit arg");
         if (!explicit_arg_r.has_value()) return std::unexpected(std::move(explicit_arg_r).error());
@@ -1115,19 +1242,19 @@ void write_expr(std::ostream& out, const Expr& expr) {
     auto capture_count_r = read_u32_le(in, context + " capture count");
     if (!capture_count_r.has_value()) return std::unexpected(std::move(capture_count_r).error());
     std::uint32_t capture_count = capture_count_r.value();
-    expr->lambda_captures.reserve(capture_count);
+    expr->lambda_captures.reserve(static_cast<std::size_t>(capture_count));
     for (std::uint32_t i = 0; i < capture_count; i++) {
         auto capture_r = read_lambda_capture(in, context + " capture");
         if (!capture_r.has_value()) return std::unexpected(std::move(capture_r).error());
         expr->lambda_captures.push_back(std::move(capture_r).value());
     }
-    auto blanket_mode_r = read_enum<LambdaCaptureMode>(in, context + " blanket mode");
+    auto blanket_mode_r = scpp::read_enum<LambdaCaptureMode>(in, context + " blanket mode");
     if (!blanket_mode_r.has_value()) return std::unexpected(std::move(blanket_mode_r).error());
     expr->lambda_blanket_mode = blanket_mode_r.value();
     auto lambda_param_count_r = read_u32_le(in, context + " lambda param count");
     if (!lambda_param_count_r.has_value()) return std::unexpected(std::move(lambda_param_count_r).error());
     std::uint32_t lambda_param_count = lambda_param_count_r.value();
-    expr->lambda_params.reserve(lambda_param_count);
+    expr->lambda_params.reserve(static_cast<std::size_t>(lambda_param_count));
     for (std::uint32_t i = 0; i < lambda_param_count; i++) {
         auto lambda_param_r = read_param(in, context + " lambda param");
         if (!lambda_param_r.has_value()) return std::unexpected(std::move(lambda_param_r).error());
@@ -1144,60 +1271,56 @@ void write_expr(std::ostream& out, const Expr& expr) {
     if (lambda_body_present_r.value() != 0u) {
         auto lambda_body_r = read_stmt(in, context + " lambda body");
         if (!lambda_body_r.has_value()) return std::unexpected(std::move(lambda_body_r).error());
-        expr->lambda_body = std::move(lambda_body_r).value();
+        expr->lambda_body = std::move(lambda_body_r.value());
     }
-    return expr;
+    return std::move(expr);
 }
 
 // Structurally bound for the same reason as `write_expr` above; `is_static_local`
 // and `declared_local` were both missing from this list until the round-trip test
 // in tests/driver_test.cpp caught them.
-void write_stmt(std::ostream& out, const Stmt& stmt) {
-    const auto& [kind, loc, type, var_name, declared_local, init, alignment_specs, resolved_alignment,
-                 is_const, is_constexpr, is_static_local, has_ctor_args, ctor_args, expr, condition, if_mode,
-                 then_branch, else_branch, switch_cases, statements, is_unsafe] = stmt;
-    write_enum(out, kind);
-    write_source_location(out, loc);
-    write_type(out, type);
-    write_string(out, var_name);
-    write_u64_le(out, static_cast<std::uint64_t>(declared_local));
-    write_u8(out, init ? 1u : 0u);
-    if (init) write_expr(out, *init);
-    write_u32_le(out, static_cast<std::uint32_t>(alignment_specs.size()));
-    for (const AlignmentSpecifier& spec : alignment_specs) write_alignment_specifier(out, spec);
-    write_u64_le(out, resolved_alignment);
-    write_u8(out, is_const ? 1u : 0u);
-    write_u8(out, is_constexpr ? 1u : 0u);
-    write_u8(out, is_static_local ? 1u : 0u);
-    write_u8(out, has_ctor_args ? 1u : 0u);
-    write_u32_le(out, static_cast<std::uint32_t>(ctor_args.size()));
-    for (const auto& arg : ctor_args) write_expr(out, *arg);
-    write_u8(out, expr ? 1u : 0u);
-    if (expr) write_expr(out, *expr);
-    write_u8(out, condition ? 1u : 0u);
-    if (condition) write_expr(out, *condition);
-    write_enum(out, if_mode);
-    write_u8(out, then_branch ? 1u : 0u);
-    if (then_branch) write_stmt(out, *then_branch);
-    write_u8(out, else_branch ? 1u : 0u);
-    if (else_branch) write_stmt(out, *else_branch);
-    write_u32_le(out, static_cast<std::uint32_t>(switch_cases.size()));
-    for (const SwitchCase& switch_case : switch_cases) {
-        const auto& [case_loc, case_value, case_statements] = switch_case;
-        write_source_location(out, case_loc);
-        write_u8(out, case_value ? 1u : 0u);
-        if (case_value) write_expr(out, *case_value);
-        write_u32_le(out, static_cast<std::uint32_t>(case_statements.size()));
-        for (const auto& nested : case_statements) write_stmt(out, *nested);
+inline void write_stmt(ByteWriter& out, const Stmt& stmt) {
+    write_enum(out, stmt.kind);
+    write_source_location(out, stmt.loc);
+    write_type(out, stmt.type);
+    write_string(out, stmt.var_name);
+    write_u64_le(out, static_cast<std::uint64_t>(stmt.declared_local));
+    write_u8(out, stmt.init ? 1u : 0u);
+    if (stmt.init) write_expr(out, *stmt.init);
+    write_u32_le(out, static_cast<std::uint32_t>(stmt.alignment_specs.size()));
+    for (const AlignmentSpecifier& spec : stmt.alignment_specs) write_alignment_specifier(out, spec);
+    write_u64_le(out, stmt.resolved_alignment);
+    write_u8(out, stmt.is_const ? 1u : 0u);
+    write_u8(out, stmt.is_constexpr ? 1u : 0u);
+    write_u8(out, stmt.is_static_local ? 1u : 0u);
+    write_u8(out, stmt.has_ctor_args ? 1u : 0u);
+    write_u32_le(out, static_cast<std::uint32_t>(stmt.ctor_args.size()));
+    for (const auto& arg : stmt.ctor_args) write_expr(out, *arg);
+    write_u8(out, stmt.expr ? 1u : 0u);
+    if (stmt.expr) write_expr(out, *stmt.expr);
+    write_u8(out, stmt.condition ? 1u : 0u);
+    if (stmt.condition) write_expr(out, *stmt.condition);
+    write_enum(out, stmt.if_mode);
+    write_u8(out, stmt.then_branch ? 1u : 0u);
+    if (stmt.then_branch) write_stmt(out, *stmt.then_branch);
+    write_u8(out, stmt.else_branch ? 1u : 0u);
+    if (stmt.else_branch) write_stmt(out, *stmt.else_branch);
+    write_u32_le(out, static_cast<std::uint32_t>(stmt.switch_cases.size()));
+    for (const SwitchCase& switch_case : stmt.switch_cases) {
+        write_source_location(out, switch_case.loc);
+        write_u8(out, switch_case.value ? 1u : 0u);
+        if (switch_case.value) write_expr(out, *switch_case.value);
+        write_u32_le(out, static_cast<std::uint32_t>(switch_case.statements.size()));
+        for (const auto& nested : switch_case.statements) write_stmt(out, *nested);
     }
-    write_u32_le(out, static_cast<std::uint32_t>(statements.size()));
-    for (const auto& nested : statements) write_stmt(out, *nested);
-    write_u8(out, is_unsafe ? 1u : 0u);
+    write_u32_le(out, static_cast<std::uint32_t>(stmt.statements.size()));
+    for (const auto& nested : stmt.statements) write_stmt(out, *nested);
+    write_u8(out, stmt.is_unsafe ? 1u : 0u);
 }
 
-[[nodiscard]] std::expected<StmtPtr, DriverError> read_stmt(std::istream& in, const std::string& context) {
+[[nodiscard]] inline std::expected<StmtPtr, DriverError> read_stmt(ByteReader& in, const std::string& context) {
     auto stmt = std::make_unique<Stmt>();
-    auto kind_r = read_enum<StmtKind>(in, context + " kind");
+    auto kind_r = scpp::read_enum<StmtKind>(in, context + " kind");
     if (!kind_r.has_value()) return std::unexpected(std::move(kind_r).error());
     stmt->kind = kind_r.value();
     auto loc_r = read_source_location(in, context + " loc");
@@ -1222,7 +1345,7 @@ void write_stmt(std::ostream& out, const Stmt& stmt) {
     auto align_spec_count_r = read_u32_le(in, context + " align spec count");
     if (!align_spec_count_r.has_value()) return std::unexpected(std::move(align_spec_count_r).error());
     std::uint32_t align_spec_count = align_spec_count_r.value();
-    stmt->alignment_specs.reserve(align_spec_count);
+    stmt->alignment_specs.reserve(static_cast<std::size_t>(align_spec_count));
     for (std::uint32_t i = 0; i < align_spec_count; i++) {
         auto spec_r = read_alignment_specifier(in, context + " align spec");
         if (!spec_r.has_value()) return std::unexpected(std::move(spec_r).error());
@@ -1246,27 +1369,27 @@ void write_stmt(std::ostream& out, const Stmt& stmt) {
     auto ctor_arg_count_r = read_u32_le(in, context + " ctor arg count");
     if (!ctor_arg_count_r.has_value()) return std::unexpected(std::move(ctor_arg_count_r).error());
     std::uint32_t ctor_arg_count = ctor_arg_count_r.value();
-    stmt->ctor_args.reserve(ctor_arg_count);
+    stmt->ctor_args.reserve(static_cast<std::size_t>(ctor_arg_count));
     for (std::uint32_t i = 0; i < ctor_arg_count; i++) {
         auto ctor_arg_r = read_expr(in, context + " ctor arg");
         if (!ctor_arg_r.has_value()) return std::unexpected(std::move(ctor_arg_r).error());
-        stmt->ctor_args.push_back(std::move(ctor_arg_r).value());
+        stmt->ctor_args.push_back(std::move(ctor_arg_r.value()));
     }
     auto expr_present_r = read_u8(in, context + " expr present");
     if (!expr_present_r.has_value()) return std::unexpected(std::move(expr_present_r).error());
     if (expr_present_r.value() != 0u) {
         auto expr_r = read_expr(in, context + " expr");
         if (!expr_r.has_value()) return std::unexpected(std::move(expr_r).error());
-        stmt->expr = std::move(expr_r).value();
+        stmt->expr = std::move(expr_r.value());
     }
     auto condition_present_r = read_u8(in, context + " condition present");
     if (!condition_present_r.has_value()) return std::unexpected(std::move(condition_present_r).error());
     if (condition_present_r.value() != 0u) {
         auto condition_r = read_expr(in, context + " condition");
         if (!condition_r.has_value()) return std::unexpected(std::move(condition_r).error());
-        stmt->condition = std::move(condition_r).value();
+        stmt->condition = std::move(condition_r.value());
     }
-    auto if_mode_r = read_enum<IfMode>(in, context + " if mode");
+    auto if_mode_r = scpp::read_enum<IfMode>(in, context + " if mode");
     if (!if_mode_r.has_value()) return std::unexpected(std::move(if_mode_r).error());
     stmt->if_mode = if_mode_r.value();
     auto then_present_r = read_u8(in, context + " then present");
@@ -1274,19 +1397,19 @@ void write_stmt(std::ostream& out, const Stmt& stmt) {
     if (then_present_r.value() != 0u) {
         auto then_r = read_stmt(in, context + " then");
         if (!then_r.has_value()) return std::unexpected(std::move(then_r).error());
-        stmt->then_branch = std::move(then_r).value();
+        stmt->then_branch = std::move(then_r.value());
     }
     auto else_present_r = read_u8(in, context + " else present");
     if (!else_present_r.has_value()) return std::unexpected(std::move(else_present_r).error());
     if (else_present_r.value() != 0u) {
         auto else_r = read_stmt(in, context + " else");
         if (!else_r.has_value()) return std::unexpected(std::move(else_r).error());
-        stmt->else_branch = std::move(else_r).value();
+        stmt->else_branch = std::move(else_r.value());
     }
     auto switch_case_count_r = read_u32_le(in, context + " switch case count");
     if (!switch_case_count_r.has_value()) return std::unexpected(std::move(switch_case_count_r).error());
     std::uint32_t switch_case_count = switch_case_count_r.value();
-    stmt->switch_cases.reserve(switch_case_count);
+    stmt->switch_cases.reserve(static_cast<std::size_t>(switch_case_count));
     for (std::uint32_t i = 0; i < switch_case_count; i++) {
         SwitchCase switch_case{};
         auto switch_case_loc_r = read_source_location(in, context + " switch case loc");
@@ -1297,35 +1420,35 @@ void write_stmt(std::ostream& out, const Stmt& stmt) {
         if (switch_case_value_present_r.value() != 0u) {
             auto switch_case_value_r = read_expr(in, context + " switch case value");
             if (!switch_case_value_r.has_value()) return std::unexpected(std::move(switch_case_value_r).error());
-            switch_case.value = std::move(switch_case_value_r).value();
+            switch_case.value = std::move(switch_case_value_r.value());
         }
         auto switch_stmt_count_r = read_u32_le(in, context + " switch case stmt count");
         if (!switch_stmt_count_r.has_value()) return std::unexpected(std::move(switch_stmt_count_r).error());
         std::uint32_t switch_stmt_count = switch_stmt_count_r.value();
-        switch_case.statements.reserve(switch_stmt_count);
+        switch_case.statements.reserve(static_cast<std::size_t>(switch_stmt_count));
         for (std::uint32_t j = 0; j < switch_stmt_count; j++) {
             auto switch_stmt_r = read_stmt(in, context + " switch case stmt");
             if (!switch_stmt_r.has_value()) return std::unexpected(std::move(switch_stmt_r).error());
-            switch_case.statements.push_back(std::move(switch_stmt_r).value());
+            switch_case.statements.push_back(std::move(switch_stmt_r.value()));
         }
         stmt->switch_cases.push_back(std::move(switch_case));
     }
     auto nested_count_r = read_u32_le(in, context + " nested count");
     if (!nested_count_r.has_value()) return std::unexpected(std::move(nested_count_r).error());
     std::uint32_t nested_count = nested_count_r.value();
-    stmt->statements.reserve(nested_count);
+    stmt->statements.reserve(static_cast<std::size_t>(nested_count));
     for (std::uint32_t i = 0; i < nested_count; i++) {
         auto nested_r = read_stmt(in, context + " nested");
         if (!nested_r.has_value()) return std::unexpected(std::move(nested_r).error());
-        stmt->statements.push_back(std::move(nested_r).value());
+        stmt->statements.push_back(std::move(nested_r.value()));
     }
     auto unsafe_r = read_u8(in, context + " unsafe");
     if (!unsafe_r.has_value()) return std::unexpected(std::move(unsafe_r).error());
     stmt->is_unsafe = unsafe_r.value() != 0u;
-    return stmt;
+    return std::move(stmt);
 }
 
-void write_initializer(std::ostream& out, const Initializer& init) {
+inline void write_initializer(ByteWriter& out, const Initializer& init) {
     write_u8(out, init.expr ? 1u : 0u);
     if (init.expr) write_expr(out, *init.expr);
     write_u8(out, init.has_brace_args ? 1u : 0u);
@@ -1333,7 +1456,7 @@ void write_initializer(std::ostream& out, const Initializer& init) {
     for (const ExprPtr& arg : init.brace_args) write_expr(out, *arg);
 }
 
-void write_alignment_specifier(std::ostream& out, const AlignmentSpecifier& spec) {
+inline void write_alignment_specifier(ByteWriter& out, const AlignmentSpecifier& spec) {
     write_source_location(out, spec.loc);
     write_u8(out, spec.operand_is_type ? 1u : 0u);
     write_type(out, spec.type);
@@ -1341,8 +1464,8 @@ void write_alignment_specifier(std::ostream& out, const AlignmentSpecifier& spec
     if (spec.expr) write_expr(out, *spec.expr);
 }
 
-[[nodiscard]] std::expected<AlignmentSpecifier, DriverError> read_alignment_specifier(std::istream& in, const std::string& context) {
-    AlignmentSpecifier spec;
+[[nodiscard]] inline std::expected<AlignmentSpecifier, DriverError> read_alignment_specifier(ByteReader& in, const std::string& context) {
+    AlignmentSpecifier spec{};
     auto loc_r = read_source_location(in, context + " loc");
     if (!loc_r.has_value()) return std::unexpected(std::move(loc_r).error());
     spec.loc = std::move(loc_r).value();
@@ -1362,14 +1485,14 @@ void write_alignment_specifier(std::ostream& out, const AlignmentSpecifier& spec
     return spec;
 }
 
-[[nodiscard]] std::expected<Initializer, DriverError> read_initializer(std::istream& in, const std::string& context) {
-    Initializer init;
+[[nodiscard]] inline std::expected<Initializer, DriverError> read_initializer(ByteReader& in, const std::string& context) {
+    Initializer init{};
     auto expr_present_r = read_u8(in, context + " expr present");
     if (!expr_present_r.has_value()) return std::unexpected(std::move(expr_present_r).error());
     if (expr_present_r.value() != 0u) {
         auto expr_r = read_expr(in, context + " expr");
         if (!expr_r.has_value()) return std::unexpected(std::move(expr_r).error());
-        init.expr = std::move(expr_r).value();
+        init.expr = std::move(expr_r.value());
     }
     auto brace_present_r = read_u8(in, context + " brace args present");
     if (!brace_present_r.has_value()) return std::unexpected(std::move(brace_present_r).error());
@@ -1377,23 +1500,23 @@ void write_alignment_specifier(std::ostream& out, const AlignmentSpecifier& spec
     auto arg_count_r = read_u32_le(in, context + " brace arg count");
     if (!arg_count_r.has_value()) return std::unexpected(std::move(arg_count_r).error());
     std::uint32_t arg_count = arg_count_r.value();
-    init.brace_args.reserve(arg_count);
+    init.brace_args.reserve(static_cast<std::size_t>(arg_count));
     for (std::uint32_t i = 0; i < arg_count; i++) {
         auto arg_r = read_expr(in, context + " brace arg");
         if (!arg_r.has_value()) return std::unexpected(std::move(arg_r).error());
-        init.brace_args.push_back(std::move(arg_r).value());
+        init.brace_args.push_back(std::move(arg_r.value()));
     }
     return init;
 }
 
-void write_member_initializer(std::ostream& out, const MemberInitializer& init) {
+inline void write_member_initializer(ByteWriter& out, const MemberInitializer& init) {
     write_string(out, init.member_name);
     write_initializer(out, init.initializer);
     write_source_location(out, init.loc);
 }
 
-[[nodiscard]] std::expected<MemberInitializer, DriverError> read_member_initializer(std::istream& in, const std::string& context) {
-    MemberInitializer init;
+[[nodiscard]] inline std::expected<MemberInitializer, DriverError> read_member_initializer(ByteReader& in, const std::string& context) {
+    MemberInitializer init{};
     auto name_r = read_string(in, context + " member name");
     if (!name_r.has_value()) return std::unexpected(std::move(name_r).error());
     init.member_name = std::move(name_r).value();
@@ -1406,7 +1529,7 @@ void write_member_initializer(std::ostream& out, const MemberInitializer& init) 
     return init;
 }
 
-void write_struct_field(std::ostream& out, const StructField& field) {
+inline void write_struct_field(ByteWriter& out, const StructField& field) {
     write_source_location(out, field.loc);
     write_type(out, field.type);
     write_string(out, field.name);
@@ -1418,8 +1541,8 @@ void write_struct_field(std::ostream& out, const StructField& field) {
     write_u64_le(out, field.resolved_alignment);
 }
 
-[[nodiscard]] std::expected<StructField, DriverError> read_struct_field(std::istream& in, const std::string& context) {
-    StructField field;
+[[nodiscard]] inline std::expected<StructField, DriverError> read_struct_field(ByteReader& in, const std::string& context) {
+    StructField field{};
     auto loc_r = read_source_location(in, context + " loc");
     if (!loc_r.has_value()) return std::unexpected(std::move(loc_r).error());
     field.loc = std::move(loc_r).value();
@@ -1436,13 +1559,13 @@ void write_struct_field(std::ostream& out, const StructField& field) {
         if (!default_r.has_value()) return std::unexpected(std::move(default_r).error());
         field.default_initializer = std::move(default_r).value();
     }
-    auto access_r = read_enum<AccessSpecifier>(in, context + " access");
+    auto access_r = scpp::read_enum<AccessSpecifier>(in, context + " access");
     if (!access_r.has_value()) return std::unexpected(std::move(access_r).error());
     field.access = access_r.value();
     auto align_spec_count_r = read_u32_le(in, context + " align spec count");
     if (!align_spec_count_r.has_value()) return std::unexpected(std::move(align_spec_count_r).error());
     std::uint32_t align_spec_count = align_spec_count_r.value();
-    field.alignment_specs.reserve(align_spec_count);
+    field.alignment_specs.reserve(static_cast<std::size_t>(align_spec_count));
     for (std::uint32_t i = 0; i < align_spec_count; i++) {
         auto spec_r = read_alignment_specifier(in, context + " align spec");
         if (!spec_r.has_value()) return std::unexpected(std::move(spec_r).error());
@@ -1454,7 +1577,7 @@ void write_struct_field(std::ostream& out, const StructField& field) {
     return field;
 }
 
-void write_class_field(std::ostream& out, const ClassField& field) {
+inline void write_class_field(ByteWriter& out, const ClassField& field) {
     write_source_location(out, field.loc);
     write_type(out, field.type);
     write_string(out, field.name);
@@ -1466,8 +1589,8 @@ void write_class_field(std::ostream& out, const ClassField& field) {
     write_u64_le(out, field.resolved_alignment);
 }
 
-[[nodiscard]] std::expected<ClassField, DriverError> read_class_field(std::istream& in, const std::string& context) {
-    ClassField field;
+[[nodiscard]] inline std::expected<ClassField, DriverError> read_class_field(ByteReader& in, const std::string& context) {
+    ClassField field{};
     auto loc_r = read_source_location(in, context + " loc");
     if (!loc_r.has_value()) return std::unexpected(std::move(loc_r).error());
     field.loc = std::move(loc_r).value();
@@ -1484,13 +1607,13 @@ void write_class_field(std::ostream& out, const ClassField& field) {
         if (!default_r.has_value()) return std::unexpected(std::move(default_r).error());
         field.default_initializer = std::move(default_r).value();
     }
-    auto access_r = read_enum<AccessSpecifier>(in, context + " access");
+    auto access_r = scpp::read_enum<AccessSpecifier>(in, context + " access");
     if (!access_r.has_value()) return std::unexpected(std::move(access_r).error());
     field.access = access_r.value();
     auto align_spec_count_r = read_u32_le(in, context + " align spec count");
     if (!align_spec_count_r.has_value()) return std::unexpected(std::move(align_spec_count_r).error());
     std::uint32_t align_spec_count = align_spec_count_r.value();
-    field.alignment_specs.reserve(align_spec_count);
+    field.alignment_specs.reserve(static_cast<std::size_t>(align_spec_count));
     for (std::uint32_t i = 0; i < align_spec_count; i++) {
         auto spec_r = read_alignment_specifier(in, context + " align spec");
         if (!spec_r.has_value()) return std::unexpected(std::move(spec_r).error());
@@ -1502,7 +1625,7 @@ void write_class_field(std::ostream& out, const ClassField& field) {
     return field;
 }
 
-void write_base_specifier(std::ostream& out, const BaseSpecifier& base) {
+inline void write_base_specifier(ByteWriter& out, const BaseSpecifier& base) {
     write_type(out, base.base_type);
     write_enum(out, base.access);
     write_u8(out, base.is_virtual ? 1u : 0u);
@@ -1510,18 +1633,18 @@ void write_base_specifier(std::ostream& out, const BaseSpecifier& base) {
     write_string(out, base.pack_arg_name);
 }
 
-[[nodiscard]] std::expected<BaseSpecifier, DriverError> read_base_specifier(std::istream& in, const std::string& context) {
-    BaseSpecifier base;
+[[nodiscard]] inline std::expected<BaseSpecifier, DriverError> read_base_specifier(ByteReader& in, const std::string& context) {
+    BaseSpecifier base{};
     auto type_r = read_type(in, context + " type");
     if (!type_r.has_value()) return std::unexpected(std::move(type_r).error());
     base.base_type = std::move(type_r).value();
-    auto access_r = read_enum<AccessSpecifier>(in, context + " access");
+    auto access_r = scpp::read_enum<AccessSpecifier>(in, context + " access");
     if (!access_r.has_value()) return std::unexpected(std::move(access_r).error());
     base.access = access_r.value();
     auto is_virtual_r = read_u8(in, context + " is_virtual");
     if (!is_virtual_r.has_value()) return std::unexpected(std::move(is_virtual_r).error());
     base.is_virtual = is_virtual_r.value() != 0u;
-    auto kind_r = read_enum<BaseClassKind>(in, context + " kind");
+    auto kind_r = scpp::read_enum<BaseClassKind>(in, context + " kind");
     if (!kind_r.has_value()) return std::unexpected(std::move(kind_r).error());
     base.kind = kind_r.value();
     auto pack_arg_r = read_string(in, context + " pack arg");
@@ -1530,33 +1653,33 @@ void write_base_specifier(std::ostream& out, const BaseSpecifier& base) {
     return base;
 }
 
-void write_class_using_declaration(std::ostream& out, const ClassUsingDeclaration& decl) {
+inline void write_class_using_declaration(ByteWriter& out, const ClassUsingDeclaration& decl) {
     write_string(out, decl.base_name);
     write_string(out, decl.member_name);
     write_enum(out, decl.access);
 }
 
-[[nodiscard]] std::expected<ClassUsingDeclaration, DriverError> read_class_using_declaration(std::istream& in, const std::string& context) {
-    ClassUsingDeclaration decl;
+[[nodiscard]] inline std::expected<ClassUsingDeclaration, DriverError> read_class_using_declaration(ByteReader& in, const std::string& context) {
+    ClassUsingDeclaration decl{};
     auto base_name_r = read_string(in, context + " base name");
     if (!base_name_r.has_value()) return std::unexpected(std::move(base_name_r).error());
     decl.base_name = std::move(base_name_r).value();
     auto member_name_r = read_string(in, context + " member name");
     if (!member_name_r.has_value()) return std::unexpected(std::move(member_name_r).error());
     decl.member_name = std::move(member_name_r).value();
-    auto access_r = read_enum<AccessSpecifier>(in, context + " access");
+    auto access_r = scpp::read_enum<AccessSpecifier>(in, context + " access");
     if (!access_r.has_value()) return std::unexpected(std::move(access_r).error());
     decl.access = access_r.value();
     return decl;
 }
 
-void write_enum_variant(std::ostream& out, const EnumVariant& variant) {
+inline void write_enum_variant(ByteWriter& out, const EnumVariant& variant) {
     write_string(out, variant.name);
     write_i64_le(out, variant.value);
 }
 
-[[nodiscard]] std::expected<EnumVariant, DriverError> read_enum_variant(std::istream& in, const std::string& context) {
-    EnumVariant variant;
+[[nodiscard]] inline std::expected<EnumVariant, DriverError> read_enum_variant(ByteReader& in, const std::string& context) {
+    EnumVariant variant{};
     auto name_r = read_string(in, context + " name");
     if (!name_r.has_value()) return std::unexpected(std::move(name_r).error());
     variant.name = std::move(name_r).value();
@@ -1566,7 +1689,7 @@ void write_enum_variant(std::ostream& out, const EnumVariant& variant) {
     return variant;
 }
 
-void write_enum_def(std::ostream& out, const EnumDef& def) {
+inline void write_enum_def(ByteWriter& out, const EnumDef& def) {
     write_string(out, def.name);
     write_type(out, def.underlying_type);
     write_u32_le(out, static_cast<std::uint32_t>(def.variants.size()));
@@ -1578,8 +1701,8 @@ void write_enum_def(std::ostream& out, const EnumDef& def) {
     write_string(out, def.owning_module);
 }
 
-[[nodiscard]] std::expected<EnumDef, DriverError> read_enum_def(std::istream& in, const std::string& context) {
-    EnumDef def;
+[[nodiscard]] inline std::expected<EnumDef, DriverError> read_enum_def(ByteReader& in, const std::string& context) {
+    EnumDef def{};
     auto name_r = read_string(in, context + " name");
     if (!name_r.has_value()) return std::unexpected(std::move(name_r).error());
     def.name = std::move(name_r).value();
@@ -1589,7 +1712,7 @@ void write_enum_def(std::ostream& out, const EnumDef& def) {
     auto variant_count_r = read_u32_le(in, context + " variant count");
     if (!variant_count_r.has_value()) return std::unexpected(std::move(variant_count_r).error());
     std::uint32_t variant_count = variant_count_r.value();
-    def.variants.reserve(variant_count);
+    def.variants.reserve(static_cast<std::size_t>(variant_count));
     for (std::uint32_t i = 0; i < variant_count; i++) {
         auto variant_r = read_enum_variant(in, context + " variant");
         if (!variant_r.has_value()) return std::unexpected(std::move(variant_r).error());
@@ -1598,7 +1721,7 @@ void write_enum_def(std::ostream& out, const EnumDef& def) {
     auto ns_count_r = read_u32_le(in, context + " namespace count");
     if (!ns_count_r.has_value()) return std::unexpected(std::move(ns_count_r).error());
     std::uint32_t ns_count = ns_count_r.value();
-    def.namespace_path.reserve(ns_count);
+    def.namespace_path.reserve(static_cast<std::size_t>(ns_count));
     for (std::uint32_t i = 0; i < ns_count; i++) {
         auto ns_r = read_string(in, context + " namespace");
         if (!ns_r.has_value()) return std::unexpected(std::move(ns_r).error());
@@ -1616,7 +1739,7 @@ void write_enum_def(std::ostream& out, const EnumDef& def) {
     return def;
 }
 
-void write_struct_def(std::ostream& out, const StructDef& def) {
+inline void write_struct_def(ByteWriter& out, const StructDef& def) {
     write_source_location(out, def.loc);
     write_string(out, def.name);
     write_u32_le(out, static_cast<std::uint32_t>(def.fields.size()));
@@ -1642,8 +1765,8 @@ void write_struct_def(std::ostream& out, const StructDef& def) {
     write_string(out, def.nodiscard_reason);
 }
 
-[[nodiscard]] std::expected<StructDef, DriverError> read_struct_def(std::istream& in, const std::string& context) {
-    StructDef def;
+[[nodiscard]] inline std::expected<StructDef, DriverError> read_struct_def(ByteReader& in, const std::string& context) {
+    StructDef def{};
     auto loc_r = read_source_location(in, context + " loc");
     if (!loc_r.has_value()) return std::unexpected(std::move(loc_r).error());
     def.loc = std::move(loc_r).value();
@@ -1653,7 +1776,7 @@ void write_struct_def(std::ostream& out, const StructDef& def) {
     auto field_count_r = read_u32_le(in, context + " field count");
     if (!field_count_r.has_value()) return std::unexpected(std::move(field_count_r).error());
     std::uint32_t field_count = field_count_r.value();
-    def.fields.reserve(field_count);
+    def.fields.reserve(static_cast<std::size_t>(field_count));
     for (std::uint32_t i = 0; i < field_count; i++) {
         auto field_r = read_struct_field(in, context + " field");
         if (!field_r.has_value()) return std::unexpected(std::move(field_r).error());
@@ -1671,7 +1794,7 @@ void write_struct_def(std::ostream& out, const StructDef& def) {
     auto align_spec_count_r = read_u32_le(in, context + " align spec count");
     if (!align_spec_count_r.has_value()) return std::unexpected(std::move(align_spec_count_r).error());
     std::uint32_t align_spec_count = align_spec_count_r.value();
-    def.alignment_specs.reserve(align_spec_count);
+    def.alignment_specs.reserve(static_cast<std::size_t>(align_spec_count));
     for (std::uint32_t i = 0; i < align_spec_count; i++) {
         auto spec_r = read_alignment_specifier(in, context + " align spec");
         if (!spec_r.has_value()) return std::unexpected(std::move(spec_r).error());
@@ -1683,7 +1806,7 @@ void write_struct_def(std::ostream& out, const StructDef& def) {
     auto ns_count_r = read_u32_le(in, context + " namespace count");
     if (!ns_count_r.has_value()) return std::unexpected(std::move(ns_count_r).error());
     std::uint32_t ns_count = ns_count_r.value();
-    def.namespace_path.reserve(ns_count);
+    def.namespace_path.reserve(static_cast<std::size_t>(ns_count));
     for (std::uint32_t i = 0; i < ns_count; i++) {
         auto ns_r = read_string(in, context + " namespace");
         if (!ns_r.has_value()) return std::unexpected(std::move(ns_r).error());
@@ -1701,7 +1824,7 @@ void write_struct_def(std::ostream& out, const StructDef& def) {
     auto template_param_count_r = read_u32_le(in, context + " template param count");
     if (!template_param_count_r.has_value()) return std::unexpected(std::move(template_param_count_r).error());
     std::uint32_t template_param_count = template_param_count_r.value();
-    def.template_params.reserve(template_param_count);
+    def.template_params.reserve(static_cast<std::size_t>(template_param_count));
     for (std::uint32_t i = 0; i < template_param_count; i++) {
         auto template_param_r = read_generic_type_param(in, context + " template param");
         if (!template_param_r.has_value()) return std::unexpected(std::move(template_param_r).error());
@@ -1728,7 +1851,7 @@ void write_struct_def(std::ostream& out, const StructDef& def) {
     return def;
 }
 
-void write_class_def(std::ostream& out, const ClassDef& def) {
+inline void write_class_def(ByteWriter& out, const ClassDef& def) {
     write_source_location(out, def.loc);
     write_string(out, def.name);
     write_u32_le(out, static_cast<std::uint32_t>(def.fields.size()));
@@ -1767,8 +1890,8 @@ void write_class_def(std::ostream& out, const ClassDef& def) {
     write_string(out, def.nodiscard_reason);
 }
 
-[[nodiscard]] std::expected<ClassDef, DriverError> read_class_def(std::istream& in, const std::string& context) {
-    ClassDef def;
+[[nodiscard]] inline std::expected<ClassDef, DriverError> read_class_def(ByteReader& in, const std::string& context) {
+    ClassDef def{};
     auto loc_r = read_source_location(in, context + " loc");
     if (!loc_r.has_value()) return std::unexpected(std::move(loc_r).error());
     def.loc = std::move(loc_r).value();
@@ -1778,7 +1901,7 @@ void write_class_def(std::ostream& out, const ClassDef& def) {
     auto field_count_r = read_u32_le(in, context + " field count");
     if (!field_count_r.has_value()) return std::unexpected(std::move(field_count_r).error());
     std::uint32_t field_count = field_count_r.value();
-    def.fields.reserve(field_count);
+    def.fields.reserve(static_cast<std::size_t>(field_count));
     for (std::uint32_t i = 0; i < field_count; i++) {
         auto field_r = read_class_field(in, context + " field");
         if (!field_r.has_value()) return std::unexpected(std::move(field_r).error());
@@ -1787,7 +1910,7 @@ void write_class_def(std::ostream& out, const ClassDef& def) {
     auto align_spec_count_r = read_u32_le(in, context + " align spec count");
     if (!align_spec_count_r.has_value()) return std::unexpected(std::move(align_spec_count_r).error());
     std::uint32_t align_spec_count = align_spec_count_r.value();
-    def.alignment_specs.reserve(align_spec_count);
+    def.alignment_specs.reserve(static_cast<std::size_t>(align_spec_count));
     for (std::uint32_t i = 0; i < align_spec_count; i++) {
         auto spec_r = read_alignment_specifier(in, context + " align spec");
         if (!spec_r.has_value()) return std::unexpected(std::move(spec_r).error());
@@ -1799,7 +1922,7 @@ void write_class_def(std::ostream& out, const ClassDef& def) {
     auto ns_count_r = read_u32_le(in, context + " namespace count");
     if (!ns_count_r.has_value()) return std::unexpected(std::move(ns_count_r).error());
     std::uint32_t ns_count = ns_count_r.value();
-    def.namespace_path.reserve(ns_count);
+    def.namespace_path.reserve(static_cast<std::size_t>(ns_count));
     for (std::uint32_t i = 0; i < ns_count; i++) {
         auto ns_r = read_string(in, context + " namespace");
         if (!ns_r.has_value()) return std::unexpected(std::move(ns_r).error());
@@ -1823,7 +1946,7 @@ void write_class_def(std::ostream& out, const ClassDef& def) {
     auto base_count_r = read_u32_le(in, context + " base count");
     if (!base_count_r.has_value()) return std::unexpected(std::move(base_count_r).error());
     std::uint32_t base_count = base_count_r.value();
-    def.base_specifiers.reserve(base_count);
+    def.base_specifiers.reserve(static_cast<std::size_t>(base_count));
     for (std::uint32_t i = 0; i < base_count; i++) {
         auto base_r = read_base_specifier(in, context + " base");
         if (!base_r.has_value()) return std::unexpected(std::move(base_r).error());
@@ -1832,7 +1955,7 @@ void write_class_def(std::ostream& out, const ClassDef& def) {
     auto using_count_r = read_u32_le(in, context + " using count");
     if (!using_count_r.has_value()) return std::unexpected(std::move(using_count_r).error());
     std::uint32_t using_count = using_count_r.value();
-    def.using_declarations.reserve(using_count);
+    def.using_declarations.reserve(static_cast<std::size_t>(using_count));
     for (std::uint32_t i = 0; i < using_count; i++) {
         auto using_r = read_class_using_declaration(in, context + " using");
         if (!using_r.has_value()) return std::unexpected(std::move(using_r).error());
@@ -1841,7 +1964,7 @@ void write_class_def(std::ostream& out, const ClassDef& def) {
     auto template_param_count_r = read_u32_le(in, context + " template param count");
     if (!template_param_count_r.has_value()) return std::unexpected(std::move(template_param_count_r).error());
     std::uint32_t template_param_count = template_param_count_r.value();
-    def.template_params.reserve(template_param_count);
+    def.template_params.reserve(static_cast<std::size_t>(template_param_count));
     for (std::uint32_t i = 0; i < template_param_count; i++) {
         auto template_param_r = read_generic_type_param(in, context + " template param");
         if (!template_param_r.has_value()) return std::unexpected(std::move(template_param_r).error());
@@ -1868,7 +1991,7 @@ void write_class_def(std::ostream& out, const ClassDef& def) {
     auto spec_arg_count_r = read_u32_le(in, context + " specialization arg count");
     if (!spec_arg_count_r.has_value()) return std::unexpected(std::move(spec_arg_count_r).error());
     std::uint32_t spec_arg_count = spec_arg_count_r.value();
-    def.specialization_template_args.reserve(spec_arg_count);
+    def.specialization_template_args.reserve(static_cast<std::size_t>(spec_arg_count));
     for (std::uint32_t i = 0; i < spec_arg_count; i++) {
         auto spec_arg_r = read_type(in, context + " specialization arg");
         if (!spec_arg_r.has_value()) return std::unexpected(std::move(spec_arg_r).error());
@@ -1903,7 +2026,7 @@ void write_class_def(std::ostream& out, const ClassDef& def) {
     return def;
 }
 
-void write_function(std::ostream& out, const Function& fn) {
+inline void write_function(ByteWriter& out, const Function& fn) {
     write_type(out, fn.return_type);
     write_string(out, fn.name);
     write_source_location(out, fn.loc);
@@ -1945,8 +2068,8 @@ void write_function(std::ostream& out, const Function& fn) {
     write_string(out, fn.owning_module);
 }
 
-[[nodiscard]] std::expected<Function, DriverError> read_function(std::istream& in, const std::string& context) {
-    Function fn;
+[[nodiscard]] inline std::expected<Function, DriverError> read_function(ByteReader& in, const std::string& context) {
+    Function fn{};
     auto return_type_r = read_type(in, context + " return type");
     if (!return_type_r.has_value()) return std::unexpected(std::move(return_type_r).error());
     fn.return_type = std::move(return_type_r).value();
@@ -1959,7 +2082,7 @@ void write_function(std::ostream& out, const Function& fn) {
     auto param_count_r = read_u32_le(in, context + " param count");
     if (!param_count_r.has_value()) return std::unexpected(std::move(param_count_r).error());
     std::uint32_t param_count = param_count_r.value();
-    fn.params.reserve(param_count);
+    fn.params.reserve(static_cast<std::size_t>(param_count));
     for (std::uint32_t i = 0; i < param_count; i++) {
         auto param_r = read_param(in, context + " param");
         if (!param_r.has_value()) return std::unexpected(std::move(param_r).error());
@@ -1973,7 +2096,7 @@ void write_function(std::ostream& out, const Function& fn) {
     if (body_present_r.value() != 0u) {
         auto body_r = read_stmt(in, context + " body");
         if (!body_r.has_value()) return std::unexpected(std::move(body_r).error());
-        fn.body = std::move(body_r).value();
+        fn.body = std::move(body_r.value());
     }
     auto extern_c_r = read_u8(in, context + " extern_c");
     if (!extern_c_r.has_value()) return std::unexpected(std::move(extern_c_r).error());
@@ -1993,7 +2116,7 @@ void write_function(std::ostream& out, const Function& fn) {
     auto ctd_r = read_u8(in, context + " compile_time_dependency");
     if (!ctd_r.has_value()) return std::unexpected(std::move(ctd_r).error());
     fn.is_compile_time_dependency = ctd_r.value() != 0u;
-    auto eval_mode_r = read_enum<FunctionEvalMode>(in, context + " eval mode");
+    auto eval_mode_r = scpp::read_enum<FunctionEvalMode>(in, context + " eval mode");
     if (!eval_mode_r.has_value()) return std::unexpected(std::move(eval_mode_r).error());
     fn.eval_mode = eval_mode_r.value();
     auto varargs_r = read_u8(in, context + " has_varargs");
@@ -2011,7 +2134,7 @@ void write_function(std::ostream& out, const Function& fn) {
     auto template_param_count_r = read_u32_le(in, context + " template param count");
     if (!template_param_count_r.has_value()) return std::unexpected(std::move(template_param_count_r).error());
     std::uint32_t template_param_count = template_param_count_r.value();
-    fn.template_params.reserve(template_param_count);
+    fn.template_params.reserve(static_cast<std::size_t>(template_param_count));
     for (std::uint32_t i = 0; i < template_param_count; i++) {
         auto template_param_r = read_generic_type_param(in, context + " template param");
         if (!template_param_r.has_value()) return std::unexpected(std::move(template_param_r).error());
@@ -2026,19 +2149,19 @@ void write_function(std::ostream& out, const Function& fn) {
     auto member_init_count_r = read_u32_le(in, context + " member initializer count");
     if (!member_init_count_r.has_value()) return std::unexpected(std::move(member_init_count_r).error());
     std::uint32_t member_init_count = member_init_count_r.value();
-    fn.member_initializers.reserve(member_init_count);
+    fn.member_initializers.reserve(static_cast<std::size_t>(member_init_count));
     for (std::uint32_t i = 0; i < member_init_count; i++) {
         auto member_init_r = read_member_initializer(in, context + " member initializer");
         if (!member_init_r.has_value()) return std::unexpected(std::move(member_init_r).error());
         fn.member_initializers.push_back(std::move(member_init_r).value());
     }
-    auto receiver_ref_qualifier_r = read_enum<ReceiverRefQualifier>(in, context + " receiver ref qualifier");
+    auto receiver_ref_qualifier_r = scpp::read_enum<ReceiverRefQualifier>(in, context + " receiver ref qualifier");
     if (!receiver_ref_qualifier_r.has_value()) return std::unexpected(std::move(receiver_ref_qualifier_r).error());
     fn.receiver_ref_qualifier = receiver_ref_qualifier_r.value();
     auto is_static_r = read_u8(in, context + " is_static");
     if (!is_static_r.has_value()) return std::unexpected(std::move(is_static_r).error());
     fn.is_static = is_static_r.value() != 0u;
-    auto access_r = read_enum<AccessSpecifier>(in, context + " access");
+    auto access_r = scpp::read_enum<AccessSpecifier>(in, context + " access");
     if (!access_r.has_value()) return std::unexpected(std::move(access_r).error());
     fn.access = access_r.value();
     auto is_virtual_r = read_u8(in, context + " is_virtual");
@@ -2065,7 +2188,7 @@ void write_function(std::ostream& out, const Function& fn) {
     auto ns_count_r = read_u32_le(in, context + " namespace count");
     if (!ns_count_r.has_value()) return std::unexpected(std::move(ns_count_r).error());
     std::uint32_t ns_count = ns_count_r.value();
-    fn.namespace_path.reserve(ns_count);
+    fn.namespace_path.reserve(static_cast<std::size_t>(ns_count));
     for (std::uint32_t i = 0; i < ns_count; i++) {
         auto ns_r = read_string(in, context + " namespace");
         if (!ns_r.has_value()) return std::unexpected(std::move(ns_r).error());
@@ -2144,18 +2267,25 @@ void write_function(std::ostream& out, const Function& fn) {
 }
 
 
-struct GenericMethodOwnerRemap {
-    std::string old_owner_id;
-    std::string new_owner_id;
-    std::string class_name;
+class GenericMethodOwnerRemap {
+public:
+    virtual ~GenericMethodOwnerRemap() = default;
+    std::string old_owner_id{};
+    std::string new_owner_id{};
+    std::string class_name{};
+
+    GenericMethodOwnerRemap() = default;
+    GenericMethodOwnerRemap(std::string old_id, std::string new_id, std::string cls)
+        : old_owner_id{std::move(old_id)}, new_owner_id{std::move(new_id)}, class_name{std::move(cls)} {}
 };
 
 [[nodiscard]] std::string rewrite_generic_method_name_for_owner(const Function& fn,
                                                                 const GenericMethodOwnerRemap& remap) {
     std::string old_prefix = remap.class_name + "__" + remap.old_owner_id;
     std::string new_prefix = remap.class_name + "__" + remap.new_owner_id;
-    if (fn.name.rfind(old_prefix, 0) == 0) return new_prefix + fn.name.substr(old_prefix.size());
-    return fn.name;
+    if (fn.name.starts_with(old_prefix)) return new_prefix + fn.name.substr(old_prefix.size());
+    std::string name = fn.name;
+    return name;
 }
 
 [[nodiscard]] bool is_local_module_enum(const EnumDef& def) { return def.owning_module.empty(); }
@@ -2167,64 +2297,67 @@ struct GenericMethodOwnerRemap {
     CompileTimePayloadPlan plan = plan_compile_time_payload(program);
     if (plan.root_function_names.empty()) return {};
 
-    std::unordered_set<std::size_t> reachable_function_indices(plan.reachable_function_indices.begin(),
-                                                          plan.reachable_function_indices.end());
-    std::unordered_set<std::string> reachable_type_names(plan.reachable_type_names.begin(), plan.reachable_type_names.end());
-    std::vector<const StructDef*> structs;
-    std::vector<const ClassDef*> classes;
-    std::vector<const EnumDef*> enums;
-    std::vector<const Function*> functions;
-    for (const EnumDef& def : program.enums) {
+    std::unordered_set<std::size_t> reachable_function_indices{};
+    for (std::size_t idx : plan.reachable_function_indices) reachable_function_indices.insert(idx);
+    std::unordered_set<std::string> reachable_type_names{};
+    for (const std::string& name : plan.reachable_type_names) reachable_type_names.insert(name);
+    std::vector<std::size_t> structs{};
+    std::vector<std::size_t> classes{};
+    std::vector<std::size_t> enums{};
+    std::vector<std::size_t> functions{};
+    for (std::size_t i = 0; i < program.enums.size(); i++) {
+        const EnumDef& def = program.enums[i];
         if (is_local_module_enum(def) && reachable_type_names.contains(def.name)) {
-            enums.push_back(&def);
+            enums.push_back(i);
         }
     }
-    for (const StructDef& def : program.structs) {
-        if (is_local_module_struct(def) && reachable_type_names.contains(def.name)) structs.push_back(&def);
+    for (std::size_t i = 0; i < program.structs.size(); i++) {
+        const StructDef& def = program.structs[i];
+        if (is_local_module_struct(def) && reachable_type_names.contains(def.name)) structs.push_back(i);
     }
-    for (const ClassDef& def : program.classes) {
-        if (is_local_module_class(def) && reachable_type_names.contains(def.name)) classes.push_back(&def);
+    for (std::size_t i = 0; i < program.classes.size(); i++) {
+        const ClassDef& def = program.classes[i];
+        if (is_local_module_class(def) && reachable_type_names.contains(def.name)) classes.push_back(i);
     }
     for (std::size_t i = 0; i < program.functions.size(); i++) {
         const Function& fn = program.functions[i];
         if (!is_local_module_function(fn)) continue;
-        if (reachable_function_indices.contains(i)) functions.push_back(&fn);
+        if (reachable_function_indices.contains(i)) functions.push_back(i);
     }
-    std::ostringstream payload(std::ios::binary);
-    payload.write(SCPPM_COMPILE_TIME_AST_MAGIC.data(), static_cast<std::streamsize>(SCPPM_COMPILE_TIME_AST_MAGIC.size()));
+    ByteWriter payload{};
+    payload.write(SCPPM_COMPILE_TIME_AST_MAGIC.data(), SCPPM_COMPILE_TIME_AST_MAGIC.size());
     write_u32_le(payload, SCPPM_COMPILE_TIME_AST_VERSION);
     write_u32_le(payload, static_cast<std::uint32_t>(plan.root_function_names.size()));
     for (const std::string& name : plan.root_function_names) write_string(payload, name);
     write_u32_le(payload, static_cast<std::uint32_t>(enums.size()));
-    for (const EnumDef* def : enums) write_enum_def(payload, *def);
+    for (std::size_t idx : enums) write_enum_def(payload, program.enums[idx]);
     write_u32_le(payload, static_cast<std::uint32_t>(structs.size()));
-    for (const StructDef* def : structs) write_struct_def(payload, *def);
+    for (std::size_t idx : structs) write_struct_def(payload, program.structs[idx]);
     write_u32_le(payload, static_cast<std::uint32_t>(classes.size()));
-    for (const ClassDef* def : classes) write_class_def(payload, *def);
+    for (std::size_t idx : classes) write_class_def(payload, program.classes[idx]);
     write_u32_le(payload, static_cast<std::uint32_t>(functions.size()));
-    for (const Function* fn : functions) write_function(payload, *fn);
+    for (std::size_t idx : functions) write_function(payload, program.functions[idx]);
     return payload.str();
 }
 
-[[nodiscard]] std::expected<StructuredCompileTimePayload, DriverError> deserialize_compile_time_payload(std::string_view bytes, const std::string& path) {
-    std::istringstream in(std::string(bytes), std::ios::binary);
+[[nodiscard]] inline std::expected<StructuredCompileTimePayload, DriverError> deserialize_compile_time_payload(std::string_view bytes, const std::string& path) {
+    ByteReader in{bytes};
     char magic[4] = {};
-    in.read(magic, sizeof(magic));
-    if (!in || std::string_view(magic, 4) != SCPPM_COMPILE_TIME_AST_MAGIC) {
+    if (!in.read(magic, 4) || std::string_view(magic, 4) != SCPPM_COMPILE_TIME_AST_MAGIC) {
         return std::unexpected(DriverError("invalid .scppm file '" + path + "': bad structured compile-time payload magic"));
     }
     auto version_r = read_u32_le(in, path + " payload version");
     if (!version_r.has_value()) return std::unexpected(std::move(version_r).error());
     std::uint32_t version = version_r.value();
     if (version != SCPPM_COMPILE_TIME_AST_VERSION) {
-        return std::unexpected(DriverError("unsupported structured compile-time payload version " + std::to_string(version) +
+        return std::unexpected(DriverError("unsupported structured compile-time payload version " + std::to_string(static_cast<std::size_t>(version)) +
                           " in '" + path + "'"));
     }
-    StructuredCompileTimePayload payload;
+    StructuredCompileTimePayload payload{};
     auto root_count_r = read_u32_le(in, path + " root count");
     if (!root_count_r.has_value()) return std::unexpected(std::move(root_count_r).error());
     std::uint32_t root_count = root_count_r.value();
-    payload.root_function_names.reserve(root_count);
+    payload.root_function_names.reserve(static_cast<std::size_t>(root_count));
     for (std::uint32_t i = 0; i < root_count; i++) {
         auto root_r = read_string(in, path + " root");
         if (!root_r.has_value()) return std::unexpected(std::move(root_r).error());
@@ -2233,7 +2366,7 @@ struct GenericMethodOwnerRemap {
     auto enum_count_r = read_u32_le(in, path + " enum count");
     if (!enum_count_r.has_value()) return std::unexpected(std::move(enum_count_r).error());
     std::uint32_t enum_count = enum_count_r.value();
-    payload.enums.reserve(enum_count);
+    payload.enums.reserve(static_cast<std::size_t>(enum_count));
     for (std::uint32_t i = 0; i < enum_count; i++) {
         auto enum_r = read_enum_def(in, path + " enum");
         if (!enum_r.has_value()) return std::unexpected(std::move(enum_r).error());
@@ -2242,7 +2375,7 @@ struct GenericMethodOwnerRemap {
     auto struct_count_r = read_u32_le(in, path + " struct count");
     if (!struct_count_r.has_value()) return std::unexpected(std::move(struct_count_r).error());
     std::uint32_t struct_count = struct_count_r.value();
-    payload.structs.reserve(struct_count);
+    payload.structs.reserve(static_cast<std::size_t>(struct_count));
     for (std::uint32_t i = 0; i < struct_count; i++) {
         auto struct_r = read_struct_def(in, path + " struct");
         if (!struct_r.has_value()) return std::unexpected(std::move(struct_r).error());
@@ -2251,7 +2384,7 @@ struct GenericMethodOwnerRemap {
     auto class_count_r = read_u32_le(in, path + " class count");
     if (!class_count_r.has_value()) return std::unexpected(std::move(class_count_r).error());
     std::uint32_t class_count = class_count_r.value();
-    payload.classes.reserve(class_count);
+    payload.classes.reserve(static_cast<std::size_t>(class_count));
     for (std::uint32_t i = 0; i < class_count; i++) {
         auto class_r = read_class_def(in, path + " class");
         if (!class_r.has_value()) return std::unexpected(std::move(class_r).error());
@@ -2260,13 +2393,14 @@ struct GenericMethodOwnerRemap {
     auto function_count_r = read_u32_le(in, path + " function count");
     if (!function_count_r.has_value()) return std::unexpected(std::move(function_count_r).error());
     std::uint32_t function_count = function_count_r.value();
-    payload.functions.reserve(function_count);
+    payload.functions.reserve(static_cast<std::size_t>(function_count));
     for (std::uint32_t i = 0; i < function_count; i++) {
         auto function_r = read_function(in, path + " function");
         if (!function_r.has_value()) return std::unexpected(std::move(function_r).error());
         payload.functions.push_back(std::move(function_r).value());
     }
-    return payload;
+    std::expected<StructuredCompileTimePayload, DriverError> ret{std::move(payload)};
+    return ret;
 }
 
 [[nodiscard]] bool program_requires_structured_payload(const Program& program) {
@@ -2276,9 +2410,10 @@ struct GenericMethodOwnerRemap {
 
 void mark_reachable_hidden_compile_time_dependencies(Program& program) {
     CompileTimePayloadPlan plan = plan_compile_time_payload(program);
-    std::unordered_set<std::size_t> reachable_function_indices(plan.reachable_function_indices.begin(),
-                                                          plan.reachable_function_indices.end());
-    std::unordered_set<std::string> reachable_type_names(plan.reachable_type_names.begin(), plan.reachable_type_names.end());
+    std::unordered_set<std::size_t> reachable_function_indices{};
+    for (std::size_t idx : plan.reachable_function_indices) reachable_function_indices.insert(idx);
+    std::unordered_set<std::string> reachable_type_names{};
+    for (const std::string& name : plan.reachable_type_names) reachable_type_names.insert(name);
     for (EnumDef& def : program.enums) {
         if (!def.is_exported && def.owning_module.empty() && reachable_type_names.contains(def.name)) {
             def.is_compile_time_dependency = true;
@@ -2307,36 +2442,53 @@ void mark_reachable_hidden_compile_time_dependencies(Program& program) {
 }
 
 void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&& payload) {
-    std::vector<GenericMethodOwnerRemap> owner_remaps;
+    std::vector<GenericMethodOwnerRemap> owner_remaps{};
     for (EnumDef& def : payload.enums) {
         if (!def.is_exported) def.is_compile_time_dependency = true;
-        auto existing =
-            std::find_if(imported.enums.begin(), imported.enums.end(), [&](const EnumDef& current) { return current.name == def.name; });
-        if (existing != imported.enums.end()) {
-            *existing = std::move(def);
+        std::size_t found_idx = imported.enums.size();
+        for (std::size_t j = 0; j < imported.enums.size(); j++) {
+            if (imported.enums[j].name == def.name) {
+                found_idx = j;
+                break;
+            }
+        }
+        if (found_idx < imported.enums.size()) {
+            imported.enums[found_idx] = std::move(def);
         } else {
             imported.enums.push_back(std::move(def));
         }
     }
     for (StructDef& def : payload.structs) {
         if (!def.is_exported) def.is_compile_time_dependency = true;
-        auto existing = std::find_if(imported.structs.begin(), imported.structs.end(),
-                                     [&](const StructDef& current) { return same_struct_identity_for_payload_merge(current, def); });
-        if (existing != imported.structs.end()) {
-            *existing = std::move(def);
+        std::size_t found_idx = imported.structs.size();
+        for (std::size_t j = 0; j < imported.structs.size(); j++) {
+            if (same_struct_identity_for_payload_merge(imported.structs[j], def)) {
+                found_idx = j;
+                break;
+            }
+        }
+        if (found_idx < imported.structs.size()) {
+            imported.structs[found_idx] = std::move(def);
         } else {
             imported.structs.push_back(std::move(def));
         }
     }
     for (ClassDef& def : payload.classes) {
         if (!def.is_exported) def.is_compile_time_dependency = true;
-        auto existing = std::find_if(imported.classes.begin(), imported.classes.end(),
-                                     [&](const ClassDef& current) { return same_class_identity_for_payload_merge(current, def); });
-        if (existing != imported.classes.end()) {
-            if (!existing->template_owner_id.empty() && existing->template_owner_id != def.template_owner_id) {
-                owner_remaps.push_back(GenericMethodOwnerRemap{existing->template_owner_id, def.template_owner_id, def.name});
+        std::size_t found_idx = imported.classes.size();
+        for (std::size_t j = 0; j < imported.classes.size(); j++) {
+            if (same_class_identity_for_payload_merge(imported.classes[j], def)) {
+                found_idx = j;
+                break;
             }
-            *existing = std::move(def);
+        }
+        if (found_idx < imported.classes.size()) {
+            if (!imported.classes[found_idx].template_owner_id.empty() &&
+                imported.classes[found_idx].template_owner_id != def.template_owner_id) {
+                owner_remaps.push_back(GenericMethodOwnerRemap{
+                    imported.classes[found_idx].template_owner_id, def.template_owner_id, def.name});
+            }
+            imported.classes[found_idx] = std::move(def);
         } else {
             imported.classes.push_back(std::move(def));
         }
@@ -2353,81 +2505,156 @@ void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&
         if (fn.body && fn.is_compile_time_dependency && fn.eval_mode == FunctionEvalMode::RuntimeOnly) {
             fn.skip_imported_body_verification = true;
         }
-        auto existing = std::find_if(imported.functions.begin(), imported.functions.end(),
-                                     [&](const Function& current) { return same_function_identity_for_payload_merge(current, fn); });
-        if (existing != imported.functions.end()) {
-            *existing = std::move(fn);
+        std::size_t found_idx = imported.functions.size();
+        for (std::size_t j = 0; j < imported.functions.size(); j++) {
+            if (same_function_identity_for_payload_merge(imported.functions[j], fn)) {
+                found_idx = j;
+                break;
+            }
+        }
+        if (found_idx < imported.functions.size()) {
+            imported.functions[found_idx] = std::move(fn);
         } else {
             imported.functions.push_back(std::move(fn));
         }
     }
 }
 
-[[nodiscard]] std::expected<void, DriverError> write_scppm_file(const Program& program, std::string_view interface_source, const std::string& path) {
-    std::ofstream out(path, std::ios::binary);
-    if (!out) {
-        return std::unexpected(DriverError("cannot write module interface '" + path + "'"));
+extern "C" {
+    int open(const char* pathname, int flags, ...);
+    int close(int fd);
+    long read(int fd, void* buf, unsigned long count);
+    long write(int fd, const void* buf, unsigned long count);
+    int system(const char* command);
+    char* getenv(const char* name);
+}
+
+[[nodiscard]] inline std::expected<void, DriverError> write_file_bytes(const std::string& path, std::string_view content) {
+    int fd = -1;
+    [[scpp::unsafe]] {
+        fd = open(path.c_str(), 0x241, 0644);
     }
+    if (fd < 0) {
+        return std::unexpected(DriverError("cannot open file for writing: " + path));
+    }
+    std::size_t total_written = 0;
+    while (total_written < content.size()) {
+        long n = 0;
+        [[scpp::unsafe]] {
+            n = write(fd, content.data() + total_written, static_cast<unsigned long>(content.size() - total_written));
+        }
+        if (n <= 0) {
+            [[scpp::unsafe]] { close(fd); }
+            return std::unexpected(DriverError("failed writing to file: " + path));
+        }
+        total_written += static_cast<std::size_t>(n);
+    }
+    int close_rc = 0;
+    [[scpp::unsafe]] {
+        close_rc = close(fd);
+    }
+    if (close_rc != 0) {
+        return std::unexpected(DriverError("failed closing file: " + path));
+    }
+    return {};
+}
+
+[[nodiscard]] inline std::expected<std::string, DriverError> read_file_bytes(const std::string& path) {
+    int fd = -1;
+    [[scpp::unsafe]] {
+        fd = open(path.c_str(), 0);
+    }
+    if (fd < 0) {
+        return std::unexpected(DriverError("cannot open file for reading: " + path));
+    }
+    std::string result{};
+    char buf[4096] = {};
+    while (true) {
+        long n = 0;
+        [[scpp::unsafe]] {
+            void* p = &buf[0];
+            n = read(fd, p, static_cast<unsigned long>(4096));
+        }
+        if (n < 0) {
+            [[scpp::unsafe]] { close(fd); }
+            return std::unexpected(DriverError("failed reading file: " + path));
+        }
+        if (n == 0) break;
+        result.append(std::string(buf, static_cast<std::size_t>(n)));
+    }
+    [[scpp::unsafe]] {
+        close(fd);
+    }
+    return std::move(result);
+}
+
+[[nodiscard]] inline std::expected<void, DriverError> write_scppm_file(const Program& program, std::string_view interface_source, const std::string& path) {
     std::string payload = serialize_compile_time_payload(program);
-    unsigned char flags = payload.empty() ? 0u : 0x01u;
-    const std::array<char, 8> header = {'S', 'C', 'P', 'P', 'M', 1, 0, static_cast<char>(flags)};
-    out.write(header.data(), static_cast<std::streamsize>(header.size()));
+    std::uint8_t flags = payload.empty() ? static_cast<std::uint8_t>(0) : static_cast<std::uint8_t>(0x01);
+    ByteWriter out{};
+    const char header[8] = {'S', 'C', 'P', 'P', 'M', static_cast<char>(1), '\0', static_cast<char>(flags)};
+    out.write(&header[0], 8);
     write_u32_le(out, static_cast<std::uint32_t>(interface_source.size()));
-    out.write(interface_source.data(), static_cast<std::streamsize>(interface_source.size()));
+    out.write(interface_source.data(), static_cast<std::size_t>(interface_source.size()));
     if ((flags & 0x01u) != 0u) {
         write_u32_le(out, static_cast<std::uint32_t>(payload.size()));
-        out.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+        out.write(payload.c_str(), static_cast<std::size_t>(payload.size()));
     }
-    if (!out) {
+    auto write_r = write_file_bytes(path, out.str());
+    if (!write_r.has_value()) {
         return std::unexpected(DriverError("failed while writing module interface '" + path + "'"));
     }
     return {};
 }
 
-[[nodiscard]] std::expected<LoadedModuleFile, DriverError> read_module_file(const std::string& path) {
-    LoadedModuleFile loaded;
-    std::filesystem::path file_path(path);
-    if (file_path.extension() != ".scppm") {
-        std::ifstream file(path);
-        if (!file) return std::unexpected(DriverError("cannot open imported module source '" + path + "'"));
-        std::ostringstream buffer;
-        buffer << file.rdbuf();
-        loaded.interface_source = buffer.str();
-        return loaded;
+[[nodiscard]] inline std::expected<LoadedModuleFile, DriverError> read_module_file(const std::string& path) {
+    LoadedModuleFile loaded{};
+    auto bytes_r = read_file_bytes(path);
+    if (!bytes_r.has_value()) {
+        return std::unexpected(DriverError("cannot open imported module source '" + path + "'"));
+    }
+    const std::string& bytes = bytes_r.value();
+    if (!path.ends_with(".scppm")) {
+        loaded.interface_source = bytes;
+        std::expected<LoadedModuleFile, DriverError> ret{std::move(loaded)};
+        return ret;
     }
 
     loaded.is_scppm = true;
-    std::ifstream file(path, std::ios::binary);
-    if (!file) return std::unexpected(DriverError("cannot open imported module interface '" + path + "'"));
-    char header[8];
-    file.read(header, sizeof(header));
-    if (file.gcount() != static_cast<std::streamsize>(sizeof(header))) {
+    ByteReader in{bytes};
+    char header[8] = {};
+    if (!in.read(header, 8)) {
         return std::unexpected(DriverError("invalid .scppm file '" + path + "': truncated header"));
     }
-    if (std::memcmp(header, "SCPPM", 5) != 0) {
+    if (header[0] != 'S' || header[1] != 'C' || header[2] != 'P' || header[3] != 'P' || header[4] != 'M') {
         return std::unexpected(DriverError("invalid .scppm file '" + path + "': bad magic"));
     }
-    unsigned char major_version = static_cast<unsigned char>(header[5]);
+    std::uint8_t major_version = static_cast<std::uint8_t>(header[5]);
     if (major_version != 1) {
-        return std::unexpected(DriverError("unsupported .scppm major version " + std::to_string(major_version) + " in '" + path + "'"));
+        return std::unexpected(DriverError("unsupported .scppm major version " + std::to_string(static_cast<std::size_t>(major_version)) + " in '" + path + "'"));
     }
-    unsigned char flags = static_cast<unsigned char>(header[7]);
-    auto interface_length_r = read_u32_le(file, path + " interface length");
+    std::uint8_t flags = static_cast<std::uint8_t>(header[7]);
+    auto interface_length_r = read_u32_le(in, path + " interface length");
     if (!interface_length_r.has_value()) return std::unexpected(std::move(interface_length_r).error());
     std::uint32_t interface_length = interface_length_r.value();
-    loaded.interface_source.resize(interface_length);
-    file.read(loaded.interface_source.data(), static_cast<std::streamsize>(interface_length));
-    if (!file) return std::unexpected(DriverError("invalid .scppm file '" + path + "': truncated interface source"));
+    if (in.pos + static_cast<std::size_t>(interface_length) > in.data.size()) {
+        return std::unexpected(DriverError("invalid .scppm file '" + path + "': truncated interface source"));
+    }
+    loaded.interface_source = string_from_view(in.data.substr(in.pos, static_cast<std::size_t>(interface_length)));
+    in.pos += static_cast<std::size_t>(interface_length);
     if ((flags & 0x01u) != 0u) {
         loaded.has_compile_time_payload = true;
-        auto payload_length_r = read_u32_le(file, path + " payload length");
+        auto payload_length_r = read_u32_le(in, path + " payload length");
         if (!payload_length_r.has_value()) return std::unexpected(std::move(payload_length_r).error());
         std::uint32_t payload_length = payload_length_r.value();
-        loaded.compile_time_payload_bytes.resize(payload_length);
-        file.read(loaded.compile_time_payload_bytes.data(), static_cast<std::streamsize>(payload_length));
-        if (!file) return std::unexpected(DriverError("invalid .scppm file '" + path + "': truncated structured payload"));
+        if (in.pos + static_cast<std::size_t>(payload_length) > in.data.size()) {
+            return std::unexpected(DriverError("invalid .scppm file '" + path + "': truncated structured payload"));
+        }
+        loaded.compile_time_payload_bytes = string_from_view(in.data.substr(in.pos, static_cast<std::size_t>(payload_length)));
+        in.pos += static_cast<std::size_t>(payload_length);
     }
-    return loaded;
+    std::expected<LoadedModuleFile, DriverError> ret{std::move(loaded)};
+    return ret;
 }
 
 [[nodiscard]] std::expected<void, DriverError> create_archive(const std::vector<std::string>& object_paths, const std::string& archive_path) {
@@ -2438,97 +2665,215 @@ void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&
     for (const std::string& object_path : object_paths) {
         command += " \"" + object_path + "\"";
     }
-    int result = std::system(command.c_str());
+    int result = 0;
+    [[scpp::unsafe]] {
+        result = system(command.c_str());
+    }
     if (result != 0) {
         return std::unexpected(DriverError("archive command failed: " + command));
     }
     return {};
 }
 
-[[nodiscard]] std::optional<std::filesystem::path> current_executable_path() {
-    std::error_code ec;
-    std::filesystem::path path = std::filesystem::read_symlink("/proc/self/exe", ec);
-    if (ec) return std::nullopt;
-    return path;
+extern "C" {
+    long readlink(const char* path, char* buf, unsigned long bufsiz);
+    int access(const char* pathname, int mode);
+    int unlink(const char* pathname);
+    char* realpath(const char* path, char* resolved_path);
 }
 
-[[nodiscard]] std::optional<std::filesystem::path> runtime_default_prebuilt_stdlib_dir() {
-    std::optional<std::filesystem::path> exe = current_executable_path();
+[[nodiscard]] inline bool path_ends_with(std::string_view path, std::string_view suffix) {
+    if (path.size() < suffix.size()) return false;
+    return path.substr(path.size() - suffix.size()) == suffix;
+}
+
+[[nodiscard]] inline std::string path_parent(std::string_view p) {
+    if (p.empty()) return ".";
+    std::size_t slash = p.rfind("/");
+    if (slash == std::string_view::npos) return ".";
+    if (slash == 0) return "/";
+    return string_from_view(p.substr(0, slash));
+}
+
+[[nodiscard]] inline std::string path_filename(std::string_view p) {
+    if (p.empty()) return "";
+    std::size_t slash = p.rfind("/");
+    if (slash == std::string_view::npos) return string_from_view(p);
+    return string_from_view(p.substr(slash + 1));
+}
+
+[[nodiscard]] inline std::string path_join(std::string_view a, std::string_view b) {
+    if (a.empty()) return string_from_view(b);
+    if (b.empty()) return string_from_view(a);
+    if (a.at(a.size() - 1) == '/') return string_from_view(a) + string_from_view(b);
+    return string_from_view(a) + "/" + string_from_view(b);
+}
+
+[[nodiscard]] inline bool path_exists(const std::string& path) {
+    int rc = -1;
+    [[scpp::unsafe]] {
+        rc = access(path.c_str(), 0);
+    }
+    return rc == 0;
+}
+
+inline void path_remove(const std::string& path) {
+    [[scpp::unsafe]] {
+        unlink(path.c_str());
+    }
+}
+
+[[nodiscard]] inline std::string path_lexically_normal(std::string_view p) {
+    std::vector<std::string> segments{};
+    bool is_absolute = !p.empty() && p.at(0) == '/';
+    std::size_t i = 0;
+    while (i < p.size()) {
+        while (i < p.size() && p.at(i) == '/') i++;
+        if (i >= p.size()) break;
+        std::size_t start = i;
+        while (i < p.size() && p.at(i) != '/') i++;
+        std::string_view seg = p.substr(start, i - start);
+        if (seg == ".") {
+            continue;
+        } else if (seg == "..") {
+            if (!segments.empty() && segments.back() != "..") {
+                segments.pop_back();
+            } else if (!is_absolute) {
+                segments.push_back("..");
+            }
+        } else {
+            segments.push_back(string_from_view(seg));
+        }
+    }
+    if (segments.empty()) {
+        return is_absolute ? "/" : ".";
+    }
+    std::string result{};
+    for (std::size_t idx = 0; idx < segments.size(); idx++) {
+        if (is_absolute || idx > 0) result += "/";
+        result += segments[idx];
+    }
+    return result;
+}
+
+[[nodiscard]] inline std::optional<std::string> current_executable_path() {
+    char buf[4096] = {};
+    long len = 0;
+    [[scpp::unsafe]] {
+        len = readlink("/proc/self/exe", buf, 4095);
+    }
+    if (len <= 0) return std::nullopt;
+    buf[len] = '\0';
+    return std::string(buf, static_cast<std::size_t>(len));
+}
+
+[[nodiscard]] inline std::optional<std::string> runtime_default_prebuilt_stdlib_dir() {
+    std::optional<std::string> exe = current_executable_path();
     if (!exe.has_value()) return std::nullopt;
-    return (exe->parent_path() / "libs").lexically_normal();
+    return path_lexically_normal(path_join(path_parent(*exe), "libs"));
 }
 
-[[nodiscard]] std::optional<std::filesystem::path> runtime_installed_stdlib_dir() {
-    std::optional<std::filesystem::path> exe = current_executable_path();
+[[nodiscard]] inline std::optional<std::string> runtime_installed_stdlib_dir() {
+    std::optional<std::string> exe = current_executable_path();
     if (!exe.has_value()) return std::nullopt;
-    return (exe->parent_path() / ".." / "share" / "scpp" / "libs").lexically_normal();
+    return path_lexically_normal(path_join(path_join(path_join(path_parent(*exe), ".."), "share"), "scpp/libs"));
 }
 
-[[nodiscard]] std::optional<std::filesystem::path> runtime_default_source_stdlib_dir() {
-    std::optional<std::filesystem::path> exe = current_executable_path();
+[[nodiscard]] inline std::optional<std::string> runtime_default_source_stdlib_dir() {
+    std::optional<std::string> exe = current_executable_path();
     if (!exe.has_value()) return std::nullopt;
-    return (exe->parent_path() / ".." / "libs").lexically_normal();
+    return path_lexically_normal(path_join(path_join(path_parent(*exe), ".."), "libs"));
 }
 
-[[nodiscard]] std::vector<std::string> build_default_import_search_dirs(const std::vector<std::string>& explicit_dirs) {
+[[nodiscard]] inline std::vector<std::string> build_default_import_search_dirs(const std::vector<std::string>& explicit_dirs) {
     std::vector<std::string> dirs = explicit_dirs;
     auto append_if_missing = [&](std::string path) {
         if (path.empty()) return;
-        if (std::find(dirs.begin(), dirs.end(), path) == dirs.end()) dirs.push_back(std::move(path));
+        bool found = false;
+        for (const std::string& d : dirs) {
+            if (d == path) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) dirs.push_back(std::move(path));
     };
-    auto append_module_dirs = [&](const std::filesystem::path& base) {
-        append_if_missing(base.string());
-        append_if_missing((base / "std").string());
-        append_if_missing((base / "scpp").string());
+    auto append_module_dirs = [&](const std::string& base) {
+        append_if_missing(base);
+        append_if_missing(path_join(base, "std"));
+        append_if_missing(path_join(base, "scpp"));
     };
-    if (const char* env = std::getenv("SCPP_STDLIB_PATH"); env != nullptr && env[0] != '\0') {
+    const char* env = nullptr;
+    [[scpp::unsafe]] {
+        env = getenv("SCPP_STDLIB_PATH");
+    }
+    bool env_valid = false;
+    if (env != nullptr) {
+        [[scpp::unsafe]] {
+            env_valid = (env[0] != '\0');
+        }
+    }
+    if (env_valid) {
         append_module_dirs(env);
     } else {
-        if (std::optional<std::filesystem::path> runtime_dir = runtime_default_prebuilt_stdlib_dir(); runtime_dir.has_value()) {
-            append_module_dirs(*runtime_dir);
+        std::optional<std::string> prebuilt_dir = runtime_default_prebuilt_stdlib_dir();
+        if (prebuilt_dir.has_value()) {
+            append_module_dirs(*prebuilt_dir);
         }
-        if (std::optional<std::filesystem::path> runtime_dir = runtime_installed_stdlib_dir(); runtime_dir.has_value()) {
-            append_module_dirs(*runtime_dir);
+        std::optional<std::string> installed_dir = runtime_installed_stdlib_dir();
+        if (installed_dir.has_value()) {
+            append_module_dirs(*installed_dir);
         }
-        if (std::optional<std::filesystem::path> runtime_dir = runtime_default_source_stdlib_dir(); runtime_dir.has_value()) {
-            append_module_dirs(*runtime_dir);
+        std::optional<std::string> source_dir = runtime_default_source_stdlib_dir();
+        if (source_dir.has_value()) {
+            append_module_dirs(*source_dir);
         }
     }
     return dirs;
 }
 
-[[nodiscard]] std::vector<std::string> default_stdlib_link_inputs() {
-    std::vector<std::string> result;
-    auto append_if_exists = [&](const std::filesystem::path& lib_path) {
-        if (!std::filesystem::exists(lib_path)) return;
-        std::string path = lib_path.string();
-        if (std::find(result.begin(), result.end(), path) == result.end()) {
-            result.push_back(std::move(path));
+[[nodiscard]] inline std::vector<std::string> default_stdlib_link_inputs() {
+    std::vector<std::string> result{};
+    auto append_if_exists = [&](const std::string& lib_path) {
+        if (!path_exists(lib_path)) return;
+        bool found = false;
+        for (const std::string& r : result) {
+            if (r == lib_path) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            result.push_back(lib_path);
         }
     };
-    std::vector<std::optional<std::filesystem::path>> candidate_dirs = {
-        runtime_default_prebuilt_stdlib_dir(),
-        runtime_installed_stdlib_dir(),
-    };
-    for (const std::optional<std::filesystem::path>& lib_dir : candidate_dirs) {
+    std::vector<std::optional<std::string>> candidate_dirs{};
+    candidate_dirs.push_back(runtime_default_prebuilt_stdlib_dir());
+    candidate_dirs.push_back(runtime_installed_stdlib_dir());
+    for (const std::optional<std::string>& lib_dir : candidate_dirs) {
         if (!lib_dir.has_value()) continue;
-        append_if_exists(*lib_dir / "libstd.scppa");
-        append_if_exists(*lib_dir / "libscpp.scppa");
+        append_if_exists(path_join(*lib_dir, "libstd.scppa"));
+        append_if_exists(path_join(*lib_dir, "libscpp.scppa"));
     }
     return result;
 }
 
-[[nodiscard]] std::string absolute_source_path(const std::string& path) {
-    std::error_code ec;
-    std::filesystem::path absolute = std::filesystem::absolute(path, ec);
-    if (ec) return path;
-    return absolute.lexically_normal().string();
+[[nodiscard]] inline std::string absolute_source_path(const std::string& path) {
+    char buf[4096] = {};
+    char* res = nullptr;
+    [[scpp::unsafe]] {
+        res = realpath(path.c_str(), buf);
+    }
+    if (res != nullptr) return std::string(buf);
+    std::string fallback = path;
+    return fallback;
 }
 
-[[nodiscard]] std::vector<std::size_t> line_offsets(std::string_view source) {
-    std::vector<std::size_t> offsets = {0};
+[[nodiscard]] inline std::vector<std::size_t> line_offsets(std::string_view source) {
+    std::vector<std::size_t> offsets{};
+    offsets.push_back(static_cast<std::size_t>(0));
     for (std::size_t i = 0; i < source.size(); i++) {
-        if (source[i] == '\n') offsets.push_back(i + 1);
+        if (source.at(i) == '\n') offsets.push_back(i + 1);
     }
     return offsets;
 }
@@ -2547,8 +2892,8 @@ void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&
     bool in_block_comment = false;
     int depth = 0;
     for (std::size_t i = open_offset; i < source.size(); i++) {
-        char c = source[i];
-        char next = i + 1 < source.size() ? source[i + 1] : '\0';
+        char c = source.at(i);
+        char next = i + 1 < source.size() ? source.at(i + 1) : '\0';
         if (in_line_comment) {
             if (c == '\n') in_line_comment = false;
             continue;
@@ -2618,8 +2963,8 @@ void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&
     bool in_block_comment = false;
     int depth = 0;
     for (std::size_t i = decl_begin; i < source.size(); i++) {
-        char c = source[i];
-        char next = i + 1 < source.size() ? source[i + 1] : '\0';
+        char c = source.at(i);
+        char next = i + 1 < source.size() ? source.at(i + 1) : '\0';
         if (in_line_comment) {
             if (c == '\n') in_line_comment = false;
             continue;
@@ -2687,13 +3032,13 @@ void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&
 // ending in "export").
 [[nodiscard]] std::size_t widen_declaration_begin_over_leading_export(std::string_view source, std::size_t decl_begin) {
     std::size_t i = decl_begin;
-    while (i > 0 && std::isspace(static_cast<unsigned char>(source[i - 1]))) i--;
-    static constexpr std::string_view kExportKeyword = "export";
-    if (i < kExportKeyword.size()) return decl_begin;
-    std::size_t candidate = i - kExportKeyword.size();
-    if (source.substr(candidate, kExportKeyword.size()) != kExportKeyword) return decl_begin;
+    while (i > 0 && is_ascii_space(source.at(i - 1))) i--;
+    constexpr std::size_t kExportLen = 6;
+    if (i < kExportLen) return decl_begin;
+    std::size_t candidate = i - kExportLen;
+    if (source.substr(candidate, kExportLen) != "export") return decl_begin;
     bool boundary_before = candidate == 0 ||
-        !(std::isalnum(static_cast<unsigned char>(source[candidate - 1])) || source[candidate - 1] == '_');
+        !(is_ascii_alnum(source.at(candidate - 1)) || source.at(candidate - 1) == '_');
     if (!boundary_before) return decl_begin;
     return candidate;
 }
@@ -2711,13 +3056,13 @@ void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&
 // argument-free forms.
 [[nodiscard]] std::size_t widen_declaration_begin_over_leading_attribute(std::string_view source, std::size_t decl_begin) {
     std::size_t i = decl_begin;
-    while (i > 0 && std::isspace(static_cast<unsigned char>(source[i - 1]))) i--;
-    if (i < 2 || source[i - 1] != ']' || source[i - 2] != ']') return decl_begin;
+    while (i > 0 && is_ascii_space(source.at(i - 1))) i--;
+    if (i < 2 || source.at(i - 1) != ']' || source.at(i - 2) != ']') return decl_begin;
     std::size_t j = i - 2;
     while (j > 0) {
         j--;
-        if (source[j] == ';' || source[j] == '{' || source[j] == '}') return decl_begin;
-        if (source[j] == '[' && j > 0 && source[j - 1] == '[') return j - 1;
+        if (source.at(j) == ';' || source.at(j) == '{' || source.at(j) == '}') return decl_begin;
+        if (source.at(j) == '[' && j > 0 && source.at(j - 1) == '[') return j - 1;
     }
     return decl_begin;
 }
@@ -2746,8 +3091,8 @@ void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&
     int paren_depth = 0;
     bool saw_param_list_end = false;
     for (std::size_t i = signature_begin; i < body_begin; i++) {
-        char c = source[i];
-        char next = i + 1 < source.size() ? source[i + 1] : '\0';
+        char c = source.at(i);
+        char next = i + 1 < source.size() ? source.at(i + 1) : '\0';
         if (in_line_comment) {
             if (c == '\n') in_line_comment = false;
             continue;
@@ -2807,13 +3152,20 @@ void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&
     return std::nullopt;
 }
 
+class BodyRange {
+public:
+    virtual ~BodyRange() = default;
+    std::size_t begin{};
+    std::size_t end{};
+    std::string replacement{};
+
+    BodyRange() = default;
+    BodyRange(std::size_t b, std::size_t e, std::string r)
+        : begin{b}, end{e}, replacement{std::move(r)} {}
+};
+
 [[nodiscard]] std::expected<std::string, DriverError> strip_concrete_function_bodies(const Program& program, const std::string& file_path, std::string source) {
-    struct BodyRange {
-        std::size_t begin;
-        std::size_t end;
-        std::string replacement;
-    };
-    std::vector<BodyRange> ranges;
+    std::vector<BodyRange> ranges{};
     for (const Function& fn : program.functions) {
         if (!fn.body || !fn.loc.has_source_path()) continue;
         if (absolute_source_path(fn.loc.source_path_text()) != file_path) continue;
@@ -2821,14 +3173,14 @@ void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&
         if (begin >= source.size() || source[begin] != '{') continue;
         if (!fn.member_initializers.empty()) {
             std::size_t signature_begin = offset_for_loc(source, fn.loc);
-            if (auto colon = find_constructor_member_initializer_colon(source, signature_begin, begin)) {
-                ranges.push_back(BodyRange{*colon, begin, ""});
+            if (auto colon = find_constructor_member_initializer_colon(source, signature_begin, begin); colon.has_value()) {
+                ranges.push_back(BodyRange{*colon, begin, std::string("")});
             }
         }
         auto end_r = find_matching_brace(source, begin);
         if (!end_r.has_value()) return std::unexpected(std::move(end_r).error());
         std::size_t end = end_r.value();
-        ranges.push_back(BodyRange{begin, end + 1, ";"});
+        ranges.push_back(BodyRange{begin, end + 1, std::string(";")});
         // Once this definition's own body is stripped down to a bare
         // `;` above, any standalone forward declaration(s) that were
         // reconciled against it (see Function::superseded_forward_
@@ -2848,7 +3200,7 @@ void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&
             auto decl_end_r = find_declaration_semicolon(source, decl_begin);
             if (!decl_end_r.has_value()) return std::unexpected(std::move(decl_end_r).error());
             std::size_t decl_end = decl_end_r.value();
-            ranges.push_back(BodyRange{decl_begin, decl_end + 1, ""});
+            ranges.push_back(BodyRange{decl_begin, decl_end + 1, std::string("")});
         }
     }
     // A local class/struct defined inside a function body (e.g.
@@ -2869,7 +3221,7 @@ void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&
     // stripping the outer function's body already removes its nested
     // classes' member bodies too, so the nested ranges are redundant, not
     // merely undesirable.
-    std::vector<BodyRange> maximal_ranges;
+    std::vector<BodyRange> maximal_ranges{};
     for (const BodyRange& candidate : ranges) {
         bool contained = false;
         for (const BodyRange& other : ranges) {
@@ -2879,22 +3231,55 @@ void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&
                 break;
             }
         }
-        if (!contained) maximal_ranges.push_back(candidate);
+        if (!contained) maximal_ranges.push_back(BodyRange{candidate.begin, candidate.end, candidate.replacement});
     }
     ranges = std::move(maximal_ranges);
-    std::sort(ranges.begin(), ranges.end(), [](const BodyRange& a, const BodyRange& b) {
-        if (a.begin != b.begin) return a.begin > b.begin;
-        if (a.end != b.end) return a.end > b.end;
-        return a.replacement > b.replacement;
-    });
-    ranges.erase(std::unique(ranges.begin(), ranges.end(), [](const BodyRange& a, const BodyRange& b) {
-                     return a.begin == b.begin && a.end == b.end && a.replacement == b.replacement;
-                 }),
-                 ranges.end());
-    for (const BodyRange& range : ranges) {
-        source.replace(range.begin, range.end - range.begin, range.replacement);
+    for (std::size_t i = 0; i < ranges.size(); i++) {
+        for (std::size_t j = i + 1; j < ranges.size(); j++) {
+            bool swap_needed = false;
+            if (ranges[i].begin > ranges[j].begin) {
+                swap_needed = true;
+            } else if (ranges[i].begin == ranges[j].begin) {
+                if (ranges[i].end > ranges[j].end) {
+                    swap_needed = true;
+                }
+            }
+            if (swap_needed) {
+                BodyRange tmp = std::move(ranges[i]);
+                ranges[i] = std::move(ranges[j]);
+                ranges[j] = std::move(tmp);
+            }
+        }
     }
-    return source;
+    std::vector<BodyRange> unique_ranges{};
+    for (std::size_t i = 0; i < ranges.size(); i++) {
+        if (!unique_ranges.empty()) {
+            std::size_t last_idx = unique_ranges.size() - 1;
+            if (unique_ranges[last_idx].begin == ranges[i].begin &&
+                unique_ranges[last_idx].end == ranges[i].end &&
+                unique_ranges[last_idx].replacement == ranges[i].replacement) {
+                continue;
+            }
+        }
+        unique_ranges.push_back(BodyRange{ranges[i].begin, ranges[i].end, ranges[i].replacement});
+    }
+    ranges = std::move(unique_ranges);
+    std::string new_source{};
+    std::size_t last_pos = 0;
+    for (std::size_t i = 0; i < ranges.size(); i++) {
+        const BodyRange& range = ranges[i];
+        if (range.begin > last_pos) {
+            new_source += source.substr(last_pos, range.begin - last_pos);
+        }
+        new_source += range.replacement;
+        if (range.end > last_pos) {
+            last_pos = range.end;
+        }
+    }
+    if (last_pos < source.size()) {
+        new_source += source.substr(last_pos, source.size() - last_pos);
+    }
+    return new_source;
 }
 
 // ch11 §11.7/§11.8: resolves `import name;` declarations against a
@@ -2913,12 +3298,15 @@ void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&
 // as "<module>:<partition>" (e.g. "std:string") -- see resolve_partition
 // below for why that path re-parses fresh every time instead of caching
 // like resolve() does for ordinary cross-module imports.
+constexpr int kMaxResolutionDepth = 256;
+
 class ModuleCache {
 public:
+    virtual ~ModuleCache() = default;
     explicit ModuleCache(std::unordered_map<std::string, std::string> import_paths,
                          std::vector<std::string> import_search_dirs = {})
-        : import_paths_(std::move(import_paths)),
-          import_search_dirs_(build_default_import_search_dirs(import_search_dirs)) {}
+        : import_paths_{std::move(import_paths)},
+          import_search_dirs_{build_default_import_search_dirs(import_search_dirs)} {}
 
     // resolve()/resolve_partition() recurse into each other (directly
     // and via the resolver lambdas parse() calls back into) one native
@@ -2947,7 +3335,6 @@ public:
     // >3x margin below the ~851 empirical native crash point measured
     // above (and construction below is native C++, not self-hosted, so no
     // scpp-side stack-cost concern applies to this counter itself).
-    static constexpr int kMaxResolutionDepth = 256;
 
     // Returns std::expected rather than throwing on failure now that
     // parser.cppm's own ModuleResolver alias (batch 6/#412) has a
@@ -2972,35 +3359,48 @@ public:
         if (cached != cache_.end()) return &cached->second;
 
         if (resolving_.contains(module_name)) {
-            return std::unexpected(ParseError(0, 0, "circular import detected: module '" + module_name +
-                               "' (directly or transitively) imports itself"));
+            std::string msg = "circular import detected: module '";
+            msg += module_name;
+            msg += "' (directly or transitively) imports itself";
+            return std::unexpected(ParseError{0, 0, std::move(msg)});
         }
         if (resolution_depth_ >= kMaxResolutionDepth) {
-            return std::unexpected(ParseError(0, 0, "module import chain too deep (nested more than " +
-                               std::to_string(kMaxResolutionDepth) +
-                               " levels) while resolving '" + module_name + "'; check for accidental complexity"));
+            std::string msg = "module import chain too deep (nested more than ";
+            msg += std::to_string(static_cast<std::int64_t>(kMaxResolutionDepth));
+            msg += " levels) while resolving '";
+            msg += module_name;
+            msg += "'; check for accidental complexity";
+            return std::unexpected(ParseError{0, 0, std::move(msg)});
         }
+        std::string target_path{};
         auto path_it = import_paths_.find(module_name);
         if (path_it == import_paths_.end()) {
             auto inferred_r = infer_module_path(module_name);
             if (!inferred_r.has_value()) return std::unexpected(std::move(inferred_r).error());
             if (inferred_r.value().has_value()) {
-                path_it = import_paths_.emplace(module_name, *inferred_r.value()).first;
+                target_path = *inferred_r.value();
+                import_paths_.emplace(module_name, target_path);
             } else {
-                return std::unexpected(ParseError(0, 0, "cannot find module '" + module_name + "' (use --import " + module_name +
-                                   "=path/to/file or -I <dir>)"));
+                std::string msg = "cannot find module '";
+                msg += module_name;
+                msg += "' (use --import ";
+                msg += module_name;
+                msg += "=path/to/file or -I <dir>)";
+                return std::unexpected(ParseError{0, 0, std::move(msg)});
             }
+        } else {
+            target_path = path_it->second;
         }
 
         resolving_.insert(module_name);
         ++resolution_depth_;
-        std::string resolved_path = absolute_source_path(path_it->second);
+        std::string resolved_path = absolute_source_path(target_path);
         auto loaded_r = read_module_file(resolved_path);
-        if (!loaded_r.has_value()) return std::unexpected(ParseError(0, 0, loaded_r.error().what()));
-        LoadedModuleFile loaded = std::move(loaded_r).value();
+        if (!loaded_r.has_value()) return std::unexpected(ParseError{0, 0, loaded_r.error().what()});
+        LoadedModuleFile loaded = std::move(loaded_r.value());
         // Stamps every SourceLocation this parse() produces (see
         // ParseError's and parse_primary()'s own comments) with
-        // path_it->second -- the path exactly as given via `--import
+        // target_path -- the path exactly as given via `--import
         // name=path` (or as inferred by -I search) -- rather than
         // `resolved_path`, so a diagnostic rooted in this file prints
         // that same as-given spelling instead of silently rewriting it
@@ -3011,36 +3411,49 @@ public:
         // naming, archive lookup) where deduplicating equivalent paths
         // genuinely matters.
         auto imported_result = parse(
-            loaded.interface_source, [this](const std::string& name) -> std::expected<const Program*, ParseError> { return resolve(name); },
-            [this](const std::string& key) -> std::expected<Program, ParseError> { return resolve_partition(key); }, path_it->second);
+            std::string_view{loaded.interface_source},
+            std::function<std::expected<const Program*, ParseError>(const std::string&)>(
+                [this](const std::string& name) -> std::expected<const Program*, ParseError> { return resolve(name); }),
+            std::function<std::expected<Program, ParseError>(const std::string&)>(
+                [this](const std::string& key) -> std::expected<Program, ParseError> { return resolve_partition(key); }),
+            target_path);
         if (!imported_result.has_value()) return std::unexpected(std::move(imported_result).error());
         Program imported = std::move(imported_result.value());
         imported.source_path = resolved_path;
         if (loaded.has_compile_time_payload) {
             auto payload_r = deserialize_compile_time_payload(loaded.compile_time_payload_bytes, resolved_path);
-            if (!payload_r.has_value()) return std::unexpected(ParseError(0, 0, payload_r.error().what()));
-            merge_compile_time_payload(imported, std::move(payload_r).value());
+            if (!payload_r.has_value()) return std::unexpected(ParseError{0, 0, payload_r.error().what()});
+            merge_compile_time_payload(imported, std::move(payload_r.value()));
         } else if (!loaded.is_scppm) {
             mark_reachable_hidden_compile_time_dependencies(imported);
         } else if (loaded.is_scppm && program_requires_structured_payload(imported)) {
-            return std::unexpected(ParseError(0, 0, "module interface '" + resolved_path +
-                              "' lacks the required structured compile-time payload; rebuild it with a newer scpp "
-                              "'build-module' output"));
+            std::string msg = "module interface '";
+            msg += resolved_path;
+            msg += "' lacks the required structured compile-time payload; rebuild it with a newer scpp 'build-module' output";
+            return std::unexpected(ParseError{0, 0, std::move(msg)});
         }
         resolving_.erase(module_name);
         --resolution_depth_;
 
         if (imported.module_name != module_name) {
-            return std::unexpected(ParseError(0, 0, "'" + path_it->second + "' does not declare module '" + module_name +
-                               "' (its own module declaration names '" +
-                               (imported.module_name.empty() ? std::string("<none>") : imported.module_name) +
-                               "')"));
+            std::string msg = "'";
+            msg += path_it->second;
+            msg += "' does not declare module '";
+            msg += module_name;
+            msg += "' (its own module declaration names '";
+            if (imported.module_name.empty()) {
+                msg += "<none>";
+            } else {
+                msg += imported.module_name;
+            }
+            msg += "')";
+            return std::unexpected(ParseError{0, 0, std::move(msg)});
         }
 
         resolution_order_.push_back(module_name);
         resolved_paths_[module_name] = resolved_path;
-        auto [it, inserted] = cache_.emplace(module_name, std::move(imported));
-        return &it->second;
+        auto emplace_res = cache_.emplace(module_name, std::move(imported));
+        return &emplace_res.first->second;
     }
 
     // ch11 §11.4: resolves a same-module partition key
@@ -3058,55 +3471,79 @@ public:
     // resolve() above.
     [[nodiscard]] std::expected<Program, ParseError> resolve_partition(const std::string& key) {
         if (partitions_resolving_.contains(key)) {
-            return std::unexpected(ParseError(0, 0, "circular partition import detected: '" + key +
-                               "' (directly or transitively) imports itself"));
+            std::string msg = "circular partition import detected: '";
+            msg += key;
+            msg += "' (directly or transitively) imports itself";
+            return std::unexpected(ParseError{0, 0, std::move(msg)});
         }
         if (resolution_depth_ >= kMaxResolutionDepth) {
-            return std::unexpected(ParseError(0, 0, "module import chain too deep (nested more than " +
-                               std::to_string(kMaxResolutionDepth) +
-                               " levels) while resolving partition '" + key + "'; check for accidental complexity"));
+            std::string msg = "module import chain too deep (nested more than ";
+            msg += std::to_string(static_cast<std::int64_t>(kMaxResolutionDepth));
+            msg += " levels) while resolving partition '";
+            msg += key;
+            msg += "'; check for accidental complexity";
+            return std::unexpected(ParseError{0, 0, std::move(msg)});
         }
+        std::string target_path{};
         auto path_it = import_paths_.find(key);
         if (path_it == import_paths_.end()) {
             auto inferred_r = infer_partition_path(key);
             if (!inferred_r.has_value()) return std::unexpected(std::move(inferred_r).error());
             if (inferred_r.value().has_value()) {
-                path_it = import_paths_.emplace(key, *inferred_r.value()).first;
+                target_path = *inferred_r.value();
+                import_paths_.emplace(key, target_path);
             } else {
-                return std::unexpected(ParseError(0, 0, "cannot find partition '" + key + "' (use --import " + key +
-                                   "=path/to/file or import its parent module via -I <dir>)"));
+                std::string msg = "cannot find partition '";
+                msg += key;
+                msg += "' (use --import ";
+                msg += key;
+                msg += "=path/to/file or import its parent module via -I <dir>)";
+                return std::unexpected(ParseError{0, 0, std::move(msg)});
             }
+        } else {
+            target_path = path_it->second;
         }
 
         partitions_resolving_.insert(key);
         ++resolution_depth_;
-        auto loaded_r = read_module_file(path_it->second);
-        if (!loaded_r.has_value()) return std::unexpected(ParseError(0, 0, loaded_r.error().what()));
-        LoadedModuleFile loaded = std::move(loaded_r).value();
+        auto loaded_r = read_module_file(target_path);
+        if (!loaded_r.has_value()) return std::unexpected(ParseError{0, 0, loaded_r.error().what()});
+        LoadedModuleFile loaded = std::move(loaded_r.value());
         if (loaded.is_scppm) {
-            return std::unexpected(ParseError(0, 0, "partition import path '" + path_it->second +
-                              "' must use a source .scpp file, not a compiled .scppm artifact"));
+            std::string msg = "partition import path '";
+            msg += target_path;
+            msg += "' must use a source .scpp file, not a compiled .scppm artifact";
+            return std::unexpected(ParseError{0, 0, std::move(msg)});
         }
-        // path_it->second (not an absolute_source_path()-normalized
+        // target_path (not an absolute_source_path()-normalized
         // form) so this partition's own SourceLocations preserve
         // whatever spelling resolved it -- see resolve()'s matching
         // comment above; partition.source_path just below is still the
         // absolute form internal bookkeeping (e.g. resolved_paths_) can
         // rely on.
         auto partition_result = parse(
-            loaded.interface_source, [this](const std::string& name) -> std::expected<const Program*, ParseError> { return resolve(name); },
-            [this](const std::string& nested_key) -> std::expected<Program, ParseError> { return resolve_partition(nested_key); },
-            path_it->second);
+            std::string_view{loaded.interface_source},
+            std::function<std::expected<const Program*, ParseError>(const std::string&)>(
+                [this](const std::string& name) -> std::expected<const Program*, ParseError> { return resolve(name); }),
+            std::function<std::expected<Program, ParseError>(const std::string&)>(
+                [this](const std::string& nested_key) -> std::expected<Program, ParseError> { return resolve_partition(nested_key); }),
+            target_path);
         if (!partition_result.has_value()) return std::unexpected(std::move(partition_result).error());
         Program partition = std::move(partition_result.value());
-        partition.source_path = absolute_source_path(path_it->second);
+        partition.source_path = absolute_source_path(target_path);
         partitions_resolving_.erase(key);
         --resolution_depth_;
 
         std::string expected_key = partition.module_name + ":" + partition.partition_name;
         if (expected_key != key) {
-            return std::unexpected(ParseError(0, 0, "'" + path_it->second + "' does not declare partition '" + key +
-                               "' (its own module declaration names '" + expected_key + "')"));
+            std::string msg = "'";
+            msg += target_path;
+            msg += "' does not declare partition '";
+            msg += key;
+            msg += "' (its own module declaration names '";
+            msg += expected_key;
+            msg += "')";
+            return std::unexpected(ParseError{0, 0, std::move(msg)});
         }
         return partition;
     }
@@ -3142,12 +3579,13 @@ public:
     // separate-compilation call, never read again afterward.
     [[nodiscard]] Program& program_for(const std::string& module_name) { return cache_.at(module_name); }
     [[nodiscard]] static std::string unescape_json_string(std::string_view text) {
-        std::string out;
+        std::string out{};
         out.reserve(text.size());
         for (std::size_t i = 0; i < text.size(); i++) {
-            char ch = text[i];
+            char ch = text.at(i);
             if (ch == '\\' && i + 1 < text.size()) {
-                char next = text[++i];
+                i++;
+                char next = text.at(i);
                 switch (next) {
                     case '\\': out.push_back('\\'); break;
                     case '"': out.push_back('"'); break;
@@ -3162,17 +3600,23 @@ public:
         }
         return out;
     }
-    [[nodiscard]] static std::optional<std::string> archive_from_metadata(const std::filesystem::path& metadata_path,
+    [[nodiscard]] static std::optional<std::string> archive_from_metadata(const std::string& metadata_path,
                                                                            const std::string& module_name) {
-        if (!std::filesystem::exists(metadata_path)) return std::nullopt;
-        std::ifstream file(metadata_path);
-        if (!file) return std::nullopt;
-        std::string line;
+        if (!path_exists(metadata_path)) return std::nullopt;
+        auto bytes_r = read_file_bytes(metadata_path);
+        if (!bytes_r.has_value()) return std::nullopt;
+        const std::string& content = bytes_r.value();
+        std::string line{};
         const std::string name_needle = "\"name\": \"" + module_name + "\"";
         const std::string archive_needle = "\"archive\": \"";
-        while (std::getline(file, line)) {
-            if (line.find(name_needle) == std::string::npos) continue;
-            std::size_t archive_pos = line.find(archive_needle);
+        std::size_t line_start = 0;
+        while (line_start < content.size()) {
+            std::size_t line_end = content.find('\n', line_start);
+            if (line_end == std::string::npos) line_end = content.size();
+            line = content.substr(line_start, line_end - line_start);
+            line_start = line_end + 1;
+            if (line.find(name_needle.c_str()) == std::string::npos) continue;
+            std::size_t archive_pos = line.find(archive_needle.c_str());
             if (archive_pos == std::string::npos) continue;
             archive_pos += archive_needle.size();
             std::size_t archive_end = line.find('"', archive_pos);
@@ -3184,23 +3628,22 @@ public:
     [[nodiscard]] std::optional<std::string> archive_for(const std::string& module_name) const {
         auto path_it = resolved_paths_.find(module_name);
         if (path_it == resolved_paths_.end()) return std::nullopt;
-        std::filesystem::path interface_path(path_it->second);
-        if (interface_path.extension() != ".scppm") return std::nullopt;
-        std::vector<std::filesystem::path> candidates = {
-            interface_path.parent_path() / ("lib" + module_name + ".scppa"),
-        };
-        if (interface_path.parent_path().filename() == "modules") {
-            candidates.push_back(interface_path.parent_path().parent_path() / "archives" /
-                                 ("lib" + module_name + ".scppa"));
-            if (std::optional<std::string> metadata_archive =
-                    archive_from_metadata(interface_path.parent_path().parent_path() / "package-metadata.json",
-                                          module_name);
-                metadata_archive.has_value()) {
+        const std::string& interface_path = path_it->second;
+        if (!path_ends_with(interface_path, ".scppm")) return std::nullopt;
+        std::string parent = path_parent(interface_path);
+        std::vector<std::string> candidates{};
+        candidates.push_back(path_join(parent, "lib" + module_name + ".scppa"));
+        if (path_filename(parent) == "modules") {
+            std::string grand_parent = path_parent(parent);
+            candidates.push_back(path_join(path_join(grand_parent, "archives"), "lib" + module_name + ".scppa"));
+            std::optional<std::string> metadata_archive =
+                archive_from_metadata(path_join(grand_parent, "package-metadata.json"), module_name);
+            if (metadata_archive.has_value()) {
                 candidates.push_back(*metadata_archive);
             }
         }
-        for (const std::filesystem::path& archive_path : candidates) {
-            if (std::filesystem::exists(archive_path)) return archive_path.string();
+        for (const std::string& archive_path : candidates) {
+            if (path_exists(archive_path)) return archive_path;
         }
         return std::nullopt;
     }
@@ -3215,7 +3658,11 @@ private:
         if (absolute_source_path(it->second) == absolute_source_path(path)) return;
         std::vector<std::string>& conflicts = discovered_source_path_conflicts_[key];
         if (conflicts.empty()) conflicts.push_back(it->second);
-        if (std::find(conflicts.begin(), conflicts.end(), path) == conflicts.end()) conflicts.push_back(path);
+        bool found = false;
+        for (const std::string& existing : conflicts) {
+            if (existing == path) { found = true; break; }
+        }
+        if (!found) conflicts.push_back(path);
     }
 
     // Returns std::expected rather than throwing "multiple source files
@@ -3227,17 +3674,21 @@ private:
     [[nodiscard]] std::expected<std::optional<std::string>, ParseError> lookup_discovered_source_path(const std::string& key) const {
         auto conflict_it = discovered_source_path_conflicts_.find(key);
         if (conflict_it != discovered_source_path_conflicts_.end() && !conflict_it->second.empty()) {
-            return std::unexpected(ParseError(0, 0, "multiple source files declare '" + key + "': " + std::accumulate(
-                                  std::next(conflict_it->second.begin()), conflict_it->second.end(), conflict_it->second.front(),
-                                  [](std::string acc, const std::string& path) { return std::move(acc) + ", " + path; })));
+            std::string msg = "multiple source files declare '" + key + "': ";
+            for (std::size_t i = 0; i < conflict_it->second.size(); ++i) {
+                if (i != 0) msg += ", ";
+                msg += conflict_it->second[i];
+            }
+            return std::unexpected(ParseError{0, 0, std::move(msg)});
         }
         auto it = discovered_source_paths_.find(key);
         if (it == discovered_source_paths_.end()) return std::nullopt;
         return it->second;
     }
 
-    [[nodiscard]] std::expected<void, ParseError> scan_source_root(const std::filesystem::path& root) {
-        std::filesystem::path normalized_root = root.lexically_normal();
+#ifdef __clang__
+    [[nodiscard]] std::expected<void, ParseError> scan_source_root(const std::string& root) {
+        std::filesystem::path normalized_root = std::filesystem::path(root).lexically_normal();
         if (normalized_root.empty()) normalized_root = ".";
         std::string root_key = normalized_root.string();
         if (scanned_source_roots_.contains(root_key)) return {};
@@ -3262,8 +3713,8 @@ private:
                 continue;
             }
             auto loaded_r = read_module_file(entry.path().string());
-            if (!loaded_r.has_value()) return std::unexpected(ParseError(0, 0, loaded_r.error().what()));
-            LoadedModuleFile loaded = std::move(loaded_r).value();
+            if (!loaded_r.has_value()) return std::unexpected(ParseError{0, 0, loaded_r.error().what()});
+            LoadedModuleFile loaded = std::move(loaded_r.value());
             if (std::optional<ScannedModuleDecl> decl = scan_declared_module_from_source(loaded.interface_source);
                 decl.has_value()) {
                 std::string key = decl->module_name;
@@ -3274,13 +3725,18 @@ private:
         }
         return {};
     }
+#else
+    [[nodiscard]] std::expected<void, ParseError> scan_source_root(const std::string& root) {
+        return {};
+    }
+#endif
 
     [[nodiscard]] std::expected<void, ParseError> ensure_module_source_root_scanned(const std::string& module_name) {
         auto module_it = import_paths_.find(module_name);
         if (module_it == import_paths_.end()) return {};
-        std::filesystem::path module_path(module_it->second);
-        if (module_path.extension() != ".scpp") return {};
-        return scan_source_root(module_path.parent_path());
+        const std::string& module_path = module_it->second;
+        if (!path_ends_with(module_path, ".scpp")) return {};
+        return scan_source_root(path_parent(module_path));
     }
 
     [[nodiscard]] std::expected<void, ParseError> ensure_search_dirs_scanned() {
@@ -3294,11 +3750,10 @@ private:
 
     [[nodiscard]] std::expected<std::optional<std::string>, ParseError> infer_module_path(const std::string& module_name) {
         for (const std::string& dir : import_search_dirs_) {
-            std::filesystem::path base(dir);
-            std::filesystem::path interface_candidate = base / (module_name + ".scppm");
-            if (std::filesystem::exists(interface_candidate)) return interface_candidate.string();
-            std::filesystem::path source_candidate = base / (module_name + ".scpp");
-            if (std::filesystem::exists(source_candidate)) return source_candidate.string();
+            std::string interface_candidate = path_join(dir, module_name + ".scppm");
+            if (path_exists(interface_candidate)) return interface_candidate;
+            std::string source_candidate = path_join(dir, module_name + ".scpp");
+            if (path_exists(source_candidate)) return source_candidate;
         }
         if (auto scan_r = ensure_search_dirs_scanned(); !scan_r.has_value()) return std::unexpected(std::move(scan_r).error());
         return lookup_discovered_source_path(module_name);
@@ -3320,26 +3775,33 @@ private:
         return lookup_discovered_source_path(key);
     }
 
-    std::unordered_map<std::string, std::string> import_paths_;
-    std::vector<std::string> import_search_dirs_;
-    std::unordered_map<std::string, std::string> discovered_source_paths_;
-    std::unordered_map<std::string, std::vector<std::string>> discovered_source_path_conflicts_;
-    std::unordered_set<std::string> scanned_source_roots_;
+    std::unordered_map<std::string, std::string> import_paths_{};
+    std::vector<std::string> import_search_dirs_{};
+    std::unordered_map<std::string, std::string> discovered_source_paths_{};
+    std::unordered_map<std::string, std::vector<std::string>> discovered_source_path_conflicts_{};
+    std::unordered_set<std::string> scanned_source_roots_{};
     bool search_dirs_scanned_ = false;
-    std::unordered_map<std::string, Program> cache_;
-    std::unordered_map<std::string, std::string> resolved_paths_;
-    std::unordered_set<std::string> resolving_;
-    std::unordered_set<std::string> partitions_resolving_;
+    std::unordered_map<std::string, Program> cache_{};
+    std::unordered_map<std::string, std::string> resolved_paths_{};
+    std::unordered_set<std::string> resolving_{};
+    std::unordered_set<std::string> partitions_resolving_{};
     int resolution_depth_ = 0;
-    std::vector<std::string> resolution_order_;
+    std::vector<std::string> resolution_order_{};
 };
 
 [[nodiscard]] std::string trim_copy(std::string_view text) {
     std::size_t begin = 0;
-    while (begin < text.size() && std::isspace(static_cast<unsigned char>(text[begin]))) begin++;
+    while (begin < text.size() && is_ascii_space(text.at(begin))) begin++;
     std::size_t end = text.size();
-    while (end > begin && std::isspace(static_cast<unsigned char>(text[end - 1]))) end--;
-    return std::string(text.substr(begin, end - begin));
+    while (end > begin && is_ascii_space(text.at(end - 1))) end--;
+    return string_from_view(text.substr(begin, end - begin));
+}
+
+[[nodiscard]] std::size_t string_view_find(std::string_view sv, char c, std::size_t start = 0) {
+    for (std::size_t i = start; i < sv.size(); ++i) {
+        if (sv.at(i) == c) return i;
+    }
+    return std::string_view::npos;
 }
 
 [[nodiscard]] bool starts_with(std::string_view text, std::string_view prefix) {
@@ -3363,10 +3825,10 @@ private:
 [[nodiscard]] std::expected<std::string, DriverError> inline_partition_imports(const Program& program, ModuleCache& cache, const std::string& module_source_path,
                                      std::string_view source,
                                      bool keep_concrete_bodies, std::unordered_set<std::string>& expanded_partition_paths) {
-    std::ostringstream out;
+    std::string out{};
     std::size_t line_start = 0;
     while (line_start <= source.size()) {
-        std::size_t line_end = source.find('\n', line_start);
+        std::size_t line_end = string_view_find(source, '\n', line_start);
         bool had_newline = line_end != std::string_view::npos;
         std::string_view line =
             had_newline ? source.substr(line_start, line_end - line_start) : source.substr(line_start);
@@ -3380,27 +3842,27 @@ private:
             auto partition_path_r = cache.source_path_for_partition(key);
             if (!partition_path_r.has_value()) {
                 const ParseError& error = partition_path_r.error();
-                return std::unexpected(DriverError(error.what(), error.loc));
+                return std::unexpected(DriverError{error.what(), error.loc});
             }
             if (!partition_path_r.value().has_value()) {
-                return std::unexpected(DriverError("cannot find partition '" + program.module_name + ":" + partition_name +
-                                  "' while writing module interface artifacts"));
+                return std::unexpected(DriverError{std::string("cannot find partition '") + program.module_name + ":" + partition_name +
+                                  "' while writing module interface artifacts"});
             }
             std::string absolute_partition_path = absolute_source_path(*partition_path_r.value());
             if (expanded_partition_paths.insert(absolute_partition_path).second) {
                 auto rendered_r = render_module_interface_file(program, cache, absolute_partition_path, module_source_path, keep_concrete_bodies,
                                                     /*keep_module_declaration=*/false, expanded_partition_paths);
                 if (!rendered_r.has_value()) return std::unexpected(std::move(rendered_r).error());
-                out << std::move(rendered_r).value();
+                out += rendered_r.value();
             }
         } else {
-            out << std::string(line);
-            if (had_newline) out << '\n';
+            out += string_from_view(line);
+            if (had_newline) out += '\n';
         }
         if (!had_newline) break;
         line_start = line_end + 1;
     }
-    return out.str();
+    return out;
 }
 
 [[nodiscard]] std::expected<std::string, DriverError> render_module_interface_file(const Program& program, ModuleCache& cache, const std::string& file_path,
@@ -3410,14 +3872,14 @@ private:
     auto loaded_r = read_module_file(file_path);
     if (!loaded_r.has_value()) return std::unexpected(std::move(loaded_r).error());
     LoadedModuleFile loaded = std::move(loaded_r).value();
-    std::string source = std::move(loaded.interface_source);
+    std::string source = loaded.interface_source;
     if (!keep_concrete_bodies) {
         auto stripped_r = strip_concrete_function_bodies(program, absolute_source_path(file_path), std::move(source));
         if (!stripped_r.has_value()) return std::unexpected(std::move(stripped_r).error());
         source = std::move(stripped_r).value();
     }
 
-    std::ostringstream out;
+    std::string out{};
     std::size_t line_start = 0;
     bool skipping_clang = false;
     while (line_start <= source.size()) {
@@ -3444,26 +3906,26 @@ private:
         bool is_module_decl = starts_with(trimmed, "export module ") || starts_with(trimmed, "module ") || trimmed == "module;";
         if (is_module_decl) {
             if (keep_module_declaration) {
-                out << std::string(line);
-                if (had_newline) out << '\n';
+                out += string_from_view(line);
+                if (had_newline) out += '\n';
             }
         } else {
             auto inlined_r = inline_partition_imports(program, cache, module_source_path, line, keep_concrete_bodies,
                                             expanded_partition_paths);
             if (!inlined_r.has_value()) return std::unexpected(std::move(inlined_r).error());
-            out << std::move(inlined_r).value();
-            if (had_newline) out << '\n';
+            out += inlined_r.value();
+            if (had_newline) out += '\n';
         }
         if (!had_newline) break;
         line_start = line_end + 1;
     }
-    return out.str();
+    return out;
 }
 
 std::string hoist_non_partition_imports(std::string source) {
-    std::vector<std::string> imports;
-    std::unordered_set<std::string> seen_imports;
-    std::vector<std::string> body_lines;
+    std::vector<std::string> imports{};
+    std::unordered_set<std::string> seen_imports{};
+    std::vector<std::string> body_lines{};
     // ch11 §11.2: a global module fragment -- a leading bare `module;`
     // line, plus anything between it and the module declaration itself
     // (e.g. an ordinary comment, or, for a not-yet-self-hosted file, real
@@ -3473,8 +3935,8 @@ std::string hoist_non_partition_imports(std::string source) {
     // which never matches a bare `module;`: it only recognizes
     // "module "/"export module " with a trailing space before a real
     // name) so it can be re-emitted first, before module_line itself.
-    std::vector<std::string> prologue_lines;
-    std::string module_line;
+    std::vector<std::string> prologue_lines{};
+    std::string module_line{};
     bool module_line_set = false;
 
     std::size_t line_start = 0;
@@ -3485,7 +3947,7 @@ std::string hoist_non_partition_imports(std::string source) {
         std::string_view line =
             had_newline ? std::string_view(source).substr(line_start, line_end - line_start)
                         : std::string_view(source).substr(line_start);
-        std::string line_text(line);
+        std::string line_text = string_from_view(line);
         std::string trimmed = trim_copy(line);
         if (trimmed == "#ifdef __clang__") {
             skipping_clang = true;
@@ -3516,23 +3978,32 @@ std::string hoist_non_partition_imports(std::string source) {
         line_start = line_end + 1;
     }
 
-    std::ostringstream out;
-    for (const std::string& prologue_line : prologue_lines) out << prologue_line << '\n';
-    if (module_line_set) out << module_line << '\n';
+    std::string out{};
+    for (const std::string& prologue_line : prologue_lines) {
+        out += prologue_line;
+        out += '\n';
+    }
+    if (module_line_set) {
+        out += module_line;
+        out += '\n';
+    }
     if (!imports.empty()) {
-        out << '\n';
-        for (const std::string& import_line : imports) out << import_line << '\n';
+        out += '\n';
+        for (const std::string& import_line : imports) {
+            out += import_line;
+            out += '\n';
+        }
     }
     for (std::size_t i = 0; i < body_lines.size(); i++) {
-        if ((module_line_set || !imports.empty()) || i > 0) out << '\n';
-        out << body_lines[i];
+        if ((module_line_set || !imports.empty()) || i > 0) out += '\n';
+        out += body_lines[i];
     }
-    return out.str();
+    return out;
 }
 
 [[nodiscard]] std::expected<std::string, DriverError> build_merged_interface_source(const Program& program, ModuleCache& cache, const std::string& module_source_path,
                                           bool keep_concrete_bodies) {
-    std::unordered_set<std::string> expanded_partition_paths;
+    std::unordered_set<std::string> expanded_partition_paths{};
     auto rendered_r = render_module_interface_file(program, cache, module_source_path, module_source_path,
                                                                     keep_concrete_bodies,
                                                                     /*keep_module_declaration=*/true,
@@ -3675,11 +4146,11 @@ llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
         }
     }
     if (!over.has_value()) return {};
-    std::string message;
+    std::string message{};
     message += "nesting is too deep: this construct is more than ";
-    message += std::to_string(kMaxNestingDepth);
+    message += std::to_string(static_cast<std::int64_t>(kMaxNestingDepth));
     message += " levels deep, which exceeds the maximum nesting depth the compiler supports";
-    return std::unexpected(DriverError(message, *over));
+    return std::unexpected(DriverError{message, *over});
 }
 
 // Move-checks an already-parsed (and, if it has imports of its own,
@@ -3742,13 +4213,15 @@ llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
     // the try/catch this call site used to need while it still threw is
     // gone, replaced by the same explicit .has_value() check used
     // everywhere else in this file.
-    if (auto fold_result = fold_immediate_calls(program); !fold_result.has_value()) {
-        return std::unexpected(DriverError(fold_result.error().what()));
+    ConstexprLimits limits{};
+    auto fold_result = fold_immediate_calls(program, limits);
+    if (!fold_result.has_value()) {
+        return std::unexpected(DriverError{fold_result.error().what()});
     }
     auto check_moves_result = check_moves(program);
     if (!check_moves_result.has_value()) {
         const DataflowError& error = check_moves_result.error();
-        return std::unexpected(DriverError(error.what(), error.loc, DriverErrorKind::Dataflow));
+        return std::unexpected(DriverError{error.what(), error.loc, DriverErrorKind::Dataflow});
     }
 
     // Real llvm-c/Target.h's own llvm::LLVMInitializeNativeTarget/
@@ -3759,84 +4232,95 @@ llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
     // a small shim compiled with the real header available; see
     // libs/llvm/target.cpp's and libs/llvm/native_target_init.cpp's
     // own header comments.
-    llvm::scpp_llvm_target_initialize_native_target();
-    llvm::scpp_llvm_target_initialize_native_asm_printer();
+    llvm::LLVMTargetMachineRef target_machine = nullptr;
+    llvm::LLVMTargetDataRef target_data = nullptr;
+    std::string triple{};
+    std::string data_layout{};
 
-    char* default_triple_c = llvm::LLVMGetDefaultTargetTriple();
-    std::string triple = default_triple_c;
-    llvm::LLVMDisposeMessage(default_triple_c);
+    [[scpp::unsafe]] {
+        llvm::scpp_llvm_target_initialize_native_target();
+        llvm::scpp_llvm_target_initialize_native_asm_printer();
 
-    llvm::LLVMTargetRef target = nullptr;
-    char* lookup_error_c = nullptr;
-    if (llvm::LLVMGetTargetFromTriple(triple.c_str(), &target, &lookup_error_c)) {
-        std::string lookup_error = lookup_error_c != nullptr ? lookup_error_c : "";
-        llvm::LLVMDisposeMessage(lookup_error_c);
-        return std::unexpected(DriverError("failed to lookup target '" + triple + "': " + lookup_error));
-    }
+        char* default_triple_c = llvm::LLVMGetDefaultTargetTriple();
+        triple = std::string{default_triple_c};
+        llvm::LLVMDisposeMessage(default_triple_c);
 
-    // A std::unique_ptr with llvm::LLVMDisposeTargetMachine as its deleter
-    // gives target_machine the exact same "always freed, even if an
-    // exception unwinds through codegen.generate() below" exception
-    // safety the original llvm::TargetMachine unique_ptr had, without
-    // needing a bespoke RAII wrapper type. std::remove_pointer_t
-    // recovers the pointee type from the exported llvm::LLVMTargetMachineRef
-    // alias rather than naming the opaque llvm::LLVMOpaqueTargetMachine
-    // struct tag directly: that tag is declared in the `llvm` module's
-    // own `:target_machine` partition, in that partition's module
-    // purview but never exported (see target_machine.cpp's own header
-    // comment), so it is reachable through the alias but not nameable
-    // by ordinary unqualified lookup here.
-    std::unique_ptr<std::remove_pointer_t<llvm::LLVMTargetMachineRef>, void (*)(llvm::LLVMTargetMachineRef)> target_machine(
-        llvm::LLVMCreateTargetMachine(target, triple.c_str(), "generic", "", codegen_opt_level_for(opt_level),
-                                 llvm::LLVMRelocPIC, llvm::LLVMCodeModelDefault),
-        &llvm::LLVMDisposeTargetMachine);
-    if (!target_machine) {
-        return std::unexpected(DriverError("failed to create target machine for '" + triple + "'"));
+        llvm::LLVMTargetRef target = nullptr;
+        char* lookup_error_c = nullptr;
+        if (llvm::LLVMGetTargetFromTriple(triple.c_str(), &target, &lookup_error_c) != 0) {
+            std::string lookup_error{};
+            if (lookup_error_c != nullptr) {
+                lookup_error = std::string{lookup_error_c};
+            }
+            llvm::LLVMDisposeMessage(lookup_error_c);
+            return std::unexpected(DriverError{std::string("failed to lookup target '") + triple + "': " + lookup_error});
+        }
+
+        target_machine = llvm::LLVMCreateTargetMachine(
+            target, triple.c_str(), "generic", "", codegen_opt_level_for(opt_level),
+            llvm::LLVMRelocPIC, llvm::LLVMCodeModelDefault);
+        if (target_machine == nullptr) {
+            return std::unexpected(DriverError{std::string("failed to create target machine for '") + triple + "'"});
+        }
+
+        target_data = llvm::LLVMCreateTargetDataLayout(target_machine);
+        char* data_layout_c = llvm::LLVMCopyStringRepOfTargetData(target_data);
+        data_layout = std::string{data_layout_c};
+        llvm::LLVMDisposeMessage(data_layout_c);
+        llvm::LLVMDisposeTargetData(target_data);
     }
 
     // The data layout must be set *before* codegen runs: std::make_unique
     // needs a target-accurate sizeof(T) to call malloc with, which comes
     // from the module's DataLayout.
-    Codegen codegen("scpp_module", program.source_path, emit_debug_info);
-    llvm::LLVMTargetDataRef target_data = llvm::LLVMCreateTargetDataLayout(target_machine.get());
-    char* data_layout_c = llvm::LLVMCopyStringRepOfTargetData(target_data);
-    codegen.set_target(triple, data_layout_c);
-    llvm::LLVMDisposeMessage(data_layout_c);
-    llvm::LLVMDisposeTargetData(target_data);
+    Codegen codegen{"scpp_module", program.source_path, emit_debug_info};
+    codegen.set_target(triple, data_layout);
 
-    llvm::LLVMModuleRef module;
+    llvm::LLVMModuleRef llvm_mod = nullptr;
     {
         auto module_result = codegen.generate(program);
         if (!module_result.has_value()) {
+            [[scpp::unsafe]] {
+                llvm::LLVMDisposeTargetMachine(target_machine);
+            }
             const CodegenError& error = module_result.error();
-            return std::unexpected(DriverError(error.what(), error.loc, DriverErrorKind::Codegen));
+            return std::unexpected(DriverError{error.what(), error.loc, DriverErrorKind::Codegen});
         }
-        module = std::move(module_result).value();
+        llvm_mod = std::move(module_result.value());
     }
 
-    char* emit_error_c = nullptr;
-    if (llvm::LLVMTargetMachineEmitToFile(target_machine.get(), module, object_path.c_str(), llvm::LLVMObjectFile,
-                                     &emit_error_c)) {
-        std::string emit_error = emit_error_c != nullptr ? emit_error_c : "unknown error";
-        llvm::LLVMDisposeMessage(emit_error_c);
-        return std::unexpected(DriverError("could not emit object file '" + object_path + "': " + emit_error));
+    [[scpp::unsafe]] {
+        char* emit_error_c = nullptr;
+        if (llvm::LLVMTargetMachineEmitToFile(target_machine, llvm_mod, object_path.c_str(), llvm::LLVMObjectFile,
+                                         &emit_error_c) != 0) {
+            llvm::LLVMDisposeTargetMachine(target_machine);
+            std::string emit_error = "unknown error";
+            if (emit_error_c != nullptr) {
+                emit_error = std::string{emit_error_c};
+            }
+            llvm::LLVMDisposeMessage(emit_error_c);
+            return std::unexpected(DriverError{std::string("could not emit object file '") + object_path + "': " + emit_error});
+        }
+        llvm::LLVMDisposeTargetMachine(target_machine);
     }
     return {};
 }
 
 [[nodiscard]] std::expected<void, DriverError> emit_module_archive_for_program(Program& program, const std::string& archive_path, int opt_level = 2) {
-    std::filesystem::path object_path(archive_path);
-    object_path.replace_extension(".scppo");
-    auto emit_r = emit_object_file_for_program(program, object_path.string(), /*emit_debug_info=*/false, opt_level);
+    std::string object_path = archive_path;
+    std::size_t dot = object_path.rfind('.');
+    if (dot != std::string::npos) object_path = object_path.substr(0, dot);
+    object_path += ".scppo";
+    auto emit_r = emit_object_file_for_program(program, object_path, /*emit_debug_info=*/false, opt_level);
     if (!emit_r.has_value()) return std::unexpected(std::move(emit_r).error());
-    auto archive_r = create_archive({object_path.string()}, archive_path);
+    std::vector<std::string> object_paths{};
+    object_paths.push_back(object_path);
+    auto archive_r = create_archive(object_paths, archive_path);
     if (!archive_r.has_value()) {
-        std::error_code ec;
-        std::filesystem::remove(object_path, ec);
+        path_remove(object_path);
         return std::unexpected(std::move(archive_r).error());
     }
-    std::error_code ec;
-    std::filesystem::remove(object_path, ec);
+    path_remove(object_path);
     return {};
 }
 
@@ -3856,13 +4340,18 @@ llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
 [[nodiscard]] std::expected<Program, DriverError> parse_source_with_module_cache(std::string_view source, ModuleCache& cache,
                                                                                   const std::string& source_path) {
     auto program_result = parse(
-        source, [&cache](const std::string& name) -> std::expected<const Program*, ParseError> { return cache.resolve(name); },
-        [&cache](const std::string& key) -> std::expected<Program, ParseError> { return cache.resolve_partition(key); }, source_path);
+        source,
+        std::function<std::expected<const Program*, ParseError>(const std::string&)>(
+            [&cache](const std::string& name) -> std::expected<const Program*, ParseError> { return cache.resolve(name); }),
+        std::function<std::expected<Program, ParseError>(const std::string&)>(
+            [&cache](const std::string& key) -> std::expected<Program, ParseError> { return cache.resolve_partition(key); }),
+        source_path);
     if (!program_result.has_value()) {
         const ParseError& error = program_result.error();
-        return std::unexpected(DriverError(error.what(), error.loc));
+        return std::unexpected(DriverError{error.what(), error.loc});
     }
-    return std::move(program_result).value();
+    std::expected<Program, DriverError> ret{std::move(program_result).value()};
+    return ret;
 }
 
 } // namespace scpp
@@ -3870,23 +4359,26 @@ llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
 export namespace scpp {
 
 std::string host_target_triple() {
-    char* triple_c = llvm::LLVMGetDefaultTargetTriple();
-    std::string triple = triple_c;
-    llvm::LLVMDisposeMessage(triple_c);
+    std::string triple{};
+    [[scpp::unsafe]] {
+        char* triple_c = llvm::LLVMGetDefaultTargetTriple();
+        triple = std::string{triple_c};
+        llvm::LLVMDisposeMessage(triple_c);
+    }
     return triple;
 }
 
 std::vector<std::string> project_default_stdlib_link_inputs() { return default_stdlib_link_inputs(); }
 
-std::optional<std::filesystem::path> driver_runtime_current_executable_path() { return current_executable_path(); }
+std::optional<std::string> driver_runtime_current_executable_path() { return current_executable_path(); }
 
-std::optional<std::filesystem::path> driver_runtime_default_prebuilt_stdlib_dir() {
+std::optional<std::string> driver_runtime_default_prebuilt_stdlib_dir() {
     return scpp::runtime_default_prebuilt_stdlib_dir();
 }
 
-std::optional<std::filesystem::path> driver_runtime_installed_stdlib_dir() { return scpp::runtime_installed_stdlib_dir(); }
+std::optional<std::string> driver_runtime_installed_stdlib_dir() { return scpp::runtime_installed_stdlib_dir(); }
 
-std::optional<std::filesystem::path> driver_runtime_default_source_stdlib_dir() {
+std::optional<std::string> driver_runtime_default_source_stdlib_dir() {
     return scpp::runtime_default_source_stdlib_dir();
 }
 
@@ -3905,10 +4397,10 @@ std::optional<std::filesystem::path> driver_runtime_default_source_stdlib_dir() 
                        bool emit_debug_info = false,
                        const std::string& source_path = {},
                        int opt_level = 2) {
-    ModuleCache cache(import_paths, import_search_dirs);
+    ModuleCache cache{import_paths, import_search_dirs};
     auto program_result = parse_source_with_module_cache(source, cache, source_path);
     if (!program_result.has_value()) return std::unexpected(std::move(program_result).error());
-    Program program = std::move(program_result).value();
+    Program program = std::move(program_result.value());
     program.source_path = source_path.empty() ? std::string() : absolute_source_path(source_path);
     return emit_object_file_for_program(program, object_path, emit_debug_info, opt_level);
 }
@@ -3924,15 +4416,15 @@ std::optional<std::filesystem::path> driver_runtime_default_source_stdlib_dir() 
             effective_import_paths.emplace(*module_name, absolute_source_path(source_path));
         }
     }
-    ModuleCache cache(std::move(effective_import_paths), import_search_dirs);
+    ModuleCache cache{std::move(effective_import_paths), import_search_dirs};
     auto program_result = parse_source_with_module_cache(source, cache, source_path);
     if (!program_result.has_value()) return std::unexpected(std::move(program_result).error());
-    Program program = std::move(program_result).value();
+    Program program = std::move(program_result.value());
     program.source_path = source_path.empty() ? std::string() : absolute_source_path(source_path);
     reject_not_yet_lowerable_constexpr_surface(program);
     if (!program.is_module_interface) {
-        return std::unexpected(DriverError("module artifacts can only be emitted from an interface unit, not '" +
-                          (program.module_name.empty() ? std::string("<non-module>") : module_key(program)) + "'"));
+        return std::unexpected(DriverError{std::string("module artifacts can only be emitted from an interface unit, not '") +
+                          (program.module_name.empty() ? std::string("<non-module>") : module_key(program)) + "'"});
     }
     auto merged_interface_source_r =
         build_merged_interface_source(program, cache, absolute_source_path(source_path), /*keep_concrete_bodies=*/false);
@@ -3966,9 +4458,9 @@ std::optional<std::filesystem::path> driver_runtime_default_source_stdlib_dir() 
 // change that independent call site's signature; the value itself is now
 // ignored.
 [[nodiscard]] std::expected<void, DriverError> link_executable(const std::vector<std::string>& link_inputs, const std::string& executable_path,
-                     bool /*static_link*/ = false) {
+                     bool static_link [[maybe_unused]] = false) {
     if (link_inputs.empty()) {
-        return std::unexpected(DriverError("linker command requires at least one input for '" + executable_path + "'"));
+        return std::unexpected(DriverError{std::string("linker command requires at least one input for '") + executable_path + "'"});
     }
     std::string command = "cc -static";
     for (const std::string& input : link_inputs) {
@@ -3985,9 +4477,12 @@ std::optional<std::filesystem::path> driver_runtime_default_source_stdlib_dir() 
     // does not, so it must be requested explicitly for a static link.
     if (!link_inputs.empty()) command += " -lstdc++ -lm";
     command += " -o \"" + executable_path + "\"";
-    int result = std::system(command.c_str());
+    int result = 0;
+    [[scpp::unsafe]] {
+        result = system(command.c_str());
+    }
     if (result != 0) {
-        return std::unexpected(DriverError("linker command failed: " + command));
+        return std::unexpected(DriverError{std::string("linker command failed: ") + command});
     }
     return {};
 }
@@ -4008,19 +4503,20 @@ std::optional<std::filesystem::path> driver_runtime_default_source_stdlib_dir() 
                             bool emit_debug_info = false,
                             const std::string& source_path = {},
                             int opt_level = 2) {
-    ModuleCache cache(import_paths, import_search_dirs);
+    ModuleCache cache{import_paths, import_search_dirs};
     auto program_result = parse_source_with_module_cache(source, cache, source_path);
     if (!program_result.has_value()) return std::unexpected(std::move(program_result).error());
-    Program program = std::move(program_result).value();
+    Program program = std::move(program_result.value());
     program.source_path = source_path.empty() ? std::string() : absolute_source_path(source_path);
 
     std::string object_path = executable_path + ".o";
     auto emit_r = emit_object_file_for_program(program, object_path, emit_debug_info, opt_level);
     if (!emit_r.has_value()) return std::unexpected(std::move(emit_r).error());
 
-    std::vector<std::string> module_object_paths;
-    std::vector<std::string> module_archive_paths;
-    for (const std::string& module_name : cache.resolution_order()) {
+    std::vector<std::string> module_object_paths{};
+    std::vector<std::string> module_archive_paths{};
+    std::vector<std::string> resolution = cache.resolution_order();
+    for (const std::string& module_name : resolution) {
         if (std::optional<std::string> archive_path = cache.archive_for(module_name); archive_path.has_value()) {
             module_archive_paths.push_back(*archive_path);
             continue;
@@ -4037,30 +4533,46 @@ std::optional<std::filesystem::path> driver_runtime_default_source_stdlib_dir() 
     // a conventional left-to-right static linker able to satisfy one
     // archive's references from a later one.
     std::vector<std::string> link_inputs = module_object_paths;
-    for (auto it = module_archive_paths.rbegin(); it != module_archive_paths.rend(); ++it) {
-        if (std::find(link_inputs.begin(), link_inputs.end(), *it) == link_inputs.end()) {
-            link_inputs.push_back(*it);
+    auto contains_input = [](const std::vector<std::string>& vec, const std::string& item) -> bool {
+        for (const std::string& v : vec) {
+            if (v == item) return true;
+        }
+        return false;
+    };
+    for (std::size_t i = module_archive_paths.size(); i > 0; --i) {
+        const std::string& archive_path = module_archive_paths[i - 1];
+        if (!contains_input(link_inputs, archive_path)) {
+            link_inputs.push_back(archive_path);
         }
     }
-    link_inputs.insert(link_inputs.end(), extra_link_inputs.begin(), extra_link_inputs.end());
-    bool uses_stdlib = std::find(cache.resolution_order().begin(), cache.resolution_order().end(), "std") !=
-                       cache.resolution_order().end();
+    for (const std::string& extra : extra_link_inputs) {
+        link_inputs.push_back(extra);
+    }
+    bool uses_stdlib = false;
+    for (const std::string& mod : resolution) {
+        if (mod == "std") {
+            uses_stdlib = true;
+            break;
+        }
+    }
     if (uses_stdlib) {
         for (const std::string& input : default_stdlib_link_inputs()) {
-            if (std::find(link_inputs.begin(), link_inputs.end(), input) == link_inputs.end()) {
+            if (!contains_input(link_inputs, input)) {
                 link_inputs.push_back(input);
             }
         }
     }
-    std::vector<std::string> final_link_inputs = {object_path};
-    final_link_inputs.insert(final_link_inputs.end(), link_inputs.begin(), link_inputs.end());
+    std::vector<std::string> final_link_inputs{};
+    final_link_inputs.push_back(object_path);
+    for (const std::string& item : link_inputs) {
+        final_link_inputs.push_back(item);
+    }
     auto link_r = link_executable(final_link_inputs, executable_path, static_link);
     if (!link_r.has_value()) return std::unexpected(std::move(link_r).error());
 
-    std::error_code final_cleanup_ec;
-    std::filesystem::remove(object_path, final_cleanup_ec);
+    path_remove(object_path);
     for (const std::string& module_object_path : module_object_paths) {
-        std::filesystem::remove(module_object_path, final_cleanup_ec);
+        path_remove(module_object_path);
     }
     return {};
 }
