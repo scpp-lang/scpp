@@ -155,6 +155,9 @@ std::string send_request(int port, const std::string& request) {
 }
 
 void run_integration_test() {
+#ifdef SCPP_HTTPSERVER_EXECUTABLE_PATH
+    expect(std::filesystem::exists(SCPP_HTTPSERVER_EXECUTABLE_PATH), "httpserver executable exists");
+#endif
     const auto root = prepare_docroot();
     const int port = reserve_port();
     const auto binary = build_server_binary(root, port);

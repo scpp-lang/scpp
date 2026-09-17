@@ -13,17 +13,6 @@ export enum class error { empty_range };
 export template<typename T>
 class uniform_int_distribution;
 
-export int uniform_int_rand(int maxValue) {
-    if (maxValue <= 0) {
-        return 0;
-    }
-
-    std::random_device seed_source{};
-    std::mt19937 generator{seed_source.call()};
-    auto distribution_result = scpp::rand::uniform_int_distribution<int>::make(0, maxValue - 1);
-    return distribution_result.value()(generator);
-}
-
 export template<>
 class uniform_int_distribution<int> {
 private:
@@ -57,7 +46,7 @@ public:
         return std::move(result);
     }
 
-    int call(std::mt19937& generator) {
+    int operator()(std::mt19937& generator) {
         int64_t min_i = static_cast<int64_t>(this->minimum_);
         int64_t max_i = static_cast<int64_t>(this->maximum_);
         uint64_t range = static_cast<uint64_t>((max_i - min_i) + static_cast<int64_t>(1));
@@ -82,5 +71,16 @@ public:
         return this->maximum_;
     }
 };
+
+export int uniform_int_rand(int maxValue) {
+    if (maxValue <= 0) {
+        return 0;
+    }
+
+    std::random_device seed_source{};
+    std::mt19937 generator{seed_source.call()};
+    auto distribution_result = scpp::rand::uniform_int_distribution<int>::make(0, maxValue - 1);
+    return distribution_result.value()(generator);
+}
 
 } // namespace scpp::rand

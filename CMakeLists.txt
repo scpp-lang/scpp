@@ -61,6 +61,8 @@ find_package(LLVM REQUIRED CONFIG)
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 llvm_map_components_to_libnames(LLVM_LIBS core support target native)
 
+find_package(Threads REQUIRED)
+
 list(INSERT CMAKE_FIND_LIBRARY_SUFFIXES 0 ".a")
 find_library(SQLITE3_LIB NAMES sqlite3 REQUIRED)
 find_path(SQLITE3_INCLUDE_DIR NAMES sqlite3.h REQUIRED)

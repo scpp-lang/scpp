@@ -20,7 +20,7 @@ namespace std {
 // leave an `optional` disengaged -- was "use of undeclared variable
 // 'std::nullopt'".
 export struct nullopt_t {
-    explicit nullopt_t(int tag) { return; }
+    explicit constexpr nullopt_t(int tag) { return; }
 };
 
 export constexpr nullopt_t nullopt{0};

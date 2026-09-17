@@ -31,7 +31,9 @@
 # files' C++-compilability. CONFIGURE_DEPENDS makes CMake re-glob (and
 # thus notice newly-added/removed stdlib files) on the next build, so
 # nobody has to remember to keep an explicit file list in sync by hand.
-file(GLOB_RECURSE SCPP_STDLIB_CXX_VALIDATION_SOURCES CONFIGURE_DEPENDS
+find_package(Threads REQUIRED)
+
+file(GLOB_RECURSE SCPP_STDLIB_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/std/*.scpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/scpp/*.scpp")
 
@@ -39,20 +41,30 @@ file(GLOB_RECURSE SCPP_STDLIB_CXX_VALIDATION_SOURCES CONFIGURE_DEPENDS
 # mirroring the exact technique libs/llvm/CMakeLists.txt already uses for
 # its own (unrelated, already-real-C++) `.scpp` files.
 set_source_files_properties(
-    ${SCPP_STDLIB_CXX_VALIDATION_SOURCES}
-    PROPERTIES LANGUAGE CXX)
+    ${SCPP_STDLIB_SOURCES}
+    PROPERTIES
+        LANGUAGE CXX
+        COMPILE_OPTIONS "-include;${CMAKE_CURRENT_SOURCE_DIR}/scpp_clang_preinclude.h")
 
-# EXCLUDE_FROM_ALL: this target currently does NOT compile cleanly (see
-# below), so it must not be part of the default `ALL` build -- doing so
-# would break `cmake --build build` for everyone. It stays available as an
-# explicit, opt-in target (`cmake --build build --target
-# scpp_stdlib_cxx_validation`) so it can be built on demand to track
-# progress as the underlying findings are addressed.
-add_library(scpp_stdlib_cxx_validation OBJECT EXCLUDE_FROM_ALL)
-target_sources(scpp_stdlib_cxx_validation
+set(SCPP_STDLIB_WRAPPER_SOURCES
+    std/string/scpp_string_wrapper.cpp
+    std/vector/scpp_vector_wrapper.cpp
+    std/memory/scpp_shared_ptr_wrapper.cpp
+    std/thread/scpp_thread_wrapper.cpp
+    std/print/scpp_print_wrapper.cpp
+    std/random/scpp_random_wrapper.cpp
+    std/charconv/scpp_charconv_wrapper.cpp
+    scpp/io/scpp_io_wrapper.cpp)
+
+# Real static library providing the SCPP standard library for C++ compilation,
+# exporting its .scpp modules via CXX_MODULES file set and containing native wrappers.
+add_library(scpp_std STATIC)
+target_sources(scpp_std
     PUBLIC
         FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            ${SCPP_STDLIB_CXX_VALIDATION_SOURCES})
+            ${SCPP_STDLIB_SOURCES}
+    PRIVATE
+        ${SCPP_STDLIB_WRAPPER_SOURCES})
 
 # libs/std/std.scpp declares `export module std;` -- scpp's own,
 # self-contained stdlib module, unrelated to (and unaware of) any real C++
@@ -64,7 +76,8 @@ target_sources(scpp_stdlib_cxx_validation
 # additionally try to make the compiler's own real `std` module available
 # alongside our own same-named one -- a genuine conflict distinct from
 # (and on top of) the reserved-name diagnostic below.
-set_target_properties(scpp_stdlib_cxx_validation PROPERTIES CXX_MODULE_STD 0)
+set_target_properties(scpp_std PROPERTIES CXX_MODULE_STD 0)
+target_link_libraries(scpp_std PUBLIC Threads::Threads)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     # Same precedent as scpp_ast's own -Wno-error=unknown-attributes
     # above: scpp vendor attributes ([[scpp::lifetime(...)]],
@@ -73,10 +86,16 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     # ignored" warning, which would otherwise be a hard error under this
     # project's global -Werror-equivalent. Likewise for the reserved
     # module name discussed above.
-    target_compile_options(scpp_stdlib_cxx_validation PRIVATE
+    target_compile_options(scpp_std PRIVATE
         -Wno-error=unknown-attributes
-        -Wno-error=reserved-module-identifier)
+        -Wno-error=reserved-module-identifier
+        -Wno-unused-parameter
+        -Wno-unused-variable
+        -Wno-pessimizing-move)
 endif()
+
+add_library(scpp_stdlib ALIAS scpp_std)
+add_library(scpp_stdlib_cxx_validation ALIAS scpp_std)
 
 # ---------------------------------------------------------------------
 # FINDING (as of this target's introduction): the "every valid scpp file
