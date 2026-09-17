@@ -5496,8 +5496,8 @@ void run_cli_extension_tests() {
     }
 
     {
-        std::string case_name = "cli_rejects_cpp_input";
-        std::filesystem::path source_path = std::filesystem::current_path() / "cli_rejects_cpp_input.cpp";
+        std::string case_name = "cli_rejects_unsupported_extension_input";
+        std::filesystem::path source_path = std::filesystem::current_path() / "cli_rejects_txt_input.txt";
         cases_run++;
         write_text_file(source_path, "int main() { return 0; }\n");
         RunResult result = run_command_capture(std::string(SCPP_BINARY_PATH) + " parse " + source_path.string() + " 2>&1");
@@ -5505,6 +5505,178 @@ void run_cli_extension_tests() {
         expect(result.exit_code != 0, case_name + ": expected non-zero exit");
         expect(result.stdout_text.find("otherwise pass --source <path>") != std::string::npos,
                case_name + ": expected --source hint, got '" + result.stdout_text + "'");
+    }
+
+    {
+        std::string case_name = "cli_accepts_cpp_positional_input";
+        std::filesystem::path source_path = std::filesystem::current_path() / "cli_accepts_cpp_positional_input.cpp";
+        std::filesystem::path exe_path = std::filesystem::current_path() / "cli_accepts_cpp_positional_input_exe";
+        cases_run++;
+        write_text_file(source_path, "int main() { return 0; }\n");
+        RunResult parse_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " parse " + source_path.string() + " 2>&1");
+        expect(parse_result.exit_code == 0,
+               case_name + ": expected parse of .cpp positional input to succeed, got '" + parse_result.stdout_text + "'");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + source_path.string() + " -o " +
+                                exe_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": expected direct build of .cpp input to succeed, got '" + build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected executable to exit 0, got " + std::to_string(run_result.exit_code));
+        std::filesystem::remove(source_path);
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "cli_accepts_cppm_cc_cxx_positional_inputs";
+        std::filesystem::path cppm_path = std::filesystem::current_path() / "cli_mod.cppm";
+        std::filesystem::path cc_path = std::filesystem::current_path() / "cli_test.cc";
+        std::filesystem::path cxx_path = std::filesystem::current_path() / "cli_test.cxx";
+        cases_run++;
+        write_text_file(cppm_path, "export module cli_mod;\nnamespace cli_mod { export int val() { return 1; } }\n");
+        write_text_file(cc_path, "int main() { return 0; }\n");
+        write_text_file(cxx_path, "int main() { return 0; }\n");
+        RunResult parse_cppm = run_command_capture(std::string(SCPP_BINARY_PATH) + " parse " + cppm_path.string() + " 2>&1");
+        expect(parse_cppm.exit_code == 0, case_name + ": parse .cppm should succeed, got '" + parse_cppm.stdout_text + "'");
+        RunResult parse_cc = run_command_capture(std::string(SCPP_BINARY_PATH) + " parse " + cc_path.string() + " 2>&1");
+        expect(parse_cc.exit_code == 0, case_name + ": parse .cc should succeed, got '" + parse_cc.stdout_text + "'");
+        RunResult parse_cxx = run_command_capture(std::string(SCPP_BINARY_PATH) + " parse " + cxx_path.string() + " 2>&1");
+        expect(parse_cxx.exit_code == 0, case_name + ": parse .cxx should succeed, got '" + parse_cxx.stdout_text + "'");
+        std::filesystem::remove(cppm_path);
+        std::filesystem::remove(cc_path);
+        std::filesystem::remove(cxx_path);
+    }
+
+    {
+        std::string case_name = "cli_compile_only_with_explicit_output";
+        std::filesystem::path source_path = std::filesystem::current_path() / "cli_c_explicit.cpp";
+        std::filesystem::path object_path = std::filesystem::current_path() / "cli_c_explicit_custom.o";
+        cases_run++;
+        write_text_file(source_path, "int answer() { return 42; }\n");
+        RunResult compile_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " -c " + source_path.string() + " -o " +
+                                object_path.string() + " 2>&1");
+        expect(compile_result.exit_code == 0,
+               case_name + ": scpp -c -o should succeed, got '" + compile_result.stdout_text + "'");
+        expect(std::filesystem::exists(object_path), case_name + ": expected output object file to exist");
+        if (std::filesystem::exists(object_path)) {
+            std::vector<unsigned char> bytes = read_binary_file(object_path);
+            expect(bytes.size() >= 4 && bytes[0] == 0x7f && bytes[1] == 'E' && bytes[2] == 'L' && bytes[3] == 'F',
+                   case_name + ": expected ELF object file magic");
+        }
+        std::filesystem::remove(source_path);
+        std::filesystem::remove(object_path);
+    }
+
+    {
+        std::string case_name = "cli_compile_only_default_basename_output";
+        std::filesystem::path source_path = std::filesystem::current_path() / "cli_c_basename.cpp";
+        std::filesystem::path expected_object = std::filesystem::current_path() / "cli_c_basename.o";
+        cases_run++;
+        std::filesystem::remove(expected_object);
+        write_text_file(source_path, "int answer() { return 42; }\n");
+        RunResult compile_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " -c " + source_path.string() + " 2>&1");
+        expect(compile_result.exit_code == 0,
+               case_name + ": scpp -c without -o should succeed, got '" + compile_result.stdout_text + "'");
+        expect(std::filesystem::exists(expected_object),
+               case_name + ": expected derived basename object file 'cli_c_basename.o' to exist");
+        std::filesystem::remove(source_path);
+        std::filesystem::remove(expected_object);
+    }
+
+    {
+        std::string case_name = "cli_compile_only_cppm_input";
+        std::filesystem::path cppm_path = std::filesystem::current_path() / "cli_c_mod.cppm";
+        std::filesystem::path expected_object = std::filesystem::current_path() / "cli_c_mod.o";
+        cases_run++;
+        std::filesystem::remove(expected_object);
+        write_text_file(cppm_path, "export module cli_c_mod;\nnamespace cli_c_mod { export int val() { return 99; } }\n");
+        RunResult compile_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " -c " + cppm_path.string() + " 2>&1");
+        expect(compile_result.exit_code == 0,
+               case_name + ": scpp -c on .cppm should succeed, got '" + compile_result.stdout_text + "'");
+        expect(std::filesystem::exists(expected_object), case_name + ": expected derived .o for .cppm to exist");
+        std::filesystem::remove(cppm_path);
+        std::filesystem::remove(expected_object);
+    }
+
+    {
+        std::string case_name = "cli_tolerates_standard_compiler_flags";
+        std::filesystem::path source_path = std::filesystem::current_path() / "cli_flags_test.cpp";
+        std::filesystem::path object_path = std::filesystem::current_path() / "cli_flags_test.o";
+        cases_run++;
+        write_text_file(source_path, "int answer() { return 42; }\n");
+        RunResult compile_result = run_command_capture(
+            std::string(SCPP_BINARY_PATH) +
+            " -O0 -O1 -O2 -O3 -Os -Ofast -fPIC -fPIE -fno-exceptions -fexceptions -fno-rtti -frtti "
+            "-Wall -Wextra -Werror -Wpedantic -Wno-unused -std=c++20 -DTEST_MACRO -DVAL=1 -m64 -pipe "
+            "-c " + source_path.string() + " -o " + object_path.string() + " 2>&1");
+        expect(compile_result.exit_code == 0,
+               case_name + ": compiler flags should be tolerated cleanly, got '" + compile_result.stdout_text + "'");
+        expect(std::filesystem::exists(object_path), case_name + ": expected output object file to exist");
+        std::filesystem::remove(source_path);
+        std::filesystem::remove(object_path);
+    }
+
+    {
+        std::string case_name = "cli_compile_and_link_separate_steps";
+        std::filesystem::path helper_source = std::filesystem::current_path() / "cli_sep_helper.cpp";
+        std::filesystem::path helper_obj = std::filesystem::current_path() / "cli_sep_helper.o";
+        std::filesystem::path main_source = std::filesystem::current_path() / "cli_sep_main.cpp";
+        std::filesystem::path main_obj = std::filesystem::current_path() / "cli_sep_main.o";
+        std::filesystem::path exe_path = std::filesystem::current_path() / "cli_sep_exe";
+        cases_run++;
+        write_text_file(helper_source, "extern \"C\" int get_helper_value() { return 42; }\n");
+        write_text_file(main_source,
+                        "extern \"C\" int get_helper_value();\n"
+                        "int main() {\n"
+                        "    int val = 0;\n"
+                        "    [[scpp::unsafe]] {\n"
+                        "        val = get_helper_value();\n"
+                        "    }\n"
+                        "    return val - 42;\n"
+                        "}\n");
+        RunResult c_helper =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " -c " + helper_source.string() + " -o " +
+                                helper_obj.string() + " 2>&1");
+        expect(c_helper.exit_code == 0, case_name + ": compile helper.o failed: " + c_helper.stdout_text);
+        RunResult c_main =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " -c " + main_source.string() + " -o " +
+                                main_obj.string() + " 2>&1");
+        expect(c_main.exit_code == 0, case_name + ": compile main.o failed: " + c_main.stdout_text);
+        RunResult link_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + main_obj.string() + " " +
+                                helper_obj.string() + " -o " + exe_path.string() + " 2>&1");
+        expect(link_result.exit_code == 0, case_name + ": link object files failed: " + link_result.stdout_text);
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected executable to exit 0, got " + std::to_string(run_result.exit_code));
+        std::filesystem::remove(helper_source);
+        std::filesystem::remove(helper_obj);
+        std::filesystem::remove(main_source);
+        std::filesystem::remove(main_obj);
+        std::filesystem::remove(exe_path);
+    }
+
+    {
+        std::string case_name = "driver_api_compile_to_object_and_derive_path";
+        cases_run++;
+        expect(scpp::derive_object_path("main.scpp") == "main.o", case_name + ": main.scpp -> main.o");
+        expect(scpp::derive_object_path("path/to/test.cpp") == "test.o", case_name + ": path/to/test.cpp -> test.o");
+        expect(scpp::derive_object_path("dir/mod.cppm") == "mod.o", case_name + ": dir/mod.cppm -> mod.o");
+        expect(scpp::derive_object_path("code.cc") == "code.o", case_name + ": code.cc -> code.o");
+        expect(scpp::derive_object_path("unit.cxx") == "unit.o", case_name + ": unit.cxx -> unit.o");
+        expect(scpp::derive_object_path(".hidden.cpp") == ".hidden.o", case_name + ": .hidden.cpp -> .hidden.o");
+
+        std::filesystem::path obj_path = std::filesystem::current_path() / "driver_api_test.o";
+        std::filesystem::remove(obj_path);
+        auto compile_r = scpp::compile_to_object("int answer() { return 42; }\n", obj_path.string());
+        expect(compile_r.has_value(), case_name + ": expected compile_to_object to succeed");
+        expect(std::filesystem::exists(obj_path), case_name + ": expected object file to exist");
+        std::filesystem::remove(obj_path);
     }
 
     {

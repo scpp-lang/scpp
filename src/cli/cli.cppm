@@ -61,6 +61,11 @@ inline bool ends_with(std::string_view str, std::string_view suffix) {
     return str.substr(str.size() - suffix.size()) == suffix;
 }
 
+inline bool starts_with(std::string_view str, std::string_view prefix) {
+    if (str.size() < prefix.size()) return false;
+    return str.substr(0, prefix.size()) == prefix;
+}
+
 inline std::size_t find_char(std::string_view s, char c) {
     for (std::size_t i = 0; i < s.size(); i++) {
         if (s.at(i) == c) return i;
@@ -290,7 +295,8 @@ std::string type_to_string(const scpp::Type& type) {
 }
 
 [[nodiscard]] bool is_implicit_source_path(std::string_view path) {
-    return ends_with(path, ".scpp");
+    return ends_with(path, ".scpp") || ends_with(path, ".cppm") || ends_with(path, ".cpp") ||
+           ends_with(path, ".cc") || ends_with(path, ".cxx");
 }
 
 bool require_scpp_input_path(std::string_view path, std::string_view role) {
@@ -299,7 +305,7 @@ bool require_scpp_input_path(std::string_view path, std::string_view role) {
     eprint(role);
     eprint(" '");
     eprint(path);
-    eprintln("'; positional source inputs must use the .scpp extension, otherwise pass --source <path>");
+    eprintln("'; positional source inputs must use a supported source extension (.scpp, .cppm, .cpp, .cc, .cxx), otherwise pass --source <path>");
     return false;
 }
 
@@ -846,7 +852,8 @@ int run_parse(std::string_view path) {
 int run_build(std::string_view input_path, std::string_view output_path,
               const std::vector<std::string>& extra_link_inputs,
               const std::unordered_map<std::string, std::string>& import_paths,
-              const std::vector<std::string>& import_search_dirs, bool static_link, bool emit_debug_info) {
+              const std::vector<std::string>& import_search_dirs, bool static_link, bool emit_debug_info,
+              bool compile_only = false, int opt_level = 2) {
     auto source_result = read_file(input_path);
     if (!source_result.has_value()) {
         eprint("error: ");
@@ -855,8 +862,19 @@ int run_build(std::string_view input_path, std::string_view output_path,
     }
     const std::string& source = source_result.value();
 
+    if (compile_only) {
+        auto result = scpp::compile_to_object(source, string_from_view(output_path), import_paths,
+                                              import_search_dirs, emit_debug_info, string_from_view(input_path),
+                                              opt_level);
+        if (!result.has_value()) {
+            print_diagnostic(input_path, source, result.error().loc, result.error().what());
+            return 1;
+        }
+        return 0;
+    }
+
     auto result = scpp::compile_to_executable(source, string_from_view(output_path), extra_link_inputs, import_paths, static_link,
-                                import_search_dirs, emit_debug_info, string_from_view(input_path));
+                                import_search_dirs, emit_debug_info, string_from_view(input_path), opt_level);
     if (!result.has_value()) {
         print_diagnostic(input_path, source, result.error().loc, result.error().what());
         return 1;
@@ -1039,7 +1057,7 @@ export int run(int argc, char** argv) {
         return scpp::build_manifest_project(path_current(), options);
     }
     if (argc >= 2) {
-        std::string_view output_path = "a.out";
+        std::string_view explicit_output_path{};
         std::vector<std::string> source_paths{};
         std::vector<std::string> extra_link_inputs{};
         std::unordered_map<std::string, std::string> import_paths{};
@@ -1047,16 +1065,48 @@ export int run(int argc, char** argv) {
         std::vector<std::string> import_search_dirs{};
         bool static_link = false;
         bool emit_debug_info = false;
+        bool compile_only = false;
+        int opt_level = 2;
+        bool version_only = false;
         for (int i = 1; i < argc; i++) {
             std::string_view arg{get_arg(argv, i)};
             if (arg == "-o" && i + 1 < argc) {
                 i++;
-                output_path = std::string_view{get_arg(argv, i)};
+                explicit_output_path = std::string_view{get_arg(argv, i)};
+            } else if (starts_with(arg, "-o") && arg.size() > 2) {
+                explicit_output_path = arg.substr(2);
+            } else if (arg == "-c") {
+                compile_only = true;
             } else if (arg == "-I" && i + 1 < argc) {
                 i++;
                 import_search_dirs.push_back(std::string{get_arg(argv, i)});
+            } else if (starts_with(arg, "-I") && arg.size() > 2) {
+                import_search_dirs.push_back(string_from_view(arg.substr(2)));
+            } else if (arg == "-isystem" && i + 1 < argc) {
+                i++;
+                import_search_dirs.push_back(std::string{get_arg(argv, i)});
+            } else if (starts_with(arg, "-isystem") && arg.size() > 8) {
+                import_search_dirs.push_back(string_from_view(arg.substr(8)));
             } else if (arg == "-g") {
                 emit_debug_info = true;
+            } else if (arg == "-g0") {
+                emit_debug_info = false;
+            } else if (starts_with(arg, "-g")) {
+                emit_debug_info = true;
+            } else if (arg == "-O0") {
+                opt_level = 0;
+            } else if (arg == "-O1") {
+                opt_level = 1;
+            } else if (arg == "-O2") {
+                opt_level = 2;
+            } else if (arg == "-O3") {
+                opt_level = 3;
+            } else if (arg == "-Os" || arg == "-Oz" || arg == "-Og") {
+                opt_level = 2;
+            } else if (arg == "-Ofast") {
+                opt_level = 3;
+            } else if (arg == "-O") {
+                opt_level = 2;
             } else if (arg == "--static") {
                 static_link = true;
             } else if (arg == "--link" && i + 1 < argc) {
@@ -1076,6 +1126,45 @@ export int run(int argc, char** argv) {
                 std::string mod_path = string_from_view(mapping.substr(eq + 1));
                 import_paths.emplace(mod_name, mod_path);
                 import_entries.push_back(ImportEntry{mod_name, mod_path});
+            } else if (arg == "-D" && i + 1 < argc) {
+                i++;
+            } else if (starts_with(arg, "-D")) {
+                // accept macro definition
+            } else if (arg == "-U" && i + 1 < argc) {
+                i++;
+            } else if (starts_with(arg, "-U")) {
+                // accept macro undefine
+            } else if (starts_with(arg, "-std=") || starts_with(arg, "--std=")) {
+                // accept language standard
+            } else if (starts_with(arg, "-Wl,")) {
+                extra_link_inputs.push_back(string_from_view(arg));
+            } else if (starts_with(arg, "-W") || arg == "-w") {
+                // accept warning flags
+            } else if (starts_with(arg, "-f")) {
+                // accept compiler feature flags
+            } else if (starts_with(arg, "-m")) {
+                // accept machine/architecture flags
+            } else if (arg == "-pthread" || arg == "-pthreads") {
+                extra_link_inputs.push_back(string_from_view(arg));
+            } else if (arg == "-pipe") {
+                // accept -pipe
+            } else if (arg == "-shared" || arg == "--shared") {
+                // accept -shared
+            } else if (starts_with(arg, "-l")) {
+                extra_link_inputs.push_back(string_from_view(arg));
+            } else if (arg == "-L" && i + 1 < argc) {
+                i++;
+                extra_link_inputs.push_back("-L" + std::string{get_arg(argv, i)});
+            } else if (starts_with(arg, "-L")) {
+                extra_link_inputs.push_back(string_from_view(arg));
+            } else if (arg == "--version") {
+                oprintln("scpp version " + string_from_view(version));
+                return 0;
+            } else if (arg == "-v") {
+                version_only = true;
+            } else if (!arg.empty() && arg.at(0) != '-' &&
+                       (ends_with(arg, ".o") || ends_with(arg, ".a") || ends_with(arg, ".so"))) {
+                extra_link_inputs.push_back(string_from_view(arg));
             } else {
                 switch (maybe_collect_source_arg(arg, i, argc, argv, source_paths, "input file")) {
                     case SourceArgParseResult::AddedSource: break;
@@ -1089,13 +1178,30 @@ export int run(int argc, char** argv) {
             }
         }
         if (source_paths.empty()) {
+            if (!extra_link_inputs.empty() && !compile_only) {
+                std::string link_output = explicit_output_path.empty() ? std::string{"a.out"} : string_from_view(explicit_output_path);
+                auto link_r = scpp::link_executable(extra_link_inputs, link_output, static_link);
+                if (!link_r.has_value()) {
+                    eprintln(link_r.error().what());
+                    return 1;
+                }
+                return 0;
+            }
+            if (version_only) {
+                oprintln("scpp version " + string_from_view(version));
+                return 0;
+            }
             eprintln("error: build requires a source file (pass <file.scpp> or --source <path>)");
             return 1;
         }
         if (!validate_import_paths(import_entries)) return 1;
         if (!append_explicit_source_imports(source_paths, import_paths)) return 1;
+        std::string output_path = !explicit_output_path.empty()
+                                      ? string_from_view(explicit_output_path)
+                                      : (compile_only ? scpp::derive_object_path(source_paths.front())
+                                                      : std::string{"a.out"});
         return run_build(source_paths.front(), output_path, extra_link_inputs, import_paths, import_search_dirs, static_link,
-                         emit_debug_info);
+                         emit_debug_info, compile_only, opt_level);
     }
 
     if (scpp::find_project_manifest(path_current()).has_value()) {
@@ -1106,7 +1212,7 @@ export int run(int argc, char** argv) {
     oprintln("Usage: " + string_from_view(name) + " lex <file.scpp>|--source <file>");
     oprintln("       " + string_from_view(name) + " parse <file.scpp>|--source <file>");
     oprintln("       " + string_from_view(name) +
-             " <file.scpp> [<more.scpp>...] [--source <file>]... [-o <output>] [-I <dir>]... [-g] [--static] [--link <path>]... [--import name=path]...");
+             " <file.scpp> [<more.scpp>...] [--source <file>]... [-c] [-o <output>] [-I <dir>]... [-g] [--static] [--link <path>]... [--import name=path]...");
     oprintln("       " + string_from_view(name) +
              " build [--workspace] [-p <package>] [--lib [<name>]] [--bin <name>]");
     oprintln("       " + string_from_view(name) +
