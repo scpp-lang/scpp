@@ -3708,7 +3708,8 @@ private:
                 it.increment(ec);
                 continue;
             }
-            if (entry.path().extension() != ".scpp") {
+            std::string ext = entry.path().extension().string();
+            if (ext != ".scpp" && ext != ".cppm" && ext != ".cpp" && ext != ".cc" && ext != ".cxx") {
                 it.increment(ec);
                 continue;
             }
@@ -3735,7 +3736,9 @@ private:
         auto module_it = import_paths_.find(module_name);
         if (module_it == import_paths_.end()) return {};
         const std::string& module_path = module_it->second;
-        if (!path_ends_with(module_path, ".scpp")) return {};
+        if (!path_ends_with(module_path, ".scpp") && !path_ends_with(module_path, ".cppm") &&
+            !path_ends_with(module_path, ".cpp") && !path_ends_with(module_path, ".cc") &&
+            !path_ends_with(module_path, ".cxx")) return {};
         return scan_source_root(path_parent(module_path));
     }
 
@@ -3754,6 +3757,14 @@ private:
             if (path_exists(interface_candidate)) return interface_candidate;
             std::string source_candidate = path_join(dir, module_name + ".scpp");
             if (path_exists(source_candidate)) return source_candidate;
+            std::string cppm_candidate = path_join(dir, module_name + ".cppm");
+            if (path_exists(cppm_candidate)) return cppm_candidate;
+            std::string cpp_candidate = path_join(dir, module_name + ".cpp");
+            if (path_exists(cpp_candidate)) return cpp_candidate;
+            std::string cc_candidate = path_join(dir, module_name + ".cc");
+            if (path_exists(cc_candidate)) return cc_candidate;
+            std::string cxx_candidate = path_join(dir, module_name + ".cxx");
+            if (path_exists(cxx_candidate)) return cxx_candidate;
         }
         if (auto scan_r = ensure_search_dirs_scanned(); !scan_r.has_value()) return std::unexpected(std::move(scan_r).error());
         return lookup_discovered_source_path(module_name);
@@ -4403,6 +4414,25 @@ std::optional<std::string> driver_runtime_default_source_stdlib_dir() {
     Program program = std::move(program_result.value());
     program.source_path = source_path.empty() ? std::string() : absolute_source_path(source_path);
     return emit_object_file_for_program(program, object_path, emit_debug_info, opt_level);
+}
+
+// Compiles source text down to a native object file (-c mode) without invoking the linker.
+[[nodiscard]] std::expected<void, DriverError> compile_to_object(std::string_view source, const std::string& object_path,
+                       const std::unordered_map<std::string, std::string>& import_paths = {},
+                       const std::vector<std::string>& import_search_dirs = {},
+                       bool emit_debug_info = false,
+                       const std::string& source_path = {},
+                       int opt_level = 2) {
+    return emit_object_file(source, object_path, import_paths, import_search_dirs, emit_debug_info, source_path, opt_level);
+}
+
+[[nodiscard]] inline std::string derive_object_path(std::string_view source_path) {
+    std::string filename = path_filename(source_path);
+    std::size_t dot = filename.rfind('.');
+    if (dot != std::string::npos && dot > 0) {
+        return filename.substr(0, dot) + ".o";
+    }
+    return filename + ".o";
 }
 
 [[nodiscard]] std::expected<void, DriverError> emit_module_artifacts(std::string_view source, const std::string& interface_path, const std::string& archive_path,
