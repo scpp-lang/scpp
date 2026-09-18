@@ -53,7 +53,7 @@ void __print_bool(const bool& value) {
     return;
 }
 
-void __print_char(const char& value) {
+export void __print_char(const char& value) {
     [[scpp::unsafe]] {
         scpp_print_char(value);
     }

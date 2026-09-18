@@ -64,11 +64,15 @@ namespace scpp {
 }
 
     const StructDef* Codegen::find_struct_def(const std::string& name) const {
+        if (program_ == nullptr) return nullptr;
         const StructDef* forward_decl = nullptr;
-        for (const StructDef& def : program_->structs) {
-            if (def.name != name) continue;
-            if (!def.is_forward_declaration) return &def;
-            if (forward_decl == nullptr) forward_decl = &def;
+        [[scpp::unsafe]] {
+            for (std::size_t i = 0; i < program_->structs.size(); ++i) {
+                const StructDef* def = &program_->structs[i];
+                if (def->name != name) continue;
+                if (!def->is_forward_declaration) return def;
+                if (forward_decl == nullptr) forward_decl = def;
+            }
         }
         return forward_decl;
     }
@@ -76,10 +80,17 @@ namespace scpp {
 
     const ClassDef* Codegen::find_class_def(const std::string& name) const
 {
-        for (const ClassDef& def : program_->classes) {
-            if (def.name == name) return &def;
+        if (program_ == nullptr) return nullptr;
+        const ClassDef* forward_decl = nullptr;
+        [[scpp::unsafe]] {
+            for (std::size_t i = 0; i < program_->classes.size(); ++i) {
+                const ClassDef* def = &program_->classes[i];
+                if (def->name != name) continue;
+                if (!def->is_forward_declaration) return def;
+                if (forward_decl == nullptr) forward_decl = def;
+            }
         }
-        return nullptr;
+        return forward_decl;
     }
 
 
@@ -91,8 +102,11 @@ namespace scpp {
 
     const Function* Codegen::find_function_def(const std::string& name) const
 {
-        for (const Function& fn : program_->functions) {
-            if (fn.name == name) return &fn;
+        if (program_ == nullptr) return nullptr;
+        [[scpp::unsafe]] {
+            for (std::size_t i = 0; i < program_->functions.size(); ++i) {
+                if (program_->functions[i].name == name) return &program_->functions[i];
+            }
         }
         return nullptr;
     }
@@ -145,17 +159,29 @@ namespace scpp {
             case ExprKind::StringLiteral: return string_literal_type(expr.name.size());
 
             case ExprKind::Identifier: {
-                if (const Codegen::LocalSlot* local = find_local(expr); local != nullptr) return local->type;
+                if (const Codegen::LocalSlot* local = find_local(expr); local != nullptr) {
+                    [[scpp::unsafe]] {
+                        return local->type;
+                    }
+                }
                 if (const Codegen::GlobalSlot* global = find_visible_global_slot(expr.name, expr.explicit_global_qualification);
                     global != nullptr) {
-                    return global->type;
+                    [[scpp::unsafe]] {
+                        return global->type;
+                    }
                 }
                 if (const EnumDef* def = [&, this]() {
                         const EnumDef* enum_def = nullptr;
-                        [[maybe_unused]] const EnumVariant* variant = find_enum_variant(program_, expr.name, &enum_def);
+                        [[scpp::unsafe]] {
+                            [[maybe_unused]] const EnumVariant* variant = find_enum_variant(program_, expr.name, &enum_def);
+                        }
                         return enum_def;
                     }(); def != nullptr) {
-                    return named_type(def->name);
+                    std::string ename{};
+                    [[scpp::unsafe]] {
+                        ename = def->name;
+                    }
+                    return named_type(ename);
                 }
                 return resolve_function_designator_type(expr);
             }
@@ -243,9 +269,11 @@ namespace scpp {
                     }
                 }
                 if (const Function* selected = resolve_subscript_operator_function(expr); selected != nullptr) {
-                    return selected->return_type.kind == TypeKind::Reference && selected->return_type.pointee
-                               ? member_access_type(*selected->return_type.pointee, !selected->return_type.is_mutable_ref)
-                               : selected->return_type;
+                    [[scpp::unsafe]] {
+                        return selected->return_type.kind == TypeKind::Reference && selected->return_type.pointee
+                                   ? member_access_type(*selected->return_type.pointee, !selected->return_type.is_mutable_ref)
+                                   : selected->return_type;
+                    }
                 }
                 return std::nullopt;
             }
@@ -313,9 +341,11 @@ namespace scpp {
                                     resolve_overload_by_type(underlying.name + "_operator_deref", no_args, 1,
                                                          receiver_is_mutable, expr.lhs.get());
                                 callee != nullptr) {
-                                return callee->return_type.kind == TypeKind::Reference
-                                           ? std::optional<Type>{*callee->return_type.pointee}
-                                           : std::optional<Type>{callee->return_type};
+                                [[scpp::unsafe]] {
+                                    return callee->return_type.kind == TypeKind::Reference
+                                               ? std::optional<Type>{*callee->return_type.pointee}
+                                               : std::optional<Type>{callee->return_type};
+                                }
                             }
                         }
                         if (operand->kind != TypeKind::Pointer) {
@@ -355,7 +385,9 @@ namespace scpp {
                     if (const Function* op =
                             resolve_binary_operator_function(expr, binary_lhs_type, binary_rhs_type);
                         op != nullptr) {
-                        return op->return_type;
+                        [[scpp::unsafe]] {
+                            return op->return_type;
+                        }
                     }
                 }
                 switch (expr.binary_op) {
@@ -447,12 +479,11 @@ namespace scpp {
                     if (find_class_def(expr.name) != nullptr) return named_type(expr.name);
                 }
                 if (expr.lhs != nullptr && expr.name.empty()) {
-                    const Expr* callee_expr = expr.lhs.get();
-                    if (callee_expr->kind == ExprKind::Unary && callee_expr->unary_op == UnaryOp::Deref &&
-                        callee_expr->lhs != nullptr) {
-                        callee_expr = callee_expr->lhs.get();
-                    }
-                    std::optional<Type> callee_type = infer_type(*callee_expr);
+                    const Expr& base_expr =
+                        (expr.lhs->kind == ExprKind::Unary && expr.lhs->unary_op == UnaryOp::Deref && expr.lhs->lhs != nullptr)
+                            ? *expr.lhs->lhs
+                            : *expr.lhs;
+                    std::optional<Type> callee_type = infer_type(base_expr);
                     if (callee_type.has_value() && callee_type->kind == TypeKind::FunctionPointer) {
                         return *callee_type->function_return;
                     }
@@ -460,8 +491,12 @@ namespace scpp {
                 }
                 if (expr.lhs == nullptr) {
                     if (const Codegen::LocalSlot* callee_local = find_local(expr);
-                        callee_local != nullptr && callee_local->type.kind == TypeKind::FunctionPointer) {
-                        return *callee_local->type.function_return;
+                        callee_local != nullptr) {
+                        [[scpp::unsafe]] {
+                            if (callee_local->type.kind == TypeKind::FunctionPointer) {
+                                return *callee_local->type.function_return;
+                            }
+                        }
                     }
                 }
                 auto inferred_call_argument_type = [&, this](const Expr& arg, const Type& param_type) -> std::optional<Type> {
@@ -470,12 +505,16 @@ namespace scpp {
                     if (arg.kind == ExprKind::Identifier && param_type.kind == TypeKind::Reference &&
                         !param_type.is_mutable_ref && !param_type.is_rvalue_ref && param_type.pointee != nullptr) {
                         const Codegen::LocalSlot* arg_local = find_local(arg);
-                        if (arg_local != nullptr && arg_local->type.kind == TypeKind::Reference &&
-                            arg_local->type.is_rvalue_ref && arg_local->type.pointee != nullptr &&
-                            types_equal(*arg_local->type.pointee, *param_type.pointee)) {
-                            Type fallback = arg_local->type;
-                            fallback.name = arg_local->type.pointee->name;
-                            return fallback;
+                        if (arg_local != nullptr) {
+                            [[scpp::unsafe]] {
+                                if (arg_local->type.kind == TypeKind::Reference &&
+                                    arg_local->type.is_rvalue_ref && arg_local->type.pointee != nullptr &&
+                                    types_equal(*arg_local->type.pointee, *param_type.pointee)) {
+                                    Type fallback = arg_local->type;
+                                    fallback.name = arg_local->type.pointee->name;
+                                    return fallback;
+                                }
+                            }
                         }
                     }
                     return std::nullopt;
@@ -495,37 +534,43 @@ namespace scpp {
                 }
                 const Function* callee =
                     resolve_overload_by_type(callee_name, expr.args, param_offset, receiver_is_mutable, expr.lhs.get());
-                if (callee == nullptr && expr.lhs != nullptr) {
-                    for (const Function& fn : program_->functions) {
-                        if (fn.name != callee_name || fn.is_generic_template) continue;
-                        if (!function_accepts_argument_count(fn, expr.args.size(), param_offset)) continue;
-                        if (param_offset == 1 && !receiver_matches_method_qualifier(*expr.lhs, fn)) continue;
-                        bool all_match = true;
-                        std::size_t fixed_param_count = fn.params.size() - param_offset;
-                        for (std::size_t i = 0; all_match && i < expr.args.size() && i < fixed_param_count; i++) {
-                            const Type& param_type = fn.params[i + param_offset].type;
-                            std::optional<Type> arg_type = inferred_call_argument_type(*expr.args[i], param_type);
-                            if (!arg_type.has_value()) {
-                                all_match = false;
+                if (callee == nullptr && expr.lhs != nullptr && program_ != nullptr) {
+                    [[scpp::unsafe]] {
+                        for (std::size_t k = 0; k < program_->functions.size(); ++k) {
+                            const Function* fn = &program_->functions[k];
+                            if (fn->name != callee_name || fn->is_generic_template) continue;
+                            if (!function_accepts_argument_count(*fn, expr.args.size(), param_offset)) continue;
+                            if (param_offset == 1 && !receiver_matches_method_qualifier(*expr.lhs, *fn)) continue;
+                            bool all_match = true;
+                            std::size_t fixed_param_count = fn->params.size() - param_offset;
+                            for (std::size_t i = 0; all_match && i < expr.args.size() && i < fixed_param_count; i++) {
+                                const Type& param_type = fn->params[i + param_offset].type;
+                                std::optional<Type> arg_type = inferred_call_argument_type(*expr.args[i], param_type);
+                                if (!arg_type.has_value()) {
+                                    all_match = false;
+                                    break;
+                                }
+                                if (param_type.kind == TypeKind::Reference && !param_type.is_mutable_ref &&
+                                    !param_type.is_rvalue_ref && param_type.pointee != nullptr &&
+                                    arg_type->kind == TypeKind::Reference && arg_type->is_rvalue_ref &&
+                                    arg_type->pointee != nullptr) {
+                                    all_match = types_equal(*arg_type->pointee, *param_type.pointee);
+                                } else {
+                                    all_match = argument_type_matches_parameter(*arg_type, param_type) ||
+                                                literal_matches_scalar_parameter(*expr.args[i], param_type);
+                                }
+                            }
+                            if (all_match) {
+                                callee = fn;
                                 break;
                             }
-                            if (param_type.kind == TypeKind::Reference && !param_type.is_mutable_ref &&
-                                !param_type.is_rvalue_ref && param_type.pointee != nullptr &&
-                                arg_type->kind == TypeKind::Reference && arg_type->is_rvalue_ref &&
-                                arg_type->pointee != nullptr) {
-                                all_match = types_equal(*arg_type->pointee, *param_type.pointee);
-                            } else {
-                                all_match = argument_type_matches_parameter(*arg_type, param_type) ||
-                                            literal_matches_scalar_parameter(*expr.args[i], param_type);
-                            }
-                        }
-                        if (all_match) {
-                            callee = &fn;
-                            break;
                         }
                     }
                 }
-                return callee == nullptr ? std::nullopt : std::optional<Type>(callee->return_type);
+                if (callee == nullptr) return std::nullopt;
+                [[scpp::unsafe]] {
+                    return callee->return_type;
+                }
             }
         }
         return std::nullopt;
@@ -573,8 +618,11 @@ namespace scpp {
                 if (arg.lhs == nullptr || arg.rhs == nullptr) return false;
                 const Function* op =
                     resolve_binary_operator_function(arg, infer_type(*arg.lhs), infer_type(*arg.rhs));
-                if (op == nullptr || op->return_type.kind == TypeKind::Reference) return false;
-                known_arg_type = op->return_type;
+                if (op == nullptr) return false;
+                [[scpp::unsafe]] {
+                    if (op->return_type.kind == TypeKind::Reference) return false;
+                    known_arg_type = op->return_type;
+                }
                 break;
             }
             case ExprKind::NullptrLiteral:
@@ -591,7 +639,10 @@ namespace scpp {
             default:
                 return false;
         }
-        std::optional<Type> arg_type = known_arg_type.has_value() ? std::move(known_arg_type) : infer_type(arg);
+        std::optional<Type> arg_type = std::move(known_arg_type);
+        if (!arg_type.has_value()) {
+            arg_type = infer_type(arg);
+        }
         if (!arg_type.has_value()) return false;
         // [dcl.init.ref]/5.4.2: a reference that does not bind directly
         // binds to a temporary of the referenced type, implicitly
@@ -700,12 +751,16 @@ namespace scpp {
 {
         if (expr.kind != ExprKind::Identifier) return false;
         const Codegen::LocalSlot* local = find_local(expr);
-        return local != nullptr && types_equal(local->type, target_type);
+        if (local == nullptr) return false;
+        [[scpp::unsafe]] {
+            return types_equal(local->type, target_type);
+        }
     }
 
 
     const Function* Codegen::find_single_argument_converting_constructor(const std::string& class_name, const Expr& arg)
 {
+        if (program_ == nullptr) return nullptr;
         const std::string ctor_name = class_name + "_new";
         const std::string ctor_prefix = ctor_name + ".";
         auto is_constructor_clone = [&](const Function& fn) {
@@ -714,19 +769,26 @@ namespace scpp {
                     fn.name.starts_with(ctor_prefix));
         };
         std::vector<const Function*> matches{};
-        for (const Function& fn : program_->functions) {
-            if (fn.member_owner_class != class_name || fn.params.size() != 2) continue;
-            if (!is_constructor_clone(fn)) continue;
-            const Type& ctor_param_type = fn.params[1].type;
-            if (types_equal(ctor_param_type, named_type(class_name)) ||
-                (ctor_param_type.kind == TypeKind::Reference && ctor_param_type.pointee != nullptr &&
-                 types_equal(*ctor_param_type.pointee, named_type(class_name)))) {
-                continue;
+        [[scpp::unsafe]] {
+            for (std::size_t i = 0; i < program_->functions.size(); ++i) {
+                const Function* fn = &program_->functions[i];
+                if (fn->member_owner_class != class_name || fn->params.size() != 2) continue;
+                if (!is_constructor_clone(*fn)) continue;
+                const Type& ctor_param_type = fn->params[1].type;
+                if (types_equal(ctor_param_type, named_type(class_name)) ||
+                    (ctor_param_type.kind == TypeKind::Reference && ctor_param_type.pointee != nullptr &&
+                     types_equal(*ctor_param_type.pointee, named_type(class_name)))) {
+                    continue;
+                }
+                if (constructor_parameter_accepts_argument_directly(arg, fn->params[1].type)) matches.push_back(fn);
             }
-            if (constructor_parameter_accepts_argument_directly(arg, fn.params[1].type)) matches.push_back(&fn);
         }
         if (matches.empty()) return nullptr;
-        if (matches.size() == 1) return matches[0];
+        if (matches.size() == 1) {
+            [[scpp::unsafe]] {
+                return matches[0];
+            }
+        }
         // [over.ics.rank] through the shared algebra -- the same one
         // resolve_overload_by_type, resolve_constructor_overload_exact,
         // movecheck's resolve_constructor_signature and the constant
@@ -739,11 +801,15 @@ namespace scpp {
         single_arg.push_back(deep_clone_expr(arg));
         std::vector<std::vector<ArgumentConversion>> conversions{};
         for (const Function* fn : matches) {
-            conversions.push_back(argument_conversions_for(*fn, single_arg, /*param_offset=*/1, /*receiver_expr=*/nullptr));
+            [[scpp::unsafe]] {
+                conversions.push_back(argument_conversions_for(*fn, single_arg, /*param_offset=*/1, /*receiver_expr=*/nullptr));
+            }
         }
         std::vector<std::size_t> best = best_viable_candidates(conversions);
         if (best.size() != 1) return nullptr;
-        return matches[best[0]];
+        [[scpp::unsafe]] {
+            return matches[best[0]];
+        }
     }
 
 
@@ -894,9 +960,13 @@ namespace scpp {
             if (inferred.has_value()) return inferred;
             if (arg.kind == ExprKind::Identifier) {
                 const Codegen::LocalSlot* local = find_local(arg);
-                if (local != nullptr && local->type.kind == TypeKind::Reference && local->type.is_rvalue_ref &&
-                    local->type.pointee != nullptr) {
-                    return *local->type.pointee;
+                if (local != nullptr) {
+                    [[scpp::unsafe]] {
+                        if (local->type.kind == TypeKind::Reference && local->type.is_rvalue_ref &&
+                            local->type.pointee != nullptr) {
+                            return *local->type.pointee;
+                        }
+                    }
                 }
             }
             return std::nullopt;
@@ -945,11 +1015,15 @@ namespace scpp {
         ReadOnlyPlaceQuery query{};
         query.declared_variable = [&, this](const Expr& name_expr) -> std::optional<std::pair<bool, Type>> {
             if (const Codegen::LocalSlot* local = find_local(name_expr); local != nullptr) {
-                return std::pair<bool, Type>{local->is_const, local->type};
+                [[scpp::unsafe]] {
+                    return std::pair<bool, Type>{local->is_const, local->type};
+                }
             }
             if (const Codegen::GlobalSlot* global = find_visible_global_slot(name_expr.name, name_expr.explicit_global_qualification);
                 global != nullptr) {
-                return std::pair<bool, Type>{global->is_const, global->type};
+                [[scpp::unsafe]] {
+                    return std::pair<bool, Type>{global->is_const, global->type};
+                }
             }
             return std::nullopt;
         };
@@ -1018,16 +1092,23 @@ namespace scpp {
     bool Codegen::parameter_type_is_generic_placeholder(const Function& fn, const Type& type) const
 {
         if (type.kind != TypeKind::Named || type.name.empty() || !type.template_args.empty()) return false;
-        auto names_a_parameter = [&](const std::vector<GenericTypeParam>& params) {
-            return std::ranges::any_of(params, [&](const GenericTypeParam& param) { return param.name == type.name; });
+        auto names_a_parameter = [&](const std::vector<GenericTypeParam>& params) -> bool {
+            for (const GenericTypeParam& param : params) {
+                if (param.name == type.name) return true;
+            }
+            return false;
         };
         if (names_a_parameter(fn.template_params)) return true;
         if (fn.member_owner_class.empty()) return false;
         if (const ClassDef* owner = find_class_def(fn.member_owner_class); owner != nullptr) {
-            return names_a_parameter(owner->template_params);
+            [[scpp::unsafe]] {
+                return names_a_parameter(owner->template_params);
+            }
         }
         if (const StructDef* owner = find_struct_def(fn.member_owner_class); owner != nullptr) {
-            return names_a_parameter(owner->template_params);
+            [[scpp::unsafe]] {
+                return names_a_parameter(owner->template_params);
+            }
         }
         return false;
     }
@@ -1036,7 +1117,7 @@ namespace scpp {
     Type Codegen::normalized_param_type(const Function& fn, const Expr& arg, Type type)
 {
         if (!parameter_type_is_generic_placeholder(fn, type)) return type;
-        if (std::optional<Type> inferred = infer_type(arg); inferred.has_value()) return *inferred;
+        if (std::optional<Type> inferred = infer_type(arg); inferred.has_value()) return std::move(*inferred);
         return type;
     }
 
@@ -1053,9 +1134,13 @@ namespace scpp {
                                                                   std::size_t param_offset, const Expr* receiver_expr)
 {
         bool has_receiver = (receiver_expr != nullptr && param_offset == 1);
-        auto& cache = has_receiver ? call_candidates_cache_with_receiver_ : call_candidates_cache_no_receiver_;
-        if (auto it = cache.find(callee_name); it != cache.end()) {
-            return it->second;
+        {
+            const auto& cache = has_receiver ? call_candidates_cache_with_receiver_ : call_candidates_cache_no_receiver_;
+            if (auto it = cache.find(callee_name); it != cache.end()) {
+                std::vector<const Function*> res{};
+                for (const Function* fn : it->second) res.push_back(fn);
+                return res;
+            }
         }
 
         bool callee_is_ctor = callee_name.ends_with("_new");
@@ -1068,46 +1153,81 @@ namespace scpp {
         bool owner_has_dot = owner.find('.') != std::string::npos;
 
         std::vector<const Function*> candidates{};
-        for (const Function& fn : program_->functions) {
-            if (fn.name == callee_name) {
-                candidates.push_back(&fn);
-                continue;
-            }
-            if (fn.is_extern_c && !fn.namespace_path.empty()) {
-                std::string qualified{};
-                for (std::size_t i = 0; i < fn.namespace_path.size(); ++i) {
-                    if (i != 0) qualified += "::";
-                    qualified += fn.namespace_path[i];
+        {
+            auto add_candidate = [&](const Function* new_fn) {
+                [[scpp::unsafe]] {
+                    for (std::size_t i = 0; i < candidates.size(); ++i) {
+                        const Function* existing = candidates[i];
+                        if (existing->name != new_fn->name) continue;
+                        if (existing->is_generic_template != new_fn->is_generic_template) continue;
+                        if (existing->params.size() != new_fn->params.size()) continue;
+                        bool same_params = true;
+                        for (std::size_t p = 0; p < existing->params.size(); ++p) {
+                            if (!types_equal(existing->params[p].type, new_fn->params[p].type)) {
+                                same_params = false;
+                                break;
+                            }
+                        }
+                        if (same_params && existing->receiver_ref_qualifier == new_fn->receiver_ref_qualifier) {
+                            if (existing->body == nullptr && new_fn->body != nullptr) {
+                                candidates[i] = new_fn;
+                            }
+                            return;
+                        }
+                    }
+                    candidates.push_back(new_fn);
                 }
-                qualified += "::" + fn.name;
-                if (qualified == callee_name) {
-                    candidates.push_back(&fn);
-                    continue;
-                }
-            }
-            if (callee_is_ctor && fn.name.starts_with(ctor_prefix)) {
-                if (!has_receiver || (!owner.empty() && !fn.member_owner_class.empty() && fn.member_owner_class == owner)) {
-                    candidates.push_back(&fn);
-                    continue;
-                }
-            }
-            if (fn.name.size() > callee_name.size() + 1 && fn.name.ends_with(callee_name)) {
-                std::size_t separator = fn.name.size() - callee_name.size() - 1;
-                if (fn.name[separator] == '.' && fn.name.compare(0, separator, fn.member_owner_class) == 0) {
-                    if (!has_receiver || (!owner.empty() && !fn.member_owner_class.empty() && fn.member_owner_class == owner &&
-                        (fn.name == owner_dot_callee || fn.name == owner_dot_member))) {
-                        candidates.push_back(&fn);
-                        continue;
+            };
+            if (program_ != nullptr) {
+                [[scpp::unsafe]] {
+                    for (std::size_t k = 0; k < program_->functions.size(); ++k) {
+                        const Function* fn = &program_->functions[k];
+                        if (fn->name == callee_name) {
+                            add_candidate(fn);
+                            continue;
+                        }
+                        if (fn->is_extern_c && !fn->namespace_path.empty()) {
+                            std::string qualified{};
+                            for (std::size_t i = 0; i < fn->namespace_path.size(); ++i) {
+                                if (i != 0) qualified += "::";
+                                qualified += fn->namespace_path[i];
+                            }
+                            qualified += "::" + fn->name;
+                            if (qualified == callee_name) {
+                                add_candidate(fn);
+                                continue;
+                            }
+                        }
+                        if (callee_is_ctor && fn->name.starts_with(ctor_prefix)) {
+                            if (!has_receiver || (!owner.empty() && !fn->member_owner_class.empty() && fn->member_owner_class == owner)) {
+                                add_candidate(fn);
+                                continue;
+                            }
+                        }
+                        if (fn->name.size() > callee_name.size() + 1 && fn->name.ends_with(callee_name)) {
+                            std::size_t separator = fn->name.size() - callee_name.size() - 1;
+                            if (fn->name[separator] == '.' && fn->name.substr(0, separator) == fn->member_owner_class) {
+                                if (!has_receiver || (!owner.empty() && !fn->member_owner_class.empty() && fn->member_owner_class == owner &&
+                                    (fn->name == owner_dot_callee || fn->name == owner_dot_member))) {
+                                    add_candidate(fn);
+                                    continue;
+                                }
+                            }
+                        }
+                        if (has_receiver && owner_has_dot && !fn->member_owner_class.empty() && fn->member_owner_class == owner &&
+                            fn->name == member) {
+                            add_candidate(fn);
+                            continue;
+                        }
                     }
                 }
             }
-            if (has_receiver && owner_has_dot && !fn.member_owner_class.empty() && fn.member_owner_class == owner &&
-                fn.name == member) {
-                candidates.push_back(&fn);
-                continue;
-            }
         }
-        cache.emplace(callee_name, candidates);
+        if (has_receiver) {
+            call_candidates_cache_with_receiver_.emplace(callee_name, candidates);
+        } else {
+            call_candidates_cache_no_receiver_.emplace(callee_name, candidates);
+        }
         return candidates;
     }
 
@@ -1127,7 +1247,11 @@ namespace scpp {
                 fn.params[0].type.is_mutable_ref && !receiver_is_mutable) {
                 return CallCandidateRejection{CallRejectionReason::ReceiverIsReadOnly, 0, Type{}};
             }
-            if (!receiver_matches_method_qualifier(*receiver_expr, fn)) {
+            bool matches_qual = false;
+            [[scpp::unsafe]] {
+                matches_qual = receiver_matches_method_qualifier(*receiver_expr, fn);
+            }
+            if (!matches_qual) {
                 return CallCandidateRejection{CallRejectionReason::ReceiverRefQualifier, 0, Type{}};
             }
         }
@@ -1172,8 +1296,8 @@ namespace scpp {
     std::string Codegen::call_display_name(const Expr& expr, const std::string& receiver_class)
 {
         if (!receiver_class.empty()) return receiver_class + "::" + expr.name;
-        if (!expr.name.empty()) return expr.name;
-        if (expr.lhs != nullptr && expr.lhs->kind == ExprKind::Identifier) return expr.lhs->name;
+        if (!expr.name.empty()) return std::string{expr.name};
+        if (expr.lhs != nullptr && expr.lhs->kind == ExprKind::Identifier) return std::string{expr.lhs->name};
         return "<function pointer>";
     }
 
@@ -1205,8 +1329,10 @@ namespace scpp {
     const ConstraintExcludedMember* Codegen::constraint_excluded_member_for(const std::string& callee_name)
 {
         if (program_ == nullptr) return nullptr;
-        for (const ConstraintExcludedMember& excluded : program_->constraint_excluded_members) {
-            if (callee_name == excluded.class_name + "_" + excluded.member_name) return &excluded;
+        [[scpp::unsafe]] {
+            for (const ConstraintExcludedMember& excluded : program_->constraint_excluded_members) {
+                if (callee_name == excluded.class_name + "_" + excluded.member_name) return &excluded;
+            }
         }
         return nullptr;
     }
@@ -1243,23 +1369,23 @@ namespace scpp {
             // declared, in the template the reader wrote.
             if (const ConstraintExcludedMember* excluded = constraint_excluded_member_for(callee_name);
                 excluded != nullptr) {
-                return "no viable '" + excluded->member_name + "' for '" + excluded->class_name +
-                       "': it requires '" + excluded->concept_name + "<" + excluded->argument_spelling +
-                       ">', which '" + excluded->argument_spelling + "' does not satisfy";
+                std::string msg{};
+                [[scpp::unsafe]] {
+                    msg = "no viable '" + excluded->member_name + "' for '" + excluded->class_name +
+                          "': it requires '" + excluded->concept_name + "<" + excluded->argument_spelling +
+                          ">', which '" + excluded->argument_spelling + "' does not satisfy";
+                }
+                return msg;
             }
             return "call to unknown function '" + display_name + "': no function with that name is declared here";
         }
 
-        auto describe_signature = [&, this](const Function& fn) {
-            return describe_candidate_signature(fn, display_name, param_offset);
-        };
-        auto candidate_list = [&]() {
-            std::string result{};
+        std::string candidate_list_str{};
+        [[scpp::unsafe]] {
             for (const Function* fn : candidates) {
-                result += "\n  candidate: " + describe_signature(*fn);
+                candidate_list_str += "\n  candidate: " + describe_candidate_signature(*fn, display_name, param_offset);
             }
-            return result;
-        };
+        }
 
         // Ambiguity is reported before any per-candidate rejection,
         // because there is no rejection to report: every tied candidate
@@ -1275,7 +1401,9 @@ namespace scpp {
                 tied.size() > 1) {
                 std::string result = "ambiguous call to '" + display_name + "': " + std::to_string(tied.size()) +
                                      " overloads match these argument types equally well and none is better than the others ([over.match.best])";
-                for (const Function* fn : tied) result += "\n  candidate: " + describe_signature(*fn);
+                [[scpp::unsafe]] {
+                    for (const Function* fn : tied) result += "\n  candidate: " + describe_candidate_signature(*fn, display_name, param_offset);
+                }
                 return result;
             }
         }
@@ -1290,8 +1418,10 @@ namespace scpp {
         bool any_read_only_receiver = false;
         bool any_ref_qualifier = false;
         for (const Function* fn : candidates) {
-            CallCandidateRejection rejection =
-                classify_call_candidate(*fn, args, param_offset, receiver_is_mutable, receiver_expr);
+            CallCandidateRejection rejection{};
+            [[scpp::unsafe]] {
+                rejection = classify_call_candidate(*fn, args, param_offset, receiver_is_mutable, receiver_expr);
+            }
             switch (rejection.reason) {
                 case CallRejectionReason::ArgumentType:
                     if (type_mismatch_fn == nullptr) {
@@ -1325,7 +1455,7 @@ namespace scpp {
                        ", which does not initialize parameter type '" +
                        describe_type_brief(type_mismatch.expected_param_type) +
                        "': check that its elements match that type's members in number and type" +
-                       (candidates.size() > 1 ? candidate_list() : std::string());
+                       (candidates.size() > 1 ? candidate_list_str : std::string());
             }
             std::optional<Type> actual = infer_type(*args[type_mismatch.argument_index]);
             std::string actual_text =
@@ -1339,24 +1469,32 @@ namespace scpp {
                        std::to_string(type_mismatch.argument_index + 1) + ": " +
                        explicit_only_conversion_function_message(
                            describe_type_brief(*actual), describe_type_brief(type_mismatch.expected_param_type)) +
-                       (candidates.size() > 1 ? candidate_list() : std::string());
+                       (candidates.size() > 1 ? candidate_list_str : std::string());
+            }
+            std::string mismatch_sig{};
+            [[scpp::unsafe]] {
+                mismatch_sig = describe_candidate_signature(*type_mismatch_fn, display_name, param_offset);
             }
             return "no overload of '" + display_name + "' matches these argument types: argument " +
                    std::to_string(type_mismatch.argument_index + 1) + " is " + actual_text + ", but '" +
-                   describe_signature(*type_mismatch_fn) + "' expects '" +
+                   mismatch_sig + "' expects '" +
                    describe_type_brief(type_mismatch.expected_param_type) +
                    "' (spec §16.3(3) -- an argument of scalar type matches a parameter of scalar type only if "
                    "the two types are the same; an explicit static_cast<T> may be required)" +
-                   (candidates.size() > 1 ? candidate_list() : std::string());
+                   (candidates.size() > 1 ? candidate_list_str : std::string());
         }
         if (read_only_arg_fn != nullptr) {
+            std::string ro_sig{};
+            [[scpp::unsafe]] {
+                ro_sig = describe_candidate_signature(*read_only_arg_fn, display_name, param_offset);
+            }
             return "no overload of '" + display_name + "' accepts these arguments: argument " +
                    std::to_string(read_only_arg.argument_index + 1) +
                    " is read-only (const), so it cannot bind parameter '" +
                    describe_type_brief(read_only_arg.expected_param_type) +
-                   "' of '" + describe_signature(*read_only_arg_fn) +
+                   "' of '" + ro_sig +
                    "', which the callee may write through ([over.ics.ref])" +
-                   (candidates.size() > 1 ? candidate_list() : std::string());
+                   (candidates.size() > 1 ? candidate_list_str : std::string());
         }
         if (any_read_only_receiver) {
             return "cannot call non-const member function '" + display_name +
@@ -1366,10 +1504,10 @@ namespace scpp {
             return "no overload of '" + display_name +
                    "' accepts this receiver: its '&'/'&&' ref-qualifier does not match the receiver "
                    "expression (spec ch05.9)" +
-                   candidate_list();
+                   candidate_list_str;
         }
         return "no overload of '" + display_name + "' takes " + std::to_string(args.size()) +
-               (args.size() == 1 ? " argument" : " arguments") + candidate_list();
+               (args.size() == 1 ? " argument" : " arguments") + candidate_list_str;
     }
 
 
@@ -1390,29 +1528,46 @@ namespace scpp {
         // for generic overloads ("ambiguous call to overloaded generic
         // function", monomorphize.cppm). Joining that answer rather than
         // inventing a second one.
-        auto ambiguous = [&](std::vector<const Function*> tied) -> const Function* {
-            if (out_ambiguous != nullptr) *out_ambiguous = std::move(tied);
-            return nullptr;
-        };
-        if (out_ambiguous != nullptr) out_ambiguous->clear();
+        if (out_ambiguous != nullptr) {
+            [[scpp::unsafe]] {
+                out_ambiguous->clear();
+            }
+        }
         std::vector<const Function*> candidates = collect_call_candidates(callee_name, param_offset, receiver_expr);
         if (candidates.empty()) return nullptr;
-        if (candidates.size() == 1 && !candidates[0]->is_generic_template) {
-            return classify_call_candidate(*candidates[0], args, param_offset, receiver_is_mutable, receiver_expr).reason ==
-                           CallRejectionReason::None
-                       ? candidates[0]
-                       : nullptr;
+        bool single_cand_is_generic = false;
+        [[scpp::unsafe]] {
+            single_cand_is_generic = candidates[0]->is_generic_template;
+        }
+        if (candidates.size() == 1 && !single_cand_is_generic) {
+            CallCandidateRejection cand_rej{};
+            [[scpp::unsafe]] {
+                cand_rej = classify_call_candidate(*candidates[0], args, param_offset, receiver_is_mutable, receiver_expr);
+            }
+            if (cand_rej.reason == CallRejectionReason::None) {
+                [[scpp::unsafe]] {
+                    return candidates[0];
+                }
+            }
+            return nullptr;
         }
 
         std::vector<const Function*> matches{};
         for (const Function* fn : candidates) {
-            if (classify_call_candidate(*fn, args, param_offset, receiver_is_mutable, receiver_expr).reason ==
-                CallRejectionReason::None) {
+            CallCandidateRejection fn_rej{};
+            [[scpp::unsafe]] {
+                fn_rej = classify_call_candidate(*fn, args, param_offset, receiver_is_mutable, receiver_expr);
+            }
+            if (fn_rej.reason == CallRejectionReason::None) {
                 matches.push_back(fn);
             }
         }
         if (matches.empty()) return nullptr;
-        if (matches.size() == 1) return matches[0];
+        if (matches.size() == 1) {
+            [[scpp::unsafe]] {
+                return matches[0];
+            }
+        }
         // [over.match.best]/2.4, adopted by spec §10.4(4): a non-template
         // function is better than a template specialization. The
         // template is the fallback, not a peer -- without this, `f(int)`
@@ -1421,39 +1576,65 @@ namespace scpp {
         // win; when that was the template, codegen resolved to the
         // uninstantiated `f.T` and failed with "no generated code for
         // resolved function".)
-        auto narrow_to = [&](auto&& accepts) {
+        {
             std::vector<const Function*> selected{};
             for (const Function* fn : matches) {
-                if (accepts(fn)) selected.push_back(fn);
+                bool ok = false;
+                [[scpp::unsafe]] {
+                    ok = !fn->is_generic_template;
+                }
+                if (ok) selected.push_back(fn);
             }
             if (!selected.empty()) matches = std::move(selected);
-        };
-        narrow_to([](const Function* fn) { return !fn->is_generic_template; });
-        if (matches.size() == 1) return matches[0];
+        }
+        if (matches.size() == 1) {
+            [[scpp::unsafe]] {
+                return matches[0];
+            }
+        }
         // The implicit object parameter's ref-qualifier, when the class
         // declares both a qualified and an unqualified overload of the
         // same name -- C++ makes that pair ill-formed to declare, so
         // there is no [over.ics.rank] rule for it and it stays a
         // narrowing preference rather than part of the ranking below.
         if (param_offset == 1 && receiver_expr != nullptr) {
-            narrow_to([&, this](const Function* fn) {
-                if (fn->params.empty() || fn->params[0].type.pointee == nullptr) return false;
-                if (fn->receiver_ref_qualifier == ReceiverRefQualifier::None) return false;
-                Type receiver_expected = *fn->params[0].type.pointee;
-                receiver_expected.is_const_qualified = false;
-                bool receiver_is_rvalue = produces_rvalue_of_type(*receiver_expr, receiver_expected);
-                return receiver_is_rvalue ? fn->receiver_ref_qualifier == ReceiverRefQualifier::RValue
-                                          : fn->receiver_ref_qualifier == ReceiverRefQualifier::LValue;
-            });
-            if (matches.size() == 1) return matches[0];
+            std::vector<const Function*> selected{};
+            for (const Function* fn : matches) {
+                bool ok = false;
+                [[scpp::unsafe]] {
+                    if (!fn->params.empty() && fn->params[0].type.pointee != nullptr &&
+                        fn->receiver_ref_qualifier != ReceiverRefQualifier::None) {
+                        Type receiver_expected = *fn->params[0].type.pointee;
+                        receiver_expected.is_const_qualified = false;
+                        bool receiver_is_rvalue = produces_rvalue_of_type(*receiver_expr, receiver_expected);
+                        ok = receiver_is_rvalue ? fn->receiver_ref_qualifier == ReceiverRefQualifier::RValue
+                                                : fn->receiver_ref_qualifier == ReceiverRefQualifier::LValue;
+                    }
+                }
+                if (ok) selected.push_back(fn);
+            }
+            if (!selected.empty()) matches = std::move(selected);
+            if (matches.size() == 1) {
+                [[scpp::unsafe]] {
+                    return matches[0];
+                }
+            }
         }
         if (callee_name.ends_with("_new")) {
-            // A monomorphized clone of a constructor template is not a
-            // peer of the template it came from; it is the thing the
-            // template resolved to. Purely a naming artefact of
-            // monomorphization, so it narrows before ranking.
-            narrow_to([&](const Function* fn) { return fn->name.starts_with(callee_name + "."); });
-            if (matches.size() == 1) return matches[0];
+            std::vector<const Function*> selected{};
+            for (const Function* fn : matches) {
+                bool ok = false;
+                [[scpp::unsafe]] {
+                    ok = fn->name.starts_with(callee_name + ".");
+                }
+                if (ok) selected.push_back(fn);
+            }
+            if (!selected.empty()) matches = std::move(selected);
+            if (matches.size() == 1) {
+                [[scpp::unsafe]] {
+                    return matches[0];
+                }
+            }
         }
         // [over.match.best] over [over.ics.rank], via the one ranking
         // algebra in ast.cppm that codegen, movecheck and the constant
@@ -1486,12 +1667,29 @@ namespace scpp {
         //    happened to reach the ambiguity report, i.e. the only
         //    correct ones.
         std::vector<std::vector<ArgumentConversion>> conversions{};
-        for (const Function* fn : matches) conversions.push_back(argument_conversions_for(*fn, args, param_offset, receiver_expr));
+        for (const Function* fn : matches) {
+            [[scpp::unsafe]] {
+                conversions.push_back(argument_conversions_for(*fn, args, param_offset, receiver_expr));
+            }
+        }
         std::vector<std::size_t> best = best_viable_candidates(conversions);
-        if (best.size() == 1) return matches[best[0]];
+        if (best.size() == 1) {
+            [[scpp::unsafe]] {
+                return matches[best[0]];
+            }
+        }
         std::vector<const Function*> tied{};
-        for (std::size_t index : best) tied.push_back(matches[index]);
-        return ambiguous(std::move(tied));
+        for (std::size_t index : best) {
+            [[scpp::unsafe]] {
+                tied.push_back(matches[index]);
+            }
+        }
+        if (out_ambiguous != nullptr) {
+            [[scpp::unsafe]] {
+                *out_ambiguous = std::move(tied);
+            }
+        }
+        return nullptr;
     }
 
 
@@ -1524,12 +1722,18 @@ namespace scpp {
             if (fn.params[0].type.pointee != nullptr) {
                 Type receiver_expected = *fn.params[0].type.pointee;
                 receiver_expected.is_const_qualified = false;
-                receiver_conversion.argument_is_rvalue = produces_rvalue_of_type(*receiver_expr, receiver_expected);
+                bool rvalue = false;
+                bool read_only = false;
+                [[scpp::unsafe]] {
+                    rvalue = produces_rvalue_of_type(*receiver_expr, receiver_expected);
+                    read_only = is_read_only_place(*receiver_expr);
+                }
+                receiver_conversion.argument_is_rvalue = rvalue;
                 // A read-only receiver cannot prefer `T&` over `const T&`
                 // -- classify_call_candidate has already made the `T&`
                 // overload non-viable for it, and saying otherwise here
                 // would be a second answer to the same question.
-                if (!fn.params[0].type.is_mutable_ref && is_read_only_place(*receiver_expr)) {
+                if (!fn.params[0].type.is_mutable_ref && read_only) {
                     receiver_conversion.unknown = true;
                 }
             }
@@ -1605,8 +1809,10 @@ namespace scpp {
             std::string result = "ambiguous constructor call for class '" + class_name + "': " +
                                  std::to_string(tied.size()) +
                                  " constructors match these argument types equally well and none is better than the others ([over.match.best])";
-            for (const Function* fn : tied) {
-                result += "\n  candidate: " + describe_candidate_signature(*fn, class_name, /*param_offset=*/1);
+            [[scpp::unsafe]] {
+                for (const Function* fn : tied) {
+                    result += "\n  candidate: " + describe_candidate_signature(*fn, class_name, /*param_offset=*/1);
+                }
             }
             return result;
         }
@@ -1624,10 +1830,18 @@ namespace scpp {
         // govern, so only a bare lvalue reaches this message.
         if (args.size() == 1 && args[0] != nullptr && !is_copy_constructible(class_name) &&
             is_bare_same_type_copy_source(*args[0], named_type(class_name))) {
-            return std::string(record_keyword(class_name, *program_)) + " '" + class_name +
+            std::string kw{};
+            [[scpp::unsafe]] {
+                kw = record_keyword(class_name, *program_);
+            }
+            return kw + " '" + class_name +
                    "' is not copy-constructible (spec §6.5(2)) -- this construction is not permitted";
         }
-        return std::string(record_keyword(class_name, *program_)) + " '" + class_name +
+        std::string kw{};
+        [[scpp::unsafe]] {
+            kw = record_keyword(class_name, *program_);
+        }
+        return kw + " '" + class_name +
                "' has no constructor matching this call";
     }
 
@@ -1635,29 +1849,38 @@ namespace scpp {
     const Function* Codegen::resolve_constructor_overload_exact(const std::string& class_name, const std::vector<ExprPtr>& args,
                                                                 std::vector<const Function*>* out_ambiguous)
 {
-        if (out_ambiguous != nullptr) out_ambiguous->clear();
+        if (out_ambiguous != nullptr) {
+            [[scpp::unsafe]] {
+                out_ambiguous->clear();
+            }
+        }
         auto is_constructor_clone = [&](const Function& fn) {
             return fn.name == class_name + "_new" ||
                    (!fn.member_owner_class.empty() && fn.member_owner_class == class_name &&
                     fn.name.starts_with(class_name + "_new."));
         };
         std::vector<const Function*> matches{};
-        for (const Function& fn : program_->functions) {
-            if (!is_constructor_clone(fn)) continue;
-            if (!function_accepts_argument_count(fn, args.size(), 1)) continue;
-            bool all_match = true;
-            for (std::size_t i = 0; all_match && i < args.size(); i++) {
-                all_match = argument_matches_parameter(*args[i], fn.params[i + 1].type);
-                // Same viability rule as classify_call_candidate: a
-                // read-only argument forms no conversion sequence to a
-                // `T&` parameter ([over.ics.ref]).
-                if (all_match && fn.params[i + 1].type.kind == TypeKind::Reference &&
-                    fn.params[i + 1].type.is_mutable_ref && !fn.params[i + 1].type.is_rvalue_ref &&
-                    is_read_only_place(*args[i])) {
-                    all_match = false;
+        if (program_ != nullptr) {
+            [[scpp::unsafe]] {
+                for (std::size_t k = 0; k < program_->functions.size(); ++k) {
+                    const Function* fn = &program_->functions[k];
+                    if (!is_constructor_clone(*fn)) continue;
+                    if (!function_accepts_argument_count(*fn, args.size(), 1)) continue;
+                    bool all_match = true;
+                    for (std::size_t i = 0; all_match && i < args.size(); i++) {
+                        all_match = argument_matches_parameter(*args[i], fn->params[i + 1].type);
+                        // Same viability rule as classify_call_candidate: a
+                        // read-only argument forms no conversion sequence to a
+                        // `T&` parameter ([over.ics.ref]).
+                        if (all_match && fn->params[i + 1].type.kind == TypeKind::Reference &&
+                            fn->params[i + 1].type.is_mutable_ref && !fn->params[i + 1].type.is_rvalue_ref &&
+                            is_read_only_place(*args[i])) {
+                            all_match = false;
+                        }
+                    }
+                    if (all_match) matches.push_back(fn);
                 }
             }
-            if (all_match) matches.push_back(&fn);
         }
         if (matches.empty()) return nullptr;
         // The same [over.ics.rank] algebra resolve_overload_by_type uses,
@@ -1669,13 +1892,27 @@ namespace scpp {
         // a different constructor than `f(x)` picks an overload.
         std::vector<std::vector<ArgumentConversion>> conversions{};
         for (const Function* fn : matches) {
-            conversions.push_back(argument_conversions_for(*fn, args, /*param_offset=*/1, /*receiver_expr=*/nullptr));
+            [[scpp::unsafe]] {
+                conversions.push_back(argument_conversions_for(*fn, args, /*param_offset=*/1, /*receiver_expr=*/nullptr));
+            }
         }
         std::vector<std::size_t> best = best_viable_candidates(conversions);
-        if (best.size() == 1) return matches[best[0]];
+        if (best.size() == 1) {
+            [[scpp::unsafe]] {
+                return matches[best[0]];
+            }
+        }
         std::vector<const Function*> best_matches{};
-        for (std::size_t index : best) best_matches.push_back(matches[index]);
-        if (out_ambiguous != nullptr) *out_ambiguous = std::move(best_matches);
+        for (std::size_t index : best) {
+            [[scpp::unsafe]] {
+                best_matches.push_back(matches[index]);
+            }
+        }
+        if (out_ambiguous != nullptr) {
+            [[scpp::unsafe]] {
+                *out_ambiguous = std::move(best_matches);
+            }
+        }
         return nullptr;
     }
 

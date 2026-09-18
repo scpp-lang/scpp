@@ -11,13 +11,13 @@ extern "C" {
 
 namespace std {
 
-void* unordered_set_allocate_bytes(uint64_t bytes, uint64_t align) {
+export void* unordered_set_allocate_bytes(uint64_t bytes, uint64_t align) {
     [[scpp::unsafe]] {
         return scpp_vector_allocate(bytes, align);
     }
 }
 
-void unordered_set_deallocate_bytes(void* ptr, uint64_t align) {
+export void unordered_set_deallocate_bytes(void* ptr, uint64_t align) {
     [[scpp::unsafe]] {
         scpp_vector_deallocate(ptr, align);
     }
@@ -86,7 +86,7 @@ class unordered_set_insert_result {
 // Which slot a probe landed on, and whether it had to be constructed --
 // the private half of the answer above, before it is dressed as an
 // iterator. Not exported: no caller outside this file names it.
-class unordered_set_slot_result {
+export class unordered_set_slot_result {
   public:
     size_t index{};
     bool inserted{};
@@ -507,6 +507,57 @@ public:
             probes = probes + 1;
         }
         return false;
+    }
+
+    bool operator==(const unordered_set<T>& other) const {
+        if (this->size_ != other.size_) return false;
+        size_t index = 0;
+        while (index < this->slot_count_) {
+            int state = 0;
+            [[scpp::unsafe]] {
+                state = this->states_[index];
+            }
+            if (state == 1) {
+                T item{};
+                [[scpp::unsafe]] {
+                    item = this->slots_[index];
+                }
+                if (!other.contains(item)) return false;
+            }
+            index = index + 1;
+        }
+        return true;
+    }
+
+    bool operator!=(const unordered_set<T>& other) const {
+        return !(*this == other);
+    }
+
+    const T& __item_at_linear_index(size_t linear_index) const {
+        size_t count = 0;
+        size_t idx = 0;
+        while (idx < this->slot_count_) {
+            int state = 0;
+            [[scpp::unsafe]] {
+                state = this->states_[idx];
+            }
+            if (state == 1) {
+                if (count == linear_index) {
+                    [[scpp::unsafe]] {
+                        return this->slots_[idx];
+                    }
+                }
+                count = count + 1;
+            }
+            idx = idx + 1;
+        }
+        [[scpp::unsafe]] {
+            return this->slots_[0];
+        }
+    }
+
+    const T& operator[](int linear_index) const {
+        return this->__item_at_linear_index(static_cast<size_t>(linear_index));
     }
 
     size_t size() const {

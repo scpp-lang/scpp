@@ -4,6 +4,7 @@ module scpp.compiler.movecheck:interfaces;
 
 import std;
 import scpp.ast;
+import scpp.mir;
 import :errors;
 import :signatures;
 import :types;
@@ -18,7 +19,10 @@ namespace scpp {
     switch (type.kind) {
         case TypeKind::Named: {
             const ClassDef* def = find_class_def(program, type.name);
-            return def != nullptr && def->is_interface;
+            if (def == nullptr) return false;
+            [[scpp::unsafe]] {
+                return def->is_interface;
+            }
         }
         case TypeKind::Array: return type.element != nullptr && type_forms_interface_object(*type.element, program);
         default: return false;
@@ -35,9 +39,9 @@ namespace scpp {
 // copy of it. `validate_declared_type` below is the second such rule.
 class ClassSemanticsValidator {
 public:
+    virtual ~ClassSemanticsValidator() = default;
     ClassSemanticsValidator(const Program& program, const Signatures& signatures)
         : program_{program}, signatures_{signatures} {
-        class_defs_.reserve(program_.classes.size());
         for (const ClassDef& def : program_.classes) {
             class_defs_[def.name] = &def;
         }
@@ -100,32 +104,46 @@ public:
     }
 
 private:
-    struct Provider {
+    class Provider {
+    public:
+        virtual ~Provider() = default;
+        Provider() = default;
+        Provider(const Provider&) = default;
+        Provider& operator=(const Provider&) = default;
+        Provider(Provider&&) = default;
+        Provider& operator=(Provider&&) = default;
         const ClassDef* owner = nullptr;
         const Function* fn = nullptr;
         std::string slot_key;
         std::string name;
     };
 
-    struct Analysis {
+    class Analysis {
+    public:
+        virtual ~Analysis() = default;
+        Analysis() = default;
+        Analysis(const Analysis&) = default;
+        Analysis& operator=(const Analysis&) = default;
+        Analysis(Analysis&&) = default;
+        Analysis& operator=(Analysis&&) = default;
         bool computed = false;
-        std::unordered_map<std::string, std::vector<Provider>> visible_names;
-        std::unordered_map<std::string, Provider> effective_virtual_slots;
-        std::unordered_set<std::string> all_virtual_slots;
-        std::unordered_set<std::string> reachable_bases;
+        std::unordered_map<std::string, std::vector<Provider>> visible_names{};
+        std::unordered_map<std::string, Provider> effective_virtual_slots{};
+        std::unordered_set<std::string> all_virtual_slots{};
+        std::unordered_set<std::string> reachable_bases{};
     };
 
     const Program& program_;
     const Signatures& signatures_;
-    std::unordered_map<std::string, const ClassDef*> class_defs_;
-    std::unordered_map<std::string, std::vector<const Function*>> declared_methods_;
-    std::unordered_map<std::string, Analysis> analyses_;
-    std::unordered_set<std::string> analysis_stack_;
+    std::unordered_map<std::string, const ClassDef*> class_defs_{};
+    std::unordered_map<std::string, std::vector<const Function*>> declared_methods_{};
+    std::unordered_map<std::string, Analysis> analyses_{};
+    std::unordered_set<std::string> analysis_stack_{};
 
     [[nodiscard]] static bool should_skip(const ClassDef& def) {
         return def.is_forward_declaration || def.is_concept_witness || def.is_synthetic_check_only ||
                !def.template_params.empty() || def.is_variadic_primary_template || def.is_variadic_specialization ||
-               def.is_partial_specialization || def.name.rfind("__lambda", 0) == 0;
+               def.is_partial_specialization || def.name.starts_with("__lambda");
     }
 
     // The struct counterpart of should_skip: a template definition has
@@ -161,12 +179,26 @@ private:
 
     [[nodiscard]] static std::string non_type_expr_key(const Expr* expr) {
         if (expr == nullptr) return "?";
-        switch (expr->kind) {
-            case ExprKind::IntegerLiteral: return std::to_string(expr->int_value);
-            case ExprKind::Identifier: return expr->name;
+        ExprKind ek = ExprKind::Identifier;
+        std::int64_t iv = 0;
+        std::string ename{};
+        BinaryOp bop = BinaryOp::Add;
+        const Expr* plhs = nullptr;
+        const Expr* prhs = nullptr;
+        [[scpp::unsafe]] {
+            ek = expr->kind;
+            iv = expr->int_value;
+            ename = expr->name;
+            bop = expr->binary_op;
+            if (expr->lhs) plhs = expr->lhs.get();
+            if (expr->rhs) prhs = expr->rhs.get();
+        }
+        switch (ek) {
+            case ExprKind::IntegerLiteral: return std::to_string(iv);
+            case ExprKind::Identifier: return ename;
             case ExprKind::Binary:
-                if (expr->binary_op == BinaryOp::Add) {
-                    return non_type_expr_key(expr->lhs.get()) + "+" + non_type_expr_key(expr->rhs.get());
+                if (bop == BinaryOp::Add) {
+                    return non_type_expr_key(plhs) + "+" + non_type_expr_key(prhs);
                 }
                 break;
             default: break;
@@ -235,23 +267,25 @@ private:
     }
     [[nodiscard]] static std::string instantiated_template_source_name(std::string_view class_name) {
         std::size_t dot = class_name.find('.');
-        return dot == std::string_view::npos ? std::string() : std::string(class_name.substr(0, dot));
+        if (dot == std::string_view::npos) return std::string();
+        std::string_view sub = class_name.substr(0, dot);
+        return std::string{sub.data(), sub.size()};
     }
 
     [[nodiscard]] static std::string lookup_name(const Function& fn) {
         if (is_destructor_slot(fn)) return "~";
         std::string operator_spelled = operator_function_display_spelling(fn.name);
         if (!operator_spelled.empty()) return operator_spelled;
-        if (!fn.member_owner_class.empty() && fn.name.rfind(fn.member_owner_class + "_", 0) == 0) {
+        if (!fn.member_owner_class.empty() && fn.name.starts_with(fn.member_owner_class + "_")) {
             return fn.name.substr(fn.member_owner_class.size() + 1);
         }
-        return fn.name;
+        return std::string{fn.name};
     }
 
     [[nodiscard]] static std::string slot_key(const Function& fn) {
         std::string key = lookup_name(fn);
         key += "(";
-        std::size_t start = fn.member_owner_class.empty() ? 0 : 1;
+        std::size_t start = fn.member_owner_class.empty() ? static_cast<std::size_t>(0) : static_cast<std::size_t>(1);
         for (std::size_t i = start; i < fn.params.size(); i++) {
             if (i != start) key += ",";
             key += type_key(fn.params[i].type);
@@ -271,25 +305,36 @@ private:
     [[nodiscard]] std::vector<const Function*> declared_members_of(const std::string& class_name) const {
         auto it = declared_methods_.find(class_name);
         if (it == declared_methods_.end()) return {};
-        return it->second;
+        return std::vector<const Function*>{it->second};
     }
 
     [[nodiscard]] bool type_names_interface(const std::string& name) const {
         auto it = class_defs_.find(name);
-        return it != class_defs_.end() && it->second->is_interface;
+        if (it == class_defs_.end()) return false;
+        [[scpp::unsafe]] {
+            return it->second->is_interface;
+        }
     }
 
     [[nodiscard]] bool has_accessible_base_conversion(const std::string& source_name, const std::string& target_name,
                                                       std::string_view current_class) const {
         if (source_name == target_name) return true;
         auto it = class_defs_.find(source_name);
-        if (it == class_defs_.end()) return false;
-        for (const BaseSpecifier& base : it->second->base_specifiers) {
+        if (it == class_defs_.end() || it->second == nullptr) return false;
+        std::size_t num_bases = 0;
+        [[scpp::unsafe]] {
+            num_bases = it->second->base_specifiers.size();
+        }
+        for (std::size_t i = 0; i < num_bases; i++) {
+            BaseSpecifier base{};
+            [[scpp::unsafe]] {
+                base = it->second->base_specifiers[i];
+            }
             if (base.access == AccessSpecifier::Private && current_class != source_name) {
                 continue;
             }
             if (base.base_type.name == target_name) return true;
-            if (has_accessible_base_conversion(base.base_type.name, target_name, current_class)) return true;
+            if (this->has_accessible_base_conversion(base.base_type.name, target_name, current_class)) return true;
         }
         return false;
     }
@@ -297,7 +342,7 @@ private:
     [[nodiscard]] bool named_base_conversion_allowed(const Type& source_type, const Type& target_type,
                                                      std::string_view current_class) const {
         if (source_type.kind != TypeKind::Named || target_type.kind != TypeKind::Named) return false;
-        return has_accessible_base_conversion(source_type.name, target_type.name, current_class);
+        return this->has_accessible_base_conversion(source_type.name, target_type.name, current_class);
     }
 
     [[nodiscard]] bool types_compatible_for_base_conversion(const Type& source_type, const Type& target_type,
@@ -324,7 +369,11 @@ private:
         for (const BaseSpecifier& base : def.base_specifiers) {
             const ClassDef* base_def = find_class_def(program_, base.base_type.name);
             if (base_def == nullptr) continue;
-            if (base_def->is_interface) {
+            bool is_if = false;
+            [[scpp::unsafe]] {
+                is_if = base_def->is_interface;
+            }
+            if (is_if) {
                 if (!base.is_virtual) {
                     return std::unexpected(DataflowError("class '" + def.name + "' directly inherits interface '" + base.base_type.name +
                                         "' without the required 'virtual' (spec §11.3(1))"));
@@ -336,7 +385,6 @@ private:
                                         "' with forbidden 'virtual' (spec §11.3(2))"));
                 }
             }
-
         }
         if (ordinary_bases > 1) {
             return std::unexpected(DataflowError("class '" + def.name + "' has more than one ordinary direct base class (spec §11.1(6))"));
@@ -398,11 +446,21 @@ private:
         for (const BaseSpecifier& base : def.base_specifiers) {
             const ClassDef* base_def = find_class_def(program_, base.base_type.name);
             if (base_def == nullptr) continue;
-            if (!base_def->is_interface) {
-                return std::unexpected(DataflowError("interface '" + def.name + "' inherits ordinary class '" + base_def->name +
+            bool is_if = false;
+            std::string bname{};
+            [[scpp::unsafe]] {
+                is_if = base_def->is_interface;
+                bname = base_def->name;
+            }
+            if (!is_if) {
+                return std::unexpected(DataflowError("interface '" + def.name + "' inherits ordinary class '" + bname +
                                     "' through its base graph (spec §11.2(3))"));
             }
-            if (auto _r = validate_interface_bases(*base_def, visiting); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            std::expected<void, DataflowError> _r{};
+            [[scpp::unsafe]] {
+                _r = validate_interface_bases(*base_def, visiting);
+            }
+            if (!_r.has_value()) return std::unexpected(std::move(_r).error());
         }
         visiting.erase(def.name);
         return {};
@@ -411,7 +469,12 @@ private:
     [[nodiscard]] std::expected<void, DataflowError> validate_explicit_virtual_destructor(const ClassDef& def) {
         const Function* destructor = nullptr;
         for (const Function* fn : declared_members_of(def.name)) {
-            if (is_destructor_slot(*fn)) {
+            if (fn == nullptr) continue;
+            bool is_dtor = false;
+            [[scpp::unsafe]] {
+                is_dtor = is_destructor_slot(*fn);
+            }
+            if (is_dtor) {
                 destructor = fn;
                 break;
             }
@@ -420,7 +483,14 @@ private:
             return std::unexpected(DataflowError("class '" + def.name + "' must declare an explicit virtual destructor (spec §11.5(1))"));
         }
         bool overrides_base = false;
-        std::string dtor_slot = slot_key(*destructor);
+        std::string dtor_slot{};
+        bool dtor_virtual = false;
+        SourceLocation dtor_loc{};
+        [[scpp::unsafe]] {
+            dtor_slot = slot_key(*destructor);
+            dtor_virtual = destructor->is_virtual;
+            dtor_loc = destructor->loc;
+        }
         for (const BaseSpecifier& base : def.base_specifiers) {
             if (auto _r = ensure_analyzed(base.base_type.name); !_r.has_value()) return std::unexpected(std::move(_r).error());
             Analysis& base_analysis = analyses_.at(base.base_type.name);
@@ -429,43 +499,59 @@ private:
                 break;
             }
         }
-        if (!destructor->is_virtual && !overrides_base) {
+        if (!dtor_virtual && !overrides_base) {
             std::string template_source = instantiated_template_source_name(def.name);
             if (!template_source.empty()) {
                 for (const Function* fn : declared_members_of(template_source)) {
-                    if (is_destructor_slot(*fn) && (fn->is_virtual || fn->is_override)) return {};
+                    if (fn == nullptr) continue;
+                    bool ok_dtor = false;
+                    [[scpp::unsafe]] {
+                        ok_dtor = is_destructor_slot(*fn) && (fn->is_virtual || fn->is_override);
+                    }
+                    if (ok_dtor) return {};
                 }
             }
         }
-        if (!destructor->is_virtual && !overrides_base) {
+        if (!dtor_virtual && !overrides_base) {
             return std::unexpected(DataflowError("destructor of class '" + def.name + "' must be declared virtual or override a base "
                                 "virtual destructor (spec §11.5(1)-(3))",
-                                destructor->loc));
+                                dtor_loc));
         }
         return {};
     }
 
     [[nodiscard]] std::expected<void, DataflowError> ensure_analyzed(const std::string& class_name) {
-        Analysis& result = analyses_[class_name];
-        if (result.computed) return {};
+        if (auto it = analyses_.find(class_name); it != analyses_.end() && it->second.computed) return {};
         if (!analysis_stack_.insert(class_name).second) {
             return std::unexpected(DataflowError("cyclic class inheritance involving '" + class_name + "'"));
         }
+        Analysis result{};
         const ClassDef* def = class_defs_.at(class_name);
+        if (def == nullptr) return {};
+        std::size_t num_bases = 0;
+        std::string dname{};
+        [[scpp::unsafe]] {
+            num_bases = def->base_specifiers.size();
+            dname = def->name;
+        }
 
         std::unordered_map<std::string, std::vector<Provider>> base_visible_candidates{};
         std::unordered_map<std::string, std::unordered_set<std::string>> base_visible_contributors{};
         std::unordered_map<std::string, std::vector<Provider>> base_virtual_candidates{};
-        for (const BaseSpecifier& base : def->base_specifiers) {
+        for (std::size_t b_i = 0; b_i < num_bases; b_i++) {
+            BaseSpecifier base{};
+            [[scpp::unsafe]] {
+                base = def->base_specifiers[b_i];
+            }
             result.reachable_bases.insert(base.base_type.name);
             if (auto _r = ensure_analyzed(base.base_type.name); !_r.has_value()) return std::unexpected(std::move(_r).error());
             Analysis& base_analysis = analyses_.at(base.base_type.name);
-            result.reachable_bases.insert(base_analysis.reachable_bases.begin(), base_analysis.reachable_bases.end());
+            for (const auto& rb : base_analysis.reachable_bases) result.reachable_bases.insert(rb);
             for (const auto& visible_entry : base_analysis.visible_names) {
                 const auto& name = visible_entry.first;
                 const auto& providers = visible_entry.second;
                 auto& dest = base_visible_candidates[name];
-                dest.insert(dest.end(), providers.begin(), providers.end());
+                for (const auto& p : providers) dest.push_back(p);
                 base_visible_contributors[name].insert(base.base_type.name);
             }
             for (const auto& virtual_entry : base_analysis.effective_virtual_slots) {
@@ -474,68 +560,99 @@ private:
                 base_virtual_candidates[slot].push_back(provider);
                 result.all_virtual_slots.insert(slot);
             }
-            result.all_virtual_slots.insert(base_analysis.all_virtual_slots.begin(), base_analysis.all_virtual_slots.end());
+            for (const auto& slot : base_analysis.all_virtual_slots) result.all_virtual_slots.insert(slot);
         }
 
         std::unordered_map<std::string, std::vector<const Function*>> own_names{};
         std::unordered_map<std::string, Provider> own_virtual_slots{};
-        for (const Function* fn : declared_members_of(def->name)) {
-            if (is_constructor_slot(*fn)) continue;
-            std::string name = lookup_name(*fn);
-            if (name != "~" && !fn->is_static) own_names[name].push_back(fn);
-            std::string slot = slot_key(*fn);
+        for (const Function* fn : declared_members_of(dname)) {
+            if (fn == nullptr) continue;
+            bool is_ctor = false;
+            std::string name{};
+            bool is_static = false;
+            std::string slot{};
+            bool is_override = false;
+            bool is_deleted = false;
+            bool is_virtual = false;
+            SourceLocation fn_loc{};
+            [[scpp::unsafe]] {
+                is_ctor = is_constructor_slot(*fn);
+                if (!is_ctor) {
+                    name = lookup_name(*fn);
+                    is_static = fn->is_static;
+                    slot = slot_key(*fn);
+                    is_override = fn->is_override;
+                    is_deleted = fn->is_deleted;
+                    is_virtual = fn->is_virtual;
+                    fn_loc = fn->loc;
+                }
+            }
+            if (is_ctor) continue;
+            if (name != "~" && !is_static) own_names[name].push_back(fn);
             bool overrides = result.all_virtual_slots.contains(slot);
-            if (overrides && !fn->is_override) {
-                return std::unexpected(DataflowError("member '" + name + "' of class '" + def->name +
+            if (overrides && !is_override) {
+                return std::unexpected(DataflowError("member '" + name + "' of class '" + dname +
                                     "' overrides a base virtual member but omits 'override' (spec §11.5(4))",
-                                    fn->loc));
+                                    fn_loc));
             }
-            if (!overrides && fn->is_override) {
-                return std::unexpected(DataflowError("member '" + name + "' of class '" + def->name +
+            if (!overrides && is_override) {
+                return std::unexpected(DataflowError("member '" + name + "' of class '" + dname +
                                     "' is marked 'override' but does not override any base virtual member (spec §11.5(5))",
-                                    fn->loc));
+                                    fn_loc));
             }
-            // [class.virtual]/17: a function with a deleted definition
-            // shall not override one without, and vice versa -- otherwise
-            // the deletion is silently reachable (or silently escapable)
-            // through a base reference, which is the whole point of the
-            // rule.
             if (overrides) {
                 auto base_slot_it = base_virtual_candidates.find(slot);
                 if (base_slot_it != base_virtual_candidates.end()) {
                     for (const Provider& provider : base_slot_it->second) {
-                        if (provider.fn == nullptr || provider.fn->is_deleted == fn->is_deleted) continue;
+                        bool prov_deleted = false;
+                        [[scpp::unsafe]] {
+                            if (provider.fn != nullptr) prov_deleted = provider.fn->is_deleted;
+                        }
+                        if (provider.fn == nullptr || prov_deleted == is_deleted) continue;
                         return std::unexpected(DataflowError(
-                            "member '" + name + "' of class '" + def->name + "' is " +
-                                (fn->is_deleted ? "defined as '= delete' but overrides a base virtual member that is not"
-                                                : "not deleted but overrides a base virtual member that is defined as '= delete'") +
+                            "member '" + name + "' of class '" + dname + "' is " +
+                                (is_deleted ? "defined as '= delete' but overrides a base virtual member that is not"
+                                            : "not deleted but overrides a base virtual member that is defined as '= delete'") +
                                 " ([class.virtual]/17 -- a deleted and a non-deleted function may not override one another)",
-                            fn->loc));
+                            fn_loc));
                     }
                 }
             }
-            bool is_effectively_virtual = fn->is_virtual || overrides;
+            bool is_effectively_virtual = is_virtual || overrides;
             if (is_effectively_virtual) {
-                own_virtual_slots[slot] = Provider{def, fn, slot, name};
+                Provider prov{};
+                prov.owner = def;
+                prov.fn = fn;
+                prov.slot_key = slot;
+                prov.name = name;
+                own_virtual_slots[slot] = std::move(prov);
                 result.all_virtual_slots.insert(slot);
             }
         }
 
         std::unordered_map<std::string, std::vector<Provider>> using_names{};
-        for (const ClassUsingDeclaration& using_decl : def->using_declarations) {
+        std::size_t num_using = 0;
+        [[scpp::unsafe]] {
+            num_using = def->using_declarations.size();
+        }
+        for (std::size_t u_i = 0; u_i < num_using; u_i++) {
+            ClassUsingDeclaration using_decl{};
+            [[scpp::unsafe]] {
+                using_decl = def->using_declarations[u_i];
+            }
             if (!result.reachable_bases.contains(using_decl.base_name)) {
-                return std::unexpected(DataflowError("class '" + def->name + "' names non-base class '" + using_decl.base_name +
+                return std::unexpected(DataflowError("class '" + dname + "' names non-base class '" + using_decl.base_name +
                                     "' in a using-declaration (spec §11.4)"));
             }
             if (auto _r = ensure_analyzed(using_decl.base_name); !_r.has_value()) return std::unexpected(std::move(_r).error());
             Analysis& target_analysis = analyses_.at(using_decl.base_name);
             auto base_it = target_analysis.visible_names.find(using_decl.member_name);
             if (base_it == target_analysis.visible_names.end() || base_it->second.empty()) {
-                return std::unexpected(DataflowError("class '" + def->name + "' names missing member '" + using_decl.member_name +
+                return std::unexpected(DataflowError("class '" + dname + "' names missing member '" + using_decl.member_name +
                                     "' in using " + using_decl.base_name + "::" + using_decl.member_name + "'"));
             }
             auto& dest = using_names[using_decl.member_name];
-            dest.insert(dest.end(), base_it->second.begin(), base_it->second.end());
+            for (const auto& p : base_it->second) dest.push_back(p);
         }
 
         std::unordered_set<std::string> all_names{};
@@ -546,7 +663,14 @@ private:
             if (own_names.contains(name)) {
                 std::vector<Provider> providers{};
                 for (const Function* fn : own_names.at(name)) {
-                    providers.push_back(Provider{def, fn, slot_key(*fn), name});
+                    std::string skey{};
+                    [[scpp::unsafe]] { skey = slot_key(*fn); }
+                    Provider prov{};
+                    prov.owner = def;
+                    prov.fn = fn;
+                    prov.slot_key = std::move(skey);
+                    prov.name = name;
+                    providers.push_back(std::move(prov));
                 }
                 result.visible_names[name] = std::move(providers);
                 continue;
@@ -558,7 +682,7 @@ private:
             auto candidates_it = base_visible_candidates.find(name);
             if (candidates_it == base_visible_candidates.end()) continue;
             if (base_visible_contributors[name].size() > 1) {
-                return std::unexpected(DataflowError("class '" + def->name + "' inherits ambiguous member name '" + name +
+                return std::unexpected(DataflowError("class '" + dname + "' inherits ambiguous member name '" + name +
                                     "' from multiple bases without an overriding declaration or using-declaration "
                                     "(spec §11.4(1)-(4))"));
             }
@@ -576,14 +700,18 @@ private:
             Provider chosen{};
             bool have_chosen = false;
             for (const Provider& provider : providers) {
-                if (!distinct_owners.insert(provider.owner->name).second) continue;
+                std::string owner_name{};
+                [[scpp::unsafe]] {
+                    if (provider.owner != nullptr) owner_name = provider.owner->name;
+                }
+                if (!distinct_owners.insert(owner_name).second) continue;
                 if (!have_chosen) {
                     chosen = provider;
                     have_chosen = true;
                 }
             }
             if (distinct_owners.size() > 1) {
-                return std::unexpected(DataflowError("class '" + def->name +
+                return std::unexpected(DataflowError("class '" + dname +
                                     "' needs its own overriding declaration to provide a unique final overrider for '" +
                                     chosen.name + "' (spec §11.4(5)-(6))"));
             }
@@ -592,6 +720,7 @@ private:
 
         result.computed = true;
         analysis_stack_.erase(class_name);
+        analyses_[class_name] = std::move(result);
         return {};
     }
 
@@ -604,7 +733,13 @@ private:
                 const ClassDef* iface = find_class_def(program_, interface_name);
                 if (iface == nullptr) continue;
                 Type self = named_type(def.name);
-                if (iface->thread_movable_override) {
+                bool mov_override = false;
+                bool share_override = false;
+                [[scpp::unsafe]] {
+                    mov_override = iface->thread_movable_override;
+                    share_override = iface->thread_shareable_override;
+                }
+                if (mov_override) {
                     auto _r = thread_movable_of(self, program_);
                     if (!_r.has_value()) return std::unexpected(std::move(_r).error());
                     if (!_r.value()) {
@@ -612,7 +747,7 @@ private:
                                             interface_name + "' (spec §8.5(2)-(5))"));
                     }
                 }
-                if (iface->thread_shareable_override) {
+                if (share_override) {
                     auto _r = thread_shareable_of(self, program_);
                     if (!_r.has_value()) return std::unexpected(std::move(_r).error());
                     if (!_r.value()) {
@@ -628,11 +763,25 @@ private:
 
     void collect_interfaces(const std::string& class_name, std::unordered_set<std::string>& out) const {
         auto it = class_defs_.find(class_name);
-        if (it == class_defs_.end()) return;
-        for (const BaseSpecifier& base : it->second->base_specifiers) {
+        if (it == class_defs_.end() || it->second == nullptr) return;
+        std::size_t num_bases = 0;
+        [[scpp::unsafe]] {
+            num_bases = it->second->base_specifiers.size();
+        }
+        for (std::size_t i = 0; i < num_bases; i++) {
+            BaseSpecifier base{};
+            [[scpp::unsafe]] {
+                base = it->second->base_specifiers[i];
+            }
             const ClassDef* base_def = find_class_def(program_, base.base_type.name);
             if (base_def == nullptr) continue;
-            if (base_def->is_interface) out.insert(base_def->name);
+            bool is_if = false;
+            std::string bname{};
+            [[scpp::unsafe]] {
+                is_if = base_def->is_interface;
+                bname = base_def->name;
+            }
+            if (is_if) out.insert(bname);
             collect_interfaces(base.base_type.name, out);
         }
     }
@@ -717,23 +866,43 @@ private:
     [[nodiscard]] std::expected<void, DataflowError> validate_initializer_scopes() {
         return for_each_initializer_scope(program_, [&, this](const InitializerScope& scope)
                                                         -> std::expected<void, DataflowError> {
-            if (scope.declares_namespace_scope_variable) {
-                if (auto _r = validate_declared_type(*scope.declared_type, "global variable '" + scope.name + "'", scope.loc);
+            if (scope.declares_namespace_scope_variable && scope.declared_type != nullptr) {
+                Type decl_type{};
+                [[scpp::unsafe]] {
+                    decl_type = *scope.declared_type;
+                }
+                if (auto _r = validate_declared_type(decl_type, "global variable '" + scope.name + "'", scope.loc);
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
-                if (type_forms_interface_object(*scope.declared_type, program_)) {
+                if (type_forms_interface_object(decl_type, program_)) {
                     return std::unexpected(DataflowError("a global variable definition forms an object of interface type (spec §11.2(5.1))",
                                         scope.loc));
                 }
             }
             if (scope.expr != nullptr) {
-                if (auto _r = walk_expr(*scope.expr, scope.body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                std::expected<void, DataflowError> _r{};
+                [[scpp::unsafe]] {
+                    _r = walk_expr(*scope.expr, scope.body);
+                }
+                if (!_r.has_value()) return std::unexpected(std::move(_r).error());
             }
             if (scope.brace_args != nullptr) {
-                for (const ExprPtr& arg : *scope.brace_args) {
-                    if (arg == nullptr) continue;
-                    if (auto _r = walk_expr(*arg, scope.body); !_r.has_value()) return std::unexpected(std::move(_r).error());
+                std::size_t num_args = 0;
+                [[scpp::unsafe]] {
+                    num_args = scope.brace_args->size();
+                }
+                for (std::size_t i = 0; i < num_args; i++) {
+                    const Expr* p_arg = nullptr;
+                    [[scpp::unsafe]] {
+                        p_arg = (*scope.brace_args)[i].get();
+                    }
+                    if (p_arg == nullptr) continue;
+                    std::expected<void, DataflowError> _r{};
+                    [[scpp::unsafe]] {
+                        _r = walk_expr(*p_arg, scope.body);
+                    }
+                    if (!_r.has_value()) return std::unexpected(std::move(_r).error());
                 }
             }
             return {};

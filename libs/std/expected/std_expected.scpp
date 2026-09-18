@@ -161,7 +161,7 @@ public:
         return this->has_value_;
     }
 
-    T& value() {
+    T& value() & {
         if (!this->has_value_) {
             std::abort();
         }
@@ -170,12 +170,22 @@ public:
         }
     }
 
-    const T& value() const {
+    const T& value() const & {
         if (!this->has_value_) {
             std::abort();
         }
         [[scpp::unsafe]] {
             return ((const T*)&this->storage_)[0];
+        }
+    }
+
+    T value() && {
+        if (!this->has_value_) {
+            std::abort();
+        }
+        [[scpp::unsafe]] {
+            T& source = ((T*)&this->storage_)[0];
+            return std::move(source);
         }
     }
 

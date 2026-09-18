@@ -148,6 +148,7 @@ class LifetimeAnnotation {
 
     [[nodiscard]] bool present() const { return name.size() != 0; }
     [[nodiscard]] bool is_any() const { return name == "any"; }
+    bool operator==(const LifetimeAnnotation&) const = default;
 
 };
 
@@ -4502,6 +4503,8 @@ public:
     }
     TypeLayoutInfo(const TypeLayoutInfo&) = default;
     TypeLayoutInfo(TypeLayoutInfo&&) = default;
+    TypeLayoutInfo& operator=(const TypeLayoutInfo&) = default;
+    TypeLayoutInfo& operator=(TypeLayoutInfo&&) = default;
 };
 
 [[nodiscard]] inline TypeLayoutInfo value_of_type_layout(const std::optional<TypeLayoutInfo>& layout) {
@@ -5402,7 +5405,7 @@ enum class ConversionDestinationSet {
 // than as two different ones. Lives here, next to Program itself, because
 // both movecheck and codegen diagnose those clauses and neither can
 // import the other's partitions -- a second copy would be free to drift.
-[[nodiscard]] inline std::string_view record_keyword(const std::string& record_name, const Program& program) {
+[[nodiscard]] inline std::string record_keyword(const std::string& record_name, const Program& program) {
     for (const StructDef& def : program.structs) {
         if (def.name == record_name) return "struct";
     }
@@ -5410,3 +5413,48 @@ enum class ConversionDestinationSet {
 }
 
 } // namespace scpp
+
+namespace std {
+
+export template<>
+class hash<const scpp::Function*> {
+public:
+    uint64_t operator()(const scpp::Function* fn) const {
+        if (fn == nullptr) return 0;
+        std::string fn_name{};
+        [[scpp::unsafe]] {
+            fn_name = fn->name;
+        }
+        return std::hash<std::string>{}(fn_name);
+    }
+    virtual ~hash() = default;
+};
+
+export template<>
+class equal_to<const scpp::Function*> {
+public:
+    bool operator()(const scpp::Function* lhs, const scpp::Function* rhs) const {
+        return lhs == rhs;
+    }
+    virtual ~equal_to() = default;
+};
+
+export template<>
+class hash<scpp::Function*> {
+public:
+    uint64_t operator()(scpp::Function* fn) const {
+        return std::hash<const scpp::Function*>{}(fn);
+    }
+    virtual ~hash() = default;
+};
+
+export template<>
+class equal_to<scpp::Function*> {
+public:
+    bool operator()(scpp::Function* lhs, scpp::Function* rhs) const {
+        return lhs == rhs;
+    }
+    virtual ~equal_to() = default;
+};
+
+} // namespace std

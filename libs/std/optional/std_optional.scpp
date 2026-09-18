@@ -179,17 +179,25 @@ public:
         return this->has_value_;
     }
 
-    T& value() {
+    T& value() & {
         if (!this->has_value_) std::abort();
         [[scpp::unsafe]] {
             return ((T*)&this->storage_)[0];
         }
     }
 
-    const T& value() const {
+    const T& value() const & {
         if (!this->has_value_) std::abort();
         [[scpp::unsafe]] {
             return ((const T*)&this->storage_)[0];
+        }
+    }
+
+    T value() && {
+        if (!this->has_value_) std::abort();
+        [[scpp::unsafe]] {
+            T& source = ((T*)&this->storage_)[0];
+            return std::move(source);
         }
     }
 
@@ -228,6 +236,18 @@ public:
 
     bool operator!=(nullopt_t null_option) const {
         return this->has_value_;
+    }
+
+    bool operator==(const optional<T>& other) const {
+        if (this->has_value_ != other.has_value_) return false;
+        if (!this->has_value_) return true;
+        [[scpp::unsafe]] {
+            return *((const T*)&this->storage_) == *((const T*)&other.storage_);
+        }
+    }
+
+    bool operator!=(const optional<T>& other) const {
+        return !(*this == other);
     }
 
     void reset() {

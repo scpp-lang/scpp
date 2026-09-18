@@ -89,64 +89,54 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
 //    genuinely borrows it, and what that hold is entered against --
 //    the root, or the lender when the capture is a reborrow -- follows
 //    reborrow_is_tracked_against_lender, the same as everywhere else.
+[[nodiscard]] std::expected<void, DataflowError> apply_by_value_capture_source(
+    const Expr& source, const Type& declared_type, const LambdaCapture& capture,
+    const std::string& capture_display, DataflowState& state, const Body& body,
+    const Signatures& signatures, bool report_errors) {
+    const Type source_type = by_value_capture_type(capture, declared_type);
+    if (is_named_record_type(source_type, body)) {
+        bool is_copy_source = is_bare_same_type_copy_source(source, source_type, body, signatures);
+        bool is_freely_copyable_source =
+            is_freely_copyable_class_value_source(source, source_type, body, signatures);
+        bool is_rvalue_source = produces_rvalue_of_type(source, source_type, body, signatures);
+        if (report_errors) {
+            if (is_copy_source || is_freely_copyable_source) {
+                bool has_copy_ctor = false;
+                [[scpp::unsafe]] {
+                    has_copy_ctor = state.classes_with_copy_ctor != nullptr && state.classes_with_copy_ctor->contains(source_type.name);
+                }
+                if (!is_freely_copyable_source && !has_copy_ctor) {
+                    return std::unexpected(DataflowError(
+                        "capture '" + capture_display + "' of class '" + source_type.name +
+                           "' requires std::move or another rvalue source because the class is not "
+                           "copy-constructible (spec §6.5/§5.12)",
+                        state.current_loc));
+                }
+            } else if (!is_rvalue_source) {
+                return std::unexpected(DataflowError(
+                    "capture '" + capture_display + "' of class '" + source_type.name +
+                        "' must use an implicitly copyable same-typed source (if copy-constructible) or an "
+                        "rvalue such as "
+                        "std::move(...) (spec §6.5/§5.12)",
+                    state.current_loc));
+            }
+        }
+        if (auto _r = apply_expr(source, /*is_move_target_context=*/is_rvalue_source, state, body, signatures, report_errors); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+        return {};
+    }
+    if (auto _r = apply_expr(source, /*is_move_target_context=*/source.kind == ExprKind::Move, state, body, signatures,
+               report_errors); !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
+    return {};
+}
+
 [[nodiscard]] std::expected<void, DataflowError> apply_lambda_captures(const Expr& expr, DataflowState& state,
                             const Body& body, const Signatures& signatures, bool report_errors,
                             std::vector<ClosureCaptureBorrow>* out_closure_capture_borrows) {
     InCallBorrows reference_capture_borrows{};
-    auto apply_by_value_capture_source = [&](const Expr& source, const Type& declared_type, const LambdaCapture& capture,
-                                             const std::string& capture_display) -> std::expected<void, DataflowError> {
-        // ch05 §5.12: what a by-value capture stores is the *referent* --
-        // by_value_capture_type is the one place that decides it, and the
-        // rules below have to be asked about that type, not about the
-        // declared type of the thing named. A `std::unique_ptr<int>& r`
-        // captured as `[r]` is just as much an implicit copy of a
-        // move-only class as `[p]` on the pointer itself is, and used to
-        // slip past every check here because a Reference is not a named
-        // class type.
-        const Type source_type = by_value_capture_type(capture, declared_type);
-        // spec §6.5 governs every *class type*, `struct` included -- asking
-        // is_named_class_type here (which answers the narrower ch04
-        // §4.1/§4.2 question of `class` vs `struct`, for access control)
-        // left by-value capture of a struct entirely ungated, so a struct
-        // with no copy constructor at all was copied into the closure
-        // silently. is_named_record_type is the same
-        // question the by-value *parameter* boundary already asks.
-        if (is_named_record_type(source_type, body)) {
-            bool is_copy_source = is_bare_same_type_copy_source(source, source_type, body, signatures);
-            bool is_freely_copyable_source =
-                is_freely_copyable_class_value_source(source, source_type, body, signatures);
-            bool is_rvalue_source = produces_rvalue_of_type(source, source_type, body, signatures);
-            if (report_errors) {
-                if (is_copy_source || is_freely_copyable_source) {
-                    if (!is_freely_copyable_source &&
-                        (state.classes_with_copy_ctor == nullptr ||
-                         !state.classes_with_copy_ctor->contains(source_type.name))) {
-                        return std::unexpected(DataflowError(
-                            "capture '" + capture_display + "' of class '" + source_type.name +
-                               "' requires std::move or another rvalue source because the class is not "
-                               "copy-constructible (spec §6.5/§5.12)",
-                            state.current_loc));
-                    }
-                } else if (!is_rvalue_source) {
-                    return std::unexpected(DataflowError(
-                        "capture '" + capture_display + "' of class '" + source_type.name +
-                            "' must use an implicitly copyable same-typed source (if copy-constructible) or an "
-                            "rvalue such as "
-                            "std::move(...) (spec §6.5/§5.12)",
-                        state.current_loc));
-                }
-            }
-            if (auto _r = apply_expr(source, /*is_move_target_context=*/is_rvalue_source, state, body, signatures, report_errors); !_r.has_value()) {
-                return std::unexpected(std::move(_r).error());
-            }
-            return {};
-        }
-        if (auto _r = apply_expr(source, /*is_move_target_context=*/source.kind == ExprKind::Move, state, body, signatures,
-                   report_errors); !_r.has_value()) {
-            return std::unexpected(std::move(_r).error());
-        }
-        return {};
-    };
     for (const LambdaCapture& capture : expr.lambda_captures) {
         if (capture.init) {
             if (auto _r = reject_lifetime_group_state_embedding(*capture.init, state, body, signatures, report_errors, "a closure capture", nullptr);
@@ -155,7 +145,7 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
             }
             std::optional<Type> init_type = infer_expr_type(*capture.init, body, signatures);
             if (init_type.has_value()) {
-                if (auto _r = apply_by_value_capture_source(*capture.init, *init_type, capture, capture.name); !_r.has_value()) {
+                if (auto _r = apply_by_value_capture_source(*capture.init, *init_type, capture, capture.name, state, body, signatures, report_errors); !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
             } else {
@@ -213,10 +203,18 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
-                const Type* by_value_type = chained ? (chained_type.has_value() ? &*chained_type : nullptr)
-                                                    : &body.type_of(*captured);
+                const Type* by_value_type = nullptr;
+                if (chained) {
+                    if (chained_type.has_value()) by_value_type = &*chained_type;
+                } else {
+                    by_value_type = &body.type_of(*captured);
+                }
                 if (by_value_type != nullptr) {
-                    if (auto _r = apply_by_value_capture_source(capture_ident, *by_value_type, capture, capture.name); !_r.has_value()) {
+                    Type target_type{};
+                    [[scpp::unsafe]] {
+                        target_type = *by_value_type;
+                    }
+                    if (auto _r = apply_by_value_capture_source(capture_ident, target_type, capture, capture.name, state, body, signatures, report_errors); !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
                 }
@@ -266,19 +264,15 @@ void rewrite_unqualified_member_calls(Expr& expr, const std::unordered_map<std::
             return std::unexpected(std::move(_r).error());
         }
         if (out_closure_capture_borrows != nullptr) {
-            // What the finished closure holds follows the same split
-            // apply_reference_argument just checked against: a capture
-            // that reborrows an already-bound reference/span local holds
-            // that *lender* suspended for as long as the closure lives,
-            // exactly as a stored `T& q = r;` does, while a capture of
-            // an owned local holds the root borrowed.
             std::optional<LocalId> lender = resolve_reborrow_lender(capture_ident, body, signatures);
-            if (reborrow_is_tracked_against_lender(lender, body)) {
-                out_closure_capture_borrows->push_back(ClosureCaptureBorrow{*lender, ref_type.is_mutable_ref, lender});
-                continue;
-            }
-            for (LocalId root : roots) {
-                out_closure_capture_borrows->push_back(ClosureCaptureBorrow{root, ref_type.is_mutable_ref, std::nullopt});
+            [[scpp::unsafe]] {
+                if (reborrow_is_tracked_against_lender(lender, body)) {
+                    out_closure_capture_borrows->push_back(ClosureCaptureBorrow{*lender, ref_type.is_mutable_ref, lender});
+                } else {
+                    for (LocalId root : roots) {
+                        out_closure_capture_borrows->push_back(ClosureCaptureBorrow{root, ref_type.is_mutable_ref, std::nullopt});
+                    }
+                }
             }
         }
     }
