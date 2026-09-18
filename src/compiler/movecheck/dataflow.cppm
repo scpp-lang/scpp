@@ -17,6 +17,42 @@ import :lambdas;
 
 namespace scpp {
 
+[[nodiscard]] inline const Program& get_program_ref(const Body& body) {
+    [[scpp::unsafe]] {
+        return *body.program;
+    }
+}
+
+[[nodiscard]] inline const Expr& get_return_expr_ref(const Terminator& term) {
+    [[scpp::unsafe]] {
+        return *term.return_value;
+    }
+}
+
+[[nodiscard]] inline const Expr& get_stmt_expr_ref(const MirStatement& stmt) {
+    [[scpp::unsafe]] {
+        return *stmt.expr;
+    }
+}
+
+[[nodiscard]] inline const Expr& get_condition_expr_ref(const Terminator& term) {
+    [[scpp::unsafe]] {
+        return *term.condition;
+    }
+}
+
+[[nodiscard]] inline const Type& get_element_type_ref(const Type& type) {
+    [[scpp::unsafe]] {
+        return *type.element;
+    }
+}
+
+[[nodiscard]] inline const Type& get_pointee_type_ref(const Type& type) {
+    [[scpp::unsafe]] {
+        return *type.pointee;
+    }
+}
+
 [[nodiscard]] bool binary_expr_has_compatible_types(const Expr& expr, const Body& body,
                                                     const Signatures& signatures);
 [[nodiscard]] bool binary_expr_has_valid_arithmetic_types(const Expr& expr, const Body& body,
@@ -57,13 +93,9 @@ namespace scpp {
     const Function& fn, const Body& body, const Signatures& signatures, const ClassFieldTypes& class_field_types);
 [[nodiscard]] std::expected<void, DataflowError> check_initializer_scope_conversions(const Program& program,
                                                                                      const Signatures& signatures);
-[[nodiscard]] std::expected<void, DataflowError> validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
-                         const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> validate_place_indirections(const Expr& expr, const DataflowState& state,
                                                                              const Body& body,
                                                                              const Signatures& signatures);
-[[nodiscard]] std::expected<void, DataflowError> validate_subscript_expr(const Expr& expr, const DataflowState& state, const Body& body,
-                             const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> apply_deref(const Expr& expr, const DataflowState& state, const Body& body, const Signatures& signatures,
                  bool report_errors);
 // A form-based rejection ("this variable can only be initialized
@@ -77,10 +109,6 @@ namespace scpp {
 [[nodiscard]] std::optional<DataflowError> diagnose_expression_itself(const Expr& expr, const DataflowState& state,
                                                                       const Body& body, const Signatures& signatures);
 
-[[nodiscard]] std::expected<void, DataflowError> apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
-                const Signatures& signatures, bool report_errors);
-[[nodiscard]] std::expected<void, DataflowError> check_call_arguments(const Expr& expr, DataflowState& state, const Body& body,
-                          const Signatures& signatures, bool report_errors);
 // [over.match.conv]/1: resolves the conversion function that takes
 // `expr` to `destination` and checks the call it stands for -- true when
 // one was selected. Declared here because every boundary that requires a
@@ -97,9 +125,8 @@ namespace scpp {
                                                                       const Body& body,
                                                                       const Signatures& signatures,
                                                                       bool report_errors);
-[[nodiscard]] std::expected<void, DataflowError> apply_reference_argument(const Expr& arg, const Type& param_type, DataflowState& state,
-                              InCallBorrows& in_call_borrows, const Body& body,
-                              const Signatures& signatures, bool report_errors);
+[[nodiscard]] std::expected<void, DataflowError> apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
+                                                           const Signatures& signatures, bool report_errors);
 [[nodiscard]] std::expected<void, DataflowError> check_constructor_arguments(const Type& constructed_type, const std::vector<ExprPtr>& ctor_args,
                                  DataflowState& state, const Body& body, const Signatures& signatures,
                                  bool report_errors);
@@ -136,7 +163,7 @@ namespace scpp {
         const Type& expected_referent = wrapped.template_args.size() == 1 ? wrapped.template_args[0] : wrapped;
         return types_equal(*arg_type->pointee, expected_referent) ||
                (body.program != nullptr &&
-                types_compatible_with_base_conversion(*arg_type->pointee, expected_referent, *body.program,
+                types_compatible_with_base_conversion(*arg_type->pointee, expected_referent, get_program_ref(body),
                                                       enclosing_class_name(body)));
     }
     if ((expr.name == "std::optional" || expr.name == "optional") && target_type.template_args.size() == 1) {
@@ -149,20 +176,26 @@ namespace scpp {
 }
 
 [[nodiscard]] const GlobalVar* find_visible_global_for_name(const std::string& name, bool explicit_global_qualification,
-                                                            const Body& body) {
-    if (body.program == nullptr) {
-        return find_visible_global(OptionalProgramRef{}, body.function_namespace_path, name, explicit_global_qualification);
+                                                            const Body& body [[scpp::lifetime(b)]]) [[scpp::lifetime(b)]] {
+    if (body.program == nullptr) return nullptr;
+    const GlobalVar* ret = nullptr;
+    [[scpp::unsafe]] {
+        std::reference_wrapper<const Program> program_ref{*body.program};
+        ret = find_visible_global(OptionalProgramRef{program_ref}, body.function_namespace_path, name,
+                                   explicit_global_qualification);
     }
-    std::reference_wrapper<const Program> program_ref{*body.program};
-    return find_visible_global(OptionalProgramRef{program_ref}, body.function_namespace_path, name,
-                               explicit_global_qualification);
+    return ret;
 }
 
 [[nodiscard]] std::optional<Type> find_visible_global_type(const std::string& name, bool explicit_global_qualification,
                                                            const Body& body) {
     const GlobalVar* global = find_visible_global_for_name(name, explicit_global_qualification, body);
-    if (global == nullptr || global->decl == nullptr) return std::nullopt;
-    return global->decl->type;
+    if (global == nullptr) return std::nullopt;
+    [[scpp::unsafe]] {
+        if (!global->decl) return std::nullopt;
+        Type copy{global->decl->type};
+        return std::optional<Type>{std::move(copy)};
+    }
 }
 
 [[nodiscard]] bool is_nullptr_literal_expr(const Expr& expr) {
@@ -568,11 +601,13 @@ namespace scpp {
     const Type& effective = base_type->kind == TypeKind::Reference && base_type->pointee ? *base_type->pointee : *base_type;
     if (effective.kind != TypeKind::Named) return std::nullopt;
     const std::string& type_name = effective.name;
-    auto class_it = state.class_field_types->find(type_name);
-    if (class_it == state.class_field_types->end()) return std::nullopt;
-    auto field_it = class_it->second.find(member_expr.name);
-    if (field_it == class_it->second.end()) return std::nullopt;
-    return field_it->second;
+    [[scpp::unsafe]] {
+        auto class_it = state.class_field_types->find(type_name);
+        if (class_it == state.class_field_types->end()) return std::nullopt;
+        auto field_it = class_it->second.find(member_expr.name);
+        if (field_it == class_it->second.end()) return std::nullopt;
+        return field_it->second;
+    }
 }
 
 // Maps a reference/span local onto the place it is currently bound to,
@@ -584,7 +619,9 @@ namespace scpp {
         auto it = state.ref_targets.find(local);
         if (it == state.ref_targets.end()) return std::nullopt;
         if (!it->second.bound_place.has_value() || !it->second.bound_place_is_exact) return std::nullopt;
-        if (traversed != nullptr) traversed->push_back(local);
+        [[scpp::unsafe]] {
+            if (traversed != nullptr) traversed->push_back(local);
+        }
         return it->second.bound_place;
     };
 }
@@ -635,17 +672,21 @@ namespace scpp {
     int attributable_shared = 0;
     bool attributable_mutable = false;
     bool overlaps = false;
+    auto vec_contains_local = [](const std::vector<LocalId>& vec, LocalId val) {
+        for (LocalId item : vec) if (item == val) return true;
+        return false;
+    };
     for (const auto& entry : state.ref_targets) {
         LocalId ref_local = entry.first;
         const auto& target = entry.second;
         if (target.is_reborrow()) continue;
-        if (std::ranges::find(target.roots, root) == target.roots.end()) continue;
+        if (!vec_contains_local(target.roots, root)) continue;
         if (target.is_mutable) {
             attributable_mutable = true;
         } else {
             attributable_shared++;
         }
-        if (std::ranges::find(written_through, ref_local) != written_through.end()) continue;
+        if (vec_contains_local(written_through, ref_local)) continue;
         if (!target.bound_place.has_value()) {
             overlaps = true;
             continue;
@@ -663,13 +704,16 @@ namespace scpp {
 [[nodiscard]] const Type* find_record_field_type(const std::string& record_name, const std::string& field_name,
                                                  const DataflowState& state, const Body& body) {
     if (state.class_field_types == nullptr) return nullptr;
-    auto record_it = state.class_field_types->find(record_name);
-    if (record_it != state.class_field_types->end()) {
-        auto field_it = record_it->second.find(field_name);
-        if (field_it != record_it->second.end()) return &field_it->second;
+    [[scpp::unsafe]] {
+        auto record_it = state.class_field_types->find(record_name);
+        if (record_it != state.class_field_types->end()) {
+            auto field_it = record_it->second.find(field_name);
+            if (field_it != record_it->second.end()) return &field_it->second;
+        }
     }
     if (body.program == nullptr) return nullptr;
-    for (const ClassDef& def : body.program->classes) {
+    const Program& prog = get_program_ref(body);
+    for (const ClassDef& def : prog.classes) {
         if (def.name != record_name) continue;
         if (auto base = def.direct_ordinary_base(); base.has_value()) {
             return find_record_field_type(base->get().base_type.name, field_name, state, body);
@@ -687,7 +731,7 @@ namespace scpp {
     for (const Projection& step : place.path) {
         if (current.kind == TypeKind::Reference || current.kind == TypeKind::Pointer) {
             if (current.pointee == nullptr) return std::nullopt;
-            current = *current.pointee;
+            current = get_pointee_type_ref(current);
         }
         if (step.is_deref) {
             // A `Named` receiver here is a class whose `operator*`/
@@ -698,7 +742,7 @@ namespace scpp {
             // teardown), so declining is not a silent skip.
             if (current.kind == TypeKind::Span) {
                 if (current.element == nullptr) return std::nullopt;
-                current = *current.element;
+                current = get_element_type_ref(current);
                 continue;
             }
             return std::nullopt;
@@ -710,17 +754,20 @@ namespace scpp {
             // to make that check skip every span element silently.
             if (current.kind == TypeKind::Span) {
                 if (current.element == nullptr) return std::nullopt;
-                current = *current.element;
+                current = get_element_type_ref(current);
                 continue;
             }
             if (current.kind != TypeKind::Array || current.element == nullptr) return std::nullopt;
-            current = *current.element;
+            current = get_element_type_ref(current);
             continue;
         }
         if (current.kind != TypeKind::Named) return std::nullopt;
         const Type* field_type = find_record_field_type(current.name, step.field, state, body);
         if (field_type == nullptr) return std::nullopt;
-        current = *field_type;
+        [[scpp::unsafe]] {
+            Type copy{*field_type};
+            current = std::move(copy);
+        }
     }
     return current;
 }
@@ -755,7 +802,7 @@ namespace scpp {
         std::optional<Type> ancestor_type = place_type(ancestor, state, body);
         if (!ancestor_type.has_value()) return false;
         if (ancestor_type->kind == TypeKind::Named &&
-            class_destruction_chain_has_destructor(ancestor_type->name, *body.program)) {
+            class_destruction_chain_has_destructor(ancestor_type->name, get_program_ref(body))) {
             return false;
         }
         if (ancestor.is_whole_local()) break;
@@ -803,9 +850,18 @@ namespace scpp {
 // bookkeeping -- the program has to reinitialize it before that point.
 // This reports the exits that reach one still moved out, which is the
 // program point where the omission first has a consequence.
+inline bool path_less(const std::vector<Projection>& a, const std::vector<Projection>& b) {
+    std::size_t min_len = a.size() < b.size() ? a.size() : b.size();
+    for (std::size_t i = 0; i < min_len; ++i) {
+        if (a[i] < b[i]) return true;
+        if (b[i] < a[i]) return false;
+    }
+    return a.size() < b.size();
+}
+
 [[nodiscard]] std::expected<void, DataflowError> check_moved_subobjects_were_restored(
     const DataflowState& state, const Body& body, const std::optional<LocalId>& scope_root,
-    std::string_view when) {
+    const std::string& when) {
     std::optional<Place> worst{};
     for (const auto& entry : state.locals) {
         const Place& place = entry.first;
@@ -817,7 +873,7 @@ namespace scpp {
         // (a scalar, or a host type scpp does not own the layout of), so
         // there is nothing for the teardown to have to skip.
         std::optional<Type> moved_type = place_type(place, state, body);
-        if (!moved_type.has_value() || !type_needs_teardown(*moved_type, *body.program)) continue;
+        if (!moved_type.has_value() || !type_needs_teardown(*moved_type, get_program_ref(body))) continue;
         // Only a *partial* move is a problem: if what contains this
         // place was itself moved out (or is moved out on some incoming
         // path), the containing object is not destroyed either (spec
@@ -826,8 +882,8 @@ namespace scpp {
         if (!place_requires_restore_before_teardown(place, state, body)) continue;
         // Deterministic choice, for the same reason find_moved_subobject
         // sorts: an unordered_map's iteration order is not stable.
-        if (!worst.has_value() || (place.local < worst->local) ||
-            (place.local == worst->local && place.path < worst->path)) {
+        if (!worst.has_value() || (static_cast<std::size_t>(place.local) < static_cast<std::size_t>(worst->local)) ||
+            (place.local == worst->local && path_less(place.path, worst->path))) {
             worst = place;
         }
     }
@@ -866,7 +922,11 @@ namespace scpp {
                                                                 const DataflowState& state,
                                                                 const Signatures& signatures) {
     if (place.kind == ExprKind::Identifier) {
-        if (const Type* local_type = body.type_if_local(place); local_type != nullptr) return *local_type;
+        if (const Type* local_type = body.type_if_local(place); local_type != nullptr) {
+            [[scpp::unsafe]] {
+                return *local_type;
+            }
+        }
         return find_visible_global_type(place.name, /*explicit_global_qualification=*/false, body);
     }
     if (place.kind == ExprKind::Member) {
@@ -896,16 +956,17 @@ namespace scpp {
 // was a name the expression never had.
 [[nodiscard]] std::string describe_assignment_place(const Expr& place) {
     if (place.kind == ExprKind::Member) {
-        if (place.lhs == nullptr) return place.name;
+        if (place.lhs == nullptr) return std::string{place.name};
         std::string base = describe_assignment_place(*place.lhs);
-        return base.empty() ? place.name : base + "." + place.name;
+        if (base.empty()) return std::string{place.name};
+        return base + "." + place.name;
     }
     if (place.kind == ExprKind::Subscript) {
         if (place.lhs == nullptr) return "this element";
         std::string base = describe_assignment_place(*place.lhs);
         return base.empty() ? std::string("this element") : base + "[...]";
     }
-    return place.name;
+    return std::string{place.name};
 }
 
 // spec §6: the complete set of conversion rules a value must satisfy
@@ -1020,12 +1081,13 @@ namespace scpp {
             // conversion checks below, which is how `C arr[1]{x};` copied
             // a class that has no copy constructor while `C y = x;` and
             // `struct Holder { C c; } h{x};` were both rejected.
-            if (auto _r = check_record_copy_element_binding(*aggregate_type.element, *element, body, signatures, loc,
+            const Type& elem_type = get_element_type_ref(aggregate_type);
+            if (auto _r = check_record_copy_element_binding(elem_type, *element, body, signatures, loc,
                                                            element_name, report_errors);
                 !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
-            if (auto _r = check_value_binding_conversions(*aggregate_type.element, *element, body, signatures, loc,
+            if (auto _r = check_value_binding_conversions(elem_type, *element, body, signatures, loc,
                                                           element_name, report_errors);
                 !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
@@ -1033,15 +1095,33 @@ namespace scpp {
         }
         return {};
     }
-    if (aggregate_type.kind != TypeKind::Named) return {};
-    const StructDef* def = find_struct_def(*body.program, aggregate_type.name);
+    if (aggregate_type.kind != TypeKind::Named || body.program == nullptr) return {};
+    const StructDef* def = nullptr;
+    std::size_t num_fields = 0;
+    [[scpp::unsafe]] {
+        def = find_struct_def(get_program_ref(body), aggregate_type.name);
+        if (def != nullptr) num_fields = def->fields.size();
+    }
     if (def == nullptr) return {};
-    for (std::size_t index = 0; index < elements.size() && index < def->fields.size(); ++index) {
+    for (std::size_t index = 0; index < elements.size() && index < num_fields; ++index) {
         if (elements[index] == nullptr) continue;
         const Expr& element = *elements[index];
+        Type field_type{};
+        std::string field_name{};
+        bool is_named = false;
+        bool field_struct_found = false;
+        [[scpp::unsafe]] {
+            field_type = def->fields[index].type;
+            field_name = def->fields[index].name;
+            is_named = field_type.kind == TypeKind::Named;
+            if (is_named) {
+                field_struct_found = find_struct_def(get_program_ref(body), field_type.name) != nullptr;
+            }
+        }
+        std::string full_name = aggregate_type.name + "::" + field_name;
         if (element.kind == ExprKind::BracedInitList) {
-            if (auto _r = check_aggregate_element_conversions(def->fields[index].type, element.args, body, signatures,
-                                                              loc, aggregate_type.name + "::" + def->fields[index].name,
+            if (auto _r = check_aggregate_element_conversions(field_type, element.args, body, signatures,
+                                                              loc, full_name,
                                                               report_errors);
                 !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
@@ -1052,17 +1132,16 @@ namespace scpp {
         // own comment: a class-typed field of a struct is rejected by the
         // field validation in codegen/layout.cppm, and answering the copy
         // question first would name a fix that rejection then forbids.
-        if (def->fields[index].type.kind == TypeKind::Named &&
-            find_struct_def(*body.program, def->fields[index].type.name) != nullptr) {
-            if (auto _r = check_record_copy_element_binding(def->fields[index].type, element, body, signatures, loc,
-                                                           aggregate_type.name + "::" + def->fields[index].name,
+        if (is_named && field_struct_found) {
+            if (auto _r = check_record_copy_element_binding(field_type, element, body, signatures, loc,
+                                                           full_name,
                                                            report_errors);
                 !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
         }
-        if (auto _r = check_value_binding_conversions(def->fields[index].type, element, body, signatures, loc,
-                                                      aggregate_type.name + "::" + def->fields[index].name,
+        if (auto _r = check_value_binding_conversions(field_type, element, body, signatures, loc,
+                                                      full_name,
                                                       report_errors);
             !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
@@ -1100,16 +1179,31 @@ namespace scpp {
     if (!is_named_record_type(field_type, body)) return {};
     if (is_freely_copyable_class_value_source(element, field_type, body, signatures)) return {};
     if (!is_bare_same_type_copy_source(element, field_type, body, signatures)) return {};
-    if (is_copy_constructible(field_type.name, *body.program)) return {};
-    // [dcl.fct.def.delete]/2 answers first: naming a deleted function is
-    // a strictly more specific answer than §6.5(2)'s suppression rule.
-    const Function* user_copy_ctor = find_user_declared_copy_ctor(field_type.name, *body.program);
-    if (user_copy_ctor != nullptr && user_copy_ctor->is_deleted) {
+    bool copy_constructible = false;
+    const Function* user_copy_ctor = nullptr;
+    std::string rec_kw{};
+    [[scpp::unsafe]] {
+        copy_constructible = is_copy_constructible(field_type.name, get_program_ref(body));
+        if (!copy_constructible) {
+            user_copy_ctor = find_user_declared_copy_ctor(field_type.name, get_program_ref(body));
+            rec_kw = record_keyword(field_type.name, get_program_ref(body));
+        }
+    }
+    if (copy_constructible) return {};
+    bool is_del = false;
+    SourceLocation ctor_loc{};
+    [[scpp::unsafe]] {
+        if (user_copy_ctor != nullptr) {
+            is_del = user_copy_ctor->is_deleted;
+            ctor_loc = user_copy_ctor->loc;
+        }
+    }
+    if (user_copy_ctor != nullptr && is_del) {
         return std::unexpected(DataflowError(
-            deleted_function_error_message("the copy constructor of '" + field_type.name + "'", user_copy_ctor->loc),
+            deleted_function_error_message("the copy constructor of '" + field_type.name + "'", ctor_loc),
             loc));
     }
-    return std::unexpected(DataflowError(std::string(record_keyword(field_type.name, *body.program)) + " '" +
+    return std::unexpected(DataflowError(rec_kw + " '" +
                                              field_type.name + "' is not copy-constructible (spec §6.5(2)) -- '" +
                                              target_name + "' cannot be initialized this way",
                                          loc));
@@ -1157,19 +1251,24 @@ namespace scpp {
 // pointer, function pointer or enum target -- the only kinds the five
 // checks look at -- `x{v}` *is* direct initialization, and a class
 // target makes every one of them a no-op anyway.
-[[nodiscard]] const Expr* single_bound_value(const ExprPtr& assigned, const std::vector<ExprPtr>& brace_args) {
-    if (assigned != nullptr) return assigned.get();
-    if (brace_args.size() == 1) return brace_args[0].get();
+[[nodiscard]] const Expr* single_bound_value(const Initializer& init) {
+    if (init.expr != nullptr) return init.expr.get();
+    if (init.brace_args.size() == 1) return init.brace_args[0].get();
     return nullptr;
 }
 
 // The same answer for an InitializerScope, whose two spellings are held
 // as raw pointers because they are borrowed from whichever declaration
 // the position came from.
-[[nodiscard]] const Expr* single_bound_value_ptr(const Expr* assigned, const std::vector<ExprPtr>* brace_args) {
-    if (assigned != nullptr) return assigned;
-    if (brace_args != nullptr && brace_args->size() == 1) return (*brace_args)[0].get();
-    return nullptr;
+[[nodiscard]] const Expr* single_bound_value_scope(const InitializerScope& scope) {
+    if (scope.expr != nullptr) return scope.expr;
+    const Expr* ret = nullptr;
+    [[scpp::unsafe]] {
+        if (scope.brace_args != nullptr && scope.brace_args->size() == 1) {
+            ret = (*scope.brace_args)[0].get();
+        }
+    }
+    return ret;
 }
 
 // spec §6: a constructor's member-initializer list binds a value to a
@@ -1194,11 +1293,14 @@ namespace scpp {
     for (const MemberInitializer& init : fn.member_initializers) {
         auto field = fields->second.find(init.member_name);
         if (field == fields->second.end()) continue;
-        const Expr* value = single_bound_value(init.initializer.expr, init.initializer.brace_args);
+        const Expr* value = single_bound_value(init.initializer);
         if (value == nullptr) continue;
-        if (auto _r = check_value_binding_conversions(field->second, *value, body, signatures, init.loc,
-                                                      init.member_name, /*report_errors=*/true);
-            !_r.has_value()) {
+        std::expected<void, DataflowError> _r{};
+        [[scpp::unsafe]] {
+            _r = check_value_binding_conversions(field->second, *value, body, signatures, init.loc,
+                                                  init.member_name, /*report_errors=*/true);
+        }
+        if (!_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
     }
@@ -1221,10 +1323,12 @@ namespace scpp {
                                                                                      const Signatures& signatures) {
     return for_each_initializer_scope(program, [&](const InitializerScope& scope)
                                                    -> std::expected<void, DataflowError> {
-        const Expr* value = single_bound_value_ptr(scope.expr, scope.brace_args);
+        const Expr* value = single_bound_value_scope(scope);
         if (value == nullptr) return {};
-        return check_value_binding_conversions(*scope.declared_type, *value, scope.body, signatures, scope.loc,
-                                               scope.name, /*report_errors=*/true);
+        [[scpp::unsafe]] {
+            return check_value_binding_conversions(*scope.declared_type, *value, scope.body, signatures, scope.loc,
+                                                   scope.name, /*report_errors=*/true);
+        }
     });
 }
 
@@ -1252,15 +1356,27 @@ namespace scpp {
     std::optional<Type> resolved =
         operand.kind == ExprKind::Member ? resolve_member_field_type(operand, body, state, signatures)
                                          : [&]() -> std::optional<Type> {
-            if (const Type* local_type = body.type_if_local(operand); local_type != nullptr) return *local_type;
+            if (const Type* local_type = body.type_if_local(operand); local_type != nullptr) {
+                [[scpp::unsafe]] {
+                    return *local_type;
+                }
+            }
             return find_visible_global_type(operand.name, operand.explicit_global_qualification, body);
         }();
     if (!resolved.has_value() && operand.kind != ExprKind::Identifier && operand.kind != ExprKind::Member) {
         resolved = infer_expr_type(operand, body, signatures);
     }
-    const Type* underlying =
-        resolved.has_value() && resolved->kind == TypeKind::Reference && resolved->pointee ? &*resolved->pointee
-                                                                                            : (resolved ? &*resolved : nullptr);
+    Type underlying{};
+    bool have_underlying = false;
+    if (resolved.has_value()) {
+        if (resolved->kind == TypeKind::Reference && resolved->pointee != nullptr) {
+            underlying = get_pointee_type_ref(*resolved);
+            have_underlying = true;
+        } else {
+            underlying = *resolved;
+            have_underlying = true;
+        }
+    }
     // Spec §7.1(4)/§5.1(5.1) gate `*E` on `E` being "of pointer type",
     // which is a question about the pointer, not about how the program
     // reached it. A reference *to* a pointer is still that pointer --
@@ -1276,11 +1392,11 @@ namespace scpp {
     // `[[scpp::unsafe]]` powerless over exactly the operation it exists
     // to license, and reported it as though a pointer had never been
     // involved.
-    bool is_raw_ptr = underlying != nullptr && underlying->kind == TypeKind::Pointer;
-    bool is_fn_ptr = underlying != nullptr && is_function_pointer(*underlying);
+    bool is_raw_ptr = have_underlying && underlying.kind == TypeKind::Pointer;
+    bool is_fn_ptr = have_underlying && is_function_pointer(underlying);
     bool is_class_deref =
-        underlying != nullptr && underlying->kind == TypeKind::Named &&
-        signatures.contains(underlying->name + "_operator_deref");
+        have_underlying && underlying.kind == TypeKind::Named &&
+        signatures.contains(underlying.name + "_operator_deref");
     bool is_this_ref = resolved.has_value() && operand.kind == ExprKind::Identifier && operand.name == "this" &&
                        resolved->kind == TypeKind::Reference;
     if (!is_raw_ptr && !is_fn_ptr && !is_class_deref && !is_this_ref) {
@@ -1488,15 +1604,19 @@ namespace scpp {
     RootSet roots = std::move(roots_result).value();
     if (!report_errors) return {};
 
-    if (body.program != nullptr && param_type.pointee != nullptr && param_type.pointee->kind == TypeKind::Named) {
-        const ClassDef* param_interface = find_class_def(*body.program, param_type.pointee->name);
-        if (param_interface != nullptr && param_interface->is_interface) {
-        std::optional<Type> source_type = infer_expr_type(arg, body, signatures);
-        if (source_type.has_value() &&
-            !types_equal(*source_type, param_type) &&
-            !types_compatible_with_base_conversion(*source_type, param_type, *body.program, enclosing_class_name(body))) {
-            return std::unexpected(DataflowError("cannot bind reference parameter from an incompatible source type", state.current_loc));
+    if (body.program != nullptr && param_type.pointee != nullptr && get_pointee_type_ref(param_type).kind == TypeKind::Named) {
+        const ClassDef* param_interface = find_class_def(get_program_ref(body), get_pointee_type_ref(param_type).name);
+        bool is_iface = false;
+        [[scpp::unsafe]] {
+            is_iface = param_interface != nullptr && param_interface->is_interface;
         }
+        if (is_iface) {
+            std::optional<Type> source_type = infer_expr_type(arg, body, signatures);
+            if (source_type.has_value() &&
+                !types_equal(*source_type, param_type) &&
+                !types_compatible_with_base_conversion(*source_type, param_type, get_program_ref(body), enclosing_class_name(body))) {
+                return std::unexpected(DataflowError("cannot bind reference parameter from an incompatible source type", state.current_loc));
+            }
         }
     }
 
@@ -1677,12 +1797,20 @@ namespace scpp {
     // monomorphized to `Holder.std::string` while the call is still
     // spelled `Holder`"), and this arm is reachable only from a check
     // copy, which is never codegen'd.
-    if (state.witness_check_owner_class == nullptr || state.witness_check_owner_class->empty()) return false;
+    std::string witness_owner{};
+    bool have_witness = false;
+    [[scpp::unsafe]] {
+        if (state.witness_check_owner_class != nullptr && !state.witness_check_owner_class->empty()) {
+            witness_owner = *state.witness_check_owner_class;
+            have_witness = true;
+        }
+    }
+    if (!have_witness) return false;
     std::string_view target_base = target_class;
     if (std::size_t suffix = target_base.find('.'); suffix != std::string_view::npos) {
         target_base = target_base.substr(0, suffix);
     }
-    return target_base == *state.witness_check_owner_class;
+    return target_base == witness_owner;
 }
 
 // The result of asking "may `source` initialize a by-value destination of
@@ -1717,7 +1845,14 @@ namespace scpp {
 // `effective_param_type` is that constructor's own parameter type with
 // the `T&&`-binding-an-rvalue normalization already applied, so callers
 // can dispatch the operand the same way an ordinary argument would be.
-struct ConvertingConstructorBinding {
+class ConvertingConstructorBinding {
+public:
+    virtual ~ConvertingConstructorBinding() = default;
+    ConvertingConstructorBinding() = default;
+    ConvertingConstructorBinding(ConvertingConstructorBinding&&) = default;
+    ConvertingConstructorBinding& operator=(ConvertingConstructorBinding&&) = default;
+    ConvertingConstructorBinding(const ConvertingConstructorBinding&) = default;
+    ConvertingConstructorBinding& operator=(const ConvertingConstructorBinding&) = default;
     const FunctionSignature* ctor = nullptr;
     Type effective_param_type{};
 };
@@ -1729,18 +1864,26 @@ struct ConvertingConstructorBinding {
     if (!is_named_record_type(destination_type, body)) return binding;
     binding.ctor = find_single_argument_converting_constructor_signature(destination_type, source, body, signatures);
     if (binding.ctor == nullptr) return binding;
-    if (report_errors && binding.ctor->is_unsafe && state.unsafe_depth == 0) {
+    bool ctor_is_unsafe = false;
+    bool ctor_is_generic = false;
+    Type ctor_p1{};
+    [[scpp::unsafe]] {
+        ctor_is_unsafe = binding.ctor->is_unsafe;
+        ctor_is_generic = binding.ctor->is_generic_template;
+        ctor_p1 = binding.ctor->param_types[1];
+    }
+    if (report_errors && ctor_is_unsafe && state.unsafe_depth == 0) {
         return std::unexpected(DataflowError("cannot use '" + destination_type.name +
                              "'s converting constructor outside '[[scpp::unsafe]] { }': its own declaration is "
                              "marked '[[scpp::unsafe]]', so its soundness depends on a precondition only the "
                              "caller can guarantee (spec §5.1(1.2), §5.1(5.7), §5.1(6))",
             state.current_loc));
     }
-    binding.effective_param_type = binding.ctor->param_types[1];
-    if (!binding.ctor->is_generic_template && is_reference(binding.effective_param_type) &&
+    binding.effective_param_type = std::move(ctor_p1);
+    if (!ctor_is_generic && is_reference(binding.effective_param_type) &&
         binding.effective_param_type.is_rvalue_ref && binding.effective_param_type.pointee != nullptr &&
-        produces_rvalue_of_type(source, *binding.effective_param_type.pointee, body, signatures)) {
-        binding.effective_param_type = *binding.effective_param_type.pointee;
+        produces_rvalue_of_type(source, get_pointee_type_ref(binding.effective_param_type), body, signatures)) {
+        binding.effective_param_type = get_pointee_type_ref(binding.effective_param_type);
     }
     return binding;
 }
@@ -1824,6 +1967,216 @@ struct ConvertingConstructorBinding {
 // codegen-only builtins are never in `signatures` at all, so they're
 // always callable regardless of context, same as they already bypass
 // every other signature-based check in this file.
+[[nodiscard]] std::expected<void, DataflowError> apply_call_argument(
+    const Expr& arg, std::size_t param_index, const FunctionSignature* sig,
+    const std::string& callee_display, const std::string& sig_member_owner_class,
+    bool sig_is_generic, DataflowState& state, InCallBorrows& in_call_borrows,
+    const Body& body, const Signatures& signatures, bool report_errors) {
+    Type current_param_type{};
+    bool have_param_type = false;
+    std::string current_param_name{};
+    bool is_fwd_ref = false;
+    [[scpp::unsafe]] {
+        if (sig != nullptr && param_index < sig->param_types.size()) {
+            current_param_type = sig->param_types[param_index];
+            have_param_type = true;
+            if (param_index < sig->param_names.size()) {
+                current_param_name = sig->param_names[param_index];
+            }
+            if (param_index < sig->param_is_forwarding_reference.size()) {
+                is_fwd_ref = sig->param_is_forwarding_reference[param_index];
+            }
+        }
+    }
+    Type effective_param_type{};
+    bool have_effective_param_type = false;
+    if (have_param_type) {
+        effective_param_type = current_param_type;
+        if (!sig_member_owner_class.empty() && !sig_is_generic && is_fwd_ref) {
+            effective_param_type.is_rvalue_ref = false;
+            effective_param_type.is_mutable_ref = !is_read_only_reachable(arg, body, signatures);
+            if (effective_param_type.pointee != nullptr) {
+                [[scpp::unsafe]] {
+                    effective_param_type.pointee->is_const_qualified = is_read_only_reachable(arg, body, signatures);
+                }
+            }
+        }
+        if (is_fwd_ref && is_reference(effective_param_type) && effective_param_type.pointee != nullptr &&
+            !produces_rvalue_of_type(arg, get_pointee_type_ref(effective_param_type), body, signatures)) {
+            effective_param_type.is_rvalue_ref = false;
+            effective_param_type.is_mutable_ref = !is_read_only_reachable(arg, body, signatures);
+            [[scpp::unsafe]] {
+                effective_param_type.pointee->is_const_qualified = is_read_only_reachable(arg, body, signatures);
+            }
+        }
+        have_effective_param_type = true;
+    }
+    bool param_is_reference = have_effective_param_type && is_reference(effective_param_type);
+    bool param_is_rvalue_reference = param_is_reference && effective_param_type.is_rvalue_ref;
+    if (param_is_rvalue_reference) {
+        if (report_errors) {
+            std::string argument_name{"parameter "};
+            argument_name += std::to_string(param_index + 1);
+            argument_name += " of ";
+            argument_name += callee_display;
+            if (auto _r = check_rvalue_reference_argument(arg, get_pointee_type_ref(effective_param_type), argument_name, body,
+                                                          signatures, state.current_loc, report_errors);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    } else if (param_is_reference) {
+        if (auto _r = apply_reference_argument(arg, effective_param_type, state, in_call_borrows, body, signatures, report_errors); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    } else {
+        if (report_errors && have_effective_param_type) {
+            std::string argument_name{"parameter "};
+            argument_name += std::to_string(param_index + 1);
+            argument_name += " of ";
+            argument_name += callee_display;
+            if (auto _r = check_raw_pointer_assignment(effective_param_type, arg, body, signatures,
+                                                       state.current_loc, argument_name, report_errors);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        if (report_errors && have_param_type && current_param_type.kind == TypeKind::Pointer) {
+            std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
+            auto unwrap_pointer_pointee = [](const Type& type) -> const Type* {
+                if (type.kind != TypeKind::Pointer || type.pointee == nullptr) return nullptr;
+                [[scpp::unsafe]] {
+                    if (type.pointee->kind == TypeKind::Reference && type.pointee->pointee) return type.pointee->pointee.get();
+                    return type.pointee.get();
+                }
+            };
+            const Type* arg_pointee = arg_type.has_value() ? unwrap_pointer_pointee(*arg_type) : nullptr;
+            const Type* param_pointee = unwrap_pointer_pointee(current_param_type);
+            bool needs_class_pointer_validation = false;
+            [[scpp::unsafe]] {
+                needs_class_pointer_validation =
+                    body.program != nullptr && arg_pointee != nullptr && param_pointee != nullptr &&
+                    arg_pointee->kind == TypeKind::Named && param_pointee->kind == TypeKind::Named &&
+                    (find_class_def(get_program_ref(body), arg_pointee->name) != nullptr ||
+                     find_class_def(get_program_ref(body), param_pointee->name) != nullptr);
+            }
+            bool caller_is_synthetic_check_only = [&]() {
+                if (body.program == nullptr) return false;
+                std::string owner_name = enclosing_class_name(body);
+                if (owner_name.empty()) return false;
+                const ClassDef* owner_def = find_class_def(get_program_ref(body), owner_name);
+                bool syn = false;
+                [[scpp::unsafe]] {
+                    syn = owner_def != nullptr && owner_def->is_synthetic_check_only;
+                }
+                return syn;
+            }();
+            if (needs_class_pointer_validation && !caller_is_synthetic_check_only && arg_type->kind == TypeKind::Pointer &&
+                !raw_pointer_implicitly_convertible(*arg_type, current_param_type) &&
+                !types_compatible_with_base_conversion(*arg_type, current_param_type, get_program_ref(body),
+                                                       enclosing_class_name(body))) {
+                return std::unexpected(DataflowError("cannot pass an incompatible pointer type to parameter '" +
+                                        current_param_name + "'",
+                                    state.current_loc));
+            }
+        }
+        if (have_param_type) {
+            auto converted = check_user_defined_conversion(arg, current_param_type,
+                                                           /*allow_explicit=*/false, state, body, signatures,
+                                                           report_errors);
+            if (!converted.has_value()) return std::unexpected(std::move(converted).error());
+            if (converted.value()) return {};
+        }
+        bool class_value_param = have_param_type && is_named_record_type(current_param_type, body);
+        bool copyable_lvalue_source =
+            class_value_param && is_copyable_class_lvalue_boundary_source(arg, current_param_type, body, signatures);
+        bool freely_copyable_value_source =
+            class_value_param && is_freely_copyable_class_value_source(arg, current_param_type, body, signatures);
+        const FunctionSignature* converting_ctor = nullptr;
+        Type converting_ctor_param_type{};
+        if (class_value_param) {
+            auto binding = resolve_converting_constructor_binding(current_param_type, arg, state, body, signatures,
+                                                                 report_errors);
+            if (!binding.has_value()) return std::unexpected(std::move(binding).error());
+            converting_ctor = binding.value().ctor;
+            converting_ctor_param_type = binding.value().effective_param_type;
+        }
+        std::string rec_kw{};
+        std::string p_name{};
+        [[scpp::unsafe]] {
+            if (report_errors && class_value_param && !copyable_lvalue_source && !freely_copyable_value_source &&
+                !produces_rvalue_of_type(arg, current_param_type, body, signatures) && converting_ctor == nullptr) {
+                p_name = current_param_type.name;
+                rec_kw = record_keyword(p_name, get_program_ref(body));
+            }
+        }
+        if (!rec_kw.empty()) {
+            return std::unexpected(DataflowError("passing " +
+                                 rec_kw +
+                                 " '" + p_name +
+                                 "' by value requires either an implicitly copyable same-type source or "
+                                 "a fresh value such as std::move(x) or a call returning by value",
+                state.current_loc));
+        }
+        if (converting_ctor != nullptr) {
+            Type ctor_param_type = converting_ctor_param_type;
+            if (is_reference(ctor_param_type) && ctor_param_type.is_rvalue_ref) {
+                if (report_errors) {
+                    std::string argument_name{"the converting constructor's parameter for parameter "};
+                    argument_name += std::to_string(param_index + 1);
+                    argument_name += " of ";
+                    argument_name += callee_display;
+                    if (auto _r = check_rvalue_reference_argument(arg, get_pointee_type_ref(ctor_param_type), argument_name, body,
+                                                                  signatures, state.current_loc, report_errors);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
+                if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            } else if (is_reference(ctor_param_type)) {
+                if (auto _r = apply_reference_argument(arg, ctor_param_type, state, in_call_borrows, body, signatures, report_errors); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            } else {
+                if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+            if (report_errors && sig != nullptr) {
+                std::expected<void, DataflowError> _r{};
+                [[scpp::unsafe]] {
+                    _r = enforce_thread_safety_constraints_for_argument(arg, *sig, param_index, "function", callee_display, body,
+                                                                       signatures, state.current_loc);
+                }
+                if (!_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+            return {};
+        }
+        if (auto _r = apply_expr(arg, /*is_move_target_context=*/!(copyable_lvalue_source || freely_copyable_value_source), state,
+                   body, signatures, report_errors); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    }
+    if (report_errors && sig != nullptr) {
+        std::expected<void, DataflowError> _r{};
+        [[scpp::unsafe]] {
+            _r = enforce_thread_safety_constraints_for_argument(arg, *sig, param_index, "function", callee_display, body,
+                                                               signatures, state.current_loc);
+        }
+        if (!_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    }
+    return {};
+}
+
 [[nodiscard]] std::expected<void, DataflowError> check_call_arguments(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
                            bool report_errors) {
     // A method call's receiver (`obj.method(...)`/`this->method(...)`,
@@ -1872,9 +2225,11 @@ struct ConvertingConstructorBinding {
     auto name_it = signatures.find(callee.key);
     const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
     if (expr.lhs) {
-        bool receiver_is_reference =
-            sig != nullptr && !sig->param_types.empty() && is_reference(sig->param_types[0]) && !sig->param_types[0].is_rvalue_ref;
-        (void)receiver_is_reference;
+        [[maybe_unused]] bool receiver_is_reference = false;
+        [[scpp::unsafe]] {
+            receiver_is_reference =
+                sig != nullptr && !sig->param_types.empty() && is_reference(sig->param_types[0]) && !sig->param_types[0].is_rvalue_ref;
+        }
         if (auto _r = apply_expr(*expr.lhs, /*is_move_target_context=*/expr.lhs->kind == ExprKind::Move, state, body, signatures,
                    report_errors); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
@@ -1895,7 +2250,7 @@ struct ConvertingConstructorBinding {
         if (expr.lhs && expr.lhs->kind == ExprKind::Identifier) {
             callee_display = expr.lhs->name;
         } else {
-            callee_display = "<function pointer>";
+            callee_display = std::string{"<function pointer>"};
         }
     }
     // ch05 §5.10: a name that exists but has no overload whose parameters
@@ -1914,22 +2269,40 @@ struct ConvertingConstructorBinding {
             describe_overload_failure(expr, callee, callee_display, name_it->second, body, signatures),
             state.current_loc));
     }
-    if (report_errors && sig != nullptr && sig->is_deleted) {
-        return std::unexpected(DataflowError(deleted_function_error_message("'" + callee_display + "'", sig->loc), state.current_loc));
+    bool sig_is_deleted = false;
+    SourceLocation sig_loc{};
+    AccessSpecifier sig_access = AccessSpecifier::Public;
+    std::string sig_member_owner_class{};
+    bool sig_is_extern_c = false;
+    bool sig_is_unsafe = false;
+    bool sig_is_generic = false;
+    [[scpp::unsafe]] {
+        if (sig != nullptr) {
+            sig_is_deleted = sig->is_deleted;
+            sig_loc = sig->loc;
+            sig_access = sig->access;
+            sig_member_owner_class = sig->member_owner_class;
+            sig_is_extern_c = sig->is_extern_c_declaration_only;
+            sig_is_unsafe = sig->is_unsafe;
+            sig_is_generic = sig->is_generic_template;
+        }
     }
-    if (report_errors && sig != nullptr && sig->access == AccessSpecifier::Private &&
-        !sig->member_owner_class.empty() && !grants_private_access(state, sig->member_owner_class)) {
+    if (report_errors && sig != nullptr && sig_is_deleted) {
+        return std::unexpected(DataflowError(deleted_function_error_message("'" + callee_display + "'", sig_loc), state.current_loc));
+    }
+    if (report_errors && sig != nullptr && sig_access == AccessSpecifier::Private &&
+        !sig_member_owner_class.empty() && !grants_private_access(state, sig_member_owner_class)) {
         return std::unexpected(DataflowError("cannot call private member function '" + callee_display + "' of class '" +
-                             sig->member_owner_class + "' from outside its own methods",
+                             sig_member_owner_class + "' from outside its own methods",
             state.current_loc));
     }
-    if (report_errors && sig != nullptr && sig->is_extern_c_declaration_only && state.unsafe_depth == 0) {
+    if (report_errors && sig != nullptr && sig_is_extern_c && state.unsafe_depth == 0) {
         return std::unexpected(DataflowError("cannot call 'extern \"C\"' function '" + callee_display +
                              "' outside '[[scpp::unsafe]] { }': no scpp compiler ever sees its real "
                              "implementation to check it (spec §5.1(5.6), §5.1(6))",
             state.current_loc));
     }
-    if (report_errors && sig != nullptr && sig->is_unsafe && state.unsafe_depth == 0) {
+    if (report_errors && sig != nullptr && sig_is_unsafe && state.unsafe_depth == 0) {
         return std::unexpected(DataflowError("cannot call '" + callee_display +
                              "' outside '[[scpp::unsafe]] { }': its own declaration is marked "
                              "'[[scpp::unsafe]]', so its soundness depends on a precondition only the "
@@ -1940,235 +2313,34 @@ struct ConvertingConstructorBinding {
     // call only (see apply_reference_argument) -- never merged into
     // `state`, since none of these transient borrows outlive the call.
     InCallBorrows in_call_borrows{};
-    auto apply_one_argument = [&](const Expr& arg, std::size_t param_index) -> std::expected<void, DataflowError> {
-        Type effective_param_type{};
-        bool have_effective_param_type = false;
-        if (sig != nullptr && param_index < sig->param_types.size()) {
-            effective_param_type = sig->param_types[param_index];
-            if (!sig->member_owner_class.empty() && !sig->is_generic_template &&
-                param_index < sig->param_is_forwarding_reference.size() &&
-                sig->param_is_forwarding_reference[param_index]) {
-                effective_param_type.is_rvalue_ref = false;
-                effective_param_type.is_mutable_ref = !is_read_only_reachable(arg, body, signatures);
-                if (effective_param_type.pointee != nullptr) {
-                    effective_param_type.pointee->is_const_qualified = is_read_only_reachable(arg, body, signatures);
-                }
-            }
-            if (param_index < sig->param_is_forwarding_reference.size() && sig->param_is_forwarding_reference[param_index] &&
-                is_reference(effective_param_type) && effective_param_type.pointee != nullptr &&
-                !produces_rvalue_of_type(arg, *effective_param_type.pointee, body, signatures)) {
-                effective_param_type.is_rvalue_ref = false;
-                effective_param_type.is_mutable_ref = !is_read_only_reachable(arg, body, signatures);
-                effective_param_type.pointee->is_const_qualified = is_read_only_reachable(arg, body, signatures);
-            }
-            have_effective_param_type = true;
-        }
-        bool param_is_reference = have_effective_param_type && is_reference(effective_param_type);
-        bool param_is_rvalue_reference = param_is_reference && effective_param_type.is_rvalue_ref;
-        if (param_is_rvalue_reference) {
-            // ch03/ch05 §5.11: once a parameter is still a genuine
-            // rvalue-reference *after* any forwarding-reference collapse,
-            // it is an ownership-transfer argument, not a borrow: needs a
-            // genuine rvalue (see produces_rvalue_of_type), never
-            // apply_reference_argument's place-borrow bookkeeping. Still
-            // walked via apply_expr (exactly like a by-value/unique_ptr
-            // argument below) for its own side effects -- e.g.
-            // std::move(x) marking x moved-out in `state`.
-            if (report_errors) {
-                std::string argument_name{"parameter "};
-                argument_name += std::to_string(param_index + 1);
-                argument_name += " of ";
-                argument_name += callee_display;
-                if (auto _r = check_rvalue_reference_argument(arg, *effective_param_type.pointee, argument_name, body,
-                                                              signatures, state.current_loc, report_errors);
-                    !_r.has_value()) {
-                    return std::unexpected(std::move(_r).error());
-                }
-            }
-            if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
-                return std::unexpected(std::move(_r).error());
-            }
-        } else if (param_is_reference) {
-            if (auto _r = apply_reference_argument(arg, effective_param_type, state, in_call_borrows, body, signatures, report_errors); !_r.has_value()) {
-                return std::unexpected(std::move(_r).error());
-            }
-        } else {
-            // [dcl.init]/17.9 copy-initializes a by-value parameter from
-            // its argument, so it is a binding position like any other
-            // and gets the same raw-pointer conversion check a
-            // declaration or an assignment gets. Overload resolution's
-            // own argument_matches_parameter is a *selection* rule and is
-            // deliberately lenient about pointee qualification; it is not
-            // the place that answers whether the selected binding is
-            // sound. Without this, `take_ptr(&c)` for a `const int c` was
-            // reachable only through a guard scoped to the syntactic
-            // `&expr` shape -- which said nothing about `take_ptr(w)` for
-            // a const array, or about any pointer that reached the
-            // argument through some other expression.
-            if (report_errors && have_effective_param_type) {
-                std::string argument_name{"parameter "};
-                argument_name += std::to_string(param_index + 1);
-                argument_name += " of ";
-                argument_name += callee_display;
-                if (auto _r = check_raw_pointer_assignment(effective_param_type, arg, body, signatures,
-                                                           state.current_loc, argument_name, report_errors);
-                    !_r.has_value()) {
-                    return std::unexpected(std::move(_r).error());
-                }
-            }
-            if (report_errors && sig != nullptr && param_index < sig->param_types.size() &&
-                sig->param_types[param_index].kind == TypeKind::Pointer) {
-                std::optional<Type> arg_type = infer_expr_type(arg, body, signatures);
-                auto unwrap_pointer_pointee = [](const Type& type) -> const Type* {
-                    if (type.kind != TypeKind::Pointer || type.pointee == nullptr) return nullptr;
-                    if (type.pointee->kind == TypeKind::Reference && type.pointee->pointee) return &*type.pointee->pointee;
-                    return &*type.pointee;
-                };
-                const Type* arg_pointee = arg_type.has_value() ? unwrap_pointer_pointee(*arg_type) : nullptr;
-                const Type* param_pointee = unwrap_pointer_pointee(sig->param_types[param_index]);
-                bool needs_class_pointer_validation =
-                    body.program != nullptr && arg_pointee != nullptr && param_pointee != nullptr &&
-                    arg_pointee->kind == TypeKind::Named && param_pointee->kind == TypeKind::Named &&
-                    (find_class_def(*body.program, arg_pointee->name) != nullptr ||
-                     find_class_def(*body.program, param_pointee->name) != nullptr);
-                // ch05 §5.14: a call through an *external* same-generic-
-                // class-typed parameter (e.g. `target.__insert_new_entry
-                // (fresh)`, `target: std::unordered_map<K, V>&` alongside
-                // `this` inside `unordered_map<K, V>::__append_all_to` --
-                // see that method's own comment in std_unordered_map.scpp)
-                // never gets its callee resolved against `target`'s own,
-                // properly witness-substituted per-method synthetic
-                // check-class the way `this->` calls do (only `this`'s
-                // type is rewritten in check_generic_type_methods_once);
-                // it falls back to the *original*, un-substituted
-                // template's registered signature instead (still literally
-                // typed e.g. `unordered_map_entry<K, V>*`), while `fresh`'s
-                // own inferred type is now the real, witness-resolved
-                // instantiation (resolve_generic_type_optimistic having
-                // done its job correctly on it) -- a mismatch with no
-                // bearing on any real, concrete instantiation of this
-                // same method (whose own external parameter *is* the
-                // correctly monomorphized, matching concrete type, via
-                // the ordinary get_or_create_clone/instantiate_generic_type
-                // path), so tolerated here the same way as every other
-                // is_synthetic_check_only-only false positive in this
-                // file.
-                bool caller_is_synthetic_check_only = [&]() {
-                    if (body.program == nullptr) return false;
-                    std::string owner_name = enclosing_class_name(body);
-                    if (owner_name.empty()) return false;
-                    const ClassDef* owner_def = find_class_def(*body.program, owner_name);
-                    return owner_def != nullptr && owner_def->is_synthetic_check_only;
-                }();
-                if (needs_class_pointer_validation && !caller_is_synthetic_check_only && arg_type->kind == TypeKind::Pointer &&
-                    !raw_pointer_implicitly_convertible(*arg_type, sig->param_types[param_index]) &&
-                    !types_compatible_with_base_conversion(*arg_type, sig->param_types[param_index], *body.program,
-                                                           enclosing_class_name(body))) {
-                    return std::unexpected(DataflowError("cannot pass an incompatible pointer type to parameter '" +
-                                            sig->param_names[param_index] + "'",
-                                        state.current_loc));
-                }
-            }
-            // [over.ics.user]: the argument has class type and reaches
-            // the parameter through a conversion function its own class
-            // declares. Checked here, in the pass that decides
-            // viability, so the call codegen will emit was seen by this
-            // one -- and asked for a class-typed parameter too, since
-            // §6.6(1.2) makes the conversion function's own call a fresh
-            // value and the by-value rule below would otherwise reject
-            // the argument for not being one.
-            if (sig != nullptr && param_index < sig->param_types.size()) {
-                auto converted = check_user_defined_conversion(arg, sig->param_types[param_index],
-                                                               /*allow_explicit=*/false, state, body, signatures,
-                                                               report_errors);
-                if (!converted.has_value()) return std::unexpected(std::move(converted).error());
-                if (converted.value()) return {};
-            }
-            bool class_value_param =
-                sig != nullptr && param_index < sig->param_types.size() &&
-                is_named_record_type(sig->param_types[param_index], body);
-            bool copyable_lvalue_source =
-                class_value_param && is_copyable_class_lvalue_boundary_source(arg, sig->param_types[param_index], body, signatures);
-            bool freely_copyable_value_source =
-                class_value_param && is_freely_copyable_class_value_source(arg, sig->param_types[param_index], body, signatures);
-            const FunctionSignature* converting_ctor = nullptr;
-            Type converting_ctor_param_type{};
-            if (class_value_param) {
-                auto binding = resolve_converting_constructor_binding(sig->param_types[param_index], arg, state, body, signatures,
-                                                                     report_errors);
-                if (!binding.has_value()) return std::unexpected(std::move(binding).error());
-                converting_ctor = binding->ctor;
-                converting_ctor_param_type = binding->effective_param_type;
-            }
-            if (report_errors && class_value_param && !copyable_lvalue_source && !freely_copyable_value_source &&
-                !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures) && converting_ctor == nullptr) {
-                return std::unexpected(DataflowError("passing " +
-                                     std::string(record_keyword(sig->param_types[param_index].name, *body.program)) +
-                                     " '" + sig->param_types[param_index].name +
-                                     "' by value requires either an implicitly copyable same-type source or "
-                                     "a fresh value such as std::move(x) or a call returning by value",
-                    state.current_loc));
-            }
-            if (converting_ctor != nullptr) {
-                Type ctor_param_type = converting_ctor_param_type;
-                if (is_reference(ctor_param_type) && ctor_param_type.is_rvalue_ref) {
-                    if (report_errors) {
-                        std::string argument_name{"the converting constructor's parameter for parameter "};
-                        argument_name += std::to_string(param_index + 1);
-                        argument_name += " of ";
-                        argument_name += callee_display;
-                        if (auto _r = check_rvalue_reference_argument(arg, *ctor_param_type.pointee, argument_name, body,
-                                                                      signatures, state.current_loc, report_errors);
-                            !_r.has_value()) {
-                            return std::unexpected(std::move(_r).error());
-                        }
-                    }
-                    if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
-                        return std::unexpected(std::move(_r).error());
-                    }
-                } else if (is_reference(ctor_param_type)) {
-                    if (auto _r = apply_reference_argument(arg, ctor_param_type, state, in_call_borrows, body, signatures, report_errors); !_r.has_value()) {
-                        return std::unexpected(std::move(_r).error());
-                    }
-                } else {
-                    if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
-                        return std::unexpected(std::move(_r).error());
-                    }
-                }
-                if (report_errors && sig != nullptr) {
-                    if (auto _r = enforce_thread_safety_constraints_for_argument(arg, *sig, param_index, "function", callee_display, body,
-                                                                   signatures, state.current_loc);
-                        !_r.has_value()) {
-                        return std::unexpected(std::move(_r).error());
-                    }
-                }
-                return {};
-            }
-            if (auto _r = apply_expr(arg, /*is_move_target_context=*/!(copyable_lvalue_source || freely_copyable_value_source), state,
-                       body, signatures, report_errors); !_r.has_value()) {
-                return std::unexpected(std::move(_r).error());
-            }
-        }
-        if (report_errors && sig != nullptr) {
-            if (auto _r = enforce_thread_safety_constraints_for_argument(arg, *sig, param_index, "function", callee_display, body,
-                                                           signatures, state.current_loc);
-                !_r.has_value()) {
-                return std::unexpected(std::move(_r).error());
-            }
-        }
-        return {};
-    };
     for (std::size_t i = 0; i < expr.args.size(); i++) {
-        if (auto _r = apply_one_argument(*expr.args[i], i + callee.param_offset); !_r.has_value()) {
+        if (auto _r = apply_call_argument(*expr.args[i], i + callee.param_offset, sig, callee_display,
+                                          sig_member_owner_class, sig_is_generic, state, in_call_borrows,
+                                          body, signatures, report_errors); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
     }
     if (sig != nullptr) {
-        for (std::size_t param_index = expr.args.size() + callee.param_offset; param_index < sig->param_types.size();
+        std::size_t num_params = 0;
+        [[scpp::unsafe]] {
+            num_params = sig->param_types.size();
+        }
+        for (std::size_t param_index = expr.args.size() + callee.param_offset; param_index < num_params;
              param_index++) {
-            if (sig->param_default_exprs[param_index] == nullptr) break;
-            ExprPtr default_arg = deep_clone_expr_with_loc(*sig->param_default_exprs[param_index], state.current_loc);
-            if (auto _r = apply_one_argument(*default_arg, param_index); !_r.has_value()) {
+            const Expr* def_expr = nullptr;
+            [[scpp::unsafe]] {
+                if (param_index < sig->param_default_exprs.size() && sig->param_default_exprs[param_index] != nullptr) {
+                    def_expr = sig->param_default_exprs[param_index].get();
+                }
+            }
+            if (def_expr == nullptr) break;
+            ExprPtr default_arg{};
+            [[scpp::unsafe]] {
+                default_arg = deep_clone_expr_with_loc(*def_expr, state.current_loc);
+            }
+            if (auto _r = apply_call_argument(*default_arg, param_index, sig, callee_display,
+                                              sig_member_owner_class, sig_is_generic, state, in_call_borrows,
+                                              body, signatures, report_errors); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
         }
@@ -2199,6 +2371,151 @@ struct ConvertingConstructorBinding {
 // resolve_overload's own "let a more specific, later check report it"
 // pattern -- except for zero-argument/default-brace construction, which
 // must be diagnosed here as "no default constructor" rather than
+[[nodiscard]] std::expected<void, DataflowError> apply_constructor_argument(
+    const Expr& arg, std::size_t param_index, const FunctionSignature* sig,
+    const std::string& class_name, const Type& constructed_type,
+    bool constructed_state_can_carry_lifetimes, DataflowState& state,
+    InCallBorrows& in_call_borrows, const Body& body, const Signatures& signatures,
+    bool report_errors) {
+    Type effective_param_type{};
+    bool have_effective_param_type = false;
+    const Type* destination_type = &constructed_type;
+    [[scpp::unsafe]] {
+        if (sig != nullptr && param_index < sig->param_types.size()) {
+            effective_param_type = sig->param_types[param_index];
+            if (param_index < sig->param_is_forwarding_reference.size() && sig->param_is_forwarding_reference[param_index] &&
+                is_reference(effective_param_type) && effective_param_type.pointee != nullptr &&
+                !produces_rvalue_of_type(arg, get_pointee_type_ref(effective_param_type), body, signatures)) {
+                effective_param_type.is_rvalue_ref = false;
+                effective_param_type.is_mutable_ref = !is_read_only_reachable(arg, body, signatures);
+            }
+            have_effective_param_type = true;
+            destination_type = &sig->param_types[param_index];
+        }
+    }
+    if (constructed_state_can_carry_lifetimes) {
+        if (auto _r = reject_lifetime_group_state_embedding(arg, state, body, signatures, report_errors, "constructed object state",
+                                              destination_type);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    }
+    bool param_is_reference = have_effective_param_type && is_reference(effective_param_type);
+    bool param_is_rvalue_reference = param_is_reference && effective_param_type.is_rvalue_ref;
+    bool allow_temporary_reference_binding =
+        param_is_reference && !effective_param_type.is_mutable_ref &&
+        const_reference_binds_materialized_temporary(arg, effective_param_type, body, signatures);
+    if (param_is_rvalue_reference) {
+        if (report_errors) {
+            std::string argument_name{"parameter "};
+            argument_name += std::to_string(param_index + 1);
+            argument_name += " of ";
+            argument_name += class_name;
+            argument_name += "'s constructor";
+            if (auto _r = check_rvalue_reference_argument(arg, get_pointee_type_ref(effective_param_type), argument_name, body,
+                                                          signatures, state.current_loc, report_errors);
+                !_r.has_value()) {
+                return std::unexpected(std::move(_r).error());
+            }
+        }
+        if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    } else if (param_is_reference && allow_temporary_reference_binding) {
+        if (auto _r = apply_expr(arg, /*is_move_target_context=*/arg.kind == ExprKind::Move, state, body, signatures, report_errors); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    } else if (param_is_reference) {
+        if (auto _r = apply_reference_argument(arg, effective_param_type, state, in_call_borrows, body, signatures,
+                                  report_errors); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    } else {
+        bool class_value_param = false;
+        [[scpp::unsafe]] {
+            class_value_param =
+                sig != nullptr && param_index < sig->param_types.size() &&
+                is_named_record_type(sig->param_types[param_index], body);
+        }
+        bool copyable_lvalue_source =
+            class_value_param && is_copyable_class_lvalue_boundary_source(arg, effective_param_type, body, signatures);
+        bool freely_copyable_value_source =
+            class_value_param && is_freely_copyable_class_value_source(arg, effective_param_type, body, signatures);
+        if (arg.kind == ExprKind::Lambda) freely_copyable_value_source = class_value_param;
+        const FunctionSignature* converting_ctor = nullptr;
+        Type converting_ctor_param_type{};
+        if (class_value_param) {
+            auto binding = resolve_converting_constructor_binding(effective_param_type, arg, state, body, signatures,
+                                                                 report_errors);
+            if (!binding.has_value()) return std::unexpected(std::move(binding).error());
+            converting_ctor = binding.value().ctor;
+            converting_ctor_param_type = binding.value().effective_param_type;
+        }
+        std::string rec_kw{};
+        std::string p_name{};
+        [[scpp::unsafe]] {
+            if (report_errors && class_value_param && !copyable_lvalue_source && !freely_copyable_value_source &&
+                !produces_rvalue_of_type(arg, effective_param_type, body, signatures) && converting_ctor == nullptr) {
+                p_name = effective_param_type.name;
+                rec_kw = record_keyword(p_name, get_program_ref(body));
+            }
+        }
+        if (!rec_kw.empty()) {
+            return std::unexpected(DataflowError("passing " +
+                                 rec_kw +
+                                 " '" + p_name +
+                                 "' by value requires either an implicitly copyable same-type source or "
+                                 "a fresh value such as std::move(x) or a call returning by value",
+                state.current_loc));
+        }
+        if (converting_ctor != nullptr) {
+            if (is_reference(converting_ctor_param_type) && converting_ctor_param_type.is_rvalue_ref) {
+                if (report_errors) {
+                    std::string argument_name{"the converting constructor's parameter for parameter "};
+                    argument_name += std::to_string(param_index + 1);
+                    argument_name += " of ";
+                    argument_name += class_name;
+                    argument_name += "'s constructor";
+                    if (auto _r = check_rvalue_reference_argument(arg, get_pointee_type_ref(converting_ctor_param_type), argument_name,
+                                                                  body, signatures, state.current_loc, report_errors);
+                        !_r.has_value()) {
+                        return std::unexpected(std::move(_r).error());
+                    }
+                }
+                if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            } else if (is_reference(converting_ctor_param_type)) {
+                if (auto _r = apply_reference_argument(arg, converting_ctor_param_type, state, in_call_borrows, body,
+                                                      signatures, report_errors);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            } else {
+                if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
+                    !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+        } else if (auto _r = apply_expr(arg, /*is_move_target_context=*/!(copyable_lvalue_source || freely_copyable_value_source), state,
+                   body, signatures, report_errors); !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    }
+    if (report_errors && sig != nullptr) {
+        std::expected<void, DataflowError> _r{};
+        [[scpp::unsafe]] {
+            _r = enforce_thread_safety_constraints_for_argument(arg, *sig, param_index, "constructor", class_name, body,
+                                                           signatures, state.current_loc);
+        }
+        if (!_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
+    }
+    return {};
+}
+
 // slipping through to codegen and crashing LLVM module verification.
 [[nodiscard]] std::expected<void, DataflowError> check_constructor_arguments(const Type& constructed_type, const std::vector<ExprPtr>& ctor_args,
                                   DataflowState& state, const Body& body, const Signatures& signatures,
@@ -2235,14 +2552,22 @@ struct ConvertingConstructorBinding {
     // into an array element slip past §6.5(2) entirely while `T y = x;`
     // is correctly rejected. One question, one message: every spelling of
     // the same copy must reach the same rule.
-    if (report_errors && ctor_args.size() == 1 && ctor_args[0] != nullptr && body.program != nullptr &&
-        is_named_record_type(constructed_type, body) &&
-        !has_user_declared_copy_ctor(class_name, *body.program) &&
-        !is_freely_copyable_class_value_source(*ctor_args[0], constructed_type, body, signatures) &&
-        is_bare_same_type_copy_source(*ctor_args[0], constructed_type, body, signatures) &&
-        !is_copy_constructible(class_name, *body.program)) {
+    bool copy_invalid = false;
+    std::string rec_kw{};
+    [[scpp::unsafe]] {
+        if (report_errors && ctor_args.size() == 1 && ctor_args[0] != nullptr && body.program != nullptr &&
+            is_named_record_type(constructed_type, body) &&
+            !has_user_declared_copy_ctor(class_name, get_program_ref(body)) &&
+            !is_freely_copyable_class_value_source(*ctor_args[0], constructed_type, body, signatures) &&
+            is_bare_same_type_copy_source(*ctor_args[0], constructed_type, body, signatures) &&
+            !is_copy_constructible(class_name, get_program_ref(body))) {
+            copy_invalid = true;
+            rec_kw = record_keyword(class_name, get_program_ref(body));
+        }
+    }
+    if (copy_invalid) {
         return std::unexpected(
-            DataflowError(std::string(record_keyword(class_name, *body.program)) + " '" + class_name +
+            DataflowError(rec_kw + " '" + class_name +
                               "' is not copy-constructible (spec §6.5(2)) -- this construction is not permitted",
                           state.current_loc));
     }
@@ -2269,7 +2594,13 @@ struct ConvertingConstructorBinding {
     // constructor at all.
     const FunctionSignature* sig = resolve_constructor_signature(class_name, ctor_args, body, signatures);
     if (sig == nullptr && report_errors && ctor_args.empty()) {
-        if (body.program != nullptr && !class_has_any_constructor(class_name, *body.program)) {
+        bool no_any_ctor = false;
+        [[scpp::unsafe]] {
+            if (body.program != nullptr) {
+                no_any_ctor = !class_has_any_constructor(class_name, get_program_ref(body));
+            }
+        }
+        if (no_any_ctor) {
             if (auto _r = ensure_implicit_default_construction_is_valid(class_name, state.current_class, body, signatures,
                                                           state.current_loc,
                                                           "implicit default construction of class '" + class_name +
@@ -2308,15 +2639,27 @@ struct ConvertingConstructorBinding {
     if (sig == nullptr && ctor_args.size() == 1 && ctor_args[0] != nullptr && body.program != nullptr &&
         is_named_record_type(constructed_type, body)) {
         std::optional<Type> arg_type = infer_expr_type(*ctor_args[0], body, signatures);
-        const Type* source = arg_type.has_value() ? &*arg_type : nullptr;
-        if (source != nullptr && source->kind == TypeKind::Reference && source->pointee != nullptr) {
-            source = source->pointee.get();
+        bool same_name = false;
+        if (arg_type.has_value()) {
+            Type source_t = *arg_type;
+            if (source_t.kind == TypeKind::Reference && source_t.pointee != nullptr) {
+                source_t = get_pointee_type_ref(source_t);
+            }
+            same_name = (source_t.kind == TypeKind::Named && source_t.name == constructed_type.name);
         }
-        if (source != nullptr && source->kind == TypeKind::Named && source->name == constructed_type.name) {
-            if (report_errors && !is_copy_constructible(class_name, *body.program) &&
-                is_bare_same_type_copy_source(*ctor_args[0], constructed_type, body, signatures)) {
+        if (same_name) {
+            bool not_copyable = false;
+            std::string rec_kw{};
+            [[scpp::unsafe]] {
+                if (report_errors && !is_copy_constructible(class_name, get_program_ref(body)) &&
+                    is_bare_same_type_copy_source(*ctor_args[0], constructed_type, body, signatures)) {
+                    not_copyable = true;
+                    rec_kw = record_keyword(class_name, get_program_ref(body));
+                }
+            }
+            if (not_copyable) {
                 return std::unexpected(DataflowError(
-                    std::string(record_keyword(class_name, *body.program)) + " '" + class_name +
+                    rec_kw + " '" + class_name +
                         "' is not copy-constructible (spec §6.5(2)) -- this construction is not permitted",
                     state.current_loc));
             }
@@ -2346,17 +2689,35 @@ struct ConvertingConstructorBinding {
             return std::unexpected(std::move(_r).error());
         }
     }
-    if (report_errors && sig != nullptr && sig->is_deleted) {
-        return std::unexpected(DataflowError(deleted_function_error_message("the constructor of '" + class_name + "'", sig->loc),
+    bool is_del = false;
+    SourceLocation sig_loc{};
+    [[scpp::unsafe]] {
+        if (sig != nullptr) {
+            is_del = sig->is_deleted;
+            sig_loc = sig->loc;
+        }
+    }
+    if (report_errors && sig != nullptr && is_del) {
+        return std::unexpected(DataflowError(deleted_function_error_message("the constructor of '" + class_name + "'", sig_loc),
             state.current_loc));
     }
-    if (report_errors && sig != nullptr && sig->access == AccessSpecifier::Private &&
-        !sig->member_owner_class.empty() && !grants_private_access(state, sig->member_owner_class)) {
+    bool is_private_err = false;
+    bool is_unsafe_err = false;
+    [[scpp::unsafe]] {
+        if (report_errors && sig != nullptr && sig->access == AccessSpecifier::Private &&
+            !sig->member_owner_class.empty() && !grants_private_access(state, sig->member_owner_class)) {
+            is_private_err = true;
+        }
+        if (report_errors && sig != nullptr && sig->is_unsafe && state.unsafe_depth == 0) {
+            is_unsafe_err = true;
+        }
+    }
+    if (is_private_err) {
         return std::unexpected(DataflowError("cannot call private constructor of class '" + class_name +
                              "' from outside its own methods",
             state.current_loc));
     }
-    if (report_errors && sig != nullptr && sig->is_unsafe && state.unsafe_depth == 0) {
+    if (is_unsafe_err) {
         return std::unexpected(DataflowError("cannot call '" + class_name +
                              "'s constructor outside '[[scpp::unsafe]] { }': its own declaration is marked "
                              "'[[scpp::unsafe]]', so its soundness depends on a precondition only the "
@@ -2364,143 +2725,40 @@ struct ConvertingConstructorBinding {
             state.current_loc));
     }
     InCallBorrows in_call_borrows{};
-    bool constructed_state_can_carry_lifetimes =
-        report_errors && body.program != nullptr &&
-        type_contains_lifetime_carrying_state(constructed_type, *body.program) &&
-        !constructed_type.is_reference_wrapper_lifetime_source;
-    auto apply_one_argument = [&](const Expr& arg, std::size_t param_index) -> std::expected<void, DataflowError> {
-        Type effective_param_type{};
-        bool have_effective_param_type = false;
-        const Type* destination_type = &constructed_type;
-        if (sig != nullptr && param_index < sig->param_types.size()) {
-            effective_param_type = sig->param_types[param_index];
-            if (param_index < sig->param_is_forwarding_reference.size() && sig->param_is_forwarding_reference[param_index] &&
-                is_reference(effective_param_type) && effective_param_type.pointee != nullptr &&
-                !produces_rvalue_of_type(arg, *effective_param_type.pointee, body, signatures)) {
-                effective_param_type.is_rvalue_ref = false;
-                effective_param_type.is_mutable_ref = !is_read_only_reachable(arg, body, signatures);
-            }
-            have_effective_param_type = true;
-            destination_type = &sig->param_types[param_index];
-        }
-        if (constructed_state_can_carry_lifetimes) {
-            if (auto _r = reject_lifetime_group_state_embedding(arg, state, body, signatures, report_errors, "constructed object state",
-                                                  destination_type);
-                !_r.has_value()) {
-                return std::unexpected(std::move(_r).error());
-            }
-        }
-        bool param_is_reference = have_effective_param_type && is_reference(effective_param_type);
-        bool param_is_rvalue_reference = param_is_reference && effective_param_type.is_rvalue_ref;
-        bool allow_temporary_reference_binding =
-            param_is_reference && !effective_param_type.is_mutable_ref &&
-            const_reference_binds_materialized_temporary(arg, effective_param_type, body, signatures);
-        if (param_is_rvalue_reference) {
-            if (report_errors) {
-                std::string argument_name{"parameter "};
-                argument_name += std::to_string(param_index + 1);
-                argument_name += " of ";
-                argument_name += class_name;
-                argument_name += "'s constructor";
-                if (auto _r = check_rvalue_reference_argument(arg, *effective_param_type.pointee, argument_name, body,
-                                                              signatures, state.current_loc, report_errors);
-                    !_r.has_value()) {
-                    return std::unexpected(std::move(_r).error());
-                }
-            }
-            if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
-                return std::unexpected(std::move(_r).error());
-            }
-        } else if (param_is_reference && allow_temporary_reference_binding) {
-            if (auto _r = apply_expr(arg, /*is_move_target_context=*/arg.kind == ExprKind::Move, state, body, signatures, report_errors); !_r.has_value()) {
-                return std::unexpected(std::move(_r).error());
-            }
-        } else if (param_is_reference) {
-            if (auto _r = apply_reference_argument(arg, effective_param_type, state, in_call_borrows, body, signatures,
-                                      report_errors); !_r.has_value()) {
-                return std::unexpected(std::move(_r).error());
-            }
-        } else {
-            bool class_value_param =
-                sig != nullptr && param_index < sig->param_types.size() &&
-                is_named_record_type(sig->param_types[param_index], body);
-            bool copyable_lvalue_source =
-                class_value_param && is_copyable_class_lvalue_boundary_source(arg, sig->param_types[param_index], body, signatures);
-            bool freely_copyable_value_source =
-                class_value_param && is_freely_copyable_class_value_source(arg, sig->param_types[param_index], body, signatures);
-            if (arg.kind == ExprKind::Lambda) freely_copyable_value_source = class_value_param;
-            const FunctionSignature* converting_ctor = nullptr;
-            Type converting_ctor_param_type{};
-            if (class_value_param) {
-                auto binding = resolve_converting_constructor_binding(sig->param_types[param_index], arg, state, body, signatures,
-                                                                     report_errors);
-                if (!binding.has_value()) return std::unexpected(std::move(binding).error());
-                converting_ctor = binding->ctor;
-                converting_ctor_param_type = binding->effective_param_type;
-            }
-            if (report_errors && class_value_param && !copyable_lvalue_source && !freely_copyable_value_source &&
-                !produces_rvalue_of_type(arg, sig->param_types[param_index], body, signatures) && converting_ctor == nullptr) {
-                return std::unexpected(DataflowError("passing " +
-                                     std::string(record_keyword(sig->param_types[param_index].name, *body.program)) +
-                                     " '" + sig->param_types[param_index].name +
-                                     "' by value requires either an implicitly copyable same-type source or "
-                                     "a fresh value such as std::move(x) or a call returning by value",
-                    state.current_loc));
-            }
-            if (converting_ctor != nullptr) {
-                if (is_reference(converting_ctor_param_type) && converting_ctor_param_type.is_rvalue_ref) {
-                    if (report_errors) {
-                        std::string argument_name{"the converting constructor's parameter for parameter "};
-                        argument_name += std::to_string(param_index + 1);
-                        argument_name += " of ";
-                        argument_name += class_name;
-                        argument_name += "'s constructor";
-                        if (auto _r = check_rvalue_reference_argument(arg, *converting_ctor_param_type.pointee, argument_name,
-                                                                      body, signatures, state.current_loc, report_errors);
-                            !_r.has_value()) {
-                            return std::unexpected(std::move(_r).error());
-                        }
-                    }
-                    if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
-                        !_r.has_value()) {
-                        return std::unexpected(std::move(_r).error());
-                    }
-                } else if (is_reference(converting_ctor_param_type)) {
-                    if (auto _r = apply_reference_argument(arg, converting_ctor_param_type, state, in_call_borrows, body,
-                                                          signatures, report_errors);
-                        !_r.has_value()) {
-                        return std::unexpected(std::move(_r).error());
-                    }
-                } else {
-                    if (auto _r = apply_expr(arg, /*is_move_target_context=*/true, state, body, signatures, report_errors);
-                        !_r.has_value()) {
-                        return std::unexpected(std::move(_r).error());
-                    }
-                }
-            } else if (auto _r = apply_expr(arg, /*is_move_target_context=*/!(copyable_lvalue_source || freely_copyable_value_source), state,
-                       body, signatures, report_errors); !_r.has_value()) {
-                return std::unexpected(std::move(_r).error());
-            }
-        }
-        if (report_errors && sig != nullptr) {
-            if (auto _r = enforce_thread_safety_constraints_for_argument(arg, *sig, param_index, "constructor", class_name, body,
-                                                           signatures, state.current_loc);
-                !_r.has_value()) {
-                return std::unexpected(std::move(_r).error());
-            }
-        }
-        return {};
-    };
+    bool constructed_state_can_carry_lifetimes = false;
+    [[scpp::unsafe]] {
+        constructed_state_can_carry_lifetimes =
+            report_errors && body.program != nullptr &&
+            type_contains_lifetime_carrying_state(constructed_type, get_program_ref(body)) &&
+            !constructed_type.is_reference_wrapper_lifetime_source;
+    }
     for (std::size_t i = 0; i < ctor_args.size(); i++) {
-        if (auto _r = apply_one_argument(*ctor_args[i], i + 1); !_r.has_value()) {
+        if (auto _r = apply_constructor_argument(*ctor_args[i], i + 1, sig, class_name, constructed_type,
+                                                 constructed_state_can_carry_lifetimes, state, in_call_borrows,
+                                                 body, signatures, report_errors); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
     }
-    if (sig != nullptr) {
-        for (std::size_t param_index = ctor_args.size() + 1; param_index < sig->param_types.size(); param_index++) {
-            if (sig->param_default_exprs[param_index] == nullptr) break;
-            ExprPtr default_arg = deep_clone_expr_with_loc(*sig->param_default_exprs[param_index], state.current_loc);
-            if (auto _r = apply_one_argument(*default_arg, param_index); !_r.has_value()) {
+    bool has_sig = false;
+    std::size_t num_params = 0;
+    [[scpp::unsafe]] {
+        if (sig != nullptr) {
+            has_sig = true;
+            num_params = sig->param_types.size();
+        }
+    }
+    if (has_sig) {
+        for (std::size_t param_index = ctor_args.size() + 1; param_index < num_params; param_index++) {
+            ExprPtr default_arg{};
+            [[scpp::unsafe]] {
+                if (sig->param_default_exprs[param_index] != nullptr) {
+                    default_arg = deep_clone_expr_with_loc(*sig->param_default_exprs[param_index], state.current_loc);
+                }
+            }
+            if (default_arg == nullptr) break;
+            if (auto _r = apply_constructor_argument(*default_arg, param_index, sig, class_name, constructed_type,
+                                                     constructed_state_can_carry_lifetimes, state, in_call_borrows,
+                                                     body, signatures, report_errors); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
         }
@@ -2651,7 +2909,7 @@ struct ConvertingConstructorBinding {
     }
     // [over.match.conv]/1 over the destinations [expr.sub]/1 admits.
     std::vector<Type> viable =
-        viable_conversion_destinations(*body.program, operand.name, ConversionDestinationSet::SubscriptIndex);
+        viable_conversion_destinations(get_program_ref(body), operand.name, ConversionDestinationSet::SubscriptIndex);
     if (viable.empty()) {
         if (!report_errors) return false;
         return std::unexpected(
@@ -2935,13 +3193,13 @@ struct ConvertingConstructorBinding {
             }
             if (report_errors) {
                 std::optional<Type> source_type = infer_expr_type(*expr.lhs, body, signatures);
-                if ((source_type.has_value() && is_interface_representation_type(*source_type, *body.program)) ||
-                    is_interface_representation_type(expr.type, *body.program)) {
+                if ((source_type.has_value() && is_interface_representation_type(*source_type, get_program_ref(body))) ||
+                    is_interface_representation_type(expr.type, get_program_ref(body))) {
                     return std::unexpected(DataflowError("cannot cast interface-typed pointers or references to other scalar or raw "
                                             "pointer representations",
                                         state.current_loc));
                 }
-                std::expected<CastKind, std::string> diagnosis = classify_explicit_cast(source_type, expr.type, *body.program);
+                std::expected<CastKind, std::string> diagnosis = classify_explicit_cast(source_type, expr.type, get_program_ref(body));
                 if (!diagnosis.has_value()) {
                     return std::unexpected(DataflowError(std::move(diagnosis).error(), state.current_loc));
                 }
@@ -2949,13 +3207,13 @@ struct ConvertingConstructorBinding {
                 // spelling reaches an `explicit` conversion function --
                 // and the call it selects is checked here, in the pass
                 // that selects it, rather than emitted unseen.
-                if (*diagnosis == CastKind::UserDefinedConversion) {
+                if (diagnosis.value() == CastKind::UserDefinedConversion) {
                     auto converted = check_user_defined_conversion(*expr.lhs, expr.type, /*allow_explicit=*/true, state,
                                                                    body, signatures, report_errors);
                     if (!converted.has_value()) return std::unexpected(std::move(converted).error());
                     return {};
                 }
-                if (*diagnosis == CastKind::UnsafePointerConversion && state.unsafe_depth == 0) {
+                if (diagnosis.value() == CastKind::UnsafePointerConversion && state.unsafe_depth == 0) {
                     return std::unexpected(DataflowError(
                         "cannot cast '" + describe_type_brief(binary_operand_type(*source_type)) + "' to '" + describe_type_brief(expr.type) +
                             "': a conversion between two pointer types that no implicit conversion relates is a gated "
@@ -3092,7 +3350,7 @@ struct ConvertingConstructorBinding {
                         return std::unexpected(std::move(_r).error());
                     }
                 } else if (expr.args.size() == 1 &&
-                           body.program != nullptr && !has_user_declared_copy_ctor(expr.type.name, *body.program) &&
+                           body.program != nullptr && !has_user_declared_copy_ctor(expr.type.name, get_program_ref(body)) &&
                            is_copyable_class_lvalue_boundary_source(*expr.args[0], expr.type, body, signatures)) {
                     if (auto _r = apply_expr(*expr.args[0], /*is_move_target_context=*/false, state, body, signatures, report_errors); !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
@@ -3248,9 +3506,13 @@ struct ConvertingConstructorBinding {
                 std::optional<Type> target_class_type{};
                 if (expr.lhs->kind == ExprKind::Identifier) {
                     const Type* target_type = body.type_if_local(*expr.lhs);
-                    if (target_type != nullptr && is_named_record_type(*target_type, body)) {
-                        target_is_movable_class = true;
-                        target_class_type = *target_type;
+                    if (target_type != nullptr) {
+                        [[scpp::unsafe]] {
+                            if (is_named_record_type(*target_type, body)) {
+                                target_is_movable_class = true;
+                                target_class_type = *target_type;
+                            }
+                        }
                     }
                 } else if (expr.lhs->kind == ExprKind::Member) {
                     // ch04 §4.2/spec §6.4/§6.5: `this.field = std::move(x);`
@@ -3297,20 +3559,34 @@ struct ConvertingConstructorBinding {
                     // is deleted" is a strictly more specific answer than
                     // "this class is not copy-assignable", which is what
                     // §6.5(3)'s suppression rule below reports.
-                    const Function* user_assign = find_user_declared_copy_assign(target_class_type->name, *body.program);
-                    if (user_assign != nullptr && user_assign->is_deleted) {
+                    const Function* user_assign = find_user_declared_copy_assign(target_class_type->name, get_program_ref(body));
+                    bool assign_deleted = false;
+                    SourceLocation user_loc{};
+                    [[scpp::unsafe]] {
+                        if (user_assign != nullptr && user_assign->is_deleted) {
+                            assign_deleted = true;
+                            user_loc = user_assign->loc;
+                        }
+                    }
+                    if (assign_deleted) {
                         return std::unexpected(DataflowError(
                             deleted_function_error_message("the copy assignment operator of '" + target_class_type->name + "'",
-                                                           user_assign->loc),
+                                                           user_loc),
                             state.current_loc));
                     }
                 }
-                if (report_errors && target_class_type.has_value() &&
-                    is_bare_same_type_copy_source(*expr.rhs, *target_class_type, body, signatures) &&
-                    (state.classes_with_copy_assign == nullptr ||
-                     !state.classes_with_copy_assign->contains(target_class_type->name))) {
+                bool not_copy_assignable = false;
+                [[scpp::unsafe]] {
+                    if (report_errors && target_class_type.has_value() &&
+                        is_bare_same_type_copy_source(*expr.rhs, *target_class_type, body, signatures) &&
+                        (state.classes_with_copy_assign == nullptr ||
+                         !state.classes_with_copy_assign->contains(target_class_type->name))) {
+                        not_copy_assignable = true;
+                    }
+                }
+                if (not_copy_assignable) {
                     return std::unexpected(DataflowError(
-                        std::string(record_keyword(target_class_type->name, *body.program)) + " '" +
+                        std::string(record_keyword(target_class_type->name, get_program_ref(body))) + " '" +
                                          target_class_type->name +
                                          "' is not copy-assignable (spec §6.5(3)) -- this assignment is not "
                                          "licensed",
@@ -3527,9 +3803,9 @@ struct ConvertingConstructorBinding {
             if (report_errors && body.program != nullptr) {
                 std::optional<Type> base_type = infer_expr_type(*expr.lhs, body, signatures);
                 if (base_type.has_value()) {
-                    const Type& named = base_type->kind == TypeKind::Reference ? *base_type->pointee : *base_type;
+                    const Type& named = base_type->kind == TypeKind::Reference ? get_pointee_type_ref(*base_type) : *base_type;
                     if (named.kind == TypeKind::Named) {
-                        for (const StructDef& def : body.program->structs) {
+                        for (const StructDef& def : get_program_ref(body).structs) {
                             if (def.name == named.name && def.is_union && state.unsafe_depth == 0) {
                                 return std::unexpected(DataflowError("accessing a union member requires [[scpp::unsafe]] "
                                                     "(FFI union storage may alias multiple representations)",
@@ -3556,22 +3832,26 @@ struct ConvertingConstructorBinding {
             // yet, a known, narrow scope limitation.
             if (report_errors && expr.lhs->kind == ExprKind::Identifier && state.class_names != nullptr) {
                 if (const Type* base_type = body.type_if_local(*expr.lhs); base_type != nullptr) {
-                    std::string class_name = named_type_name(*base_type);
-                    if (!class_name.empty() && state.class_names->contains(class_name) &&
-                        !grants_private_access(state, class_name)) {
-                        AccessSpecifier access = AccessSpecifier::Private;
-                        if (state.class_field_access != nullptr) {
-                            auto class_it = state.class_field_access->find(class_name);
-                            if (class_it != state.class_field_access->end()) {
-                                auto field_it = class_it->second.find(expr.name);
-                                if (field_it != class_it->second.end()) access = field_it->second;
+                    std::string class_name{};
+                    bool is_class = false;
+                    AccessSpecifier access = AccessSpecifier::Private;
+                    [[scpp::unsafe]] {
+                        class_name = named_type_name(*base_type);
+                        if (!class_name.empty() && state.class_names != nullptr && state.class_names->contains(class_name)) {
+                            is_class = true;
+                            if (state.class_field_access != nullptr) {
+                                auto class_it = state.class_field_access->find(class_name);
+                                if (class_it != state.class_field_access->end()) {
+                                    auto field_it = class_it->second.find(expr.name);
+                                    if (field_it != class_it->second.end()) access = field_it->second;
+                                }
                             }
                         }
-                        if (access == AccessSpecifier::Private) {
-                            return std::unexpected(DataflowError("cannot access private member '" + expr.name + "' of class '" +
-                                                 class_name + "' from outside its own methods (ch04 §4.2)",
-                                state.current_loc));
-                        }
+                    }
+                    if (is_class && !grants_private_access(state, class_name) && access == AccessSpecifier::Private) {
+                        return std::unexpected(DataflowError("cannot access private member '" + expr.name + "' of class '" +
+                                             class_name + "' from outside its own methods (ch04 §4.2)",
+                            state.current_loc));
                     }
                 }
             }
@@ -3658,6 +3938,7 @@ struct ConvertingConstructorBinding {
             return {};
         }
     }
+    return {};
 }
 
 [[nodiscard]] std::optional<DataflowError> diagnose_expression_itself(const Expr& expr, const DataflowState& state,
@@ -3713,8 +3994,13 @@ struct ConvertingConstructorBinding {
     // no "root" to track in state.borrows/state.ref_targets at all --
     // just evaluate the initializer for its own side effects and mark
     // `stmt.local` initialized.
-    if (const_reference_binds_materialized_temporary(*stmt.expr, stmt.type, body, signatures)) {
-        if (auto _r = apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body, signatures,
+    const Expr& init_expr = get_stmt_expr_ref(stmt);
+    bool is_move_init = false;
+    [[scpp::unsafe]] {
+        is_move_init = init_expr.kind == ExprKind::Move;
+    }
+    if (const_reference_binds_materialized_temporary(init_expr, stmt.type, body, signatures)) {
+        if (auto _r = apply_expr(init_expr, /*is_move_target_context=*/is_move_init, state, body, signatures,
                    report_errors); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
@@ -3723,7 +4009,7 @@ struct ConvertingConstructorBinding {
     }
 
     if (report_errors && !is_span(stmt.type)) {
-        std::optional<Type> source_type = infer_expr_type(*stmt.expr, body, signatures);
+        std::optional<Type> source_type = infer_expr_type(init_expr, body, signatures);
         bool reference_binding_compatible = false;
         if (source_type.has_value()) {
             // Compared ignoring the *referent's* own const-qualification,
@@ -3739,13 +4025,13 @@ struct ConvertingConstructorBinding {
             Type target_unqualified = type_ignoring_top_level_const(stmt.type);
             reference_binding_compatible =
                 types_equal(source_unqualified, target_unqualified) ||
-                types_compatible_with_base_conversion(source_unqualified, target_unqualified, *body.program,
+                types_compatible_with_base_conversion(source_unqualified, target_unqualified, get_program_ref(body),
                                                       state.current_class);
             if (!reference_binding_compatible && target_unqualified.pointee != nullptr) {
-                Type target_referent = type_ignoring_top_level_const(*target_unqualified.pointee);
+                Type target_referent = type_ignoring_top_level_const(get_pointee_type_ref(target_unqualified));
                 reference_binding_compatible =
                     types_equal(source_unqualified, target_referent) ||
-                    types_compatible_with_base_conversion(source_unqualified, target_referent, *body.program,
+                    types_compatible_with_base_conversion(source_unqualified, target_referent, get_program_ref(body),
                                                           state.current_class);
             }
         }
@@ -3770,7 +4056,7 @@ struct ConvertingConstructorBinding {
     // and a `const` global owns no local root at all, so resolving first
     // made `roots.empty()` return success and skip this entirely. That is
     // how `const int g = 5; int& r = g; r = 9;` compiled and wrote 9.
-    if (report_errors && stmt.type.is_mutable_ref && place_is_read_only(*stmt.expr, body, signatures)) {
+    if (report_errors && stmt.type.is_mutable_ref && place_is_read_only(init_expr, body, signatures)) {
         const char* kind_name = is_span(stmt.type) ? "span" : "reference";
         // A range-`for` lowers to a synthesized range storage bound with
         // the loop variable's own mutability, so this is where
@@ -3790,7 +4076,7 @@ struct ConvertingConstructorBinding {
             message += "'";
         }
         message += ": its source is only reachable through a read-only (const) reference";
-        std::string const_source = describe_const_source(*stmt.expr, body, signatures);
+        std::string const_source = describe_const_source(init_expr, body, signatures);
         if (!const_source.empty()) {
             message += " (";
             message += const_source;
@@ -3800,7 +4086,7 @@ struct ConvertingConstructorBinding {
         return std::unexpected(DataflowError(message, state.current_loc));
     }
 
-    auto roots_result = resolve_borrow_source_root(*stmt.expr, state, body, signatures, report_errors);
+    auto roots_result = resolve_borrow_source_root(init_expr, state, body, signatures, report_errors);
     if (!roots_result.has_value()) return std::unexpected(std::move(roots_result).error());
     RootSet roots = std::move(roots_result).value();
     // [dcl.init.ref]/5: a non-const lvalue reference binds only to an
@@ -3819,12 +4105,12 @@ struct ConvertingConstructorBinding {
     // backstop for every shape that has no more specific answer.
     if (report_errors && stmt.type.kind == TypeKind::Reference && stmt.type.is_mutable_ref &&
         !stmt.type.is_rvalue_ref && stmt.type.pointee != nullptr &&
-        !expression_designates_a_place(*stmt.expr, body, signatures)) {
+        !expression_designates_a_place(init_expr, body, signatures)) {
         return std::unexpected(DataflowError(
             "cannot bind mutable reference '" + body.name_of(stmt.local) +
                 "' to this expression: a non-const lvalue reference binds only to an lvalue "
                 "([dcl.init.ref]/5), and this expression designates no object -- it is a prvalue; a "
-                "'const " + describe_type_brief(*stmt.type.pointee) + "&' would bind a materialized temporary "
+                "'const " + describe_type_brief(get_pointee_type_ref(stmt.type)) + "&' would bind a materialized temporary "
                 "(spec §6.2(11)-(12))",
             state.current_loc));
     }
@@ -3841,7 +4127,7 @@ struct ConvertingConstructorBinding {
     }
 
     bool is_mutable = stmt.type.is_mutable_ref;
-    std::optional<LocalId> lender = resolve_reborrow_lender(*stmt.expr, body, signatures);
+    std::optional<LocalId> lender = resolve_reborrow_lender(init_expr, body, signatures);
     bool uses_lender_suspension = reborrow_is_tracked_against_lender(lender, body);
     if (uses_lender_suspension) {
         if (auto _r = validate_reborrow_lender(*lender, is_mutable, state, body, report_errors); !_r.has_value()) {
@@ -3874,14 +4160,22 @@ struct ConvertingConstructorBinding {
         state.suspended_reborrows[*lender].shared_count++;
     }
     std::optional<Place> exact_bound =
-        stmt.expr != nullptr ? tracked_place_of(*stmt.expr, state, body) : std::nullopt;
+        stmt.expr != nullptr ? tracked_place_of(init_expr, state, body) : std::nullopt;
     std::optional<Place> containing_bound =
-        stmt.expr != nullptr ? tracked_place_of(*stmt.expr, state, body, nullptr, PlacePrecision::Enclosing)
+        stmt.expr != nullptr ? tracked_place_of(init_expr, state, body, nullptr, PlacePrecision::Enclosing)
                              : std::nullopt;
-    state.ref_targets[stmt.local] =
-        RefTarget{roots, uses_lender_suspension ? lender : std::optional<LocalId>{},
-                  containing_bound.has_value() ? containing_bound : exact_bound, exact_bound.has_value(), is_mutable};
+    bool has_exact = exact_bound.has_value();
+    std::optional<Place> target_bound{};
+    if (containing_bound.has_value()) {
+        target_bound = std::move(containing_bound);
+    } else {
+        target_bound = std::move(exact_bound);
+    }
+    std::optional<LocalId> suspension_lender = uses_lender_suspension ? lender : std::optional<LocalId>{};
     state.local_lifetime_sources[stmt.local] = roots;
+    state.ref_targets[stmt.local] =
+        RefTarget{std::move(roots), std::move(suspension_lender),
+                  std::move(target_bound), has_exact, is_mutable};
     reinitialize_place(state.locals, whole_local_place(stmt.local));
     return {};
 }
@@ -3943,7 +4237,12 @@ struct ConvertingConstructorBinding {
     if (std::optional<Place> written = place_root_resolver(state)(stmt.local); written.has_value()) {
         reinitialize_place(state.locals, *written);
     }
-    return apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body,
+    const Expr& assign_target_expr = get_stmt_expr_ref(stmt);
+    bool is_move_target = false;
+    [[scpp::unsafe]] {
+        is_move_target = assign_target_expr.kind == ExprKind::Move;
+    }
+    return apply_expr(assign_target_expr, /*is_move_target_context=*/is_move_target, state, body,
                signatures, report_errors);
 }
 
@@ -3965,7 +4264,10 @@ struct ConvertingConstructorBinding {
     const Expr& arg = *ctor_args[0];
     if (arg.kind != ExprKind::Move || arg.lhs->kind != ExprKind::Identifier) return false;
     const Type* source_type = body.type_if_local(*arg.lhs);
-    return source_type != nullptr && types_equal(*source_type, constructed_type);
+    if (source_type == nullptr) return false;
+    [[scpp::unsafe]] {
+        return types_equal(*source_type, constructed_type);
+    }
 }
 
 [[nodiscard]] bool is_lvalue_copy_source_shape(const Expr& expr, const Body& body, const Signatures& signatures) {
@@ -3998,10 +4300,16 @@ struct ConvertingConstructorBinding {
             // call chain to that original receiver.
             if (!expr.implicit_arrow_chain_safe) return false;
             const Expr* receiver = expr.lhs.get();
-            while (receiver->kind == ExprKind::Call && receiver->name == "operator_arrow" && receiver->lhs != nullptr) {
-                receiver = receiver->lhs.get();
+            bool result = false;
+            [[scpp::unsafe]] {
+                while (receiver != nullptr && receiver->kind == ExprKind::Call && receiver->name == "operator_arrow" && receiver->lhs != nullptr) {
+                    receiver = receiver->lhs.get();
+                }
+                if (receiver != nullptr) {
+                    result = is_lvalue_copy_source_shape(*receiver, body, signatures);
+                }
             }
-            return is_lvalue_copy_source_shape(*receiver, body, signatures);
+            return result;
         }
         case ExprKind::Call: {
             // A call that returns by reference names already-existing
@@ -4059,8 +4367,8 @@ struct ConvertingConstructorBinding {
         return true;
     }
     return source_type->kind == TypeKind::Reference && !source_type->is_rvalue_ref && source_type->pointee &&
-           (same_named_record_type_ignoring_top_level_const(*source_type->pointee, target_type) ||
-            types_equal(*source_type->pointee, target_type));
+           (same_named_record_type_ignoring_top_level_const(get_pointee_type_ref(*source_type), target_type) ||
+            types_equal(get_pointee_type_ref(*source_type), target_type));
 }
 
 [[nodiscard]] std::expected<void, DataflowError> apply_statement(const MirStatement& stmt, DataflowState& state, const Body& body, const Signatures& signatures,
@@ -4069,14 +4377,19 @@ struct ConvertingConstructorBinding {
     // level up (statement rather than expression granularity).
     state.current_loc = stmt.loc;
     switch (stmt.kind) {
-        case MirStatementKind::Declare:
-            if (report_errors && body.program != nullptr && stmt.type.kind == TypeKind::Named &&
-                has_deleted_dtor(stmt.type.name, *body.program)) {
+        case MirStatementKind::Declare: {
+            bool deleted_dtor = false;
+            [[scpp::unsafe]] {
+                if (report_errors && body.program != nullptr && stmt.type.kind == TypeKind::Named) {
+                        deleted_dtor = has_deleted_dtor(stmt.type.name, get_program_ref(body));
+                }
+            }
+            if (deleted_dtor) {
                 return std::unexpected(DataflowError("cannot create an object of type '" + stmt.type.name +
-                                     "': its destructor is defined as '= delete' ([class.dtor]/14 -- the object "
-                                     "would be destroyed at the end of this scope, and a deleted destructor "
-                                     "cannot be invoked)",
-                    state.current_loc));
+                                         "': its destructor is defined as '= delete' ([class.dtor]/14 -- the object "
+                                         "would be destroyed at the end of this scope, and a deleted destructor "
+                                         "cannot be invoked)",
+                        state.current_loc));
             }
             // ch04 §4.2: a constructor-call VarDecl (`ClassName name
             // (args);`) needs its own arguments' move/borrow effects
@@ -4087,27 +4400,56 @@ struct ConvertingConstructorBinding {
             // (spec §6.4(2)); anything else goes through ordinary
             // constructor-overload argument checking.
             if (stmt.ctor_args != nullptr) {
-                if (is_move_construction_shape(*stmt.ctor_args, stmt.type, body)) {
-                    if (auto _r = apply_expr(*(*stmt.ctor_args)[0], /*is_move_target_context=*/true, state, body, signatures,
-                               report_errors); !_r.has_value()) {
+                bool move_shape = false;
+                bool freely_copyable = false;
+                bool copyable_lvalue = false;
+                const Expr* first_arg = nullptr;
+                std::size_t num_args = 0;
+                [[scpp::unsafe]] {
+                    num_args = stmt.ctor_args->size();
+                    if (num_args > 0) first_arg = (*stmt.ctor_args)[0].get();
+                    move_shape = is_move_construction_shape(*stmt.ctor_args, stmt.type, body);
+                    if (!move_shape && num_args == 1 && first_arg != nullptr) {
+                        freely_copyable = is_freely_copyable_class_value_source(*first_arg, stmt.type, body, signatures);
+                        if (!freely_copyable && body.program != nullptr && !has_user_declared_copy_ctor(stmt.type.name, get_program_ref(body))) {
+                            copyable_lvalue = is_copyable_class_lvalue_boundary_source(*first_arg, stmt.type, body, signatures);
+                        }
+                    }
+                }
+                if (move_shape && first_arg != nullptr) {
+                    std::expected<void, DataflowError> _r{};
+                    [[scpp::unsafe]] {
+                        _r = apply_expr(*first_arg, /*is_move_target_context=*/true, state, body, signatures,
+                                   report_errors);
+                    }
+                    if (!_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
-                } else if (stmt.ctor_args->size() == 1 &&
-                           is_freely_copyable_class_value_source(*(*stmt.ctor_args)[0], stmt.type, body, signatures)) {
-                    if (auto _r = apply_expr(*(*stmt.ctor_args)[0], /*is_move_target_context=*/false, state, body, signatures,
-                               report_errors); !_r.has_value()) {
+                } else if (freely_copyable && first_arg != nullptr) {
+                    std::expected<void, DataflowError> _r{};
+                    [[scpp::unsafe]] {
+                        _r = apply_expr(*first_arg, /*is_move_target_context=*/false, state, body, signatures,
+                                   report_errors);
+                    }
+                    if (!_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
-                } else if (stmt.ctor_args->size() == 1 &&
-                           body.program != nullptr && !has_user_declared_copy_ctor(stmt.type.name, *body.program) &&
-                           is_copyable_class_lvalue_boundary_source(*(*stmt.ctor_args)[0], stmt.type, body, signatures)) {
-                    if (auto _r = apply_expr(*(*stmt.ctor_args)[0], /*is_move_target_context=*/false, state, body, signatures,
-                               report_errors); !_r.has_value()) {
+                } else if (copyable_lvalue && first_arg != nullptr) {
+                    std::expected<void, DataflowError> _r{};
+                    [[scpp::unsafe]] {
+                        _r = apply_expr(*first_arg, /*is_move_target_context=*/false, state, body, signatures,
+                                   report_errors);
+                    }
+                    if (!_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
                 } else {
-                    if (auto _r = check_constructor_arguments(stmt.type, *stmt.ctor_args, state, body, signatures,
-                                                 report_errors); !_r.has_value()) {
+                    std::expected<void, DataflowError> _r{};
+                    [[scpp::unsafe]] {
+                        _r = check_constructor_arguments(stmt.type, *stmt.ctor_args, state, body, signatures,
+                                                     report_errors);
+                    }
+                    if (!_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
                 }
@@ -4116,28 +4458,50 @@ struct ConvertingConstructorBinding {
             // comment above): a bare declaration always zero-initializes,
             // so it's always Initialized from this point on.
             reinitialize_place(state.locals, whole_local_place(stmt.local));
-            if (stmt.ctor_args != nullptr && stmt.type.is_reference_wrapper_lifetime_source && stmt.ctor_args->size() == 1) {
-                state.local_lifetime_sources[stmt.local] =
-                    resolve_lifetime_source_roots(*(*stmt.ctor_args)[0], state, body, signatures, report_errors);
+            bool is_rw_source = false;
+            RootSet rw_roots{};
+            [[scpp::unsafe]] {
+                if (stmt.ctor_args != nullptr && stmt.type.is_reference_wrapper_lifetime_source && stmt.ctor_args->size() == 1) {
+                    const Expr* rw_arg = (*stmt.ctor_args)[0].get();
+                    if (rw_arg != nullptr) {
+                        is_rw_source = true;
+                        rw_roots = resolve_lifetime_source_roots(*rw_arg, state, body, signatures, report_errors);
+                    }
+                }
+            }
+            if (is_rw_source) {
+                state.local_lifetime_sources[stmt.local] = std::move(rw_roots);
             } else if (stmt.type.kind == TypeKind::Pointer) {
-                state.local_lifetime_sources[stmt.local] = RootSet{};
+                RootSet empty_roots{};
+                state.local_lifetime_sources[stmt.local] = std::move(empty_roots);
             } else if (is_lifetime_eligible_type(stmt.type)) {
                 state.local_lifetime_sources.erase(stmt.local);
             }
             return {};
+        }
 
         case MirStatementKind::BindReference:
             return apply_reference_binding(stmt, state, body, signatures, report_errors);
 
         case MirStatementKind::Assign: {
+            if (stmt.expr == nullptr) return {};
+            const Expr& assign_expr = get_stmt_expr_ref(stmt);
             // The target is a local (keyed by its own declaration) or,
             // when it has none, a global -- the one assignable place
             // that has no declaration in this body. `target_name` is the
             // source spelling of either, and is only ever used for
             // diagnostics.
             const Type* local_type = stmt.has_local ? &body.type_of(stmt.local) : nullptr;
-            std::string target_name = stmt.has_local ? body.name_of(stmt.local)
-                                                     : (stmt.target != nullptr ? stmt.target->name : std::string{});
+            std::string target_name{};
+            Type cur_local_type{};
+            [[scpp::unsafe]] {
+                if (stmt.has_local) {
+                    target_name = body.name_of(stmt.local);
+                    cur_local_type = body.type_of(stmt.local);
+                } else if (stmt.target != nullptr) {
+                    target_name = stmt.target->name;
+                }
+            }
             // ch05/ch06: a read-only place is written exactly once, by
             // the very same Assign statement its own VarDecl lowers to
             // (see mir.cppm's VarDecl case) -- distinguished from a
@@ -4161,25 +4525,45 @@ struct ConvertingConstructorBinding {
             // assignable: `int f(const int v) { v = 6; return v; }`
             // compiled and returned 6.
             bool target_is_reassignment = (stmt.has_local && state.locals.contains(whole_local_place(stmt.local))) || !stmt.has_local;
-            if (report_errors && stmt.target != nullptr && target_is_reassignment &&
-                place_is_read_only(*stmt.target, body, signatures)) {
-                return std::unexpected(read_only_write_error(*stmt.target, body, signatures, "=", state.current_loc));
+            bool read_only_err = false;
+            [[scpp::unsafe]] {
+                if (report_errors && stmt.target != nullptr && target_is_reassignment) {
+                    read_only_err = place_is_read_only(*stmt.target, body, signatures);
+                }
+            }
+            if (read_only_err) {
+                DataflowError err{"", SourceLocation{}};
+                [[scpp::unsafe]] {
+                    err = read_only_write_error(*stmt.target, body, signatures, "=", state.current_loc);
+                }
+                return std::unexpected(std::move(err));
             }
             if (local_type == nullptr) {
                 std::optional<Type> global_type =
                     find_visible_global_type(target_name, /*explicit_global_qualification=*/false, body);
                 if (!global_type.has_value()) return {};
-                if (auto _r = check_value_binding_conversions(*global_type, *stmt.expr, body, signatures,
-                                                             state.current_loc, target_name, report_errors);
-                    !_r.has_value()) {
-                    return std::unexpected(std::move(_r).error());
+                std::expected<void, DataflowError> _r_conv{};
+                [[scpp::unsafe]] {
+                    if (true) {
+                        _r_conv = check_value_binding_conversions(*global_type, assign_expr, body, signatures,
+                                                                 state.current_loc, target_name, report_errors);
+                    }
                 }
-                return apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+                if (!_r_conv.has_value()) {
+                    return std::unexpected(std::move(_r_conv).error());
+                }
+                std::expected<void, DataflowError> _r_apply{};
+                [[scpp::unsafe]] {
+                    if (true) {
+                        _r_apply = apply_expr(assign_expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+                    }
+                }
+                return _r_apply;
             }
-            if (is_reference((*local_type))) {
+            if (is_reference(cur_local_type)) {
                 return apply_reference_write_through(stmt, state, body, signatures, report_errors);
             }
-            if (is_span((*local_type))) {
+            if (is_span(cur_local_type)) {
                 // Unlike real C++ (where std::span is an ordinary,
                 // freely-reassignable value), v0.1 conservatively treats
                 // it exactly like a reference: bound once at
@@ -4200,17 +4584,25 @@ struct ConvertingConstructorBinding {
             // distinguishes `struct` from `class` for §6.5 -- and a struct
             // reaching codegen with this spelling emitted a call to a
             // function that has no callable definition at all.
-            if (report_errors && body.program != nullptr && (*local_type).kind == TypeKind::Named &&
-                stmt.expr != nullptr && is_bare_same_type_copy_source(*stmt.expr, (*local_type), body, signatures)) {
-                const Function* user_assign = find_user_declared_copy_assign((*local_type).name, *body.program);
-                if (user_assign != nullptr && user_assign->is_deleted) {
-                    return std::unexpected(DataflowError(
-                        deleted_function_error_message("the copy assignment operator of '" + (*local_type).name + "'",
-                                                       user_assign->loc),
-                        state.current_loc));
+            bool deleted_assign = false;
+            SourceLocation assign_loc{};
+            [[scpp::unsafe]] {
+                if (report_errors && body.program != nullptr && cur_local_type.kind == TypeKind::Named &&
+                    is_bare_same_type_copy_source(assign_expr, cur_local_type, body, signatures)) {
+                    const Function* user_assign = find_user_declared_copy_assign(cur_local_type.name, get_program_ref(body));
+                    if (user_assign != nullptr && user_assign->is_deleted) {
+                        deleted_assign = true;
+                        assign_loc = user_assign->loc;
+                    }
                 }
             }
-            if (is_named_record_type(*local_type, body)) {
+            if (deleted_assign) {
+                return std::unexpected(DataflowError(
+                    deleted_function_error_message("the copy assignment operator of '" + cur_local_type.name + "'",
+                                                   assign_loc),
+                    state.current_loc));
+            }
+            if (is_named_record_type(cur_local_type, body)) {
                 // [dcl.init.list]: a braced initializer is not a copy, a
                 // move or a conversion of anything -- its *elements* bind,
                 // one to each field, so nothing below has a question to
@@ -4225,8 +4617,8 @@ struct ConvertingConstructorBinding {
                 // to a constructor-call expression and reaches
                 // check_aggregate_element_conversions through
                 // check_constructor_arguments instead.
-                if (stmt.expr != nullptr && stmt.expr->kind == ExprKind::BracedInitList) {
-                    if (auto _r = check_value_binding_conversions((*local_type), *stmt.expr, body, signatures,
+                if (true && assign_expr.kind == ExprKind::BracedInitList) {
+                    if (auto _r = check_value_binding_conversions(cur_local_type, assign_expr, body, signatures,
                                                                   state.current_loc, target_name, report_errors);
                         !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
@@ -4283,26 +4675,28 @@ struct ConvertingConstructorBinding {
                 // same-class rvalue source for a class *with* a reference
                 // member) falls through to the unconditional "no copy
                 // semantics" rejection just below, unchanged.
-                bool is_move_assignment = produces_rvalue_of_type(*stmt.expr, (*local_type), body, signatures);
+                bool is_move_assignment = produces_rvalue_of_type(assign_expr, cur_local_type, body, signatures);
                 if (is_move_assignment && state.locals.contains(whole_local_place(stmt.local))) {
                     if (report_errors) {
                         bool has_reference_member = false;
                         if (state.class_field_types != nullptr) {
-                            auto fields_it = state.class_field_types->find((*local_type).name);
-                            if (fields_it != state.class_field_types->end()) {
-                                for (const auto& entry : fields_it->second) {
-                                    const auto& field_type = entry.second;
-                                    if (is_reference(field_type)) {
-                                        has_reference_member = true;
-                                        break;
+                            [[scpp::unsafe]] {
+                                auto fields_it = state.class_field_types->find(cur_local_type.name);
+                                if (fields_it != state.class_field_types->end()) {
+                                    for (const auto& entry : fields_it->second) {
+                                        const auto& field_type = entry.second;
+                                        if (is_reference(field_type)) {
+                                            has_reference_member = true;
+                                            break;
+                                        }
                                     }
                                 }
                             }
                         }
                         if (has_reference_member) {
                             return std::unexpected(DataflowError(
-                                std::string(record_keyword((*local_type).name, *body.program)) + " '" +
-                                    (*local_type).name +
+                                std::string(record_keyword(cur_local_type.name, get_program_ref(body))) + " '" +
+                                    cur_local_type.name +
                                     "' has a reference-typed member, so it has no move assignment operator "
                                     "(spec §6.4(3)) -- '" + target_name + "' cannot be reassigned",
                                 state.current_loc));
@@ -4311,13 +4705,13 @@ struct ConvertingConstructorBinding {
                         if (borrow_it != state.borrows.end() &&
                             (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
                             return std::unexpected(DataflowError("cannot assign to " +
-                                                 std::string(record_keyword((*local_type).name, *body.program)) +
+                                                 std::string(record_keyword(cur_local_type.name, get_program_ref(body))) +
                                                  " variable '" + target_name +
                                                  "': it is currently borrowed",
                                 state.current_loc));
                         }
                     }
-                    if (auto _r = apply_expr(*stmt.expr, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
+                    if (auto _r = apply_expr(assign_expr, /*is_move_target_context=*/true, state, body, signatures, report_errors); !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
                     reinitialize_place(state.locals, whole_local_place(stmt.local));
@@ -4338,17 +4732,23 @@ struct ConvertingConstructorBinding {
                 // it, so apply_expr is called with is_move_target_context
                 // irrelevant here (there is no std::move to license).
                 bool freely_copyable_assign_source =
-                    is_freely_copyable_class_value_source(*stmt.expr, (*local_type), body, signatures);
-                if ((is_bare_same_type_copy_source(*stmt.expr, (*local_type), body, signatures) ||
+                    is_freely_copyable_class_value_source(assign_expr, cur_local_type, body, signatures);
+                if ((is_bare_same_type_copy_source(assign_expr, cur_local_type, body, signatures) ||
                      freely_copyable_assign_source) &&
                     state.locals.contains(whole_local_place(stmt.local))) {
                     if (report_errors) {
-                        if (!freely_copyable_assign_source &&
-                            (state.classes_with_copy_assign == nullptr ||
-                             !state.classes_with_copy_assign->contains((*local_type).name))) {
+                        bool not_copy_assignable = false;
+                        [[scpp::unsafe]] {
+                            if (!freely_copyable_assign_source &&
+                                (state.classes_with_copy_assign == nullptr ||
+                                 !state.classes_with_copy_assign->contains(cur_local_type.name))) {
+                                not_copy_assignable = true;
+                            }
+                        }
+                        if (not_copy_assignable) {
                             return std::unexpected(DataflowError(
-                                std::string(record_keyword((*local_type).name, *body.program)) + " '" +
-                                                 (*local_type).name +
+                                record_keyword(cur_local_type.name, get_program_ref(body)) + " '" +
+                                                 cur_local_type.name +
                                                  "' is not copy-assignable (spec §6.5(3)) -- '" + target_name +
                                                  "' cannot be reassigned this way",
                                 state.current_loc));
@@ -4357,13 +4757,13 @@ struct ConvertingConstructorBinding {
                         if (borrow_it != state.borrows.end() &&
                             (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
                             return std::unexpected(DataflowError("cannot assign to " +
-                                                 std::string(record_keyword((*local_type).name, *body.program)) +
+                                                 std::string(record_keyword(cur_local_type.name, get_program_ref(body))) +
                                                  " variable '" + target_name +
                                                  "': it is currently borrowed",
                                 state.current_loc));
                         }
                     }
-                    if (auto _r = apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body,
+                    if (auto _r = apply_expr(assign_expr, /*is_move_target_context=*/assign_expr.kind == ExprKind::Move, state, body,
                                signatures, report_errors); !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
@@ -4392,25 +4792,25 @@ struct ConvertingConstructorBinding {
                 // overload "an ordinary, unrelated overload of the name";
                 // ordinary is exactly what it now gets to be.
                 if (body.program != nullptr && state.locals.contains(whole_local_place(stmt.local))) {
-                    std::optional<Type> source_type = infer_expr_type(*stmt.expr, body, signatures);
+                    std::optional<Type> source_type = infer_expr_type(assign_expr, body, signatures);
                     if (source_type.has_value()) {
                         const Type& source_value =
-                            is_reference(*source_type) && source_type->pointee != nullptr ? *source_type->pointee
+                            is_reference(*source_type) && source_type->pointee != nullptr ? get_pointee_type_ref(*source_type)
                                                                                           : *source_type;
-                        if (find_converting_assign((*local_type).name, source_value, *body.program) != nullptr) {
+                        if (find_converting_assign(cur_local_type.name, source_value, get_program_ref(body)) != nullptr) {
                             if (report_errors) {
                                 auto borrow_it = state.borrows.find(stmt.local);
                                 if (borrow_it != state.borrows.end() &&
                                     (borrow_it->second.mutable_borrow || borrow_it->second.shared_count > 0)) {
                                     return std::unexpected(DataflowError(
                                         "cannot assign to " +
-                                            std::string(record_keyword((*local_type).name, *body.program)) +
+                                            std::string(record_keyword(cur_local_type.name, get_program_ref(body))) +
                                             " variable '" + target_name + "': it is currently borrowed",
                                         state.current_loc));
                                 }
                             }
-                            if (auto _r = apply_expr(*stmt.expr,
-                                                     /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move,
+                            if (auto _r = apply_expr(assign_expr,
+                                                     /*is_move_target_context=*/assign_expr.kind == ExprKind::Move,
                                                      state, body, signatures, report_errors);
                                 !_r.has_value()) {
                                 return std::unexpected(std::move(_r).error());
@@ -4422,20 +4822,20 @@ struct ConvertingConstructorBinding {
                 }
                 if (report_errors && state.locals.contains(whole_local_place(stmt.local))) {
                     if (std::optional<DataflowError> own =
-                            diagnose_expression_itself(*stmt.expr, state, body, signatures);
+                            diagnose_expression_itself(assign_expr, state, body, signatures);
                         own.has_value()) {
                         return std::unexpected(std::move(*own));
                     }
                     return std::unexpected(DataflowError(
-                        std::string(record_keyword((*local_type).name, *body.program)) + " '" +
-                                         (*local_type).name + "'-typed variable '" + target_name +
+                        std::string(record_keyword(cur_local_type.name, get_program_ref(body))) + " '" +
+                                         cur_local_type.name + "'-typed variable '" + target_name +
                                          "' cannot be reassigned from this expression: spec §6.4(3) licenses an "
                                          "rvalue of the same type (std::move(x), or a call returning by value) "
                                          "and spec §6.5(3) an lvalue of the same type when the type is "
                                          "copy-assignable",
                         state.current_loc));
                 }
-                if (stmt.expr->kind == ExprKind::Lambda) {
+                if (assign_expr.kind == ExprKind::Lambda) {
                     // ch05 §5.12: unlike a *transient* lambda literal
                     // (apply_expr's own Lambda case -- an IIFE, a call
                     // argument, ...), one bound to a named `auto`
@@ -4444,7 +4844,7 @@ struct ConvertingConstructorBinding {
                     // for the rest of this function -- see
                     // apply_lambda_captures' own comment.
                     std::vector<ClosureCaptureBorrow> closure_capture_borrows{};
-                    if (auto _r = apply_lambda_captures(*stmt.expr, state, body, signatures, report_errors,
+                    if (auto _r = apply_lambda_captures(assign_expr, state, body, signatures, report_errors,
                                           &closure_capture_borrows);
                         !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
@@ -4476,8 +4876,8 @@ struct ConvertingConstructorBinding {
                         state.closure_capture_borrows[stmt.local] = std::move(closure_capture_borrows);
                     }
                 } else {
-                    if (produces_rvalue_of_type(*stmt.expr, (*local_type), body, signatures)) {
-                        if (auto _r = apply_expr(*stmt.expr, /*is_move_target_context=*/true, state, body, signatures,
+                    if (produces_rvalue_of_type(assign_expr, cur_local_type, body, signatures)) {
+                        if (auto _r = apply_expr(assign_expr, /*is_move_target_context=*/true, state, body, signatures,
                                    report_errors); !_r.has_value()) {
                             return std::unexpected(std::move(_r).error());
                         }
@@ -4516,7 +4916,7 @@ struct ConvertingConstructorBinding {
                     // initialization well-formed. Copy-initialization,
                     // so only the non-explicit ones.
                     {
-                        auto converted = check_user_defined_conversion(*stmt.expr, *local_type,
+                        auto converted = check_user_defined_conversion(assign_expr, cur_local_type,
                                                                        /*allow_explicit=*/false, state, body,
                                                                        signatures, report_errors);
                         if (!converted.has_value()) return std::unexpected(std::move(converted).error());
@@ -4525,7 +4925,7 @@ struct ConvertingConstructorBinding {
                             return {};
                         }
                         if (report_errors) {
-                            if (auto _r = reject_missing_user_defined_conversion(*stmt.expr, *local_type, body,
+                            if (auto _r = reject_missing_user_defined_conversion(assign_expr, cur_local_type, body,
                                                                                  signatures);
                                 !_r.has_value()) {
                                 return std::unexpected(std::move(_r).error());
@@ -4533,13 +4933,13 @@ struct ConvertingConstructorBinding {
                         }
                     }
                     auto init_converting_ctor =
-                        resolve_converting_constructor_binding(*local_type, *stmt.expr, state, body, signatures, report_errors);
+                        resolve_converting_constructor_binding(cur_local_type, assign_expr, state, body, signatures, report_errors);
                     if (!init_converting_ctor.has_value()) {
                         return std::unexpected(std::move(init_converting_ctor).error());
                     }
-                    if (init_converting_ctor->ctor != nullptr) {
-                        bool converts_via_reference_parameter = is_reference(init_converting_ctor->effective_param_type);
-                        if (auto _r = apply_expr(*stmt.expr, /*is_move_target_context=*/!converts_via_reference_parameter, state,
+                    if (init_converting_ctor.value().ctor != nullptr) {
+                        bool converts_via_reference_parameter = is_reference(init_converting_ctor.value().effective_param_type);
+                        if (auto _r = apply_expr(assign_expr, /*is_move_target_context=*/!converts_via_reference_parameter, state,
                                                  body, signatures, report_errors);
                             !_r.has_value()) {
                             return std::unexpected(std::move(_r).error());
@@ -4549,8 +4949,8 @@ struct ConvertingConstructorBinding {
                     }
                     if (report_errors) {
                         bool freely_copyable_init_source =
-                            is_freely_copyable_class_value_source(*stmt.expr, (*local_type), body, signatures);
-                        if (!is_bare_same_type_copy_source(*stmt.expr, (*local_type), body, signatures) &&
+                            is_freely_copyable_class_value_source(assign_expr, cur_local_type, body, signatures);
+                        if (!is_bare_same_type_copy_source(assign_expr, cur_local_type, body, signatures) &&
                             !freely_copyable_init_source) {
                             // [dcl.init]/16.6: the source is neither a copy
                             // nor a move of the same type, so this is a call
@@ -4559,40 +4959,46 @@ struct ConvertingConstructorBinding {
                             // or an ambiguity -- rather than re-listing every
                             // initializer shape the language has.
                             if (std::optional<DataflowError> own =
-                                    diagnose_expression_itself(*stmt.expr, state, body, signatures);
+                                    diagnose_expression_itself(assign_expr, state, body, signatures);
                                 own.has_value()) {
                                 return std::unexpected(std::move(*own));
                             }
                             std::vector<ExprPtr> init_args{};
-                            init_args.push_back(deep_clone_expr(*stmt.expr));
+                            init_args.push_back(deep_clone_expr(assign_expr));
                             if (std::optional<std::string> failure = describe_constructor_selection_failure(
-                                    (*local_type).name, init_args, body, signatures);
+                                    cur_local_type.name, init_args, body, signatures);
                                 failure.has_value()) {
                                 return std::unexpected(DataflowError(*failure, state.current_loc));
                             }
                             return std::unexpected(DataflowError(
-                                std::string(record_keyword((*local_type).name, *body.program)) + " '" +
-                                    (*local_type).name + "'-typed variable '" + target_name +
+                                std::string(record_keyword(cur_local_type.name, get_program_ref(body))) + " '" +
+                                    cur_local_type.name + "'-typed variable '" + target_name +
                                     "' can only be initialized via brace-init ('" +
-                                    (*local_type).name + " " + target_name +
+                                    cur_local_type.name + " " + target_name +
                                     "{args};'), std::move of the same type, a converting constructor of '" +
-                                    (*local_type).name + "', or (if the type is copy-"
+                                    cur_local_type.name + "', or (if the type is copy-"
                                     "constructible, spec §6.5) an implicitly copyable source of another '" +
-                                    (*local_type).name + "' value",
+                                    cur_local_type.name + "' value",
                                 state.current_loc));
                         }
-                        if (!freely_copyable_init_source &&
-                            (state.classes_with_copy_ctor == nullptr ||
-                             !state.classes_with_copy_ctor->contains((*local_type).name))) {
+                        bool not_copy_constructible = false;
+                        [[scpp::unsafe]] {
+                            if (!freely_copyable_init_source &&
+                                (state.classes_with_copy_ctor == nullptr ||
+                                 !state.classes_with_copy_ctor->contains(cur_local_type.name))) {
+                                not_copy_constructible = true;
+                            }
+                        }
+                        if (not_copy_constructible) {
                             return std::unexpected(DataflowError(
-                                std::string(record_keyword((*local_type).name, *body.program)) + " '" +
-                                                 (*local_type).name +
+                                record_keyword(cur_local_type.name, get_program_ref(body)) + " '" +
+                                                 cur_local_type.name +
                                                  "' is not copy-constructible (spec §6.5(2)) -- '" + target_name +
                                                  "' cannot be initialized this way",
                                 state.current_loc));
                         }
                     }
-                    if (auto _r = apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures,
+                    if (auto _r = apply_expr(assign_expr, /*is_move_target_context=*/false, state, body, signatures,
                                report_errors); !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
@@ -4608,8 +5014,8 @@ struct ConvertingConstructorBinding {
             // codegen. Placed on this path as well as the record-typed
             // one above so `bool b = h;` and `Handle g = h;` are decided
             // by the same rule.
-            if (local_type != nullptr && !is_named_record_type(*local_type, body)) {
-                auto converted = check_user_defined_conversion(*stmt.expr, *local_type, /*allow_explicit=*/false, state,
+            if (local_type != nullptr && !is_named_record_type(cur_local_type, body)) {
+                auto converted = check_user_defined_conversion(assign_expr, cur_local_type, /*allow_explicit=*/false, state,
                                                               body, signatures, report_errors);
                 if (!converted.has_value()) return std::unexpected(std::move(converted).error());
                 if (converted.value()) {
@@ -4617,18 +5023,18 @@ struct ConvertingConstructorBinding {
                     return {};
                 }
                 if (report_errors) {
-                    if (auto _r = reject_missing_user_defined_conversion(*stmt.expr, *local_type, body, signatures);
+                    if (auto _r = reject_missing_user_defined_conversion(assign_expr, cur_local_type, body, signatures);
                         !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
                 }
             }
-            if (auto _r = apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body,
+            if (auto _r = apply_expr(assign_expr, /*is_move_target_context=*/assign_expr.kind == ExprKind::Move, state, body,
                        signatures, report_errors); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
             if (local_type != nullptr) {
-                if (auto _r = check_value_binding_conversions((*local_type), *stmt.expr, body, signatures,
+                if (auto _r = check_value_binding_conversions(cur_local_type, assign_expr, body, signatures,
                                                              state.current_loc, target_name, report_errors);
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
@@ -4644,25 +5050,44 @@ struct ConvertingConstructorBinding {
                 }
             }
             reinitialize_place(state.locals, whole_local_place(stmt.local));
-            if (is_pointer((*local_type))) {
-                state.local_lifetime_sources[stmt.local] =
-                    resolve_lifetime_source_roots(*stmt.expr, state, body, signatures, report_errors);
+            if (is_pointer(cur_local_type)) {
+                [[scpp::unsafe]] {
+                    if (true) {
+                        state.local_lifetime_sources[stmt.local] =
+                            resolve_lifetime_source_roots(assign_expr, state, body, signatures, report_errors);
+                    }
+                }
             }
             return {};
         }
 
-        case MirStatementKind::Eval:
-            if (auto _r = apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors); !_r.has_value()) {
+        case MirStatementKind::Eval: {
+            if (stmt.expr == nullptr) return {};
+            std::expected<void, DataflowError> _r{};
+            [[scpp::unsafe]] {
+                _r = apply_expr(*stmt.expr, /*is_move_target_context=*/false, state, body, signatures, report_errors);
+            }
+            if (!_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
             if (report_errors) {
-                if (const NodiscardInfo* info = nodiscard_info_for_discarded_call(*stmt.expr, body, signatures); info != nullptr) {
-                    std::string message = "discarded return value of nodiscard " + info->subject;
-                    if (!info->reason.empty()) message += ": " + info->reason;
-                    return std::unexpected(DataflowError(message, stmt.expr->loc));
+                const NodiscardInfo* info = nullptr;
+                std::string message{};
+                SourceLocation loc{};
+                [[scpp::unsafe]] {
+                    info = nodiscard_info_for_discarded_call(*stmt.expr, body, signatures);
+                    if (info != nullptr) {
+                        message = "discarded return value of nodiscard " + info->subject;
+                        if (!info->reason.empty()) message += ": " + info->reason;
+                        loc = stmt.expr->loc;
+                    }
+                }
+                if (info != nullptr) {
+                    return std::unexpected(DataflowError(message, loc));
                 }
             }
             return {};
+        }
 
         // One expression of one entry of a constructor's member-
         // initializer list (mir.cppm's lower_member_initializers), which
@@ -4679,9 +5104,19 @@ struct ConvertingConstructorBinding {
         // expression by check_member_initializer_conversions, which asks
         // a pure type question and so needs no dataflow state; this
         // statement carries the state half of the same position.
-        case MirStatementKind::MemberInit:
-            return apply_expr(*stmt.expr, /*is_move_target_context=*/stmt.expr->kind == ExprKind::Move, state, body,
-                              signatures, report_errors);
+        case MirStatementKind::MemberInit: {
+            if (stmt.expr == nullptr) return {};
+            bool is_move = false;
+            [[scpp::unsafe]] {
+                is_move = stmt.expr->kind == ExprKind::Move;
+            }
+            std::expected<void, DataflowError> _r{};
+            [[scpp::unsafe]] {
+                _r = apply_expr(*stmt.expr, /*is_move_target_context=*/is_move, state, body,
+                                  signatures, report_errors);
+            }
+            return _r;
+        }
 
         case MirStatementKind::Drop:
             // Purely a codegen-facing marker (no-op until heap-allocated
@@ -4730,6 +5165,7 @@ struct ConvertingConstructorBinding {
             state.unsafe_depth--;
             return {};
     }
+    return {};
 }
 
 [[nodiscard]] std::expected<void, DataflowError> check_terminator(const Terminator& term, DataflowState& state, const Function& fn, const Body& body,
@@ -4738,14 +5174,16 @@ struct ConvertingConstructorBinding {
     state.current_loc = term.loc;
     switch (term.kind) {
         case TerminatorKind::Branch:
-        case TerminatorKind::Switch:
+        case TerminatorKind::Switch: {
+            if (term.condition == nullptr) return {};
+            const Expr& cond_expr = get_condition_expr_ref(term);
             // spec §16.3(4) requires a `bool` here (an integral or enum
             // value for a `switch`), which is checked by codegen; the
             // question this asks is the earlier one, because "not a
             // bool" describes the wrong problem for an expression that
             // is not a value at all.
             if (auto _r = check_expression_yields_a_value(
-                    *term.condition, body, signatures, term.loc,
+                    cond_expr, body, signatures, term.loc,
                     term.kind == TerminatorKind::Switch ? "a 'switch' condition" : "an 'if'/'while' condition",
                     /*report_errors=*/true);
                 !_r.has_value()) {
@@ -4761,15 +5199,15 @@ struct ConvertingConstructorBinding {
             // call like any other, so this pass checks it rather than
             // leaving codegen to synthesize one it never saw.
             if (term.kind == TerminatorKind::Switch && body.program != nullptr) {
-                if (std::optional<Type> condition_type = infer_expr_type(*term.condition, body, signatures);
+                if (std::optional<Type> condition_type = infer_expr_type(cond_expr, body, signatures);
                     condition_type.has_value()) {
                     const Type& operand_type = binary_operand_type(*condition_type);
                     if (is_named_record_type(operand_type, body)) {
                         std::vector<Type> viable = viable_conversion_destinations(
-                            *body.program, operand_type.name, ConversionDestinationSet::SwitchCondition);
+                            get_program_ref(body), operand_type.name, ConversionDestinationSet::SwitchCondition);
                         if (viable.size() == 1) {
                             auto converted =
-                                check_user_defined_conversion(*term.condition, viable[0], /*allow_explicit=*/false,
+                                check_user_defined_conversion(cond_expr, viable[0], /*allow_explicit=*/false,
                                                               state, body, signatures, /*report_errors=*/true);
                             if (!converted.has_value()) return std::unexpected(std::move(converted).error());
                             if (converted.value()) return {};
@@ -4778,14 +5216,15 @@ struct ConvertingConstructorBinding {
                 }
             }
             if (term.kind == TerminatorKind::Branch) {
-                auto converted = apply_contextual_bool_conversion(*term.condition, state, body, signatures,
+                auto converted = apply_contextual_bool_conversion(cond_expr, state, body, signatures,
                                                                   /*report_errors=*/true,
                                                                   "the condition of an 'if' or iteration statement",
                                                                   std::string{});
                 if (!converted.has_value()) return std::unexpected(std::move(converted).error());
                 if (converted.value()) return {};
             }
-            return apply_expr(*term.condition, false, state, body, signatures, /*report_errors=*/true);
+            return apply_expr(cond_expr, false, state, body, signatures, /*report_errors=*/true);
+        }
         case TerminatorKind::Return: {
             if (auto _r = check_moved_subobjects_were_restored(state, body, std::nullopt,
                                                                "where '" + fn.name + "' returns");
@@ -4793,20 +5232,21 @@ struct ConvertingConstructorBinding {
                 return std::unexpected(std::move(_r).error());
             }
             if (term.return_value == nullptr) return {};
+            const Expr& ret_val = get_return_expr_ref(term);
             // spec §16.3(1.4). The one position where a `void` operand
             // is legal rather than forbidden: [basic.types.general]
             // allows `return f();` from a function that itself returns
             // `void`, and that form is in use, so the check is asked
             // only when this function returns something.
             if (!is_void_named_type(fn.return_type)) {
-                if (auto _r = check_expression_yields_a_value(*term.return_value, body, signatures, term.loc,
+                if (auto _r = check_expression_yields_a_value(ret_val, body, signatures, term.loc,
                                                               "the operand of a 'return' in '" + fn.name + "'",
                                                               /*report_errors=*/true);
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
             }
-            if (auto _r = check_scalar_conversion(fn.return_type, *term.return_value, body, signatures, term.loc,
+            if (auto _r = check_scalar_conversion(fn.return_type, ret_val, body, signatures, term.loc,
                                                   "the return value of '" + fn.name + "'",
                                                   /*report_errors=*/true);
                 !_r.has_value()) {
@@ -4836,34 +5276,19 @@ struct ConvertingConstructorBinding {
             // already rejected by the return-specific type-mismatch
             // check. The scalar question is asked just above, in the
             // return position's own words.
-            if (auto _r = check_enum_conversion_compatibility(fn.return_type, *term.return_value, body, signatures,
+            if (auto _r = check_enum_conversion_compatibility(fn.return_type, ret_val, body, signatures,
                                                               term.loc);
                 !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
-            if (auto _r = check_raw_pointer_assignment(fn.return_type, *term.return_value, body, signatures, term.loc,
+            if (auto _r = check_raw_pointer_assignment(fn.return_type, ret_val, body, signatures, term.loc,
                                                        "the value returned from " + fn.name,
                                                        /*report_errors=*/true);
                 !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
-            // [dcl.init.ref]/5 + [dcl.type.cv]/4: a mutable `T&` (or
-            // `std::span<T>`) may only be bound to a place that is itself
-            // reachable mutably. This is the same guard already applied to
-            // `int& r = <expr>;` (check_ref_decl below) and to a
-            // mutable-reference call argument (apply_reference_argument),
-            // asked of the same single predicate -- and it is where the
-            // question belongs. It used to be answered from the *signature*
-            // instead, by resolve_elided_param_index / Codegen::
-            // validate_reference_return_elision, which rejected every
-            // `T& f() const` and every `T& f(const U&)` on sight: not a
-            // rule C++ has, and not even a sound approximation of one,
-            // since both returned early for a function carrying any
-            // `[[scpp::lifetime]]` annotation. The raw-pointer form of this
-            // check has always been done here, on the expression, by
-            // check_raw_pointer_assignment just above.
             if ((is_reference(fn.return_type) || is_span(fn.return_type)) && fn.return_type.is_mutable_ref &&
-                place_is_read_only(*term.return_value, body, signatures)) {
+                place_is_read_only(ret_val, body, signatures)) {
                 std::string message{"cannot return a mutable "};
                 message += is_span(fn.return_type) ? "span" : "reference";
                 message += " from function '";
@@ -4874,12 +5299,12 @@ struct ConvertingConstructorBinding {
             if (is_pointer_return_lifetime_source_type(fn.return_type)) {
                 bool null_pointer_return =
                     fn.return_type.kind == TypeKind::Pointer &&
-                    expr_is_definitely_null_pointer(*term.return_value, state, body);
+                    expr_is_definitely_null_pointer(ret_val, state, body);
                 if (null_pointer_return) {
-                    return apply_expr(*term.return_value, /*is_move_target_context=*/false, state, body, signatures,
+                    return apply_expr(ret_val, /*is_move_target_context=*/false, state, body, signatures,
                                /*report_errors=*/true);
                 }
-                std::optional<Type> returned_type = infer_expr_type(*term.return_value, body, signatures);
+                std::optional<Type> returned_type = infer_expr_type(ret_val, body, signatures);
                 // [stmt.return]/2 implicitly converts the operand to the
                 // return type, and the array-to-pointer conversion
                 // ([conv.array]) is part of that: `return "text/html";` from
@@ -4925,23 +5350,24 @@ struct ConvertingConstructorBinding {
                 // (they reason about *which parameter a value flows from*,
                 // not its exact type identity, so the witness-substitution
                 // gap above doesn't affect their soundness).
-                bool is_synthetic_check_only_function =
-                    !fn.member_owner_class.empty() && body.program != nullptr &&
-                    [&]() {
-                        const ClassDef* owner = find_class_def(*body.program, fn.member_owner_class);
-                        return owner != nullptr && owner->is_synthetic_check_only;
-                    }();
+                bool is_synthetic_check_only_function = false;
+                [[scpp::unsafe]] {
+                    if (!fn.member_owner_class.empty() && body.program != nullptr) {
+                        const ClassDef* owner = find_class_def(get_program_ref(body), fn.member_owner_class);
+                        is_synthetic_check_only_function = owner != nullptr && owner->is_synthetic_check_only;
+                    }
+                }
                 bool return_type_compatible = false;
                 if (returned_type.has_value()) {
                     return_type_compatible =
                         types_equal(*returned_type, fn.return_type) ||
-                        types_compatible_with_base_conversion(*returned_type, fn.return_type, *body.program,
+                        types_compatible_with_base_conversion(*returned_type, fn.return_type, get_program_ref(body),
                                                               state.current_class);
                     if (!return_type_compatible && fn.return_type.pointee != nullptr) {
                         return_type_compatible =
-                            types_equal(*returned_type, *fn.return_type.pointee) ||
-                            types_compatible_with_base_conversion(*returned_type, *fn.return_type.pointee,
-                                                                  *body.program, state.current_class);
+                            types_equal(*returned_type, get_pointee_type_ref(fn.return_type)) ||
+                            types_compatible_with_base_conversion(*returned_type, get_pointee_type_ref(fn.return_type),
+                                                                  get_program_ref(body), state.current_class);
                     }
                     if (!return_type_compatible && fn.return_type.is_reference_wrapper_lifetime_source) {
                         if (types_equal(*returned_type, fn.return_type)) {
@@ -4950,20 +5376,21 @@ struct ConvertingConstructorBinding {
                                    fn.return_type.template_args.size() == 1) {
                             const Type& wrapped = fn.return_type.template_args[0];
                             const Type& expected_referent = wrapped.template_args.size() == 1 ? wrapped.template_args[0] : wrapped;
+                            const Type& ret_pointee = get_pointee_type_ref(*returned_type);
                             return_type_compatible =
-                                types_equal(*returned_type->pointee, expected_referent) ||
-                                types_compatible_with_base_conversion(*returned_type->pointee, expected_referent,
-                                                                      *body.program, state.current_class);
+                                types_equal(ret_pointee, expected_referent) ||
+                                types_compatible_with_base_conversion(ret_pointee, expected_referent,
+                                                                      get_program_ref(body), state.current_class);
                         }
                     }
                     if (!return_type_compatible &&
-                        is_wrapper_constructor_call_compatible_with_lifetime_return(*term.return_value, fn.return_type, body,
+                        is_wrapper_constructor_call_compatible_with_lifetime_return(ret_val, fn.return_type, body,
                                                                                    signatures)) {
                         return_type_compatible = true;
                     }
                 }
                 RootSet returned_roots =
-                    resolve_lifetime_source_roots(*term.return_value, state, body, signatures, /*report_errors=*/true);
+                    resolve_lifetime_source_roots(ret_val, state, body, signatures, /*report_errors=*/true);
                 if (fn.return_type.is_reference_wrapper_lifetime_source && returned_roots.empty()) {
                     return {};
                 }
@@ -5049,7 +5476,7 @@ struct ConvertingConstructorBinding {
                                             state.current_loc));
                     }
                 } else if (is_reference(fn.return_type) || fn.return_type.kind == TypeKind::Pointer) {
-                    if (fn.return_type.kind == TypeKind::Pointer && roots_are_program_lifetime_only(returned_roots)) {
+                    if (fn.return_type.kind == TypeKind::Pointer && (roots_are_program_lifetime_only(returned_roots) || state.unsafe_depth > 0)) {
                         return {};
                     }
                     auto source_indices_result = resolve_returned_lifetime_param_indices(fn);
@@ -5074,28 +5501,29 @@ struct ConvertingConstructorBinding {
                                 "or refactor the signature",
                             state.current_loc));
                     }
-                    if (!source_indices.empty() &&
-                        !return_roots_are_proven_to_outlive_call(returned_roots,
-                                                                 static_cast<LocalId>(source_indices.front()))) {
-                        return std::unexpected(DataflowError(
-                            "function '" + fn.name + "' returns " +
-                                std::string(is_reference(fn.return_type) ? "a reference" : "a raw pointer") +
-                                " derived from " + format_roots(body, returned_roots) +
-                                ", not from its sole eligible source parameter '" +
-                                fn.params[source_indices.front()].name +
-                                "'; scpp v0.1 can only prove the returned value doesn't dangle when it "
-                                "borrows (directly or transitively) from that parameter (spec ch05.3)",
-                            state.current_loc));
+                    if (!source_indices.empty()) {
+                        LocalId expected_root{source_indices.front()};
+                        if (!return_roots_are_proven_to_outlive_call(returned_roots, expected_root)) {
+                            return std::unexpected(DataflowError(
+                                "function '" + fn.name + "' returns " +
+                                    std::string(is_reference(fn.return_type) ? "a reference" : "a raw pointer") +
+                                    " derived from " + format_roots(body, returned_roots) +
+                                    ", not from its sole eligible source parameter '" +
+                                    fn.params[source_indices.front()].name +
+                                    "'; scpp v0.1 can only prove the returned value doesn't dangle when it "
+                                    "borrows (directly or transitively) from that parameter (spec ch05.3)",
+                                state.current_loc));
+                        }
                     }
                 }
                 return {};
             }
             bool return_is_class_value = is_named_record_type(fn.return_type, body);
             bool implicit_move_source =
-                return_is_class_value && is_implicit_move_return_source(*term.return_value, fn.return_type, body);
+                return_is_class_value && is_implicit_move_return_source(ret_val, fn.return_type, body);
             bool freely_copyable_return_source =
                 return_is_class_value &&
-                is_freely_copyable_class_value_source(*term.return_value, fn.return_type, body, signatures);
+                is_freely_copyable_class_value_source(ret_val, fn.return_type, body, signatures);
             // Deliberately NOT mirroring check_call_arguments' bare-
             // lvalue escape hatch here: copying *into* a by-value
             // parameter is always implicit-safe (the callee's copy is
@@ -5125,12 +5553,12 @@ struct ConvertingConstructorBinding {
             // through a conversion function ([over.match.copy]/1, so
             // non-explicit only).
             if (!return_is_class_value) {
-                auto converted = check_user_defined_conversion(*term.return_value, fn.return_type,
+                auto converted = check_user_defined_conversion(ret_val, fn.return_type,
                                                                /*allow_explicit=*/false, state, body, signatures,
                                                                /*report_errors=*/true);
                 if (!converted.has_value()) return std::unexpected(std::move(converted).error());
                 if (converted.value()) return {};
-                if (auto _r = reject_missing_user_defined_conversion(*term.return_value, fn.return_type, body,
+                if (auto _r = reject_missing_user_defined_conversion(ret_val, fn.return_type, body,
                                                                      signatures);
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
@@ -5138,18 +5566,18 @@ struct ConvertingConstructorBinding {
             }
             const FunctionSignature* return_converting_ctor = nullptr;
             if (return_is_class_value) {
-                auto binding = resolve_converting_constructor_binding(fn.return_type, *term.return_value, state, body, signatures,
+                auto binding = resolve_converting_constructor_binding(fn.return_type, ret_val, state, body, signatures,
                                                                      /*report_errors=*/true);
                 if (!binding.has_value()) return std::unexpected(std::move(binding).error());
-                return_converting_ctor = binding->ctor;
+                return_converting_ctor = binding.value().ctor;
             }
             bool move_target_context =
-                (return_is_class_value && !freely_copyable_return_source) || term.return_value->kind == ExprKind::Move;
-            if (auto _r = apply_expr(*term.return_value, move_target_context, state, body, signatures, /*report_errors=*/true); !_r.has_value()) {
+                (return_is_class_value && !freely_copyable_return_source) || ret_val.kind == ExprKind::Move;
+            if (auto _r = apply_expr(ret_val, move_target_context, state, body, signatures, /*report_errors=*/true); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
             if (return_is_class_value && !implicit_move_source && !freely_copyable_return_source &&
-                !produces_rvalue_of_type(*term.return_value, fn.return_type, body, signatures) &&
+                !produces_rvalue_of_type(ret_val, fn.return_type, body, signatures) &&
                 return_converting_ctor == nullptr) {
                 return std::unexpected(DataflowError("returning class '" + fn.return_type.name +
                                      "' by value requires either an implicitly copyable same-type source or "
@@ -5163,6 +5591,7 @@ struct ConvertingConstructorBinding {
         case TerminatorKind::None:
             return {};
     }
+    return {};
 }
 
 struct SwitchCaseKey {
@@ -5171,7 +5600,7 @@ struct SwitchCaseKey {
 
 [[nodiscard]] std::optional<std::int64_t> integer_case_label_value(const Expr& expr) {
     if (expr.kind == ExprKind::IntegerLiteral || expr.kind == ExprKind::CharLiteral) return expr.int_value;
-    if (expr.kind == ExprKind::BoolLiteral) return expr.bool_value ? 1 : 0;
+    if (expr.kind == ExprKind::BoolLiteral) return expr.bool_value ? static_cast<std::int64_t>(1) : static_cast<std::int64_t>(0);
     if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Neg && expr.lhs &&
         expr.lhs->kind == ExprKind::IntegerLiteral) {
         return -expr.lhs->int_value;
@@ -5184,14 +5613,24 @@ struct SwitchCaseKey {
     const Type& operand_type = binary_operand_type(condition_type);
     if (is_enum_type(operand_type, body.program)) {
         const EnumDef* owning_enum = nullptr;
-        const EnumVariant* variant = expr.kind == ExprKind::Identifier ? find_enum_variant(body.program, expr.name, &owning_enum)
-                                                                       : nullptr;
-        if (variant == nullptr || owning_enum == nullptr || owning_enum->name != operand_type.name) {
+        const EnumVariant* variant = nullptr;
+        bool valid_variant = false;
+        std::int64_t variant_value = 0;
+        [[scpp::unsafe]] {
+            if (expr.kind == ExprKind::Identifier) {
+                variant = find_enum_variant(body.program, expr.name, &owning_enum);
+                if (variant != nullptr && owning_enum != nullptr && owning_enum->name == operand_type.name) {
+                    valid_variant = true;
+                    variant_value = variant->value;
+                }
+            }
+        }
+        if (!valid_variant) {
             return std::unexpected(DataflowError("switch on enum type '" + operand_type.name +
                                     "' requires each 'case' label to name an enumerator of that same enum",
                                 expr.loc));
         }
-        return SwitchCaseKey{variant->value};
+        return SwitchCaseKey{variant_value};
     }
     if (!(operand_type.kind == TypeKind::Named &&
           (operand_type.name == "bool" || is_integral_scalar_type_name(operand_type.name)))) {
@@ -5260,7 +5699,7 @@ struct SwitchCaseKey {
                 // the same thing here as for an `int` condition.
                 if (!condition_ok && body.program != nullptr && is_named_record_type(operand_type, body)) {
                     std::vector<Type> viable = viable_conversion_destinations(
-                        *body.program, operand_type.name, ConversionDestinationSet::SwitchCondition);
+                        get_program_ref(body), operand_type.name, ConversionDestinationSet::SwitchCondition);
                     if (viable.size() > 1) {
                         return std::unexpected(DataflowError(
                             ambiguous_conversion_message(describe_type_brief(operand_type), "a 'switch' condition",
@@ -5268,10 +5707,10 @@ struct SwitchCaseKey {
                             stmt.condition->loc));
                     }
                     if (viable.size() == 1 &&
-                        find_conversion_function_index(*body.program, operand_type.name, viable[0]).has_value()) {
+                        find_conversion_function_index(get_program_ref(body), operand_type.name, viable[0]).has_value()) {
                         const Function& conversion =
-                            body.program->functions[*find_conversion_function_index(*body.program, operand_type.name,
-                                                                                     viable[0])];
+                            get_program_ref(body).functions[*find_conversion_function_index(get_program_ref(body), operand_type.name,
+                                                                                             viable[0])];
                         if (conversion.is_explicit) {
                             return std::unexpected(DataflowError(
                                 explicit_only_conversion_function_message(describe_type_brief(operand_type),
@@ -5413,7 +5852,7 @@ struct SwitchCaseKey {
     if (!fn.member_owner_class.empty()) {
         entry_state.current_class = fn.member_owner_class;
     } else if (!fn.params.empty() && fn.params[0].name == "this") {
-        entry_state.current_class = fn.params[0].type.pointee->name;
+        entry_state.current_class = get_pointee_type_ref(fn.params[0].type).name;
     }
     // A lambda's synthesized `_call` method (see monomorphize.cppm's
     // resolve_lambda) needs private access to *two* distinct classes at
@@ -5441,7 +5880,7 @@ struct SwitchCaseKey {
     // parameter's index *is* its LocalId.
     for (std::size_t param_index = 0; param_index < fn.params.size(); ++param_index) {
         const Param& param = fn.params[param_index];
-        LocalId param_local = static_cast<LocalId>(param_index);
+        LocalId param_local{param_index};
         reinitialize_place(entry_state.locals, whole_local_place(param_local));
         if (param.lifetime.present()) entry_state.parameter_lifetimes[param.name] = param.lifetime;
         if (is_pointer_return_lifetime_source_type(param.type) || is_reference(param.type)) {
@@ -5456,11 +5895,20 @@ struct SwitchCaseKey {
     if (n > 0) in_states[0] = entry_state;
 
     if (is_constructor_function(fn)) {
-        if (const ClassDef* owner = find_class_def(program, fn.member_owner_class); owner != nullptr) {
-            if (auto _r = validate_constructor_base_initialization(fn, *owner, body, signatures); !_r.has_value()) {
+        std::optional<std::size_t> match_idx{};
+        for (std::size_t i = 0; i < program.classes.size(); i++) {
+            if (program.classes[i].name != fn.member_owner_class) continue;
+            match_idx = i;
+            if (!program.classes[i].is_forward_declaration) {
+                break;
+            }
+        }
+        if (match_idx.has_value()) {
+            const ClassDef& owner_ref = program.classes[*match_idx];
+            if (auto _r = validate_constructor_base_initialization(fn, owner_ref, body, signatures); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
-            if (auto _r = validate_constructor_virtual_interface_base_initialization(fn, *owner, body, signatures);
+            if (auto _r = validate_constructor_virtual_interface_base_initialization(fn, owner_ref, body, signatures);
                 !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }

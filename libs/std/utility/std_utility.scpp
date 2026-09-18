@@ -72,6 +72,12 @@ public:
     T1 first;
     T2 second;
 
+    pair() = default;
+    pair(const pair&) = default;
+    pair& operator=(const pair&) = default;
+    pair(pair&&) = default;
+    pair& operator=(pair&&) = default;
+
     template<typename U1, typename U2>
     pair(U1 first_value, U2 second_value) : first{std::move(first_value)}, second{std::move(second_value)} {
         return;

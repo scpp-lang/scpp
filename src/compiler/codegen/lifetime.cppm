@@ -19,8 +19,11 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
         auto value_result = codegen_expr(expr);
         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
         llvm::LLVMValueRef value = std::move(value_result).value();
-        llvm::LLVMValueRef temp = create_entry_block_alloca(llvm::LLVMTypeOf(value), "rvaluetmp");
-        llvm::LLVMBuildStore(builder_, value, temp);
+        llvm::LLVMValueRef temp = nullptr;
+        [[scpp::unsafe]] {
+            temp = create_entry_block_alloca(llvm::LLVMTypeOf(value), "rvaluetmp");
+            llvm::LLVMBuildStore(builder_, value, temp);
+        }
         return temp;
     }
 
@@ -34,7 +37,7 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
         // full-expression that created it. (The `T&&` spelling above is
         // the opposite case and is deliberately left alone -- see
         // register_full_expression_temporary's comment.)
-        register_full_expression_temporary(target_type, *materialized);
+        register_full_expression_temporary(target_type, materialized.value());
         return materialized;
     }
 
@@ -79,8 +82,11 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
     [[nodiscard]] std::expected<void, CodegenError> Codegen::codegen_copy_construct_class(llvm::LLVMValueRef dest_ptr, llvm::LLVMValueRef src_ptr, const std::string& class_name)
 {
         if (const Function* user_ctor = find_user_declared_copy_ctor_ast(class_name); user_ctor != nullptr) {
-            llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
-            build_call(ctor, {dest_ptr, src_ptr});
+            llvm::LLVMValueRef ctor = nullptr;
+            [[scpp::unsafe]] {
+                ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
+            }
+            build_call(ctor, make_call_args(dest_ptr, src_ptr));
             return {};
         }
         return codegen_memberwise_copy_construct(dest_ptr, src_ptr, class_name);
@@ -89,18 +95,24 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
 
     llvm::LLVMValueRef Codegen::find_destructor(const std::string& class_name)
 {
-        std::optional<std::size_t> index = find_destructor_function_index(class_name, *program_);
-        if (!index.has_value()) return nullptr;
-        const Function* fn = &program_->functions[*index];
-        return llvm::LLVMGetNamedFunction(module_, overload_names_.at(fn).c_str());
+        if (program_ == nullptr) return nullptr;
+        [[scpp::unsafe]] {
+            std::optional<std::size_t> index = find_destructor_function_index(class_name, *program_);
+            if (!index.has_value()) return nullptr;
+            const Function* fn = &program_->functions[*index];
+            return llvm::LLVMGetNamedFunction(module_, overload_names_.at(fn).c_str());
+        }
     }
 
 
     [[nodiscard]] const Function* Codegen::find_destructor_ast(const std::string& class_name) const
 {
-        std::optional<std::size_t> index = find_destructor_function_index(class_name, *program_);
-        if (!index.has_value()) return nullptr;
-        return &program_->functions[*index];
+        if (program_ == nullptr) return nullptr;
+        [[scpp::unsafe]] {
+            std::optional<std::size_t> index = find_destructor_function_index(class_name, *program_);
+            if (!index.has_value()) return nullptr;
+            return &program_->functions[*index];
+        }
     }
 
 
@@ -108,7 +120,11 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
 {
         const Function* destructor = find_destructor_ast(interface_name);
         if (destructor == nullptr) return {};
-        auto slot_index_result = interface_method_slot_index(interface_name, *destructor);
+        auto slot_index_result = [&, this]() -> std::expected<std::optional<std::size_t>, CodegenError> {
+            [[scpp::unsafe]] {
+                return interface_method_slot_index(interface_name, *destructor);
+            }
+        }();
         if (!slot_index_result.has_value()) return std::unexpected(std::move(slot_index_result).error());
         std::optional<std::size_t> slot_index = std::move(slot_index_result).value();
         if (!slot_index.has_value()) {
@@ -116,29 +132,40 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
         }
         llvm::LLVMValueRef object_ptr = extract_interface_object_ptr(interface_value);
         llvm::LLVMValueRef dispatch_ptr = extract_interface_dispatch_ptr(interface_value);
-        auto thunk_type_result = interface_dispatch_function_type(*destructor);
+        auto thunk_type_result = [&, this]() -> std::expected<llvm::LLVMTypeRef, CodegenError> {
+            [[scpp::unsafe]] {
+                return interface_dispatch_function_type(*destructor);
+            }
+        }();
         if (!thunk_type_result.has_value()) return std::unexpected(std::move(thunk_type_result).error());
         llvm::LLVMTypeRef thunk_type = std::move(thunk_type_result).value();
         auto table_type_result = interface_dispatch_table_type(interface_name);
         if (!table_type_result.has_value()) return std::unexpected(std::move(table_type_result).error());
         llvm::LLVMTypeRef table_type = std::move(table_type_result).value();
-        llvm::LLVMTypeRef i32_ty = llvm::LLVMInt32TypeInContext(context_);
-        llvm::LLVMValueRef slot_indices[2] = {llvm::LLVMConstInt(i32_ty, 0, /*SignExtend=*/0),
-                                       llvm::LLVMConstInt(i32_ty, static_cast<unsigned int>(*slot_index), /*SignExtend=*/0)};
-        llvm::LLVMValueRef slot_ptr = llvm::LLVMBuildGEP2(builder_, table_type, dispatch_ptr, slot_indices, 2, "iface.dtor.slot");
-        llvm::LLVMValueRef target_ptr = llvm::LLVMBuildLoad2(builder_, llvm::LLVMPointerTypeInContext(context_, 0), slot_ptr, "iface.dtor.target");
-        build_call(thunk_type, target_ptr, {object_ptr});
+        llvm::LLVMValueRef target_ptr = nullptr;
+        [[scpp::unsafe]] {
+            llvm::LLVMTypeRef i32_ty = llvm::LLVMInt32TypeInContext(context_);
+            llvm::LLVMValueRef slot_indices[2] = {llvm::LLVMConstInt(i32_ty, 0UL, /*SignExtend=*/0),
+                                           llvm::LLVMConstInt(i32_ty, static_cast<unsigned long>(*slot_index), /*SignExtend=*/0)};
+            llvm::LLVMValueRef slot_ptr = llvm::LLVMBuildGEP2(builder_, table_type, dispatch_ptr, slot_indices, 2U, "iface.dtor.slot");
+            target_ptr = create_load(llvm::LLVMPointerTypeInContext(context_, 0), slot_ptr, std::nullopt, "iface.dtor.target");
+        }
+        build_call(thunk_type, target_ptr, make_call_args(object_ptr));
         return {};
     }
 
 
     [[nodiscard]] const Function* Codegen::find_user_declared_copy_ctor_ast(const std::string& class_name)
 {
-        for (const Function& fn : program_->functions) {
-            if (fn.member_owner_class != class_name || fn.params.size() != 2) continue;
-            if (!is_constructor_function(fn)) continue;
-            const Type& p = fn.params[1].type;
-            if (is_special_member_const_lvalue_self_param(p, class_name)) return &fn;
+        if (program_ == nullptr) return nullptr;
+        [[scpp::unsafe]] {
+            for (std::size_t i = 0; i < program_->functions.size(); ++i) {
+                const Function* fn = &program_->functions[i];
+                if (fn->member_owner_class != class_name || fn->params.size() != 2) continue;
+                if (!is_constructor_function(*fn)) continue;
+                const Type& p = fn->params[1].type;
+                if (is_special_member_const_lvalue_self_param(p, class_name)) return fn;
+            }
         }
         return nullptr;
     }
@@ -146,13 +173,17 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
 
     [[nodiscard]] const Function* Codegen::find_user_declared_copy_assign_ast(const std::string& class_name)
 {
-        for (const Function& fn : program_->functions) {
-            if (!fn.name.ends_with("_operator_assign") || fn.params.size() != 2) continue;
-            if (fn.member_owner_class != class_name) continue;
-            const Type& this_param = fn.params[0].type;
-            if (!is_special_member_this_param(this_param, class_name)) continue;
-            const Type& p = fn.params[1].type;
-            if (is_special_member_const_lvalue_self_param(p, class_name)) return &fn;
+        if (program_ == nullptr) return nullptr;
+        [[scpp::unsafe]] {
+            for (std::size_t i = 0; i < program_->functions.size(); ++i) {
+                const Function* fn = &program_->functions[i];
+                if (!fn->name.ends_with("_operator_assign") || fn->params.size() != 2) continue;
+                if (fn->member_owner_class != class_name) continue;
+                const Type& this_param = fn->params[0].type;
+                if (!is_special_member_this_param(this_param, class_name)) continue;
+                const Type& p = fn->params[1].type;
+                if (is_special_member_const_lvalue_self_param(p, class_name)) return fn;
+            }
         }
         return nullptr;
     }
@@ -167,15 +198,18 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
     [[nodiscard]] const Function* Codegen::find_converting_assign_ast(const std::string& class_name,
                                                                      const Type& source_type)
 {
-        if (class_name.empty()) return nullptr;
-        for (const Function& fn : program_->functions) {
-            if (fn.member_owner_class != class_name || fn.params.size() != 2) continue;
-            if (!fn.name.ends_with("_operator_assign")) continue;
-            if (fn.is_generic_template) continue;
-            if (is_copy_assignment_function(fn) || is_move_assignment_function(fn)) continue;
-            const Type& param = fn.params[1].type;
-            const Type& wanted = param.kind == TypeKind::Reference && param.pointee != nullptr ? *param.pointee : param;
-            if (types_equal_ignoring_top_level_const(wanted, source_type)) return &fn;
+        if (class_name.empty() || program_ == nullptr) return nullptr;
+        [[scpp::unsafe]] {
+            for (std::size_t i = 0; i < program_->functions.size(); ++i) {
+                const Function* fn = &program_->functions[i];
+                if (fn->member_owner_class != class_name || fn->params.size() != 2) continue;
+                if (!fn->name.ends_with("_operator_assign")) continue;
+                if (fn->is_generic_template) continue;
+                if (is_copy_assignment_function(*fn) || is_move_assignment_function(*fn)) continue;
+                const Type& param = fn->params[1].type;
+                const Type& wanted = param.kind == TypeKind::Reference && param.pointee != nullptr ? *param.pointee : param;
+                if (types_equal_ignoring_top_level_const(wanted, source_type)) return fn;
+            }
         }
         return nullptr;
     }
@@ -196,7 +230,9 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
 {
         if (const Function* user_copy = find_user_declared_copy_ctor_ast(class_name); user_copy != nullptr) {
             // [dcl.fct.def.delete]/1, mirroring movecheck's is_copy_constructible.
-            return !user_copy->is_deleted;
+            [[scpp::unsafe]] {
+                return !user_copy->is_deleted;
+            }
         }
         if (find_user_declared_copy_assign_ast(class_name) != nullptr) {
             return false;
@@ -214,7 +250,9 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
     [[nodiscard]] bool Codegen::is_copy_assignable(const std::string& class_name)
 {
         if (const Function* user_assign = find_user_declared_copy_assign_ast(class_name); user_assign != nullptr) {
-            return !user_assign->is_deleted;
+            [[scpp::unsafe]] {
+                return !user_assign->is_deleted;
+            }
         }
         if (has_user_declared_dtor(class_name) || find_user_declared_copy_ctor_ast(class_name) != nullptr) {
             return false;
@@ -258,10 +296,16 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
         }
         for (std::size_t i = 0; i < info.field_names.size(); i++) {
             const Type& field_type = info.field_types[i];
-            llvm::LLVMValueRef dest_field = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, dest_ptr, info.physical_field_index(i),
-                                                          info.field_names[i].c_str());
-            llvm::LLVMValueRef src_field = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, src_ptr, info.physical_field_index(i),
-                                                         info.field_names[i].c_str());
+            llvm::LLVMValueRef dest_field = nullptr;
+            llvm::LLVMValueRef src_field = nullptr;
+            [[scpp::unsafe]] {
+                dest_field = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, dest_ptr,
+                                                              static_cast<unsigned int>(info.physical_field_index(i)),
+                                                              info.field_names[i].c_str());
+                src_field = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, src_ptr,
+                                                             static_cast<unsigned int>(info.physical_field_index(i)),
+                                                             info.field_names[i].c_str());
+            }
             if (auto r = codegen_copy_construct_field(dest_field, src_field, field_type); !r.has_value()) {
                 return std::unexpected(std::move(r).error());
             }
@@ -292,8 +336,11 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
         }
         if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
             if (const Function* user_ctor = find_user_declared_copy_ctor_ast(field_type.name); user_ctor != nullptr) {
-                llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
-                build_call(ctor, {dest_ptr, src_ptr});
+                llvm::LLVMValueRef ctor = nullptr;
+                [[scpp::unsafe]] {
+                    ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
+                }
+                build_call(ctor, make_call_args(dest_ptr, src_ptr));
                 return {};
             }
             return codegen_memberwise_copy_construct(dest_ptr, src_ptr, field_type.name);
@@ -301,7 +348,7 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
         auto llvm_field_type_result = to_llvm_type(field_type);
         if (!llvm_field_type_result.has_value()) return std::unexpected(std::move(llvm_field_type_result).error());
         llvm::LLVMTypeRef llvm_field_type = std::move(llvm_field_type_result).value();
-        llvm::LLVMValueRef value = llvm::LLVMBuildLoad2(builder_, llvm_field_type, src_ptr, "copiedfield");
+        llvm::LLVMValueRef value = create_load(llvm_field_type, src_ptr, std::nullopt, "copiedfield");
         create_store(value, dest_ptr, std::nullopt);
         return {};
     }
@@ -324,8 +371,11 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
         }
         if (field_type.kind == TypeKind::Named && structs_.contains(field_type.name)) {
             if (const Function* user_assign = find_user_declared_copy_assign_ast(field_type.name); user_assign != nullptr) {
-                llvm::LLVMValueRef op = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_assign).c_str());
-                build_call(op, {dest_ptr, src_ptr});
+                llvm::LLVMValueRef op = nullptr;
+                [[scpp::unsafe]] {
+                    op = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_assign).c_str());
+                }
+                build_call(op, make_call_args(dest_ptr, src_ptr));
                 return {};
             }
             return codegen_memberwise_copy_assign(dest_ptr, src_ptr, field_type.name);
@@ -333,7 +383,7 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
         auto llvm_field_type_result = to_llvm_type(field_type);
         if (!llvm_field_type_result.has_value()) return std::unexpected(std::move(llvm_field_type_result).error());
         llvm::LLVMTypeRef llvm_field_type = std::move(llvm_field_type_result).value();
-        llvm::LLVMValueRef value = llvm::LLVMBuildLoad2(builder_, llvm_field_type, src_ptr, "copiedfield");
+        llvm::LLVMValueRef value = create_load(llvm_field_type, src_ptr, std::nullopt, "copiedfield");
         create_store(value, dest_ptr, std::nullopt);
         return {};
     }
@@ -342,8 +392,10 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
     llvm::LLVMValueRef Codegen::build_array_element_gep(llvm::LLVMTypeRef array_llvm_type, llvm::LLVMValueRef array_ptr,
                                                llvm::LLVMValueRef index)
 {
-        llvm::LLVMValueRef indices[2] = {llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), 0, /*SignExtend=*/0), index};
-        return llvm::LLVMBuildGEP2(builder_, array_llvm_type, array_ptr, indices, 2, "arrayelem");
+        [[scpp::unsafe]] {
+            llvm::LLVMValueRef indices[2] = {llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), 0UL, /*SignExtend=*/0), index};
+            return llvm::LLVMBuildGEP2(builder_, array_llvm_type, array_ptr, indices, 2U, "arrayelem");
+        }
     }
 
 
@@ -352,10 +404,16 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
         const auto& info = structs_.at(class_name);
         for (std::size_t i = 0; i < info.field_names.size(); i++) {
             const Type& field_type = info.field_types[i];
-            llvm::LLVMValueRef dest_field = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, dest_ptr, info.physical_field_index(i),
-                                                          info.field_names[i].c_str());
-            llvm::LLVMValueRef src_field = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, src_ptr, info.physical_field_index(i),
-                                                         info.field_names[i].c_str());
+            llvm::LLVMValueRef dest_field = nullptr;
+            llvm::LLVMValueRef src_field = nullptr;
+            [[scpp::unsafe]] {
+                dest_field = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, dest_ptr,
+                                                              static_cast<unsigned int>(info.physical_field_index(i)),
+                                                              info.field_names[i].c_str());
+                src_field = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, src_ptr,
+                                                             static_cast<unsigned int>(info.physical_field_index(i)),
+                                                             info.field_names[i].c_str());
+            }
             if (auto r = codegen_copy_assign_field(dest_field, src_field, field_type); !r.has_value()) {
                 return std::unexpected(std::move(r).error());
             }
@@ -366,31 +424,51 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
 
     [[nodiscard]] bool Codegen::record_needs_teardown(const std::string& record_name)
 {
-        return scpp::record_needs_teardown(record_name, *program_);
+        if (program_ == nullptr) return false;
+        [[scpp::unsafe]] {
+            return scpp::record_needs_teardown(record_name, *program_);
+        }
     }
 
 
     [[nodiscard]] bool Codegen::class_has_destructor_in_chain(const std::string& class_name)
 {
-        return class_destruction_chain_has_destructor(class_name, *program_);
+        if (program_ == nullptr) return false;
+        [[scpp::unsafe]] {
+            return class_destruction_chain_has_destructor(class_name, *program_);
+        }
     }
 
 
     void Codegen::emit_destructor_chain_calls(const std::string& class_name, llvm::LLVMValueRef object_ptr)
 {
         if (llvm::LLVMValueRef dtor = find_destructor(class_name); dtor != nullptr) {
-            build_call(dtor, {object_ptr});
+            build_call(dtor, make_call_args(object_ptr));
         }
         const ClassDef* def = find_class_def(class_name);
         if (def != nullptr) {
-            if (auto base = def->direct_ordinary_base(); base.has_value()) {
-                emit_destructor_chain_calls(base->get().base_type.name, object_ptr);
+            std::string base_name{};
+            bool has_base = false;
+            std::vector<const ClassDef*> interface_bases{};
+            [[scpp::unsafe]] {
+                if (auto base = def->direct_ordinary_base(); base.has_value()) {
+                    base_name = base->get().base_type.name;
+                    has_base = true;
+                }
+                interface_bases = collect_virtual_interface_bases_in_construction_order(*def);
             }
-            std::vector<const ClassDef*> interface_bases = collect_virtual_interface_bases_in_construction_order(*def);
-            for (auto it = interface_bases.rbegin(); it != interface_bases.rend(); ++it) {
-                if (*it == nullptr) continue;
-                if (llvm::LLVMValueRef dtor = find_destructor((*it)->name); dtor != nullptr) {
-                    build_call(dtor, {object_ptr});
+            if (has_base) {
+                emit_destructor_chain_calls(base_name, object_ptr);
+            }
+            for (std::size_t b_idx = interface_bases.size(); b_idx > 0; b_idx--) {
+                const ClassDef* base_def = interface_bases[b_idx - 1];
+                if (base_def == nullptr) continue;
+                std::string base_def_name{};
+                [[scpp::unsafe]] {
+                    base_def_name = base_def->name;
+                }
+                if (llvm::LLVMValueRef dtor = find_destructor(base_def_name); dtor != nullptr) {
+                    build_call(dtor, make_call_args(object_ptr));
                 }
             }
         }
@@ -400,8 +478,11 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
     llvm::LLVMValueRef Codegen::create_moved_flag_if_has_destructor(const std::string& class_name)
 {
         if (!class_has_destructor_in_chain(class_name)) return nullptr;
-        llvm::LLVMValueRef flag = create_entry_block_alloca(llvm::LLVMInt1TypeInContext(context_), "movedflag");
-        llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, /*SignExtend=*/0), flag);
+        llvm::LLVMValueRef flag = nullptr;
+        [[scpp::unsafe]] {
+            flag = create_entry_block_alloca(llvm::LLVMInt1TypeInContext(context_), "movedflag");
+            llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0UL, /*SignExtend=*/0), flag);
+        }
         return flag;
     }
 
@@ -413,15 +494,21 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
             emit_destructor_chain_calls(class_name, object_ptr);
             return;
         }
-        llvm::LLVMValueRef was_moved = llvm::LLVMBuildLoad2(builder_, llvm::LLVMInt1TypeInContext(context_), moved_flag, "wasmoved");
-        llvm::LLVMValueRef current_fn = llvm::LLVMGetBasicBlockParent(llvm::LLVMGetInsertBlock(builder_));
-        llvm::LLVMBasicBlockRef then_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "dtorcall");
-        llvm::LLVMBasicBlockRef merge_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "dtorskip");
-        llvm::LLVMBuildCondBr(builder_, was_moved, merge_bb, then_bb);
-        llvm::LLVMPositionBuilderAtEnd(builder_, then_bb);
+        llvm::LLVMBasicBlockRef then_bb = nullptr;
+        llvm::LLVMBasicBlockRef merge_bb = nullptr;
+        [[scpp::unsafe]] {
+            llvm::LLVMValueRef was_moved = create_load(llvm::LLVMInt1TypeInContext(context_), moved_flag, std::nullopt, "wasmoved");
+            llvm::LLVMValueRef current_fn = llvm::LLVMGetBasicBlockParent(llvm::LLVMGetInsertBlock(builder_));
+            then_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "dtorcall");
+            merge_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "dtorskip");
+            llvm::LLVMBuildCondBr(builder_, was_moved, merge_bb, then_bb);
+            llvm::LLVMPositionBuilderAtEnd(builder_, then_bb);
+        }
         emit_destructor_chain_calls(class_name, object_ptr);
-        llvm::LLVMBuildBr(builder_, merge_bb);
-        llvm::LLVMPositionBuilderAtEnd(builder_, merge_bb);
+        [[scpp::unsafe]] {
+            llvm::LLVMBuildBr(builder_, merge_bb);
+            llvm::LLVMPositionBuilderAtEnd(builder_, merge_bb);
+        }
     }
 
 
@@ -459,10 +546,17 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
             for (std::size_t i = info.field_types.size(); i > 0; --i) {
                 const Type& field_type = info.field_types[i - 1];
                 if (!type_needs_subobject_teardown(field_type)) continue;
-                llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, ptr, info.physical_field_index(i - 1),
-                                                             info.field_names[i - 1].c_str());
+                llvm::LLVMValueRef field_ptr = nullptr;
+                [[scpp::unsafe]] {
+                    field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, ptr,
+                                                                 static_cast<unsigned int>(info.physical_field_index(i - 1)),
+                                                                 info.field_names[i - 1].c_str());
+                }
                 if (place != nullptr) {
-                    Place field_place = projected_field(*place, info.field_names[i - 1]);
+                    Place field_place{};
+                    [[scpp::unsafe]] {
+                        field_place = projected_field(*place, info.field_names[i - 1]);
+                    }
                     codegen_destroy_old_state_for_move_assign(field_type, field_ptr, /*moved_flag=*/nullptr, &field_place);
                     continue;
                 }
@@ -474,7 +568,10 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
 
     [[nodiscard]] bool Codegen::type_has_destructor(const Type& type)
 {
-        return type_needs_teardown(type, *program_);
+        if (program_ == nullptr) return false;
+        [[scpp::unsafe]] {
+            return type_needs_teardown(type, *program_);
+        }
     }
 
 
@@ -502,9 +599,19 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
         // is written on `a`. A struct cannot contain itself, so this
         // terminates.
         if (const StructDef* struct_def = find_struct_def(type.name); struct_def != nullptr) {
-            for (const StructField& field : struct_def->fields) {
-                if (field.default_initializer.has_value()) return true;
-                if (type_needs_nontrivial_default_init(field.type)) return true;
+            std::size_t num_fields = 0;
+            [[scpp::unsafe]] {
+                num_fields = struct_def->fields.size();
+            }
+            for (std::size_t fi = 0; fi < num_fields; ++fi) {
+                bool has_default = false;
+                bool needs_init = false;
+                [[scpp::unsafe]] {
+                    const StructField& field = struct_def->fields[fi];
+                    has_default = field.default_initializer.has_value();
+                    needs_init = type_needs_nontrivial_default_init(field.type);
+                }
+                if (has_default || needs_init) return true;
             }
         }
         return false;
@@ -526,7 +633,13 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
         // Every other teardown entry point funnels through this one, so
         // consulting the flag in more than one of them produced two
         // nested branches on the same i1.
-        emit_unless_moved(place != nullptr ? moved_flag_for_place(*place) : nullptr,
+        llvm::LLVMValueRef place_flag = nullptr;
+        if (place != nullptr) {
+            [[scpp::unsafe]] {
+                place_flag = moved_flag_for_place(*place);
+            }
+        }
+        emit_unless_moved(place_flag,
                           [&, this]() { emit_storage_destruction_unguarded(type, ptr, place); });
     }
 
@@ -543,8 +656,16 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
             // compile-time constant and the loop can be unrolled --
             // giving each element its own place. Every other array keeps
             // the loop, unchanged.
-            if (place != nullptr && place_has_moved_descendants(*place)) {
-                ignore_result(emit_unrolled_array_teardown(type, ptr, *place, /*old_state=*/false));
+            bool has_moved = false;
+            if (place != nullptr) {
+                [[scpp::unsafe]] {
+                    has_moved = place_has_moved_descendants(*place);
+                }
+            }
+            if (has_moved) {
+                [[scpp::unsafe]] {
+                    ignore_result(emit_unrolled_array_teardown(type, ptr, *place, /*old_state=*/false));
+                }
                 return;
             }
             // Reverse of construction order, exactly as for a derived
@@ -585,12 +706,24 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
     void Codegen::codegen_destroy_old_state_for_move_assign(const Type& type, llvm::LLVMValueRef ptr, llvm::LLVMValueRef moved_flag,
                                                             const Place* place)
 {
-        if (moved_flag == nullptr && place != nullptr) moved_flag = moved_flag_for_place(*place);
+        if (moved_flag == nullptr && place != nullptr) {
+            [[scpp::unsafe]] {
+                moved_flag = moved_flag_for_place(*place);
+            }
+        }
         if (type.kind == TypeKind::Array) {
             if (!type_has_destructor(type)) return;
-            if (place != nullptr && place_has_moved_descendants(*place)) {
+            bool has_moved = false;
+            if (place != nullptr) {
+                [[scpp::unsafe]] {
+                    has_moved = place_has_moved_descendants(*place);
+                }
+            }
+            if (has_moved) {
                 emit_unless_moved(moved_flag, [&, this]() {
-                    ignore_result(emit_unrolled_array_teardown(type, ptr, *place, /*old_state=*/true));
+                    [[scpp::unsafe]] {
+                        ignore_result(emit_unrolled_array_teardown(type, ptr, *place, /*old_state=*/true));
+                    }
                 });
                 return;
             }
@@ -609,57 +742,45 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
     llvm::LLVMValueRef Codegen::create_moved_flag_if_type_has_destructor(const Type& type)
 {
         if (!type_has_destructor(type)) return nullptr;
-        llvm::LLVMValueRef flag = create_entry_block_alloca(llvm::LLVMInt1TypeInContext(context_), "movedflag");
-        llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, /*SignExtend=*/0), flag);
+        llvm::LLVMValueRef flag = nullptr;
+        [[scpp::unsafe]] {
+            flag = create_entry_block_alloca(llvm::LLVMInt1TypeInContext(context_), "movedflag");
+            llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0UL, /*SignExtend=*/0), flag);
+        }
         return flag;
     }
 
 
     llvm::LLVMValueRef Codegen::create_zeroed_flag_in_entry_block(const std::string& name)
 {
-        llvm::LLVMTypeRef i1 = llvm::LLVMInt1TypeInContext(context_);
-        llvm::LLVMValueRef flag = create_entry_block_alloca(i1, name);
-        llvm::LLVMValueRef zero = llvm::LLVMConstInt(i1, 0, /*SignExtend=*/0);
-        llvm::LLVMBasicBlockRef current_block = llvm::LLVMGetInsertBlock(builder_);
-        if (current_block == nullptr) {
+        llvm::LLVMValueRef flag = nullptr;
+        [[scpp::unsafe]] {
+            llvm::LLVMTypeRef i1 = llvm::LLVMInt1TypeInContext(context_);
+            flag = create_entry_block_alloca(i1, name);
+            llvm::LLVMValueRef zero = llvm::LLVMConstInt(i1, 0UL, /*SignExtend=*/0);
+            llvm::LLVMBasicBlockRef current_block = llvm::LLVMGetInsertBlock(builder_);
+            if (current_block == nullptr) {
+                llvm::LLVMBuildStore(builder_, zero, flag);
+                return flag;
+            }
+            // The `false` has to dominate every teardown that reads the
+            // flag, and a flag for a subobject is created where that
+            // subobject is first moved -- which may be inside a branch. Put
+            // the initialization next to the alloca, in the entry block.
+            llvm::LLVMBasicBlockRef entry = llvm::LLVMGetEntryBasicBlock(llvm::LLVMGetBasicBlockParent(current_block));
+            llvm::LLVMMetadataRef saved_dbg = llvm::LLVMGetCurrentDebugLocation2(builder_);
+            llvm::LLVMValueRef insert_before = llvm::LLVMGetNextInstruction(flag);
+            if (insert_before != nullptr) {
+                llvm::LLVMPositionBuilderBefore(builder_, insert_before);
+            } else {
+                llvm::LLVMPositionBuilderAtEnd(builder_, entry);
+            }
+            llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
             llvm::LLVMBuildStore(builder_, zero, flag);
-            return flag;
+            llvm::LLVMPositionBuilderAtEnd(builder_, current_block);
+            llvm::LLVMSetCurrentDebugLocation2(builder_, saved_dbg);
         }
-        // The `false` has to dominate every teardown that reads the
-        // flag, and a flag for a subobject is created where that
-        // subobject is first moved -- which may be inside a branch. Put
-        // the initialization next to the alloca, in the entry block.
-        llvm::LLVMBasicBlockRef entry = llvm::LLVMGetEntryBasicBlock(llvm::LLVMGetBasicBlockParent(current_block));
-        llvm::LLVMMetadataRef saved_dbg = llvm::LLVMGetCurrentDebugLocation2(builder_);
-        llvm::LLVMValueRef insert_before = llvm::LLVMGetNextInstruction(flag);
-        if (insert_before != nullptr) {
-            llvm::LLVMPositionBuilderBefore(builder_, insert_before);
-        } else {
-            llvm::LLVMPositionBuilderAtEnd(builder_, entry);
-        }
-        llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
-        llvm::LLVMBuildStore(builder_, zero, flag);
-        llvm::LLVMPositionBuilderAtEnd(builder_, current_block);
-        llvm::LLVMSetCurrentDebugLocation2(builder_, saved_dbg);
         return flag;
-    }
-
-
-    void Codegen::emit_unless_moved(llvm::LLVMValueRef moved_flag, const std::function<void()>& body)
-{
-        if (moved_flag == nullptr) {
-            body();
-            return;
-        }
-        llvm::LLVMValueRef was_moved = llvm::LLVMBuildLoad2(builder_, llvm::LLVMInt1TypeInContext(context_), moved_flag, "wasmoved");
-        llvm::LLVMValueRef current_fn = llvm::LLVMGetBasicBlockParent(llvm::LLVMGetInsertBlock(builder_));
-        llvm::LLVMBasicBlockRef then_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "dtorcall");
-        llvm::LLVMBasicBlockRef merge_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "dtorskip");
-        llvm::LLVMBuildCondBr(builder_, was_moved, merge_bb, then_bb);
-        llvm::LLVMPositionBuilderAtEnd(builder_, then_bb);
-        body();
-        llvm::LLVMBuildBr(builder_, merge_bb);
-        llvm::LLVMPositionBuilderAtEnd(builder_, merge_bb);
     }
 
 
@@ -669,11 +790,17 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
         auto llvm_type_result = to_llvm_type(type);
         if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
         llvm::LLVMTypeRef array_llvm_type = std::move(llvm_type_result).value();
-        llvm::LLVMTypeRef i64 = llvm::LLVMInt64TypeInContext(context_);
+        llvm::LLVMTypeRef i64 = nullptr;
+        [[scpp::unsafe]] {
+            i64 = llvm::LLVMInt64TypeInContext(context_);
+        }
         for (std::int64_t i = type.array_size; i > 0; i--) {
             Place element = projected_index(place, i - 1);
-            llvm::LLVMValueRef element_ptr = build_array_element_gep(
-                array_llvm_type, ptr, llvm::LLVMConstInt(i64, static_cast<std::uint64_t>(i - 1), /*SignExtend=*/0));
+            llvm::LLVMValueRef element_ptr = nullptr;
+            [[scpp::unsafe]] {
+                llvm::LLVMValueRef index_val = llvm::LLVMConstInt(i64, static_cast<unsigned long>(i - 1), /*SignExtend=*/0);
+                element_ptr = build_array_element_gep(array_llvm_type, ptr, index_val);
+            }
             if (old_state) {
                 codegen_destroy_old_state_for_move_assign(*type.element, element_ptr, /*moved_flag=*/nullptr, &element);
             } else {
@@ -688,7 +815,9 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
 {
         auto it = locals_.find(place.local);
         if (it == locals_.end()) return nullptr;
-        return it->second.moved_flag_for(place.path);
+        [[scpp::unsafe]] {
+            return it->second.moved_flag_for(place.path);
+        }
     }
 
 
@@ -717,7 +846,9 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
             flag = create_zeroed_flag_in_entry_block("movedflag");
             slot.set_moved_flag(place.path, flag);
         }
-        llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 1, /*SignExtend=*/0), flag);
+        [[scpp::unsafe]] {
+            llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 1UL, /*SignExtend=*/0), flag);
+        }
         // Moving a whole object moves everything under it; a strict
         // descendant's own bit would otherwise stay behind and guard a
         // teardown that no longer happens. Mirrors the move checker's
@@ -732,7 +863,9 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
         if (it == locals_.end()) return;
         llvm::LLVMValueRef flag = it->second.moved_flag_for(place.path);
         if (flag != nullptr) {
-            llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, /*SignExtend=*/0), flag);
+            [[scpp::unsafe]] {
+                llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0UL, /*SignExtend=*/0), flag);
+            }
         }
         clear_strict_descendant_flags(place);
     }
@@ -742,23 +875,32 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
 {
         auto it = locals_.find(place.local);
         if (it == locals_.end()) return;
-        llvm::LLVMValueRef zero = llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, /*SignExtend=*/0);
+        llvm::LLVMValueRef zero = nullptr;
+        [[scpp::unsafe]] {
+            zero = llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0UL, /*SignExtend=*/0);
+        }
         for (const auto& entry : it->second.moved_flags) {
             Place candidate{place.local, entry.path};
             if (!candidate.is_strictly_under(place)) continue;
-            if (entry.flag != nullptr) llvm::LLVMBuildStore(builder_, zero, entry.flag);
+            if (entry.flag != nullptr) {
+                [[scpp::unsafe]] {
+                    llvm::LLVMBuildStore(builder_, zero, entry.flag);
+                }
+            }
         }
     }
 
 
     [[nodiscard]] std::optional<Place> Codegen::codegen_place_of(const Expr& expr)
 {
-        std::optional<Place> place = place_of(expr, [this](const Expr& e) -> std::optional<LocalId> {
+        std::function<std::optional<LocalId>(const Expr&)> local_of = [this](const Expr& e) -> std::optional<LocalId> {
             if (!has_resolved_local(e)) return std::optional<LocalId>{};
             LocalId id = resolved_local_of(e);
             if (!locals_.contains(id)) return std::optional<LocalId>{};
             return id;
-        });
+        };
+        std::function<std::optional<Place>(LocalId)> resolve_root{};
+        std::optional<Place> place = place_of(expr, local_of, resolve_root, PlacePrecision::Exact);
         if (!place.has_value()) return place;
         // Splice a reference root onto what it was bound to, so the place
         // names the object rather than the binding. Bounded by the number
@@ -816,15 +958,23 @@ inline bool ignore_result(std::expected<void, CodegenError> result) { return res
         // chain has a destructor, so no base destructor exists to reach
         // the inherited fields and it must reach them itself.
         const ClassDef* class_def = find_class_def(class_name);
-        std::size_t own_field_count = class_def != nullptr ? class_def->fields.size() : info.field_types.size();
+        std::size_t own_field_count = info.field_types.size();
+        if (class_def != nullptr) {
+            [[scpp::unsafe]] {
+                own_field_count = class_def->fields.size();
+            }
+        }
         if (own_field_count > info.field_types.size()) own_field_count = info.field_types.size();
         std::size_t first_own = info.field_types.size() - own_field_count;
         for (std::size_t i = info.field_types.size(); i > first_own; --i) {
             const Type& field_type = info.field_types[i - 1];
             if (!type_needs_subobject_teardown(field_type)) continue;
-            llvm::LLVMValueRef field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, object_ptr,
-                                                                     info.physical_field_index(i - 1),
-                                                                     info.field_names[i - 1].c_str());
+            llvm::LLVMValueRef field_ptr = nullptr;
+            [[scpp::unsafe]] {
+                field_ptr = llvm::LLVMBuildStructGEP2(builder_, info.llvm_type, object_ptr,
+                                                                         static_cast<unsigned int>(info.physical_field_index(i - 1)),
+                                                                         info.field_names[i - 1].c_str());
+            }
             codegen_destroy_old_state_for_move_assign(field_type, field_ptr);
         }
         return {};

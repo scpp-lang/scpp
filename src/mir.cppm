@@ -19,7 +19,9 @@ export namespace scpp {
 // A distinct enum type rather than a bare std::size_t alias so it cannot
 // be silently confused with the other size_t-shaped index in this file,
 // a basic-block number.
-enum class LocalId : std::size_t {};
+enum class LocalId : std::size_t {
+    ProgramLifetime = 18446744073709551615ULL
+};
 
 [[nodiscard]] inline std::size_t local_index(LocalId id) { return static_cast<std::size_t>(id); }
 
@@ -323,12 +325,12 @@ class Place {
 // template being ill-formed at some importer. A hasher passed explicitly
 // to every map cannot be missed.
 struct PlaceHash {
-    [[nodiscard]] std::size_t operator()(const Place& place) const {
-        std::size_t h = static_cast<std::size_t>(std::hash<std::size_t>{}(local_index(place.local)));
+    [[nodiscard]] std::uint64_t operator()(const Place& place) const {
+        std::uint64_t h = static_cast<std::uint64_t>(std::hash<std::size_t>{}(local_index(place.local)));
         for (const Projection& step : place.path) {
-            std::size_t step_hash = step.is_deref  ? 0x9e3779b9ULL
-                                    : step.is_index ? static_cast<std::size_t>(std::hash<std::int64_t>{}(step.index))
-                                                    : static_cast<std::size_t>(std::hash<std::string>{}(step.field));
+            std::uint64_t step_hash = step.is_deref  ? 0x9e3779b9ULL
+                                    : step.is_index ? static_cast<std::uint64_t>(std::hash<std::int64_t>{}(step.index))
+                                                    : static_cast<std::uint64_t>(std::hash<std::string>{}(step.field));
             h ^= step_hash + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
         }
         return h;
@@ -339,14 +341,44 @@ struct PlaceHash {
 
 namespace std {
 
-template<>
+export template<>
 class hash<scpp::Place> {
 public:
-    uint64_t operator()(const scpp::Place& place) const {
+    std::uint64_t operator()(const scpp::Place& place) const {
         return scpp::PlaceHash{}(place);
     }
 
     virtual ~hash() = default;
+};
+
+export template<>
+class equal_to<scpp::Place> {
+public:
+    bool operator()(const scpp::Place& lhs, const scpp::Place& rhs) const {
+        return lhs == rhs;
+    }
+
+    virtual ~equal_to() = default;
+};
+
+export template<>
+class hash<scpp::LocalId> {
+public:
+    uint64_t operator()(scpp::LocalId value) const {
+        return std::hash<std::size_t>{}(scpp::local_index(value));
+    }
+
+    virtual ~hash() = default;
+};
+
+export template<>
+class equal_to<scpp::LocalId> {
+public:
+    bool operator()(scpp::LocalId lhs, scpp::LocalId rhs) const {
+        return lhs == rhs;
+    }
+
+    virtual ~equal_to() = default;
 };
 
 } // namespace std
@@ -895,12 +927,13 @@ template <typename VisitFn>
 [[nodiscard]] auto for_each_initializer_scope(const Program& program, VisitFn&& visit)
     -> std::invoke_result_t<VisitFn&, const InitializerScope&> {
     using Result = std::invoke_result_t<VisitFn&, const InitializerScope&>;
-    for (const GlobalVar& global : program.globals) {
+    for (std::size_t g_i = 0; g_i < program.globals.size(); g_i++) {
+        const GlobalVar& global = program.globals[g_i];
         if (global.decl == nullptr || global.decl->kind != StmtKind::VarDecl) continue;
         InitializerScope scope{};
-        scope.declared_type = &global.decl->type;
+        scope.declared_type = &program.globals[g_i].decl->type;
         scope.expr = global.decl->init.get();
-        scope.brace_args = &global.decl->ctor_args;
+        scope.brace_args = &program.globals[g_i].decl->ctor_args;
         scope.loc = global.decl->loc;
         scope.name = global.decl->var_name;
         scope.declares_namespace_scope_variable = true;
@@ -908,13 +941,15 @@ template <typename VisitFn>
                                                  global.namespace_path, global.decl->loc.source_path_text());
         if (Result r = visit(scope); !r.has_value()) return r;
     }
-    for (const ClassDef& def : program.classes) {
-        for (const ClassField& field : def.fields) {
+    for (std::size_t c_i = 0; c_i < program.classes.size(); c_i++) {
+        const ClassDef& def = program.classes[c_i];
+        for (std::size_t f_i = 0; f_i < def.fields.size(); f_i++) {
+            const ClassField& field = def.fields[f_i];
             if (!field.default_initializer.has_value()) continue;
             InitializerScope scope{};
-            scope.declared_type = &field.type;
+            scope.declared_type = &program.classes[c_i].fields[f_i].type;
             scope.expr = field.default_initializer->expr.get();
-            scope.brace_args = &field.default_initializer->brace_args;
+            scope.brace_args = &program.classes[c_i].fields[f_i].default_initializer->brace_args;
             scope.loc = field.loc;
             scope.name = field.name;
             scope.body = make_initializer_scope_body(program, def.owning_module, def.owning_module, def.namespace_path,
@@ -922,13 +957,15 @@ template <typename VisitFn>
             if (Result r = visit(scope); !r.has_value()) return r;
         }
     }
-    for (const StructDef& def : program.structs) {
-        for (const StructField& field : def.fields) {
+    for (std::size_t s_i = 0; s_i < program.structs.size(); s_i++) {
+        const StructDef& def = program.structs[s_i];
+        for (std::size_t f_i = 0; f_i < def.fields.size(); f_i++) {
+            const StructField& field = def.fields[f_i];
             if (!field.default_initializer.has_value()) continue;
             InitializerScope scope{};
-            scope.declared_type = &field.type;
+            scope.declared_type = &program.structs[s_i].fields[f_i].type;
             scope.expr = field.default_initializer->expr.get();
-            scope.brace_args = &field.default_initializer->brace_args;
+            scope.brace_args = &program.structs[s_i].fields[f_i].default_initializer->brace_args;
             scope.loc = field.loc;
             scope.name = field.name;
             scope.body = make_initializer_scope_body(program, def.owning_module, def.owning_module, def.namespace_path,
@@ -936,11 +973,13 @@ template <typename VisitFn>
             if (Result r = visit(scope); !r.has_value()) return r;
         }
     }
-    for (const Function& fn : program.functions) {
-        for (const Param& param : fn.params) {
+    for (std::size_t fn_i = 0; fn_i < program.functions.size(); fn_i++) {
+        const Function& fn = program.functions[fn_i];
+        for (std::size_t p_i = 0; p_i < fn.params.size(); p_i++) {
+            const Param& param = fn.params[p_i];
             if (param.default_expr == nullptr) continue;
             InitializerScope scope{};
-            scope.declared_type = &param.type;
+            scope.declared_type = &program.functions[fn_i].params[p_i].type;
             scope.expr = param.default_expr.get();
             scope.loc = param.default_expr->loc;
             scope.name = param.name;
@@ -949,7 +988,7 @@ template <typename VisitFn>
             if (Result r = visit(scope); !r.has_value()) return r;
         }
     }
-    return Result{};
+    return {};
 }
 
 // [dcl.type.cv]/4 + spec ch05 §5.7 / §6.2(10): "is the object this
@@ -1116,12 +1155,6 @@ class ReadOnlyPlaceQuery {
             return false;
     }
 }
-
-
-
-} // namespace scpp
-
-namespace scpp {
 
 // The single authority on which declaration a name refers to. Binds every name-use in a function body to the declaration it actually
 // refers to, following ordinary lexical scope, and builds the matching

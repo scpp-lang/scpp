@@ -25,18 +25,23 @@ extern "C" {
 int open(const char* pathname, int flags, unsigned int mode);
 long write(int fd, const void* buf, unsigned long count);
 int close(int fd);
+char* getenv(const char* name);
+unsigned long strlen(const char* s);
 }
 
 namespace scpp {
 
 
     Codegen::Codegen(const std::string& module_name, std::string source_path , bool emit_debug_info)
-        : context_{llvm::LLVMContextCreate()},
-          module_{llvm::LLVMModuleCreateWithNameInContext(module_name.c_str(), context_)},
-          builder_{llvm::LLVMCreateBuilderInContext(context_)},
-          source_path_{std::move(source_path)},
+        : source_path_{std::move(source_path)},
           emit_debug_info_{emit_debug_info}
-{}
+    {
+        [[scpp::unsafe]] {
+            context_ = llvm::LLVMContextCreate();
+            module_ = llvm::LLVMModuleCreateWithNameInContext(module_name.c_str(), context_);
+            builder_ = llvm::LLVMCreateBuilderInContext(context_);
+        }
+    }
 
 
     // dibuilder_ (when present -- only if emit_debug_info_) is disposed
@@ -56,17 +61,21 @@ namespace scpp {
     // while it runs, so the context must outlive it.
     Codegen::~Codegen()
 {
-        if (dibuilder_ != nullptr) llvm::LLVMDisposeDIBuilder(dibuilder_);
-        llvm::LLVMDisposeBuilder(builder_);
-        llvm::LLVMDisposeModule(module_);
-        llvm::LLVMContextDispose(context_);
+        [[scpp::unsafe]] {
+            if (dibuilder_ != nullptr) llvm::LLVMDisposeDIBuilder(dibuilder_);
+            llvm::LLVMDisposeBuilder(builder_);
+            llvm::LLVMDisposeModule(module_);
+            llvm::LLVMContextDispose(context_);
+        }
     }
 
 
     void Codegen::set_target(const std::string& triple, const std::string& data_layout)
 {
-        llvm::LLVMSetTarget(module_, triple.c_str());
-        llvm::LLVMSetDataLayout(module_, data_layout.c_str());
+        [[scpp::unsafe]] {
+            llvm::LLVMSetTarget(module_, triple.c_str());
+            llvm::LLVMSetDataLayout(module_, data_layout.c_str());
+        }
     }
 
 
@@ -131,7 +140,8 @@ namespace scpp {
         // since its owner was skipped above) owner class's layout --
         // crashing with a bare, hard-to-place "unordered_map::at".
         std::unordered_set<std::string> synthetic_check_only_class_names{};
-        for (const StructDef& def : program.structs) {
+        for (std::size_t i = 0; i < program.structs.size(); ++i) {
+            const StructDef& def = program.structs[i];
             if (def.is_forward_declaration) continue;
             if (!def.template_params.empty()) {
                 generic_type_template_names.insert(def.name);
@@ -139,7 +149,8 @@ namespace scpp {
             }
             if (auto r = declare_struct(def); !r.has_value()) return std::unexpected(std::move(r).error());
         }
-        for (const ClassDef& def : program.classes) {
+        for (std::size_t i = 0; i < program.classes.size(); ++i) {
+            const ClassDef& def = program.classes[i];
             if (def.is_concept_witness) {
                 witness_class_names.insert(def.name);
                 continue;
@@ -159,19 +170,33 @@ namespace scpp {
             }
             if (auto r = declare_class(def); !r.has_value()) return std::unexpected(std::move(r).error());
         }
-        for (const GlobalVar& global : program.globals) {
+        for (std::size_t i = 0; i < program.globals.size(); ++i) {
+            const GlobalVar& global = program.globals[i];
             if (global.decl == nullptr) continue;
-            auto llvm_type_result = to_llvm_type(global.decl->type);
+            Type gtype{};
+            std::string gname{};
+            std::uint64_t galign = 0;
+            bool gconst = false;
+            [[scpp::unsafe]] {
+                gtype = global.decl->type;
+                gname = global.decl->var_name;
+                galign = global.decl->resolved_alignment;
+                gconst = global.decl->is_const || global.decl->is_constexpr;
+            }
+            auto llvm_type_result = to_llvm_type(gtype);
             if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
             llvm::LLVMTypeRef llvm_type = std::move(llvm_type_result).value();
-            llvm::LLVMValueRef init = llvm::LLVMConstNull(llvm_type);
-            llvm::LLVMValueRef variable = llvm::LLVMAddGlobal(module_, llvm_type, mangle_global_symbol_name(global.decl->var_name).c_str());
-            llvm::LLVMSetLinkage(variable, llvm::LLVMInternalLinkage);
-            llvm::LLVMSetGlobalConstant(variable, /*IsConstant=*/0);
-            llvm::LLVMSetInitializer(variable, init);
-            if (global.decl->resolved_alignment != 0) llvm::LLVMSetAlignment(variable, global.decl->resolved_alignment);
-            globals_.emplace(global.decl->var_name, GlobalSlot{variable, global.decl->type,
-                                                               global.decl->is_const || global.decl->is_constexpr});
+            llvm::LLVMValueRef init = nullptr;
+            llvm::LLVMValueRef variable = nullptr;
+            [[scpp::unsafe]] {
+                init = llvm::LLVMConstNull(llvm_type);
+                variable = llvm::LLVMAddGlobal(module_, llvm_type, mangle_global_symbol_name(gname).c_str());
+                llvm::LLVMSetLinkage(variable, llvm::LLVMInternalLinkage);
+                llvm::LLVMSetGlobalConstant(variable, /*IsConstant=*/0);
+                llvm::LLVMSetInitializer(variable, init);
+                if (galign != 0) llvm::LLVMSetAlignment(variable, static_cast<unsigned int>(galign));
+            }
+            globals_.emplace(std::move(gname), Codegen::GlobalSlot{variable, std::move(gtype), gconst});
         }
         if (auto r = build_overload_names(); !r.has_value()) return std::unexpected(std::move(r).error());
         auto is_never_compiled = [&](const Function& fn) {
@@ -213,17 +238,28 @@ namespace scpp {
             // are ever compiled.
             return !fn.member_owner_class.empty() && generic_type_template_names.contains(fn.member_owner_class);
         };
-        for (const Function& fn : program.functions) {
+        for (std::size_t i = 0; i < program.functions.size(); ++i) {
+            const Function& fn = program.functions[i];
             if (is_never_compiled(fn)) continue;
             if (auto r = declare_function(fn); !r.has_value()) return std::unexpected(std::move(r).error());
         }
         if (!program.globals.empty()) {
             if (auto r = define_global_initializers(program); !r.has_value()) return std::unexpected(std::move(r).error());
         }
-        for (const Function& fn : program.functions) {
+        for (std::size_t i = 0; i < program.functions.size(); ++i) {
+            const Function& fn = program.functions[i];
             if (is_never_compiled(fn)) continue;
             bool defined_a_body = false;
-            if (!fn.owning_module.empty() && fn.is_exported) {
+            bool is_from_other_partition = false;
+            [[scpp::unsafe]] {
+                if (!program.partition_name.empty() && fn.loc.has_source_path()) {
+                    is_from_other_partition = (fn.loc.source_path_text() != program.source_path);
+                }
+            }
+            bool is_synthesized = fn.name.find('.') != std::string::npos || fn.name.starts_with("__lambda");
+            if (is_from_other_partition && !is_synthesized) {
+                // An ordinary function imported from another partition of this module is defined by that partition's own object file
+            } else if (!fn.owning_module.empty() && fn.owning_module != program.module_name && fn.is_exported) {
                 // A defaulted special member (e.g. `virtual ~X() = default;`),
                 // an inherited-method forwarding stub, or a constexpr function
                 // whose body had to stay available for constant evaluation,
@@ -289,10 +325,18 @@ namespace scpp {
         }
         finalize_debug_info();
         char* error_message = nullptr;
-        llvm::LLVMBool broken = llvm::LLVMVerifyModule(module_, llvm::LLVMReturnStatusAction, &error_message);
-        std::string error{error_message != nullptr ? error_message : ""};
-        llvm::LLVMDisposeMessage(error_message);
-        if (broken) {
+        llvm::LLVMBool broken = 0;
+        [[scpp::unsafe]] {
+            broken = llvm::LLVMVerifyModule(module_, llvm::LLVMReturnStatusAction, &error_message);
+        }
+        std::string error{};
+        if (error_message != nullptr) {
+            error = std::string{error_message};
+        }
+        [[scpp::unsafe]] {
+            llvm::LLVMDisposeMessage(error_message);
+        }
+        if (broken != 0) {
             // A module-level verifier failure is a compiler bug, and the
             // IR dump is the thing that diagnoses it -- but it is a
             // *developer* aid, so it is opt-in and goes exactly where it
@@ -304,25 +348,33 @@ namespace scpp {
             // still looking like it had. Neither is acceptable behaviour
             // for a compiler.
             std::string dump_note{};
-            if (const char* dump_path = std::getenv("SCPP_DUMP_BROKEN_MODULE");
-                dump_path != nullptr && dump_path[0] != '\0') {
-                char* ir_dump = llvm::LLVMPrintModuleToString(module_);
+            const char* dump_path = nullptr;
+            [[scpp::unsafe]] {
+                dump_path = getenv("SCPP_DUMP_BROKEN_MODULE");
+            }
+            if (dump_path != nullptr && std::string{dump_path} != "") {
+                char* ir_dump = nullptr;
                 bool write_ok = false;
-                // O_WRONLY | O_CREAT | O_TRUNC = 01 | 0100 | 01000 = 01101 = 577 (0x241)
-                int fd = open(dump_path, 0x241, 0644);
-                if (fd >= 0) {
-                    if (ir_dump != nullptr) {
-                        (void)write(fd, ir_dump, std::strlen(ir_dump));
+                [[scpp::unsafe]] {
+                    ir_dump = llvm::LLVMPrintModuleToString(module_);
+                    // O_WRONLY | O_CREAT | O_TRUNC = 01 | 0100 | 01000 = 01101 = 577 (0x241)
+                    int fd = open(dump_path, 0x241, 0644);
+                    if (fd >= 0) {
+                        if (ir_dump != nullptr) {
+                            write(fd, ir_dump, strlen(ir_dump));
+                        }
+                        close(fd);
+                        write_ok = true;
                     }
-                    (void)close(fd);
-                    write_ok = true;
                 }
                 // A dump that failed to write is worse than no dump: it
                 // sends the reader to an empty or absent file believing
                 // the compiler produced one.
                 dump_note = write_ok ? "; module IR written to '" + std::string{dump_path} + "'"
                                      : "; could not write module IR to '" + std::string{dump_path} + "'";
-                llvm::LLVMDisposeMessage(ir_dump);
+                [[scpp::unsafe]] {
+                    llvm::LLVMDisposeMessage(ir_dump);
+                }
             }
             // Anything reaching here is a *module*-level invariant (every
             // function-local one was already attributed to its own
@@ -340,17 +392,33 @@ namespace scpp {
 {
         auto name_it = overload_names_.find(&fn);
         if (name_it == overload_names_.end()) return {};
-        llvm::LLVMValueRef llvm_fn = llvm::LLVMGetNamedFunction(module_, name_it->second.c_str());
+        llvm::LLVMValueRef llvm_fn = nullptr;
+        [[scpp::unsafe]] {
+            llvm_fn = llvm::LLVMGetNamedFunction(module_, name_it->second.c_str());
+        }
         if (llvm_fn == nullptr) return {};
-        if (llvm::LLVMVerifyFunction(llvm_fn, llvm::LLVMReturnStatusAction) == 0) return {};
+        llvm::LLVMBool fn_ok = 0;
+        [[scpp::unsafe]] {
+            fn_ok = llvm::LLVMVerifyFunction(llvm_fn, llvm::LLVMReturnStatusAction);
+        }
+        if (fn_ok == 0) return {};
         // Re-run the module verifier purely to recover the human-readable
         // description of what is wrong; only this one function can be
         // broken so far, so the text describes it.
         char* error_message = nullptr;
-        (void)llvm::LLVMVerifyModule(module_, llvm::LLVMReturnStatusAction, &error_message);
-        std::string error{error_message != nullptr ? error_message : ""};
-        llvm::LLVMDisposeMessage(error_message);
-        while (!error.empty() && error.back() == '\n') error.pop_back();
+        [[scpp::unsafe]] {
+            llvm::LLVMVerifyModule(module_, llvm::LLVMReturnStatusAction, &error_message);
+        }
+        std::string error{};
+        if (error_message != nullptr) {
+            error = std::string{error_message};
+        }
+        [[scpp::unsafe]] {
+            llvm::LLVMDisposeMessage(error_message);
+        }
+        while (!error.empty() && error[error.size() - 1] == '\n') {
+            error = error.substr(0, error.size() - 1);
+        }
         return std::unexpected(CodegenError("internal error: generated invalid IR for '" + fn.name + "': " + error,
             fn.loc));
     }
@@ -358,9 +426,17 @@ namespace scpp {
 
     std::string Codegen::module_ir() const
 {
-        char* ir_cstr = llvm::LLVMPrintModuleToString(module_);
-        std::string ir{ir_cstr != nullptr ? ir_cstr : ""};
-        llvm::LLVMDisposeMessage(ir_cstr);
+        char* ir_cstr = nullptr;
+        [[scpp::unsafe]] {
+            ir_cstr = llvm::LLVMPrintModuleToString(module_);
+        }
+        std::string ir{};
+        if (ir_cstr != nullptr) {
+            ir = std::string{ir_cstr};
+        }
+        [[scpp::unsafe]] {
+            llvm::LLVMDisposeMessage(ir_cstr);
+        }
         return ir;
     }
 
@@ -368,7 +444,11 @@ namespace scpp {
     [[nodiscard]] const std::vector<std::string>& Codegen::current_lookup_namespace_path() const
 {
         if (!current_global_namespace_path_.empty()) return current_global_namespace_path_;
-        if (current_function_def_ != nullptr) return current_function_def_->namespace_path;
+        if (current_function_def_ != nullptr) {
+            [[scpp::unsafe]] {
+                return current_function_def_->namespace_path;
+            }
+        }
         static const std::vector<std::string> empty;
         return empty;
     }
@@ -378,35 +458,60 @@ namespace scpp {
                                                                       bool explicit_global_qualification) const
 {
         if (program_ == nullptr) return nullptr;
-        std::reference_wrapper<const Program> program_ref{*program_};
-        const GlobalVar* global =
-            find_visible_global(OptionalProgramRef{program_ref}, current_lookup_namespace_path(), name,
-                                explicit_global_qualification);
-        if (global == nullptr || global->decl == nullptr) return nullptr;
-        auto it = globals_.find(global->decl->var_name);
-        return it == globals_.end() ? nullptr : &it->second;
+        const Program* prog = program_;
+        std::string var_name{};
+        [[scpp::unsafe]] {
+            std::reference_wrapper<const Program> program_ref{*prog};
+            const GlobalVar* global = find_visible_global(OptionalProgramRef{program_ref}, current_lookup_namespace_path(), name,
+                                                          explicit_global_qualification);
+            if (global != nullptr && global->decl != nullptr) {
+                var_name = global->decl->var_name;
+            }
+        }
+        if (var_name.empty()) return nullptr;
+        if (!globals_.contains(var_name)) return nullptr;
+        return &globals_.at(var_name);
     }
 
 
     [[nodiscard]] const Codegen::LocalSlot* Codegen::find_local(const Expr& expr) const {
         if (!has_resolved_local(expr)) return nullptr;
-        auto it = locals_.find(resolved_local_of(expr));
-        return it == locals_.end() ? nullptr : &it->second;
+        auto id = resolved_local_of(expr);
+        if (!locals_.contains(id)) return nullptr;
+        return &locals_.at(id);
     }
 
 
     [[nodiscard]] std::optional<LocalId> Codegen::this_param_local() const {
-        if (current_function_def_ == nullptr || current_function_def_->params.empty()) return std::nullopt;
-        const Param& first = current_function_def_->params.front();
-        if (first.name != "this" || !has_param_local(first)) return std::nullopt;
-        return param_local(first);
+        if (current_function_def_ == nullptr) return std::nullopt;
+        bool empty = false;
+        std::string first_name{};
+        bool has_local = false;
+        LocalId local_id{};
+        [[scpp::unsafe]] {
+            if (current_function_def_->params.empty()) {
+                empty = true;
+            } else {
+                const Param& first = current_function_def_->params.front();
+                first_name = first.name;
+                has_local = has_param_local(first);
+                if (has_local) {
+                    local_id = param_local(first);
+                }
+            }
+        }
+        if (empty || first_name != "this" || !has_local) return std::nullopt;
+        return local_id;
     }
 
 
     [[nodiscard]] std::string Codegen::mangle_global_symbol_name(const std::string& name) const
 {
         std::string result = "__scpp_global.";
-        for (char ch : name) result += ch == ':' ? '.' : ch;
+        for (std::size_t i = 0; i < name.size(); ++i) {
+            char ch = name[i];
+            result += ch == ':' ? '.' : ch;
+        }
         return result;
     }
 
@@ -415,7 +520,7 @@ namespace scpp {
 {
         switch (type.kind) {
             case TypeKind::Named:
-                if (type.template_args.empty()) return type.name;
+                if (type.template_args.empty()) return std::string{type.name};
                 {
                     std::string result = type.name;
                     for (const Type& arg : type.template_args) result += "_" + mangle_type(arg);
@@ -442,7 +547,7 @@ namespace scpp {
             case TypeKind::Span: return mangle_type(*type.pointee) + (type.is_mutable_ref ? "_span" : "_cspan");
             case TypeKind::Array: return mangle_type(*type.element) + "_arr" + std::to_string(type.array_size);
         }
-        return "?";
+        return std::string{"?"};
     }
 
 
@@ -451,10 +556,10 @@ namespace scpp {
         if (is_special_member_mangled_name(fn.name, fn.member_owner_class, "_delete")) return "~";
         std::string operator_spelled = operator_function_display_spelling(fn.name);
         if (!operator_spelled.empty()) return operator_spelled;
-        if (!fn.member_owner_class.empty() && fn.name.rfind(fn.member_owner_class + "_", 0) == 0) {
+        if (!fn.member_owner_class.empty() && fn.name.starts_with(fn.member_owner_class + "_")) {
             return fn.name.substr(fn.member_owner_class.size() + 1);
         }
-        return fn.name;
+        return std::string{fn.name};
     }
 
 
@@ -462,7 +567,7 @@ namespace scpp {
 {
         std::string key = method_lookup_name(fn);
         key += "(";
-        std::size_t start = fn.member_owner_class.empty() ? 0 : 1;
+        std::size_t start = fn.member_owner_class.empty() ? static_cast<std::size_t>(0) : static_cast<std::size_t>(1);
         for (std::size_t i = start; i < fn.params.size(); i++) {
             if (i != start) key += ",";
             key += mangle_type(fn.params[i].type);
@@ -509,28 +614,37 @@ namespace scpp {
     [[nodiscard]] std::optional<Type> Codegen::resolve_function_designator_type(const Expr& expr,
                                                                        const std::optional<Type>& target_type)
 {
-        const Expr* source = &expr;
-        if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::AddressOf && expr.lhs) source = expr.lhs.get();
-        if (source->kind != ExprKind::Identifier || find_local(*source) != nullptr) {
+        const Expr& source = (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::AddressOf && expr.lhs)
+                                 ? *expr.lhs
+                                 : expr;
+        if (source.kind != ExprKind::Identifier || find_local(source) != nullptr) {
             return std::nullopt;
         }
         std::optional<Type> result{};
-        for (const Function& fn : program_->functions) {
-            if (fn.name != source->name) continue;
-            Type candidate =
-                function_pointer_type_from_signature(fn.return_type, [&]() {
-                    std::vector<Type> params{};
-                    params.reserve(fn.params.size());
-                    for (const Param& param : fn.params) params.push_back(param.type);
-                    return params;
-                }(),
-                    fn.is_unsafe || (fn.is_extern_c && fn.body == nullptr));
-            if (target_type.has_value()) {
-                if (same_function_pointer_shape_ignoring_unsafe(candidate, *target_type)) return candidate;
-                continue;
+        if (program_ == nullptr) return std::nullopt;
+        const Program* prog = program_;
+        [[scpp::unsafe]] {
+            for (std::size_t i = 0; i < prog->functions.size(); ++i) {
+                const Function& fn = prog->functions[i];
+                std::string full_name{};
+                for (const std::string& seg : fn.namespace_path) full_name += seg + "::";
+                full_name += fn.name;
+                if (fn.name != source.name && full_name != source.name) continue;
+                Type candidate =
+                    function_pointer_type_from_signature(fn.return_type, [&]() {
+                        std::vector<Type> params{};
+                        params.reserve(fn.params.size());
+                        for (const Param& param : fn.params) params.push_back(param.type);
+                        return params;
+                    }(),
+                        fn.is_unsafe || (fn.is_extern_c && fn.body == nullptr));
+                if (target_type.has_value()) {
+                    if (same_function_pointer_shape_ignoring_unsafe(candidate, *target_type)) return candidate;
+                    continue;
+                }
+                if (result.has_value()) return std::nullopt;
+                result = std::move(candidate);
             }
-            if (result.has_value()) return std::nullopt;
-            result = std::move(candidate);
         }
         return result;
     }
@@ -540,22 +654,31 @@ namespace scpp {
 {
         std::optional<Type> source_type = resolve_function_designator_type(expr, target_type);
         if (!source_type.has_value()) return nullptr;
-        const Expr* source = &expr;
-        if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::AddressOf && expr.lhs) source = expr.lhs.get();
-        for (const Function& fn : program_->functions) {
-            if (fn.name != source->name) continue;
-            Type candidate = function_pointer_type_from_signature(fn.return_type, [&]() {
-                std::vector<Type> params{};
-                params.reserve(fn.params.size());
-                for (const Param& param : fn.params) params.push_back(param.type);
-                return params;
-            }(), fn.is_unsafe || (fn.is_extern_c && fn.body == nullptr));
-            if (!same_function_pointer_shape_ignoring_unsafe(candidate, target_type)) continue;
-            auto name_it = overload_names_.find(&fn);
-            if (name_it == overload_names_.end()) continue;
-            llvm::LLVMValueRef callee = llvm::LLVMGetNamedFunction(module_, name_it->second.c_str());
-            if (callee == nullptr) continue;
-            return callee;
+        const Expr& source = (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::AddressOf && expr.lhs)
+                                 ? *expr.lhs
+                                 : expr;
+        if (program_ == nullptr) return nullptr;
+        const Program* prog = program_;
+        [[scpp::unsafe]] {
+            for (std::size_t k = 0; k < prog->functions.size(); ++k) {
+                const Function& fn = prog->functions[k];
+                std::string full_name{};
+                for (const std::string& seg : fn.namespace_path) full_name += seg + "::";
+                full_name += fn.name;
+                if (fn.name != source.name && full_name != source.name) continue;
+                Type candidate = function_pointer_type_from_signature(fn.return_type, [&]() {
+                    std::vector<Type> params{};
+                    params.reserve(fn.params.size());
+                    for (const Param& param : fn.params) params.push_back(param.type);
+                    return params;
+                }(), fn.is_unsafe || (fn.is_extern_c && fn.body == nullptr));
+                if (!same_function_pointer_shape_ignoring_unsafe(candidate, target_type)) continue;
+                auto name_it = overload_names_.find(&fn);
+                if (name_it == overload_names_.end()) continue;
+                llvm::LLVMValueRef callee = llvm::LLVMGetNamedFunction(module_, name_it->second.c_str());
+                if (callee == nullptr) continue;
+                return callee;
+            }
         }
         return nullptr;
     }
@@ -565,7 +688,7 @@ namespace scpp {
 {
         switch (type.kind) {
             case TypeKind::Named:
-                if (type.template_args.empty()) return type.name;
+                if (type.template_args.empty()) return std::string{type.name};
                 {
                     std::string result = type.name + "<";
                     for (std::size_t i = 0; i < type.template_args.size(); i++) {
@@ -611,7 +734,7 @@ namespace scpp {
             case TypeKind::Array:
                 return verbatim_type_spelling(*type.element) + "[" + std::to_string(type.array_size) + "]";
         }
-        return "?";
+        return std::string{"?"};
     }
 
 
@@ -634,7 +757,13 @@ namespace scpp {
 
     [[nodiscard]] std::string Codegen::mangle_exported_symbol(const Function& fn) const
 {
-        const std::string& effective_module = fn.owning_module.empty() ? program_->module_name : fn.owning_module;
+        std::string effective_module = fn.owning_module;
+        if (effective_module.empty() && program_ != nullptr) {
+            const Program* prog = program_;
+            [[scpp::unsafe]] {
+                effective_module = prog->module_name;
+            }
+        }
         std::string mangled = "_scppM" + std::to_string(effective_module.size()) + "_" + effective_module;
         // Namespace nesting *beyond* the module's own required prefix
         // (ch11 §11.5 already requires every *exported* symbol's
@@ -696,7 +825,7 @@ namespace scpp {
             if (last_separator != std::string::npos) bare_name = bare_name.substr(last_separator + 2);
         }
         mangled += "F" + std::to_string(bare_name.size()) + "_" + bare_name;
-        mangled += "Q" + std::to_string(static_cast<int>(fn.receiver_ref_qualifier)) + "_";
+        mangled += "Q" + std::to_string(static_cast<std::int64_t>(fn.receiver_ref_qualifier)) + "_";
         mangled += "P" + std::to_string(fn.params.size()) + "_";
         for (const Param& param : fn.params) {
             std::string spelling = verbatim_type_spelling(param.type);
@@ -708,14 +837,31 @@ namespace scpp {
 
     [[nodiscard]] std::expected<void, CodegenError> Codegen::build_overload_names()
 {
+        std::vector<std::string> names{};
         std::unordered_map<std::string, std::vector<const Function*>> by_name{};
-        for (const Function& fn : program_->functions) {
-            by_name[fn.name].push_back(&fn);
+        if (program_ != nullptr) {
+            const Program* prog = program_;
+            [[scpp::unsafe]] {
+                for (std::size_t i = 0; i < prog->functions.size(); ++i) {
+                    const Function* fn_ptr = &prog->functions[i];
+                    if (by_name.find(fn_ptr->name) == by_name.end()) {
+                        names.push_back(fn_ptr->name);
+                    }
+                    by_name[fn_ptr->name].push_back(fn_ptr);
+                }
+            }
         }
-        for (const auto& entry : by_name) {
-            const std::string& name = entry.first;
-            const std::vector<const Function*>& fns = entry.second;
-            if (!fns.empty() && fns[0]->is_extern_c) {
+        for (const std::string& name : names) {
+            const std::vector<const Function*>& fns = by_name.at(name);
+            bool is_ext_c = false;
+            std::string fns0_owning_module{};
+            [[scpp::unsafe]] {
+                if (!fns.empty() && fns[0] != nullptr) {
+                    is_ext_c = fns[0]->is_extern_c;
+                    fns0_owning_module = fns[0]->owning_module;
+                }
+            }
+            if (!fns.empty() && is_ext_c) {
                 if (fns.size() != 1) {
                     return std::unexpected(CodegenError("'" + name +
                                         "' cannot be overloaded: 'extern \"C\"' functions share real C's own "
@@ -726,11 +872,19 @@ namespace scpp {
                 overload_names_[fns[0]] = name;
                 continue;
             }
-            bool recovered_from_elsewhere = !fns[0]->owning_module.empty();
-            bool defined_in_this_module = !program_->module_name.empty();
+            bool recovered_from_elsewhere = !fns0_owning_module.empty();
+            bool defined_in_this_module = false;
+            if (program_ != nullptr) {
+                const Program* prog = program_;
+                [[scpp::unsafe]] {
+                    defined_in_this_module = !prog->module_name.empty();
+                }
+            }
             if (recovered_from_elsewhere || defined_in_this_module) {
                 for (const Function* fn : fns) {
-                    overload_names_[fn] = mangle_exported_symbol(*fn);
+                    [[scpp::unsafe]] {
+                        overload_names_[fn] = mangle_exported_symbol(*fn);
+                    }
                 }
                 continue;
             }
@@ -746,7 +900,11 @@ namespace scpp {
             // function, there is no "give it a different llvm::LLVM name" fix
             // available at all, so this must be a hard error instead.
             for (const Function* fn : fns) {
-                if (fn->is_extern_c) {
+                bool fn_is_ext_c = false;
+                [[scpp::unsafe]] {
+                    if (fn != nullptr) fn_is_ext_c = fn->is_extern_c;
+                }
+                if (fn_is_ext_c) {
                     return std::unexpected(CodegenError("'" + name +
                                         "' cannot be overloaded: 'extern \"C\"' functions share real C's own "
                                         "lack of a function-overloading concept, so every 'extern \"C\"' "
@@ -756,10 +914,12 @@ namespace scpp {
             }
             for (const Function* fn : fns) {
                 std::string mangled = name;
-                if (fn->receiver_ref_qualifier == ReceiverRefQualifier::LValue) mangled += ".lrefq";
-                if (fn->receiver_ref_qualifier == ReceiverRefQualifier::RValue) mangled += ".rrefq";
-                for (const Param& param : fn->params) {
-                    mangled += "." + mangle_type(param.type);
+                [[scpp::unsafe]] {
+                    if (fn->receiver_ref_qualifier == ReceiverRefQualifier::LValue) mangled += ".lrefq";
+                    if (fn->receiver_ref_qualifier == ReceiverRefQualifier::RValue) mangled += ".rrefq";
+                    for (const Param& param : fn->params) {
+                        mangled += "." + mangle_type(param.type);
+                    }
                 }
                 overload_names_[fn] = mangled;
             }
@@ -772,138 +932,184 @@ namespace scpp {
 {
         bool needs_initializer = false;
         for (const GlobalVar& global : program.globals) {
-            if (global.decl != nullptr && (global.decl->init != nullptr || global.decl->has_ctor_args)) {
-                needs_initializer = true;
-                break;
+            if (global.decl != nullptr) {
+                bool has_init = false;
+                bool has_ctor = false;
+                [[scpp::unsafe]] {
+                    has_init = global.decl->init != nullptr;
+                    has_ctor = global.decl->has_ctor_args;
+                }
+                if (has_init || has_ctor) {
+                    needs_initializer = true;
+                    break;
+                }
             }
         }
         if (!needs_initializer) return {};
 
-        llvm::LLVMTypeRef fn_type = llvm::LLVMFunctionType(llvm::LLVMVoidTypeInContext(context_), nullptr, 0, /*IsVarArg=*/0);
-        llvm::LLVMValueRef init_fn = llvm::LLVMAddFunction(module_, "__scpp_global_init", fn_type);
-        llvm::LLVMSetLinkage(init_fn, llvm::LLVMInternalLinkage);
-        llvm::LLVMBasicBlockRef entry = llvm::LLVMAppendBasicBlockInContext(context_, init_fn, "entry");
-        llvm::LLVMPositionBuilderAtEnd(builder_, entry);
+        llvm::LLVMTypeRef fn_type = nullptr;
+        llvm::LLVMValueRef init_fn = nullptr;
+        llvm::LLVMBasicBlockRef entry = nullptr;
+        [[scpp::unsafe]] {
+            fn_type = llvm::LLVMFunctionType(llvm::LLVMVoidTypeInContext(context_), nullptr, 0, /*IsVarArg=*/0);
+            init_fn = llvm::LLVMAddFunction(module_, "__scpp_global_init", fn_type);
+            llvm::LLVMSetLinkage(init_fn, llvm::LLVMInternalLinkage);
+            entry = llvm::LLVMAppendBasicBlockInContext(context_, init_fn, "entry");
+            llvm::LLVMPositionBuilderAtEnd(builder_, entry);
+        }
         current_function_def_ = nullptr;
         current_global_namespace_path_.clear();
 
         for (const GlobalVar& global : program.globals) {
             if (global.decl == nullptr) continue;
-            auto it = globals_.find(global.decl->var_name);
+            std::string var_name{};
+            bool has_ctor_args = false;
+            std::uint64_t resolved_alignment = 0;
+            Type decl_type{};
+            const Expr* init_expr = nullptr;
+            SourceLocation decl_loc{};
+            [[scpp::unsafe]] {
+                var_name = global.decl->var_name;
+                has_ctor_args = global.decl->has_ctor_args;
+                resolved_alignment = global.decl->resolved_alignment;
+                decl_type = global.decl->type;
+                init_expr = global.decl->init.get();
+                decl_loc = global.decl->loc;
+            }
+            auto it = globals_.find(var_name);
             if (it == globals_.end()) continue;
             current_global_namespace_path_ = global.namespace_path;
-            if (global.decl->has_ctor_args) {
-                // `Box b{21};` at namespace scope is the same construction
-                // a block-scope declaration performs, into storage that
-                // happens to be a global rather than an alloca --
-                // construct_record_in_place is that one implementation.
-                // This used to refuse outright, and the refusal named the
-                // compiler's release history rather than the program.
-                // ch06 §7.2(3.3) already presupposes the feature: it
-                // permits, during required constant evaluation, a pointer
-                // to "a subobject ... of an object with static storage
-                // duration that is constant-initialized", and a subobject
-                // of a static-storage object is a class object built by
-                // exactly this. `docs/spec/` modifies neither
-                // [basic.start.static] nor [dcl.init], so front-matter
-                // §1(2) makes them apply unchanged.
-                //
-                // The storage is already zero-initialized: define_global
-                // gives every global a zeroinitializer, which is what the
-                // block-scope path spells with zero_initialize_storage
-                // before running the constructor.
-                Codegen::LValue target{it->second.global, global.decl->type,
-                              global.decl->resolved_alignment != 0
-                                  ? std::optional<unsigned int>(global.decl->resolved_alignment)
-                                  : alignment_for_type(global.decl->type)};
-                if (auto r = construct_record_in_place(target, global.decl->type, global.decl->ctor_args);
-                    !r.has_value()) {
+            if (has_ctor_args) {
+                std::optional<unsigned int> target_align = resolved_alignment != 0
+                    ? std::optional<unsigned int>{static_cast<unsigned int>(resolved_alignment)}
+                    : alignment_for_type(decl_type);
+                Codegen::LValue target{it->second.global, decl_type, std::move(target_align)};
+                std::expected<void, CodegenError> r{};
+                [[scpp::unsafe]] {
+                    r = construct_record_in_place(target, decl_type, global.decl->ctor_args);
+                }
+                if (!r.has_value()) {
                     return std::unexpected(std::move(r).error());
                 }
                 continue;
             }
-            if (global.decl->init == nullptr) continue;
-            if (global.decl->type.kind == TypeKind::Reference) {
-                auto lvalue_result = codegen_lvalue(*global.decl->init);
+            if (init_expr == nullptr) continue;
+            if (decl_type.kind == TypeKind::Reference) {
+                std::expected<Codegen::LValue, CodegenError> lvalue_result{};
+                [[scpp::unsafe]] {
+                    lvalue_result = codegen_lvalue(*init_expr);
+                }
                 if (!lvalue_result.has_value()) return std::unexpected(std::move(lvalue_result).error());
                 llvm::LLVMValueRef referent = std::move(lvalue_result).value().ptr;
                 create_store(referent, it->second.global, std::nullopt);
                 continue;
             }
-            // A braced list initializes the variable's own storage in
-            // place rather than producing a value to store: an array or
-            // record has no single loadable value to route through
-            // codegen_value_for_target's materialize-then-copy.
-            if (global.decl->init->kind == ExprKind::BracedInitList) {
-                Codegen::LValue target{it->second.global, global.decl->type,
-                              global.decl->resolved_alignment != 0
-                                  ? std::optional<unsigned int>(global.decl->resolved_alignment)
-                                  : alignment_for_type(global.decl->type)};
-                if (auto r = initialize_storage_from_brace_args(target, global.decl->init->args); !r.has_value()) {
+            ExprKind init_kind{};
+            [[scpp::unsafe]] {
+                init_kind = init_expr->kind;
+            }
+            if (init_kind == ExprKind::BracedInitList) {
+                std::optional<unsigned int> target_align = resolved_alignment != 0
+                    ? std::optional<unsigned int>{static_cast<unsigned int>(resolved_alignment)}
+                    : alignment_for_type(decl_type);
+                Codegen::LValue target{it->second.global, decl_type, std::move(target_align)};
+                std::expected<void, CodegenError> r{};
+                [[scpp::unsafe]] {
+                    r = initialize_storage_from_brace_args(target, init_expr->args);
+                }
+                if (!r.has_value()) {
                     return std::unexpected(std::move(r).error());
                 }
                 continue;
             }
-            // An array, for the same reason: `char g[6] = "hello";` is a
-            // [dcl.init.string] initialization of the global's storage,
-            // not a value produced and then stored. Routed to the very
-            // function the local declaration path uses, so the two
-            // positions of one declaration cannot disagree -- before
-            // this, a global array fell through to the store below,
-            // which (unlike every other binding boundary) ran no
-            // check_store_type at all, so the literal's decayed 8-byte
-            // `const char*` was written straight into the 6-byte array,
-            // overrunning it and leaving `g[0]` reading a pointer byte.
-            if (global.decl->type.kind == TypeKind::Array) {
-                Codegen::LValue target{it->second.global, global.decl->type,
-                              global.decl->resolved_alignment != 0
-                                  ? std::optional<unsigned int>(global.decl->resolved_alignment)
-                                  : alignment_for_type(global.decl->type)};
-                if (auto r = initialize_storage_from_expr(target, *global.decl->init); !r.has_value()) {
+            if (decl_type.kind == TypeKind::Array) {
+                std::optional<unsigned int> target_align = resolved_alignment != 0
+                    ? std::optional<unsigned int>{static_cast<unsigned int>(resolved_alignment)}
+                    : alignment_for_type(decl_type);
+                Codegen::LValue target{it->second.global, decl_type, std::move(target_align)};
+                std::expected<void, CodegenError> r{};
+                [[scpp::unsafe]] {
+                    r = initialize_storage_from_expr(target, *init_expr);
+                }
+                if (!r.has_value()) {
                     return std::unexpected(std::move(r).error());
                 }
                 continue;
             }
-            auto init_value_result = codegen_value_for_target(*global.decl->init, global.decl->type);
+            std::expected<llvm::LLVMValueRef, CodegenError> init_value_result{};
+            [[scpp::unsafe]] {
+                init_value_result = codegen_value_for_target(*init_expr, decl_type);
+            }
             if (!init_value_result.has_value()) return std::unexpected(std::move(init_value_result).error());
             llvm::LLVMValueRef init_value = std::move(init_value_result).value();
-            // The same check every other initialization boundary runs.
-            // This one ran none, so a global whose initializer lowered to
-            // a differently-shaped value was stored verbatim and only
-            // LLVM's module verifier -- which by then can no longer name
-            // the declaration -- had any chance of noticing.
-            auto global_llvm_type_result = to_llvm_type(global.decl->type);
+            auto global_llvm_type_result = to_llvm_type(decl_type);
             if (!global_llvm_type_result.has_value()) return std::unexpected(std::move(global_llvm_type_result).error());
-            current_loc_ = global.decl->loc;
+            current_loc_ = decl_loc;
             if (auto r = check_store_type(init_value, std::move(global_llvm_type_result).value(),
-                                          "global '" + global.decl->var_name + "'");
+                                          "global '" + var_name + "'");
                 !r.has_value()) {
                 return std::unexpected(std::move(r).error());
             }
-            create_store(init_value, it->second.global,
-                         global.decl->resolved_alignment != 0 ? std::optional<unsigned int>(global.decl->resolved_alignment)
-                                                              : alignment_for_type(global.decl->type));
+            std::optional<unsigned int> store_align = resolved_alignment != 0
+                ? std::optional<unsigned int>{static_cast<unsigned int>(resolved_alignment)}
+                : alignment_for_type(decl_type);
+            create_store(init_value, it->second.global, std::move(store_align));
         }
 
-        llvm::LLVMBuildRetVoid(builder_);
+        [[scpp::unsafe]] {
+            llvm::LLVMBuildRetVoid(builder_);
+        }
         current_global_namespace_path_.clear();
 
-        llvm::LLVMTypeRef ptr_type = llvm::LLVMPointerTypeInContext(context_, 0);
-        llvm::LLVMTypeRef ctor_field_types[3] = {llvm::LLVMInt32TypeInContext(context_), ptr_type, ptr_type};
-        llvm::LLVMTypeRef ctor_ty = llvm::LLVMStructTypeInContext(context_, ctor_field_types, 3, /*Packed=*/0);
-        llvm::LLVMValueRef ctor_fields[3] = {
-            llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), 65535, /*SignExtend=*/0),
-            llvm::LLVMConstBitCast(init_fn, ptr_type),
-            llvm::LLVMConstPointerNull(ptr_type)
-        };
-        llvm::LLVMValueRef ctor_entry = llvm::LLVMConstStructInContext(context_, ctor_fields, 3, /*Packed=*/0);
-        llvm::LLVMTypeRef array_ty = llvm::LLVMArrayType2(ctor_ty, 1);
-        llvm::LLVMValueRef ctors_initializer = llvm::LLVMConstArray2(ctor_ty, &ctor_entry, 1);
-        llvm::LLVMValueRef ctors_global = llvm::LLVMAddGlobal(module_, array_ty, "llvm.global_ctors");
-        llvm::LLVMSetLinkage(ctors_global, llvm::LLVMAppendingLinkage);
-        llvm::LLVMSetGlobalConstant(ctors_global, /*IsConstant=*/1);
-        llvm::LLVMSetInitializer(ctors_global, ctors_initializer);
+        [[scpp::unsafe]] {
+            llvm::LLVMTypeRef ptr_type = llvm::LLVMPointerTypeInContext(context_, 0);
+            llvm::LLVMTypeRef ctor_field_types[3] = {llvm::LLVMInt32TypeInContext(context_), ptr_type, ptr_type};
+            llvm::LLVMTypeRef ctor_ty = llvm::LLVMStructTypeInContext(context_, ctor_field_types, 3, /*Packed=*/0);
+            llvm::LLVMValueRef ctor_fields[3] = {
+                llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), 65535, /*SignExtend=*/0),
+                llvm::LLVMConstBitCast(init_fn, ptr_type),
+                llvm::LLVMConstPointerNull(ptr_type)
+            };
+            llvm::LLVMValueRef ctor_entry = llvm::LLVMConstStructInContext(context_, ctor_fields, 3, /*Packed=*/0);
+            llvm::LLVMTypeRef array_ty = llvm::LLVMArrayType2(ctor_ty, 1);
+            llvm::LLVMValueRef ctors_initializer = llvm::LLVMConstArray2(ctor_ty, &ctor_entry, 1);
+            llvm::LLVMValueRef ctors_global = llvm::LLVMAddGlobal(module_, array_ty, "llvm.global_ctors");
+            llvm::LLVMSetLinkage(ctors_global, llvm::LLVMAppendingLinkage);
+            llvm::LLVMSetGlobalConstant(ctors_global, /*IsConstant=*/1);
+            llvm::LLVMSetInitializer(ctors_global, ctors_initializer);
+        }
         return {};
+    }
+
+    [[nodiscard]] llvm::LLVMTargetDataRef data_layout_ref(llvm::LLVMModuleRef mod) {
+        [[scpp::unsafe]] {
+            return llvm::LLVMGetModuleDataLayout(mod);
+        }
+    }
+
+    [[nodiscard]] unsigned int pointer_abi_alignment_for_as(llvm::LLVMModuleRef mod, unsigned int address_space) {
+        [[scpp::unsafe]] {
+            llvm::LLVMContextRef ctx = llvm::LLVMGetModuleContext(mod);
+            return static_cast<unsigned int>(llvm::LLVMABIAlignmentOfType(
+                data_layout_ref(mod), llvm::LLVMPointerTypeInContext(ctx, address_space)));
+        }
+    }
+
+    [[nodiscard]] std::vector<llvm::LLVMValueRef> make_call_args() {
+        return {};
+    }
+
+    [[nodiscard]] std::vector<llvm::LLVMValueRef> make_call_args(llvm::LLVMValueRef a0) {
+        std::vector<llvm::LLVMValueRef> v{};
+        v.push_back(a0);
+        return v;
+    }
+
+    [[nodiscard]] std::vector<llvm::LLVMValueRef> make_call_args(llvm::LLVMValueRef a0, llvm::LLVMValueRef a1) {
+        std::vector<llvm::LLVMValueRef> v{};
+        v.push_back(a0);
+        v.push_back(a1);
+        return v;
     }
 
 } // namespace scpp

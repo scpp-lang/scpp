@@ -11,7 +11,14 @@ import :types;
 
 namespace scpp {
 
-struct FunctionSignature {
+class FunctionSignature {
+public:
+    virtual ~FunctionSignature() = default;
+    FunctionSignature() = default;
+    FunctionSignature(FunctionSignature&&) = default;
+    FunctionSignature& operator=(FunctionSignature&&) = default;
+    FunctionSignature(const FunctionSignature&) = default;
+    FunctionSignature& operator=(const FunctionSignature&) = default;
     std::vector<Type> param_types;
     std::vector<bool> param_is_forwarding_reference;
     std::vector<std::string> param_names;
@@ -46,6 +53,7 @@ struct FunctionSignature {
     // copy-initialization, so this has to reach overload resolution
     // rather than stay behind on the Function.
     bool is_explicit = false;
+    bool has_definition = false;
     std::string display_name;
 };
 
@@ -109,7 +117,7 @@ using Signatures = std::unordered_map<std::string, std::vector<FunctionSignature
 [[nodiscard]] bool has_user_declared_copy_ctor(const std::string& class_name, const Program& program);
 [[nodiscard]] bool has_user_declared_copy_assign(const std::string& class_name, const Program& program);
 [[nodiscard]] const Function* find_converting_assign(const std::string& class_name, const Type& source_type,
-                                                    const Program& program);
+                                                    const Program& program [[scpp::lifetime(p)]]) [[scpp::lifetime(p)]];
 [[nodiscard]] bool has_user_declared_dtor(const std::string& class_name, const Program& program);
 [[nodiscard]] bool is_field_copy_constructible(const Type& type, const Program& program);
 [[nodiscard]] bool is_field_copy_assignable(const Type& type, const Program& program);
@@ -125,9 +133,9 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
                                                            std::unordered_set<std::string>& seen);
 [[nodiscard]] std::vector<const ClassDef*> collect_virtual_interface_bases_in_construction_order(
     const Program& program, const ClassDef& def);
-[[nodiscard]] const MemberInitializer* find_explicit_interface_initializer(const Function& ctor,
-                                                                           const ClassDef& interface_def);
-[[nodiscard]] const MemberInitializer* find_explicit_base_initializer(const Function& ctor, const ClassDef& def);
+[[nodiscard]] const MemberInitializer* find_explicit_interface_initializer(const Function& ctor [[scpp::lifetime(c)]],
+                                                                           const ClassDef& interface_def) [[scpp::lifetime(c)]];
+[[nodiscard]] const MemberInitializer* find_explicit_base_initializer(const Function& ctor [[scpp::lifetime(c)]], const ClassDef& def) [[scpp::lifetime(c)]];
 [[nodiscard]] std::expected<void, DataflowError> validate_constructor_member_initialization(const Function& ctor, const ClassDef& def, const Program& program);
 [[nodiscard]] std::expected<void, DataflowError> validate_struct_constructor_member_initialization(const Function& ctor, const StructDef& def, const Program& program);
 [[nodiscard]] bool is_copy_constructible(const std::string& class_name, const Program& program);
@@ -166,10 +174,11 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 // own worked example, and the overwhelmingly common real-world one,
 // uses; a mutable-reference-parameter copy constructor, while legal
 // real C++, is out of scope for this recognition).
-[[nodiscard]] const Function* find_user_declared_copy_ctor(const std::string& class_name, const Program& program) {
-    for (const Function& fn : program.functions) {
+[[nodiscard]] const Function* find_user_declared_copy_ctor(const std::string& class_name, const Program& program [[scpp::lifetime(p)]]) [[scpp::lifetime(p)]] {
+    for (std::size_t i = 0; i < program.functions.size(); i++) {
+        const Function& fn = program.functions[i];
         if (is_copy_constructor_function(fn) && fn.member_owner_class == class_name) {
-            return &fn;
+            return &program.functions[i];
         }
     }
     return nullptr;
@@ -186,10 +195,11 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 // exactly (an operator= overload taking any other shape is simply an
 // ordinary, unrelated overload of the name -- not *the* copy assignment
 // operator this recognizes).
-[[nodiscard]] const Function* find_user_declared_copy_assign(const std::string& class_name, const Program& program) {
-    for (const Function& fn : program.functions) {
+[[nodiscard]] const Function* find_user_declared_copy_assign(const std::string& class_name, const Program& program [[scpp::lifetime(p)]]) [[scpp::lifetime(p)]] {
+    for (std::size_t i = 0; i < program.functions.size(); i++) {
+        const Function& fn = program.functions[i];
         if (is_copy_assignment_function(fn) && fn.member_owner_class == class_name) {
-            return &fn;
+            return &program.functions[i];
         }
     }
     return nullptr;
@@ -216,10 +226,11 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 // an assignment is well-formed asks the same question overload resolution
 // would.
 [[nodiscard]] const Function* find_converting_assign(const std::string& class_name, const Type& source_type,
-                                                    const Program& program) {
+                                                    const Program& program [[scpp::lifetime(p)]]) [[scpp::lifetime(p)]] {
     if (class_name.empty()) return nullptr;
     std::string suffix{"_operator_assign"};
-    for (const Function& fn : program.functions) {
+    for (std::size_t i = 0; i < program.functions.size(); i++) {
+        const Function& fn = program.functions[i];
         if (fn.member_owner_class != class_name || fn.params.size() != 2) continue;
         if (!fn.name.ends_with(suffix)) continue;
         if (fn.is_generic_template) continue;
@@ -228,7 +239,7 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
         if (is_copy_assignment_function(fn) || is_move_assignment_function(fn)) continue;
         const Type& param = fn.params[1].type;
         const Type& wanted = is_reference(param) && param.pointee != nullptr ? *param.pointee : param;
-        if (types_equal_ignoring_top_level_const(wanted, source_type)) return &fn;
+        if (types_equal_ignoring_top_level_const(wanted, source_type)) return &program.functions[i];
     }
     return nullptr;
 }
@@ -237,10 +248,11 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
     return find_user_declared_copy_assign(class_name, program) != nullptr;
 }
 
-[[nodiscard]] const Function* find_user_declared_dtor(const std::string& class_name, const Program& program) {
-    for (const Function& fn : program.functions) {
+[[nodiscard]] const Function* find_user_declared_dtor(const std::string& class_name, const Program& program [[scpp::lifetime(p)]]) [[scpp::lifetime(p)]] {
+    for (std::size_t i = 0; i < program.functions.size(); i++) {
+        const Function& fn = program.functions[i];
         if (fn.member_owner_class != class_name) continue;
-        if (is_destructor_function(fn)) return &fn;
+        if (is_destructor_function(fn)) return &program.functions[i];
     }
     return nullptr;
 }
@@ -257,7 +269,10 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 // source text mentions it.
 [[nodiscard]] bool has_deleted_dtor(const std::string& class_name, const Program& program) {
     const Function* dtor = find_user_declared_dtor(class_name, program);
-    return dtor != nullptr && dtor->is_deleted;
+    if (dtor == nullptr) return false;
+    [[scpp::unsafe]] {
+        return dtor->is_deleted;
+    }
 }
 // Certain stdlib "view" wrappers intentionally behave like scalar pairs at
 // by-value boundaries even though they are spelled as classes with
@@ -324,9 +339,12 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 }
 
 [[nodiscard]] bool class_has_any_constructor(const std::string& class_name, const Program& program) {
-    return std::any_of(program.functions.begin(), program.functions.end(), [&](const Function& fn) {
-        return is_constructor_function(fn) && fn.member_owner_class == class_name;
-    });
+    for (const Function& fn : program.functions) {
+        if (is_constructor_function(fn) && fn.member_owner_class == class_name) {
+            return true;
+        }
+    }
+    return false;
 }
 
 [[nodiscard]] std::string unqualified_template_base_name(std::string_view class_name) {
@@ -334,7 +352,7 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
     std::string_view tail = scope == std::string_view::npos ? class_name : class_name.substr(scope + 2);
     std::size_t dot = tail.find('.');
     if (dot != std::string_view::npos) tail = tail.substr(0, dot);
-    return std::string(tail);
+    return std::string{tail.data(), tail.size()};
 }
 
 [[nodiscard]] bool names_direct_base(const std::string& member_name, const ClassDef& def) {
@@ -348,9 +366,18 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
                                                            std::unordered_set<std::string>& seen) {
     for (const BaseSpecifier& base : def.base_specifiers) {
         const ClassDef* base_def = find_class_def(program, base.base_type.name);
-        if (base_def == nullptr || base_def->is_forward_declaration) continue;
-        collect_virtual_interface_bases_in_construction_order(program, *base_def, out, seen);
-        if (base.kind == BaseClassKind::Interface && seen.insert(base_def->name).second) out.push_back(base_def);
+        if (base_def == nullptr) continue;
+        bool is_fwd = false;
+        std::string base_name{};
+        [[scpp::unsafe]] {
+            is_fwd = base_def->is_forward_declaration;
+            base_name = base_def->name;
+        }
+        if (is_fwd) continue;
+        [[scpp::unsafe]] {
+            collect_virtual_interface_bases_in_construction_order(program, *base_def, out, seen);
+        }
+        if (base.kind == BaseClassKind::Interface && seen.insert(base_name).second) out.push_back(base_def);
     }
 }
 
@@ -362,21 +389,22 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
     return out;
 }
 
-[[nodiscard]] const MemberInitializer* find_explicit_interface_initializer(const Function& ctor, const ClassDef& interface_def) {
-    for (const MemberInitializer& init : ctor.member_initializers) {
+[[nodiscard]] const MemberInitializer* find_explicit_interface_initializer(const Function& ctor [[scpp::lifetime(c)]], const ClassDef& interface_def) [[scpp::lifetime(c)]] {
+    for (std::size_t i = 0; i < ctor.member_initializers.size(); i++) {
+        const MemberInitializer& init = ctor.member_initializers[i];
         if (init.member_name == interface_def.name ||
             init.member_name == unqualified_template_base_name(interface_def.name)) {
-            return &init;
+            return &ctor.member_initializers[i];
         }
     }
     return nullptr;
 }
 
-[[nodiscard]] const MemberInitializer* find_explicit_base_initializer(const Function& ctor, const ClassDef& def) {
+[[nodiscard]] const MemberInitializer* find_explicit_base_initializer(const Function& ctor [[scpp::lifetime(c)]], const ClassDef& def) [[scpp::lifetime(c)]] {
     auto base = def.direct_ordinary_base();
     if (!base.has_value()) return nullptr;
-    for (const MemberInitializer& init : ctor.member_initializers) {
-        if (names_direct_base(init.member_name, def)) return &init;
+    for (std::size_t i = 0; i < ctor.member_initializers.size(); i++) {
+        if (names_direct_base(ctor.member_initializers[i].member_name, def)) return &ctor.member_initializers[i];
     }
     return nullptr;
 }
@@ -402,8 +430,12 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
         for (std::size_t i = 0; i < interface_bases.size(); i++) {
             const ClassDef* interface_def = interface_bases[i];
             if (interface_def == nullptr) continue;
-            if (init.member_name == interface_def->name ||
-                init.member_name == unqualified_template_base_name(interface_def->name)) {
+            std::string if_name{};
+            [[scpp::unsafe]] {
+                if_name = interface_def->name;
+            }
+            if (init.member_name == if_name ||
+                init.member_name == unqualified_template_base_name(if_name)) {
                 rank = i;
                 break;
             }
@@ -430,8 +462,17 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
     }
     for (const BaseSpecifier& base : def.base_specifiers) {
         const ClassDef* base_def = find_class_def(program, base.base_type.name);
-        if (base_def == nullptr || base_def->is_forward_declaration) continue;
-        if (class_or_bases_declare_field(program, *base_def, name)) return true;
+        if (base_def == nullptr) continue;
+        bool is_fwd = false;
+        [[scpp::unsafe]] {
+            is_fwd = base_def->is_forward_declaration;
+        }
+        if (is_fwd) continue;
+        bool declares = false;
+        [[scpp::unsafe]] {
+            declares = class_or_bases_declare_field(program, *base_def, name);
+        }
+        if (declares) return true;
     }
     return false;
 }
@@ -452,14 +493,28 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
     }
     for (std::size_t i = 0; i < interface_bases.size(); i++) {
         const ClassDef* interface_def = interface_bases[i];
-        if (interface_def != nullptr && class_or_bases_declare_field(program, *interface_def, name)) return i;
+        if (interface_def == nullptr) continue;
+        bool declares = false;
+        [[scpp::unsafe]] {
+            declares = class_or_bases_declare_field(program, *interface_def, name);
+        }
+        if (declares) return i;
     }
     auto base = def.direct_ordinary_base();
     if (base.has_value()) {
         const ClassDef* base_def = find_class_def(program, base->get().base_type.name);
-        if (base_def != nullptr && !base_def->is_forward_declaration &&
-            class_or_bases_declare_field(program, *base_def, name)) {
-            return interface_bases.size();
+        if (base_def != nullptr) {
+            bool is_fwd = false;
+            bool declares = false;
+            [[scpp::unsafe]] {
+                is_fwd = base_def->is_forward_declaration;
+                if (!is_fwd) {
+                    declares = class_or_bases_declare_field(program, *base_def, name);
+                }
+            }
+            if (!is_fwd && declares) {
+                return interface_bases.size();
+            }
         }
     }
     return std::nullopt;
@@ -476,14 +531,29 @@ struct ConstructedOwner {
     const StructDef* struct_def = nullptr;
     const std::vector<const ClassDef*>* interface_bases = nullptr;
 
-    [[nodiscard]] const std::string& name() const { return class_def != nullptr ? class_def->name : struct_def->name; }
+    [[nodiscard]] const std::string& name() const {
+        if (class_def != nullptr) {
+            [[scpp::unsafe]] { return class_def->name; }
+        }
+        [[scpp::unsafe]] { return struct_def->name; }
+    }
 
     [[nodiscard]] std::optional<std::size_t> rank_of_member(const std::string& member_name) const {
         if (class_def != nullptr) {
-            return member_construction_rank(*program, *class_def, *interface_bases, member_name);
+            [[scpp::unsafe]] {
+                return member_construction_rank(*program, *class_def, *interface_bases, member_name);
+            }
         }
-        for (std::size_t i = 0; i < struct_def->fields.size(); i++) {
-            if (struct_def->fields[i].name == member_name) return i;
+        std::size_t f_size = 0;
+        [[scpp::unsafe]] {
+            f_size = struct_def->fields.size();
+        }
+        for (std::size_t i = 0; i < f_size; i++) {
+            std::string fname{};
+            [[scpp::unsafe]] {
+                fname = struct_def->fields[i].name;
+            }
+            if (fname == member_name) return i;
         }
         return std::nullopt;
     }
@@ -663,11 +733,19 @@ struct ConstructedOwner {
                                      ? "'" + later.member_name + "' is initialized twice"
                                      : "'" + later.member_name + "' runs before '" + earlier.member_name +
                                            "' but is written after it";
+            SourceLocation err_loc{};
+            [[scpp::unsafe]] {
+                if (later.loc.is_known()) {
+                    err_loc = later.loc;
+                } else {
+                    err_loc = ctor.loc;
+                }
+            }
             return std::unexpected(DataflowError(
                 "member-initializer-list for class '" + owner_name + "' is not in initialization order: " + reason +
                     " -- entries must be written in the order they run (base classes first, then fields in "
                     "declaration order), because that is the order they are evaluated in (spec §6.1)",
-                later.loc.is_known() ? later.loc : ctor.loc));
+                err_loc));
         }
         previous = ranks[i];
         previous_index = i;
@@ -703,16 +781,29 @@ struct ConstructedOwner {
     for (const StructField& field : def.fields) direct_field_names.insert(field.name);
     for (const MemberInitializer& init : ctor.member_initializers) {
         if (!direct_field_names.contains(init.member_name)) {
+            SourceLocation err_loc{};
+            [[scpp::unsafe]] {
+                if (init.loc.is_known()) {
+                    err_loc = init.loc;
+                } else {
+                    err_loc = ctor.loc;
+                }
+            }
             return std::unexpected(DataflowError("constructor for struct '" + def.name + "' names unknown member '" +
                                     init.member_name + "' in its member-initializer-list",
-                                init.loc.is_known() ? init.loc : ctor.loc));
+                                err_loc));
         }
     }
     std::vector<std::string> missing{};
     for (const StructField& field : def.fields) {
         if (field.type.kind == TypeKind::Array) continue;
-        bool covered_by_ctor = std::any_of(ctor.member_initializers.begin(), ctor.member_initializers.end(),
-                                           [&](const MemberInitializer& init) { return init.member_name == field.name; });
+        bool covered_by_ctor = false;
+        for (const MemberInitializer& init : ctor.member_initializers) {
+            if (init.member_name == field.name) {
+                covered_by_ctor = true;
+                break;
+            }
+        }
         if (!covered_by_ctor && !field.default_initializer.has_value()) missing.push_back(field.name);
     }
     if (!missing.empty()) {
@@ -767,34 +858,59 @@ struct ConstructedOwner {
     const MemberInitializer* explicit_base_init = find_explicit_base_initializer(ctor, def);
     auto base = def.direct_ordinary_base();
     if (explicit_base_init != nullptr && base.has_value() && direct_field_names.contains(base->get().base_type.name)) {
+        SourceLocation err_loc{};
+        [[scpp::unsafe]] {
+            if (explicit_base_init->loc.is_known()) {
+                err_loc = explicit_base_init->loc;
+            } else {
+                err_loc = ctor.loc;
+            }
+        }
         return std::unexpected(DataflowError("constructor for class '" + def.name + "' cannot disambiguate '" + base->get().base_type.name +
                                 "' in its member-initializer-list because that name matches both a direct field and "
                                 "the direct base class",
-                            explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc));
+                            err_loc));
     }
     for (const MemberInitializer& init : ctor.member_initializers) {
         if (&init == explicit_base_init) continue;
         bool names_interface_base = false;
         for (const ClassDef* interface_def : interface_bases) {
             if (interface_def == nullptr) continue;
-            if (init.member_name == interface_def->name ||
-                init.member_name == unqualified_template_base_name(interface_def->name)) {
+            std::string if_name{};
+            [[scpp::unsafe]] {
+                if_name = interface_def->name;
+            }
+            if (init.member_name == if_name ||
+                init.member_name == unqualified_template_base_name(if_name)) {
                 names_interface_base = true;
                 break;
             }
         }
         if (names_interface_base) continue;
         if (!direct_field_names.contains(init.member_name)) {
+            SourceLocation err_loc{};
+            [[scpp::unsafe]] {
+                if (init.loc.is_known()) {
+                    err_loc = init.loc;
+                } else {
+                    err_loc = ctor.loc;
+                }
+            }
             return std::unexpected(DataflowError("constructor for class '" + def.name + "' names unknown member '" + init.member_name +
                                     "' in its member-initializer-list",
-                                init.loc.is_known() ? init.loc : ctor.loc));
+                                err_loc));
         }
     }
     std::vector<std::string> missing{};
     for (const ClassField& field : def.fields) {
         if (field.type.kind == TypeKind::Array) continue;
-        bool covered_by_ctor = std::any_of(ctor.member_initializers.begin(), ctor.member_initializers.end(),
-                                           [&](const MemberInitializer& init) { return init.member_name == field.name; });
+        bool covered_by_ctor = false;
+        for (const MemberInitializer& init : ctor.member_initializers) {
+            if (init.member_name == field.name) {
+                covered_by_ctor = true;
+                break;
+            }
+        }
         if (!covered_by_ctor && !field.default_initializer.has_value()) missing.push_back(field.name);
     }
     if (!missing.empty()) {
@@ -845,7 +961,11 @@ struct ConstructedOwner {
         // declaration -- it suppresses nothing less than a defined one
         // would -- but the class then has no copy constructor that spec
         // §6.6(4)'s "has a copy constructor" test can be satisfied by.
-        return !user_copy->is_deleted;
+        bool del = false;
+        [[scpp::unsafe]] {
+            del = user_copy->is_deleted;
+        }
+        return !del;
     }
     if (has_user_declared_copy_assign(class_name, program)) {
         return false;
@@ -875,7 +995,11 @@ struct ConstructedOwner {
 // mirroring move assignment's identical spec §6.4(3) rule).
 [[nodiscard]] bool is_copy_assignable(const std::string& class_name, const Program& program) {
     if (const Function* user_assign = find_user_declared_copy_assign(class_name, program); user_assign != nullptr) {
-        return !user_assign->is_deleted;
+        bool del = false;
+        [[scpp::unsafe]] {
+            del = user_assign->is_deleted;
+        }
+        return !del;
     }
     if (has_user_declared_dtor(class_name, program) || has_user_declared_copy_ctor(class_name, program)) {
         return false;
@@ -970,45 +1094,61 @@ struct ConstructedOwner {
                                                                      const Body& body, const Signatures& signatures) {
     std::vector<const FunctionSignature*> matches{};
     for (const FunctionSignature* candidate : constructor_overloads_of(class_name, signatures)) {
-        if (!compile_time_dependency_visible_in_body(*candidate, body)) continue;
-        if (!signature_accepts_argument_count(*candidate, ctor_args.size(), 1)) continue;
+        if (candidate == nullptr) continue;
+        bool ct_visible = false;
+        bool arity_ok = false;
+        [[scpp::unsafe]] {
+            ct_visible = compile_time_dependency_visible_in_body(*candidate, body);
+            arity_ok = signature_accepts_argument_count(*candidate, ctor_args.size(), 1);
+        }
+        if (!ct_visible || !arity_ok) continue;
         bool all_match = true;
         for (std::size_t i = 0; all_match && i < ctor_args.size(); i++) {
+            Type param_t{};
+            [[scpp::unsafe]] {
+                param_t = candidate->param_types[i + 1];
+            }
             all_match = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
-                                                                             candidate->param_types[i + 1], body,
-                                                                             signatures);
+                                                                             param_t, body,
+                                                                             signatures, true);
         }
         if (all_match) matches.push_back(candidate);
     }
-    if (matches.empty()) return nullptr;
-    if (matches.size() == 1) return matches[0];
-    // [over.match.best]/2.4: a non-template is better than a template.
-    {
+    const FunctionSignature* selected = nullptr;
+    if (matches.size() == 1) {
+        selected = matches[0];
+    } else if (matches.size() > 1) {
+        // [over.match.best]/2.4: a non-template is better than a template.
         std::vector<const FunctionSignature*> non_generic{};
         for (const FunctionSignature* candidate : matches) {
-            if (!candidate->is_generic_template) non_generic.push_back(candidate);
+            bool is_gen = false;
+            [[scpp::unsafe]] {
+                is_gen = candidate->is_generic_template;
+            }
+            if (!is_gen) non_generic.push_back(candidate);
         }
         if (!non_generic.empty()) matches = std::move(non_generic);
-        if (matches.size() == 1) return matches[0];
+        if (matches.size() == 1) {
+            selected = matches[0];
+        } else {
+            std::vector<std::vector<ArgumentConversion>> conversions{};
+            for (const FunctionSignature* candidate : matches) {
+                std::vector<ArgumentConversion> convs{};
+                [[scpp::unsafe]] {
+                    convs = constructor_argument_conversions(*candidate, ctor_args, body, signatures);
+                }
+                conversions.push_back(std::move(convs));
+            }
+            std::vector<std::size_t> best_indices = best_viable_candidates(conversions);
+            if (best_indices.size() == 1) {
+                selected = matches[best_indices[0]];
+            }
+        }
     }
-    // [over.ics.rank] through the shared algebra, the same one codegen's
-    // two resolvers, movecheck's resolve_overload and the constant
-    // evaluator use.
-    //
-    // This was a *sixth* independent answer to "which candidate is
-    // better?", and the most arbitrary of them: it returned the first
-    // candidate that matched exactly (not the best), then the first
-    // non-generic one (not the best), then a mutable-reference score
-    // that fell back to `matches[0]` on a tie. Three "first one wins"
-    // rules in a row, in the pass whose job is to check the very
-    // constructor codegen will emit.
-    std::vector<std::vector<ArgumentConversion>> conversions{};
-    for (const FunctionSignature* candidate : matches) {
-        conversions.push_back(constructor_argument_conversions(*candidate, ctor_args, body, signatures));
+    if (selected == nullptr) return nullptr;
+    [[scpp::unsafe]] {
+        return selected;
     }
-    std::vector<std::size_t> best_indices = best_viable_candidates(conversions);
-    if (best_indices.size() != 1) return nullptr;
-    return matches[best_indices[0]];
 }
 
 // [dcl.init.aggr]: a record that declares any constructor is not an
@@ -1037,22 +1177,38 @@ struct ConstructedOwner {
                                                                                const Body& body,
                                                                                const Signatures& signatures) {
     if (body.program == nullptr || ctor_args.empty()) return std::nullopt;
-    if (!class_has_any_constructor(class_name, *body.program)) return std::nullopt;
+    bool has_any_ctor = false;
+    [[scpp::unsafe]] {
+        has_any_ctor = class_has_any_constructor(class_name, *body.program);
+    }
+    if (!has_any_ctor) return std::nullopt;
     for (const ExprPtr& arg : ctor_args) {
         if (arg == nullptr || !infer_expr_type(*arg, body, signatures).has_value()) return std::nullopt;
     }
     std::vector<const FunctionSignature*> arity_candidates{};
     std::vector<const FunctionSignature*> viable_candidates{};
     for (const FunctionSignature* candidate : constructor_overloads_of(class_name, signatures)) {
-        if (!compile_time_dependency_visible_in_body(*candidate, body)) continue;
-        if (!signature_accepts_argument_count(*candidate, ctor_args.size(), 1)) continue;
-        if (candidate->is_generic_template) return std::nullopt;
+        if (candidate == nullptr) continue;
+        bool ct_visible = false;
+        bool arity_ok = false;
+        bool is_generic = false;
+        [[scpp::unsafe]] {
+            ct_visible = compile_time_dependency_visible_in_body(*candidate, body);
+            arity_ok = signature_accepts_argument_count(*candidate, ctor_args.size(), 1);
+            is_generic = candidate->is_generic_template;
+        }
+        if (!ct_visible || !arity_ok) continue;
+        if (is_generic) return std::nullopt;
         arity_candidates.push_back(candidate);
         bool viable = true;
         for (std::size_t i = 0; viable && i < ctor_args.size(); i++) {
+            Type param_t{};
+            [[scpp::unsafe]] {
+                param_t = candidate->param_types[i + 1];
+            }
             viable = argument_matches_parameter_for_constructor_selection(*ctor_args[i],
-                                                                         candidate->param_types[i + 1], body,
-                                                                         signatures);
+                                                                         param_t, body,
+                                                                         signatures, true);
         }
         if (viable) viable_candidates.push_back(candidate);
     }
@@ -1061,15 +1217,30 @@ struct ConstructedOwner {
     auto describe_all = [](const std::vector<const FunctionSignature*>& candidates) {
         std::vector<std::string> described{};
         for (const FunctionSignature* candidate : candidates) {
-            std::string text = describe_constructor_candidate(*candidate);
-            if (std::find(described.begin(), described.end(), text) == described.end()) described.push_back(text);
+            if (candidate == nullptr) continue;
+            std::string text{};
+            [[scpp::unsafe]] {
+                text = describe_constructor_candidate(*candidate);
+            }
+            bool found = false;
+            for (const std::string& existing : described) {
+                if (existing == text) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) described.push_back(text);
         }
         std::string result{};
         for (const std::string& text : described) result += "\n  candidate: " + text;
         return result;
     };
     if (viable_candidates.size() > 1) {
-        return "ambiguous constructor call for " + std::string(record_keyword(class_name, *body.program)) + " '" +
+        std::string kw{};
+        [[scpp::unsafe]] {
+            kw = record_keyword(class_name, *body.program);
+        }
+        return "ambiguous constructor call for " + kw + " '" +
                class_name + "': " + std::to_string(viable_candidates.size()) +
                " constructors match these argument types equally well and none is better than the others "
                "([over.match.best])" +
@@ -1089,31 +1260,53 @@ struct ConstructedOwner {
                                                    const Body& body, const Signatures& signatures,
                                                    const SourceLocation& loc, std::string_view context_message) {
     if (body.program == nullptr) return {};
-    const ClassDef* class_def = find_class_def(*body.program, class_name);
+    const ClassDef* class_def = nullptr;
+    bool has_any_ctor = false;
+    [[scpp::unsafe]] {
+        class_def = find_class_def(*body.program, class_name);
+        if (class_def != nullptr) {
+            has_any_ctor = class_has_any_constructor(class_name, *body.program);
+        }
+    }
     if (class_def == nullptr) return {};
-    if (class_has_any_constructor(class_name, *body.program)) {
+    if (has_any_ctor) {
         static const std::vector<ExprPtr> no_ctor_args{};
         const FunctionSignature* sig = resolve_constructor_signature(class_name, no_ctor_args, body, signatures);
+        std::string msg_ctx{context_message.data(), context_message.size()};
         if (sig == nullptr) {
-            return std::unexpected(DataflowError(std::string(context_message) + ": base class '" + class_name +
+            return std::unexpected(DataflowError(msg_ctx + ": base class '" + class_name +
                                     "' has no default constructor; write an explicit base-class initializer",
                                 loc));
         }
-        if (sig->access == AccessSpecifier::Private && !sig->member_owner_class.empty() &&
-            current_class != sig->member_owner_class) {
-            return std::unexpected(DataflowError(std::string(context_message) + ": base class '" + class_name +
+        AccessSpecifier sig_acc = AccessSpecifier::Public;
+        std::string sig_owner{};
+        [[scpp::unsafe]] {
+            sig_acc = sig->access;
+            sig_owner = sig->member_owner_class;
+        }
+        if (sig_acc == AccessSpecifier::Private && !sig_owner.empty() &&
+            current_class != sig_owner) {
+            return std::unexpected(DataflowError(msg_ctx + ": base class '" + class_name +
                                     "' default constructor is private; write an explicit base-class initializer "
                                     "calling an accessible constructor",
                                 loc));
         }
-        if (sig->is_unsafe) {
-            return std::unexpected(DataflowError(std::string(context_message) + ": base class '" + class_name +
+        bool is_uns = false;
+        [[scpp::unsafe]] {
+            is_uns = sig->is_unsafe;
+        }
+        if (is_uns) {
+            return std::unexpected(DataflowError(msg_ctx + ": base class '" + class_name +
                                     "' default constructor is [[scpp::unsafe]]",
                                 loc));
         }
         return {};
     }
-    if (auto base = class_def->direct_ordinary_base(); base.has_value()) {
+    std::optional<std::reference_wrapper<const BaseSpecifier>> base{};
+    [[scpp::unsafe]] {
+        base = class_def->direct_ordinary_base();
+    }
+    if (base.has_value()) {
         return ensure_implicit_default_construction_is_valid(base->get().base_type.name, current_class, body, signatures, loc,
                                                       context_message);
     }
@@ -1135,28 +1328,53 @@ struct ConstructedOwner {
         return ensure_implicit_default_construction_is_valid(base->get().base_type.name, def.name, body, signatures, ctor.loc,
                                                       context_message);
     }
-    const FunctionSignature* sig =
-        resolve_constructor_signature(base->get().base_type.name, explicit_base_init->initializer.brace_args, body, signatures);
+    const FunctionSignature* sig = nullptr;
+    SourceLocation base_init_loc{};
+    [[scpp::unsafe]] {
+        sig = resolve_constructor_signature(base->get().base_type.name, explicit_base_init->initializer.brace_args, body, signatures);
+        base_init_loc = explicit_base_init->loc;
+    }
+    SourceLocation report_loc{};
+    [[scpp::unsafe]] {
+        if (base_init_loc.is_known()) {
+            report_loc = base_init_loc;
+        } else {
+            report_loc = ctor.loc;
+        }
+    }
     if (sig == nullptr) {
-        if (body.program != nullptr && !class_has_any_constructor(base->get().base_type.name, *body.program) &&
-            explicit_base_init->initializer.brace_args.empty()) {
+        bool has_ctor = false;
+        bool args_empty = false;
+        [[scpp::unsafe]] {
+            has_ctor = body.program != nullptr && class_has_any_constructor(base->get().base_type.name, *body.program);
+            args_empty = explicit_base_init->initializer.brace_args.empty();
+        }
+        if (!has_ctor && args_empty) {
             return ensure_implicit_default_construction_is_valid(base->get().base_type.name, def.name, body, signatures,
-                                                          explicit_base_init->loc, context_message);
+                                                          report_loc, context_message);
         }
         return std::unexpected(DataflowError("base-class initializer for '" + base->get().base_type.name +
                                 "' does not match any constructor of that class",
-                            explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc));
+                            report_loc));
     }
-    if (sig->access == AccessSpecifier::Private && !sig->member_owner_class.empty() && def.name != sig->member_owner_class) {
+    AccessSpecifier sig_acc = AccessSpecifier::Public;
+    std::string sig_owner{};
+    bool sig_uns = false;
+    [[scpp::unsafe]] {
+        sig_acc = sig->access;
+        sig_owner = sig->member_owner_class;
+        sig_uns = sig->is_unsafe;
+    }
+    if (sig_acc == AccessSpecifier::Private && !sig_owner.empty() && def.name != sig_owner) {
         return std::unexpected(DataflowError("cannot call private constructor of base class '" + base->get().base_type.name +
                                 "' from derived class '" + def.name + "'",
-                            explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc));
+                            report_loc));
     }
-    if (sig->is_unsafe) {
+    if (sig_uns) {
         return std::unexpected(DataflowError("cannot call base class '" + base->get().base_type.name +
                                 "' constructor outside '[[scpp::unsafe]] { }': its own declaration is marked "
                                 "'[[scpp::unsafe]]'",
-                            explicit_base_init->loc.is_known() ? explicit_base_init->loc : ctor.loc));
+                            report_loc));
     }
     return {};
 }
@@ -1168,15 +1386,23 @@ struct ConstructedOwner {
         return {};
     }
     if (!ctor.generic_method_owner_id.empty() && ctor.generic_method_owner_id != def.template_owner_id) return {};
-    std::vector<const ClassDef*> interface_bases = collect_virtual_interface_bases_in_construction_order(*body.program, def);
+    std::vector<const ClassDef*> interface_bases{};
+    [[scpp::unsafe]] {
+        interface_bases = collect_virtual_interface_bases_in_construction_order(*body.program, def);
+    }
     for (const ClassDef* interface_def : interface_bases) {
         if (interface_def == nullptr) continue;
-        const MemberInitializer* explicit_init = find_explicit_interface_initializer(ctor, *interface_def);
+        const MemberInitializer* explicit_init = nullptr;
+        std::string if_name{};
+        [[scpp::unsafe]] {
+            explicit_init = find_explicit_interface_initializer(ctor, *interface_def);
+            if_name = interface_def->name;
+        }
         std::string context_message =
-            "constructor for class '" + def.name + "' must initialize virtual interface base '" + interface_def->name + "'";
+            "constructor for class '" + def.name + "' must initialize virtual interface base '" + if_name + "'";
         if (explicit_init == nullptr) {
             if (!def.is_interface) {
-                if (auto _r = ensure_implicit_default_construction_is_valid(interface_def->name, def.name, body, signatures, ctor.loc,
+                if (auto _r = ensure_implicit_default_construction_is_valid(if_name, def.name, body, signatures, ctor.loc,
                                                               context_message);
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
@@ -1184,34 +1410,53 @@ struct ConstructedOwner {
             }
             continue;
         }
-        const FunctionSignature* sig = resolve_constructor_signature(interface_def->name, explicit_init->initializer.brace_args,
-                                                                     body, signatures);
+        const FunctionSignature* sig = nullptr;
+        SourceLocation if_report_loc{};
+        bool has_any_ctor = false;
+        bool args_empty = false;
+        [[scpp::unsafe]] {
+            sig = resolve_constructor_signature(if_name, explicit_init->initializer.brace_args, body, signatures);
+            if (explicit_init->loc.is_known()) {
+                if_report_loc = explicit_init->loc;
+            } else {
+                if_report_loc = ctor.loc;
+            }
+            has_any_ctor = class_has_any_constructor(if_name, *body.program);
+            args_empty = explicit_init->initializer.brace_args.empty();
+        }
         if (sig == nullptr) {
-            if (!class_has_any_constructor(interface_def->name, *body.program) &&
-                explicit_init->initializer.brace_args.empty()) {
-                if (auto _r = ensure_implicit_default_construction_is_valid(interface_def->name, def.name, body, signatures,
-                                                              explicit_init->loc.is_known() ? explicit_init->loc : ctor.loc,
+            if (!has_any_ctor && args_empty) {
+                if (auto _r = ensure_implicit_default_construction_is_valid(if_name, def.name, body, signatures,
+                                                              if_report_loc,
                                                               context_message);
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
                 continue;
             }
-            return std::unexpected(DataflowError("base-class initializer for '" + interface_def->name +
+            return std::unexpected(DataflowError("base-class initializer for '" + if_name +
                                     "' does not match any constructor of that class",
-                                explicit_init->loc.is_known() ? explicit_init->loc : ctor.loc));
+                                if_report_loc));
         }
-        if (sig->access == AccessSpecifier::Private && !sig->member_owner_class.empty() &&
-            def.name != sig->member_owner_class) {
-            return std::unexpected(DataflowError("cannot call private constructor of base class '" + interface_def->name +
+        AccessSpecifier sig_acc = AccessSpecifier::Public;
+        std::string sig_owner{};
+        bool sig_uns = false;
+        [[scpp::unsafe]] {
+            sig_acc = sig->access;
+            sig_owner = sig->member_owner_class;
+            sig_uns = sig->is_unsafe;
+        }
+        if (sig_acc == AccessSpecifier::Private && !sig_owner.empty() &&
+            def.name != sig_owner) {
+            return std::unexpected(DataflowError("cannot call private constructor of base class '" + if_name +
                                     "' from derived class '" + def.name + "'",
-                                explicit_init->loc.is_known() ? explicit_init->loc : ctor.loc));
+                                if_report_loc));
         }
-        if (sig->is_unsafe) {
-            return std::unexpected(DataflowError("cannot call base class '" + interface_def->name +
+        if (sig_uns) {
+            return std::unexpected(DataflowError("cannot call base class '" + if_name +
                                     "' constructor outside '[[scpp::unsafe]] { }': its own declaration is marked "
                                     "'[[scpp::unsafe]]'",
-                                explicit_init->loc.is_known() ? explicit_init->loc : ctor.loc));
+                                if_report_loc));
         }
     }
     return {};
@@ -1272,7 +1517,7 @@ struct ConstructedOwner {
     // reachable only read-only?" -- next to the identical guard already
     // applied to `int& r = <expr>;` and to a mutable-reference argument.
     if (!fn.params.empty() && fn.params[0].name == "this" && is_reference(fn.params[0].type)) {
-        return std::optional<std::size_t>(0);
+        return std::optional<std::size_t>(static_cast<std::size_t>(0));
     }
 
     std::optional<std::size_t> found{};
@@ -1314,7 +1559,12 @@ struct ConstructedOwner {
 
 [[nodiscard]] std::vector<std::size_t> infer_pointer_return_source_param_indices(const Function& fn) {
     if (fn.return_lifetime.present() || fn.return_type.kind != TypeKind::Pointer) return {};
-    if (!fn.params.empty() && fn.params[0].name == "this" && is_reference(fn.params[0].type)) return {0};
+    if (!fn.params.empty() && fn.params[0].name == "this" && is_reference(fn.params[0].type)) {
+        std::vector<std::size_t> r{};
+        std::size_t zero = 0;
+        r.push_back(zero);
+        return r;
+    }
 
     std::vector<std::size_t> indices{};
     for (std::size_t i = 0; i < fn.params.size(); i++) {
@@ -1400,7 +1650,11 @@ struct ConstructedOwner {
 [[nodiscard]] std::expected<std::vector<std::size_t>, DataflowError> resolve_returned_lifetime_param_indices(const Function& fn) {
     if (auto _r = validate_lifetime_annotation_placement(fn); !_r.has_value()) return std::unexpected(std::move(_r).error());
     if (fn.return_lifetime.present()) {
-        if (is_explicit_this_lifetime_annotation(fn)) return std::vector<std::size_t>{0};
+        if (is_explicit_this_lifetime_annotation(fn)) {
+            std::vector<std::size_t> r{};
+            r.push_back(static_cast<std::size_t>(0));
+            return r;
+        }
         if (fn.return_lifetime.is_any()) {
             return std::unexpected(DataflowError("function '" + fn.name +
                                     "' cannot name the reserved lifetime group 'any' in its return annotation",
@@ -1419,7 +1673,7 @@ struct ConstructedOwner {
         if (indices.empty() && !fn.member_owner_class.empty() && !fn.is_static && !fn.params.empty() &&
             fn.params[0].name == "this" && is_reference(fn.params[0].type) &&
             (fn.return_lifetime.name == "this" || fn.return_lifetime.name == "this" || is_operator_arrow_function(fn))) {
-            indices.push_back(0);
+            indices.push_back(static_cast<std::size_t>(0));
         }
         if (indices.empty()) {
             return std::unexpected(DataflowError("function '" + fn.name + "' names lifetime group '" + fn.return_lifetime.name +
@@ -1431,7 +1685,8 @@ struct ConstructedOwner {
     if (!is_reference(fn.return_type) && fn.return_type.kind != TypeKind::Pointer) return std::vector<std::size_t>{};
     if (fn.return_type.kind == TypeKind::Pointer) {
         std::vector<std::size_t> indices = infer_pointer_return_source_param_indices(fn);
-        return indices.size() == 1 ? indices : std::vector<std::size_t>{};
+        if (indices.size() == 1) return indices;
+        return std::vector<std::size_t>{};
     }
     auto elided_result = resolve_elided_param_index(fn);
     if (!elided_result.has_value()) return std::unexpected(std::move(elided_result).error());
@@ -1444,7 +1699,9 @@ struct ConstructedOwner {
                                 "escape the call",
                             fn.loc));
     }
-    return std::vector<std::size_t>{*elided};
+    std::vector<std::size_t> r{};
+    r.push_back(*elided);
+    return r;
 }
 
 // Whether assigning through `expr` (used as an assignment's *target* --
@@ -1463,7 +1720,7 @@ struct ConstructedOwner {
 // itself a reference/span) is always writable here -- move/
 // initialization-state legality is checked separately, this is purely
 // about const-ness.
-inline std::uint64_t g_signatures_version = 1;
+std::uint64_t g_signatures_version = 1;
 
 [[nodiscard]] std::expected<Signatures, DataflowError> build_signatures(const Program& program) {
     ++g_signatures_version;
@@ -1537,21 +1794,31 @@ inline std::uint64_t g_signatures_version = 1;
     sig.is_generic_template = fn.is_generic_template;
     sig.is_deleted = fn.is_deleted;
     sig.is_explicit = fn.is_explicit;
+    sig.has_definition = fn.body != nullptr || fn.is_defaulted || fn.is_deleted || fn.definition_is_deferred;
     sig.display_name = fn.name;
     std::vector<FunctionSignature>& overloads = signatures[fn.name];
-    for (const FunctionSignature& existing : overloads) {
+    for (std::size_t e_idx = 0; e_idx < overloads.size(); e_idx++) {
+        FunctionSignature& existing = overloads[e_idx];
         if (existing.is_generic_template != sig.is_generic_template) continue;
         bool same_params = existing.param_types.size() == sig.param_types.size();
         for (std::size_t i = 0; same_params && i < sig.param_types.size(); i++) {
             same_params = types_equal(existing.param_types[i], sig.param_types[i]);
         }
         if (same_params && existing.receiver_ref_qualifier == sig.receiver_ref_qualifier) {
-            return std::unexpected(DataflowError("redefinition of '" + fn.name +
-                                 "': a previous declaration with an identical parameter list already "
-                                 "exists ([basic.def.odr]/1 with [over.load]/2 -- functions can only be "
-                                 "overloaded by parameter list, return type alone doesn't count as a "
-                                 "difference)",
-                fn.loc));
+            if (existing.has_definition && sig.has_definition) {
+                return std::unexpected(DataflowError("redefinition of '" + fn.name +
+                                     "': a previous declaration with an identical parameter list already "
+                                     "exists ([basic.def.odr]/1 with [over.load]/2 -- functions can only be "
+                                     "overloaded by parameter list, return type alone doesn't count as a "
+                                     "difference)",
+                    fn.loc));
+            }
+            if (!existing.has_definition && sig.has_definition) {
+                existing = std::move(sig);
+                ++g_signatures_version;
+                return {};
+            }
+            return {};
         }
     }
     overloads.push_back(std::move(sig));
@@ -1568,12 +1835,15 @@ inline std::uint64_t g_signatures_version = 1;
     return {};
 }
 
-struct ConstructorOverloadCache {
+class ConstructorOverloadCache {
+public:
+    virtual ~ConstructorOverloadCache() = default;
+    ConstructorOverloadCache() = default;
     std::uint64_t version = 0;
     const Signatures* sigs = nullptr;
     std::unordered_map<std::string, std::vector<const FunctionSignature*>> map{};
 };
-inline thread_local ConstructorOverloadCache g_ctor_cache{};
+ConstructorOverloadCache g_ctor_cache{};
 
 // [class.ctor], [over.match.ctor]: every constructor overload
 // `class_name` declares -- the candidate set every constructor question
@@ -1604,7 +1874,7 @@ inline thread_local ConstructorOverloadCache g_ctor_cache{};
         g_ctor_cache.map.clear();
     }
     if (auto it = g_ctor_cache.map.find(class_name); it != g_ctor_cache.map.end()) {
-        return it->second;
+        return std::vector<const FunctionSignature*>{it->second};
     }
 
     const std::string constructor_name = class_name + "_new";

@@ -49,7 +49,6 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
                                            const Signatures& signatures, bool report_errors,
                                            std::string_view context,
                                            const Type* destination_type = nullptr);
-[[nodiscard]] bool is_read_only_reachable(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] extern bool place_is_read_only(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] extern std::expected<void, DataflowError> validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
                          const Signatures& signatures);
@@ -85,7 +84,10 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
     if (expr_type.has_value() && expr_type->is_reference_wrapper_lifetime_source) return true;
     if (expr.kind != ExprKind::Identifier) return false;
     const Type* type = body.type_if_local(expr);
-    return type != nullptr && type->is_reference_wrapper_lifetime_source;
+    if (type == nullptr) return false;
+    [[scpp::unsafe]] {
+        return type->is_reference_wrapper_lifetime_source;
+    }
 }
 
 [[nodiscard]] bool expr_contains_wrapper_lifetime_source_form(const Expr& expr, const Body& body,
@@ -164,11 +166,17 @@ std::optional<LocalId> resolve_reborrow_lender(const Expr& expr, const Body& bod
             }
             CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
-            bool returns_reference =
-                sig != nullptr && !sig->returned_lifetime_param_indices.empty() && is_pointer_return_lifetime_source_type(sig->return_type);
-            if (!returns_reference) return std::nullopt;
-            if (sig->returned_lifetime_param_indices.size() != 1) return std::nullopt;
-            std::size_t source_index = sig->returned_lifetime_param_indices.front();
+            bool returns_reference = false;
+            std::size_t num_indices = 0;
+            std::size_t source_index = 0;
+            [[scpp::unsafe]] {
+                if (sig != nullptr) {
+                    num_indices = sig->returned_lifetime_param_indices.size();
+                    returns_reference = !sig->returned_lifetime_param_indices.empty() && is_pointer_return_lifetime_source_type(sig->return_type);
+                    if (num_indices == 1) source_index = sig->returned_lifetime_param_indices.front();
+                }
+            }
+            if (!returns_reference || num_indices != 1) return std::nullopt;
             if (expr.name == "operator_deref" && expr.lhs != nullptr && source_index < callee.param_offset) {
                 return resolve_reborrow_lender(*expr.lhs, body, signatures);
             }
@@ -341,7 +349,7 @@ void release_reference_borrow(LocalId local, DataflowState& state, const Body& b
                 suspension_it->second.shared_count--;
             }
             if (suspension_it->second.shared_count == 0 && !suspension_it->second.mutable_suspended) {
-                state.suspended_reborrows.erase(suspension_it);
+                state.suspended_reborrows.erase(*target.lender);
             }
         }
     } else {
@@ -354,12 +362,12 @@ void release_reference_borrow(LocalId local, DataflowState& state, const Body& b
                     borrow_it->second.shared_count--;
                 }
                 if (!borrow_it->second.mutable_borrow && borrow_it->second.shared_count == 0) {
-                    state.borrows.erase(borrow_it);
+                    state.borrows.erase(root);
                 }
             }
         }
     }
-    state.ref_targets.erase(ref_it);
+    state.ref_targets.erase(local);
 }
 
 void release_closure_capture_borrows(LocalId local, DataflowState& state) {
@@ -379,7 +387,7 @@ void release_closure_capture_borrows(LocalId local, DataflowState& state) {
                 suspension_it->second.shared_count--;
             }
             if (!suspension_it->second.mutable_suspended && suspension_it->second.shared_count == 0) {
-                state.suspended_reborrows.erase(suspension_it);
+                state.suspended_reborrows.erase(*capture_borrow.lender);
             }
             continue;
         }
@@ -391,16 +399,25 @@ void release_closure_capture_borrows(LocalId local, DataflowState& state) {
             borrow_it->second.shared_count--;
         }
         if (!borrow_it->second.mutable_borrow && borrow_it->second.shared_count == 0) {
-            state.borrows.erase(borrow_it);
+            state.borrows.erase(capture_borrow.root);
         }
     }
-    state.closure_capture_borrows.erase(closure_it);
+    state.closure_capture_borrows.erase(local);
 }
 
 std::vector<std::size_t> successors(const Terminator& term) {
     switch (term.kind) {
-        case TerminatorKind::Goto: return {term.target};
-        case TerminatorKind::Branch: return {term.true_target, term.false_target};
+        case TerminatorKind::Goto: {
+            std::vector<std::size_t> r{};
+            r.push_back(term.target);
+            return r;
+        }
+        case TerminatorKind::Branch: {
+            std::vector<std::size_t> r{};
+            r.push_back(term.true_target);
+            r.push_back(term.false_target);
+            return r;
+        }
         case TerminatorKind::Switch: {
             std::vector<std::size_t> out{};
             out.reserve(term.switch_targets.size());
@@ -443,93 +460,83 @@ void collect_reference_use(const Expr& expr, const Body& body, LiveSet& out) {
 
 void collect_reference_uses(const Expr* expr, const Body& body, LiveSet& out) {
     if (expr == nullptr) return;
-    switch (expr->kind) {
-        case ExprKind::IntegerLiteral:
-        case ExprKind::FloatLiteral:
-        case ExprKind::BoolLiteral:
-        case ExprKind::NullptrLiteral:
-        case ExprKind::CharLiteral:
-        case ExprKind::StringLiteral:
-        case ExprKind::TypeTrait:
-        case ExprKind::Sizeof:
-        case ExprKind::Alignof:
-        case ExprKind::ValueInit:
-            return;
-        case ExprKind::New:
-            if (expr->lhs) collect_reference_uses(expr->lhs.get(), body, out);
-            for (const auto& arg : expr->args) collect_reference_uses(arg.get(), body, out);
-            return;
-        // A nested brace-enclosed initializer list is not a leaf: its
-        // elements are ordinary expressions and any of them may name a
-        // reference, so the walk has to descend into them exactly as it
-        // does into a call's arguments.
-        case ExprKind::BracedInitList:
-            for (const auto& arg : expr->args) collect_reference_uses(arg.get(), body, out);
-            return;
-        case ExprKind::Delete:
-        case ExprKind::Destroy:
-        case ExprKind::PackExpansion:
-            collect_reference_uses(expr->lhs.get(), body, out);
-            return;
-        case ExprKind::Identifier:
-            collect_reference_use(*expr, body, out);
-            return;
-        case ExprKind::Binary:
-            collect_reference_uses(expr->lhs.get(), body, out);
-            collect_reference_uses(expr->rhs.get(), body, out);
-            return;
-        case ExprKind::Conditional:
-            collect_reference_uses(expr->lhs.get(), body, out);
-            collect_reference_uses(expr->rhs.get(), body, out);
-            collect_reference_uses(expr->third.get(), body, out);
-            return;
-        case ExprKind::Unary:
-        case ExprKind::Move:
-        case ExprKind::Cast:
-            collect_reference_uses(expr->lhs.get(), body, out);
-            return;
-        case ExprKind::Call:
-            if (expr->lhs != nullptr) {
+    [[scpp::unsafe]] {
+        switch (expr->kind) {
+            case ExprKind::IntegerLiteral:
+            case ExprKind::FloatLiteral:
+            case ExprKind::BoolLiteral:
+            case ExprKind::NullptrLiteral:
+            case ExprKind::CharLiteral:
+            case ExprKind::StringLiteral:
+            case ExprKind::TypeTrait:
+            case ExprKind::Sizeof:
+            case ExprKind::Alignof:
+            case ExprKind::ValueInit:
+                return;
+            case ExprKind::New:
+                if (expr->lhs) collect_reference_uses(expr->lhs.get(), body, out);
+                for (const auto& arg : expr->args) collect_reference_uses(arg.get(), body, out);
+                return;
+            case ExprKind::BracedInitList:
+                for (const auto& arg : expr->args) collect_reference_uses(arg.get(), body, out);
+                return;
+            case ExprKind::Delete:
+            case ExprKind::Destroy:
+            case ExprKind::PackExpansion:
                 collect_reference_uses(expr->lhs.get(), body, out);
-            } else {
+                return;
+            case ExprKind::Identifier:
                 collect_reference_use(*expr, body, out);
-            }
-            for (const auto& arg : expr->args) {
-                collect_reference_uses(arg.get(), body, out);
-            }
-            return;
-        case ExprKind::Fold:
-            collect_reference_uses(expr->lhs.get(), body, out);
-            collect_reference_uses(expr->rhs.get(), body, out);
-            return;
-        case ExprKind::Member:
-            collect_reference_uses(expr->lhs.get(), body, out);
-            return;
-        case ExprKind::Subscript:
-            collect_reference_uses(expr->lhs.get(), body, out);
-            collect_reference_uses(expr->rhs.get(), body, out);
-            return;
-        case ExprKind::Lambda:
-            // ch05 §5.12: a plain (non-init) capture reads whatever
-            // local already exists under that name in the enclosing
-            // scope -- if that local is itself reference/span-typed,
-            // this is a genuine "use" of it, exactly like an ordinary
-            // Identifier reference (mirrors the Identifier case above).
-            // An init-capture's own expression is walked normally
-            // instead (it may itself reference an existing reference-
-            // typed local, e.g. `[r = some_ref]`).
-            for (const LambdaCapture& capture : expr->lambda_captures) {
-                if (capture.init) {
-                    collect_reference_uses(capture.init.get(), body, out);
-                    continue;
+                return;
+            case ExprKind::Binary:
+                collect_reference_uses(expr->lhs.get(), body, out);
+                collect_reference_uses(expr->rhs.get(), body, out);
+                return;
+            case ExprKind::Conditional:
+                collect_reference_uses(expr->lhs.get(), body, out);
+                collect_reference_uses(expr->rhs.get(), body, out);
+                collect_reference_uses(expr->third.get(), body, out);
+                return;
+            case ExprKind::Unary:
+            case ExprKind::Move:
+            case ExprKind::Cast:
+                collect_reference_uses(expr->lhs.get(), body, out);
+                return;
+            case ExprKind::Call:
+                if (expr->lhs != nullptr) {
+                    collect_reference_uses(expr->lhs.get(), body, out);
+                } else {
+                    collect_reference_use(*expr, body, out);
                 }
-                std::optional<LocalId> captured = body.local_of(capture);
-                if (captured.has_value() &&
-                    (is_reference(body.type_of(*captured)) || is_span(body.type_of(*captured)))) {
-                    out.insert(*captured);
+                for (const auto& arg : expr->args) {
+                    collect_reference_uses(arg.get(), body, out);
                 }
-            }
-            return;
+                return;
+            case ExprKind::Fold:
+                collect_reference_uses(expr->lhs.get(), body, out);
+                collect_reference_uses(expr->rhs.get(), body, out);
+                return;
+            case ExprKind::Member:
+                collect_reference_uses(expr->lhs.get(), body, out);
+                return;
+            case ExprKind::Subscript:
+                collect_reference_uses(expr->lhs.get(), body, out);
+                collect_reference_uses(expr->rhs.get(), body, out);
+                return;
+            case ExprKind::Lambda:
+                for (const LambdaCapture& capture : expr->lambda_captures) {
+                    if (capture.init) {
+                        collect_reference_uses(capture.init.get(), body, out);
+                        continue;
+                    }
+                    std::optional<LocalId> captured = body.local_of(capture);
+                    if (captured.has_value() &&
+                        (is_reference(body.type_of(*captured)) || is_span(body.type_of(*captured)))) {
+                        out.insert(*captured);
+                    }
+                }
+                return;
+        }
     }
 }
 
@@ -621,15 +628,7 @@ std::vector<std::vector<LiveSet>> compute_reference_liveness(const Body& body,
                                                               const std::vector<std::vector<std::size_t>>& preds) {
     std::size_t n = body.blocks.size();
     std::vector<LiveSet> block_live_in{};
-    block_live_in.resize(n);
-
-    auto block_live_out = [&](std::size_t b) {
-        LiveSet live{};
-        for (std::size_t succ : successors(body.blocks[b].terminator)) {
-            live.insert(block_live_in[succ].begin(), block_live_in[succ].end());
-        }
-        return live;
-    };
+    block_live_in.resize(n, {});
 
     std::vector<std::size_t> worklist{};
     std::vector<bool> queued{};
@@ -644,14 +643,20 @@ std::vector<std::vector<LiveSet>> compute_reference_liveness(const Body& body,
         std::size_t b = worklist[worklist_head++];
         queued[b] = false;
 
-        LiveSet live = block_live_out(b);
+        LiveSet live{};
+        for (std::size_t succ : successors(body.blocks[b].terminator)) {
+            for (const auto& item : block_live_in[succ]) {
+                live.insert(item);
+            }
+        }
         const BasicBlock& block = body.blocks[b];
         for (LocalId use : reference_uses(block.terminator, body)) {
             live.insert(use);
         }
-        for (auto it = block.statements.rbegin(); it != block.statements.rend(); ++it) {
-            if (std::optional<LocalId> def = reference_def(*it); def.has_value()) live.erase(*def);
-            for (LocalId use : reference_uses(*it, body)) live.insert(use);
+        for (std::size_t stmt_idx = block.statements.size(); stmt_idx > 0; --stmt_idx) {
+            const auto& stmt = block.statements[stmt_idx - 1];
+            if (std::optional<LocalId> def = reference_def(stmt); def.has_value()) live.erase(*def);
+            for (LocalId use : reference_uses(stmt, body)) live.insert(use);
         }
 
         if (live != block_live_in[b]) {
@@ -669,14 +674,19 @@ std::vector<std::vector<LiveSet>> compute_reference_liveness(const Body& body,
     // block once more, this time also recording the live-out-after-each-
     // statement snapshot the forward pass needs.
     std::vector<std::vector<LiveSet>> live_after{};
-    live_after.resize(n);
+    live_after.resize(n, {});
     for (std::size_t b = 0; b < n; b++) {
         const BasicBlock& block = body.blocks[b];
-        LiveSet live = block_live_out(b);
+        LiveSet live{};
+        for (std::size_t succ : successors(body.blocks[b].terminator)) {
+            for (const auto& item : block_live_in[succ]) {
+                live.insert(item);
+            }
+        }
         for (LocalId use : reference_uses(block.terminator, body)) {
             live.insert(use);
         }
-        live_after[b].resize(block.statements.size());
+        live_after[b].resize(block.statements.size(), {});
         for (std::size_t i = block.statements.size(); i-- > 0;) {
             live_after[b][i] = live;
             if (std::optional<LocalId> def = reference_def(block.statements[i]); def.has_value()) live.erase(*def);
@@ -766,12 +776,12 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
                candidate.kind == ExprKind::StringLiteral;
     };
     if (literal_has_no_borrow_root(expr)) {
-        if (!report_errors) return RootSet{};
+        if (!report_errors) return {};
     }
     switch (expr.kind) {
         case ExprKind::Identifier: {
             std::optional<LocalId> bound = body.local_of(expr);
-            if (!bound.has_value()) return RootSet{};
+            if (!bound.has_value()) return {};
             if (report_errors) {
                 LocalState current = lookup(state.locals, *bound);
                 if (current != LocalState::Initialized) {
@@ -799,7 +809,7 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
             //
             // The condition is an ordinary value-producing
             // sub-expression, checked like any other read.
-            if (expr.lhs == nullptr || expr.rhs == nullptr || expr.third == nullptr) return RootSet{};
+            if (expr.lhs == nullptr || expr.rhs == nullptr || expr.third == nullptr) return {};
             if (auto _r = apply_expr(*expr.lhs, /*is_move_target_context=*/false, state, body, signatures,
                                      report_errors);
                 !_r.has_value()) {
@@ -857,7 +867,8 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
             // be a use-after-free.
             if (is_explicit_star_this(expr)) {
                 std::optional<LocalId> self = body.this_local();
-                return self.has_value() ? single_root(*self) : RootSet{};
+                if (self.has_value()) return single_root(*self);
+                return {};
             }
             if (expr.unary_op == UnaryOp::AddressOf) {
                 return resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
@@ -876,7 +887,7 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
                 // binding "introduces no lender object ... because it
                 // aliases no pre-existing object or range". No root *is*
                 // the answer.
-                return RootSet{};
+                return {};
             }
             if (report_errors) {
                 if (auto _r = validate_deref_expr(expr, state, body, signatures); !_r.has_value()) {
@@ -885,7 +896,8 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
             }
             if (expr.lhs->kind == ExprKind::Identifier) {
                 std::optional<LocalId> pointer = body.local_of(*expr.lhs);
-                return pointer.has_value() ? resolve_root_place(*pointer, state) : RootSet{};
+                if (pointer.has_value()) return resolve_root_place(*pointer, state);
+                return {};
             }
             if (expr.lhs->kind == ExprKind::Member && expr.lhs->lhs) {
                 return resolve_borrow_source_root(*expr.lhs->lhs, state, body, signatures, report_errors);
@@ -904,8 +916,14 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
         case ExprKind::Call: {
             CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
-            bool returns_reference =
-                sig != nullptr && !sig->returned_lifetime_param_indices.empty() && is_pointer_return_lifetime_source_type(sig->return_type);
+            bool returns_reference = false;
+            std::vector<std::size_t> returned_indices{};
+            [[scpp::unsafe]] {
+                if (sig != nullptr) {
+                    returns_reference = !sig->returned_lifetime_param_indices.empty() && is_pointer_return_lifetime_source_type(sig->return_type);
+                    if (returns_reference) returned_indices = sig->returned_lifetime_param_indices;
+                }
+            }
             if (!returns_reference) {
                 if (report_errors) {
                     return std::unexpected(DataflowError("cannot borrow the result of calling '" + expr.name +
@@ -920,13 +938,13 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
                 if (auto _r = check_call_arguments(expr, state, body, signatures, report_errors); !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
-                return RootSet{};
+                return {};
             }
             if (auto _r = check_call_arguments(expr, state, body, signatures, report_errors); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
             RootSet roots{};
-            for (std::size_t source_index : sig->returned_lifetime_param_indices) {
+            for (std::size_t source_index : returned_indices) {
                 if (expr.name == "operator_deref" && expr.lhs != nullptr && source_index < callee.param_offset) {
                     if (expr.lhs->kind == ExprKind::Identifier) {
                         if (std::optional<LocalId> receiver = body.local_of(*expr.lhs); receiver.has_value()) {
@@ -995,7 +1013,7 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
             // its complement and was not, which is why an expression
             // kind absent from both -- `static_cast<T>(x)`, `c ? a : b`,
             // `sizeof(T)`, `a + b` -- could bind to nothing at all.
-            return RootSet{};
+            return {};
     }
 }
 
@@ -1010,18 +1028,24 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
         case ExprKind::Identifier: {
             if (std::optional<LocalId> local = body.local_of(expr); local.has_value()) {
                 auto local_it = state.local_lifetime_sources.find(*local);
-                if (local_it != state.local_lifetime_sources.end()) return local_it->second;
+                if (local_it != state.local_lifetime_sources.end()) {
+                    RootSet result = local_it->second;
+                    return result;
+                }
                 if (body.decl(*local).is_static_lifetime) return program_lifetime_root();
                 return single_root(*local);
             }
             const GlobalVar* visible_global = nullptr;
             if (body.program != nullptr) {
-                std::reference_wrapper<const Program> program_ref{*body.program};
-                visible_global = find_visible_global(OptionalProgramRef{program_ref}, body.function_namespace_path,
-                                                     expr.name, expr.explicit_global_qualification);
+                [[scpp::unsafe]] {
+                    std::reference_wrapper<const Program> program_ref{*body.program};
+                    visible_global = find_visible_global(OptionalProgramRef{program_ref}, body.function_namespace_path,
+                                                         expr.name, expr.explicit_global_qualification);
+                }
             } else {
+                OptionalProgramRef none{};
                 visible_global =
-                    find_visible_global(OptionalProgramRef{}, body.function_namespace_path, expr.name,
+                    find_visible_global(none, body.function_namespace_path, expr.name,
                                         expr.explicit_global_qualification);
             }
             if (visible_global != nullptr) {
@@ -1036,16 +1060,19 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
         case ExprKind::Member:
         case ExprKind::Subscript:
         case ExprKind::Cast:
-            return expr.lhs ? resolve_lifetime_source_roots(*expr.lhs, state, body, signatures, report_errors) : RootSet{};
+            if (expr.lhs) return resolve_lifetime_source_roots(*expr.lhs, state, body, signatures, report_errors);
+            return {};
         case ExprKind::Unary:
-            return expr.lhs ? resolve_lifetime_source_roots(*expr.lhs, state, body, signatures, report_errors) : RootSet{};
+            if (expr.lhs) return resolve_lifetime_source_roots(*expr.lhs, state, body, signatures, report_errors);
+            return {};
         case ExprKind::Conditional: {
             RootSet roots = resolve_lifetime_source_roots(*expr.rhs, state, body, signatures, report_errors);
             return union_roots(std::move(roots),
                                resolve_lifetime_source_roots(*expr.third, state, body, signatures, report_errors));
         }
         case ExprKind::Move:
-            return expr.lhs ? resolve_lifetime_source_roots(*expr.lhs, state, body, signatures, report_errors) : RootSet{};
+            if (expr.lhs) return resolve_lifetime_source_roots(*expr.lhs, state, body, signatures, report_errors);
+            return {};
         case ExprKind::Call: {
             if (is_bare_reference_wrapper_constructor_call(expr, body, signatures)) {
                 return resolve_lifetime_source_roots(*expr.args[0], state, body, signatures, report_errors);
@@ -1059,9 +1086,17 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
             CalleeSignature callee = resolve_callee_signature(expr, body, signatures);
             const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
             if (sig == nullptr) return {};
-            if (sig->returned_lifetime_param_indices.empty() || !is_pointer_return_lifetime_source_type(sig->return_type)) return {};
+            bool has_indices = false;
+            std::vector<std::size_t> returned_indices{};
+            [[scpp::unsafe]] {
+                if (!sig->returned_lifetime_param_indices.empty() && is_pointer_return_lifetime_source_type(sig->return_type)) {
+                    has_indices = true;
+                    returned_indices = sig->returned_lifetime_param_indices;
+                }
+            }
+            if (!has_indices) return {};
             RootSet roots{};
-            for (std::size_t source_index : sig->returned_lifetime_param_indices) {
+            for (std::size_t source_index : returned_indices) {
                 if (source_index < callee.param_offset) {
                     if (expr.lhs) {
                         roots = union_roots(std::move(roots),
@@ -1123,11 +1158,15 @@ std::expected<void, DataflowError> reject_lifetime_group_state_embedding(const E
     if (!report_errors) return {};
     std::optional<Type> expr_type = infer_expr_type(expr, body, signatures);
     if (!expr_type.has_value() || !is_pointer_return_lifetime_source_type(*expr_type)) return {};
-    if (destination_type != nullptr &&
-        (destination_type->is_reference_wrapper_lifetime_source ||
-         (destination_type->kind == TypeKind::Reference && destination_type->pointee != nullptr &&
-          destination_type->pointee->is_reference_wrapper_lifetime_source) ||
-         expr_contains_wrapper_lifetime_source_form(expr, body, signatures))) {
+    bool is_wrapper_dest = false;
+    if (destination_type != nullptr) {
+        [[scpp::unsafe]] {
+            is_wrapper_dest = destination_type->is_reference_wrapper_lifetime_source ||
+                (destination_type->kind == TypeKind::Reference && destination_type->pointee != nullptr &&
+                 destination_type->pointee->is_reference_wrapper_lifetime_source);
+        }
+    }
+    if (is_wrapper_dest || expr_contains_wrapper_lifetime_source_form(expr, body, signatures)) {
         return {};
     }
     RootSet roots = resolve_lifetime_source_roots(expr, state, body, signatures, report_errors);
@@ -1137,7 +1176,7 @@ std::expected<void, DataflowError> reject_lifetime_group_state_embedding(const E
     }
     if (!roots_include_parameter_lifetime(roots, body, state)) return {};
     return std::unexpected(DataflowError("cannot store a reference, pointer, or span derived from " + format_roots(body, roots) +
-                            " into " + std::string(context) +
+                            " into " + std::string{context.data(), context.size()} +
                             "; named and any lifetime groups propagate only through the direct bare return value",
                         state.current_loc));
 }

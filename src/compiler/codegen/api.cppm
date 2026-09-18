@@ -17,8 +17,8 @@ export module scpp.compiler.codegen:api;
 
 import std;
 import llvm;
-import scpp.ast;
-import scpp.constexpression;
+export import scpp.ast;
+export import scpp.constexpression;
 // For LocalId and the resolved_local_of/declared_local_of accessors.
 // Name resolution is a property of the source program, decided once (see
 // resolve_locals, scpp.mir) and recorded on the AST nodes themselves;
@@ -29,6 +29,12 @@ import scpp.mir;
 import :errors;
 
 export namespace scpp {
+
+    [[nodiscard]] extern llvm::LLVMTargetDataRef data_layout_ref(llvm::LLVMModuleRef mod);
+    [[nodiscard]] extern unsigned int pointer_abi_alignment_for_as(llvm::LLVMModuleRef mod, unsigned int address_space);
+    [[nodiscard]] extern std::vector<llvm::LLVMValueRef> make_call_args();
+    [[nodiscard]] extern std::vector<llvm::LLVMValueRef> make_call_args(llvm::LLVMValueRef a0);
+    [[nodiscard]] extern std::vector<llvm::LLVMValueRef> make_call_args(llvm::LLVMValueRef a0, llvm::LLVMValueRef a1);
 
 // Why one particular function declaration cannot be what a given call
 // targets. `resolve_overload_by_type` only cares whether this is `None`;
@@ -51,6 +57,10 @@ public:
     Type expected_param_type{};
 
     CallCandidateRejection() = default;
+    CallCandidateRejection(const CallCandidateRejection&) = default;
+    CallCandidateRejection& operator=(const CallCandidateRejection&) = default;
+    CallCandidateRejection(CallCandidateRejection&&) = default;
+    CallCandidateRejection& operator=(CallCandidateRejection&&) = default;
     CallCandidateRejection(CallRejectionReason r, std::size_t idx = 0, Type t = {})
         : reason{r}, argument_index{idx}, expected_param_type{std::move(t)} {}
     virtual ~CallCandidateRejection() = default;
@@ -108,6 +118,11 @@ private:
         bool has_ordinary_vtable = false;
         unsigned int abi_align = 1;
 
+        StructInfo() = default;
+        StructInfo(const StructInfo&) = default;
+        StructInfo& operator=(const StructInfo&) = default;
+        StructInfo(StructInfo&&) = default;
+        StructInfo& operator=(StructInfo&&) = default;
         virtual ~StructInfo() = default;
 
         // ch05 §5.14: finds `name`'s own index in `field_names`, searching
@@ -147,6 +162,10 @@ private:
         std::optional<unsigned int> alignment = std::nullopt;
 
         LValue() = default;
+        LValue(const LValue&) = default;
+        LValue& operator=(const LValue&) = default;
+        LValue(LValue&&) = default;
+        LValue& operator=(LValue&&) = default;
         LValue(llvm::LLVMValueRef ptr, Type type, std::optional<unsigned int> alignment = std::nullopt)
             : ptr{ptr}, type{std::move(type)}, alignment{alignment} {}
         virtual ~LValue() = default;
@@ -165,9 +184,9 @@ private:
     };
 
     [[nodiscard]] static bool is_scalar_type_name(const std::string& name);
-    [[nodiscard]] static const EnumDef* find_enum_def(const Program* program, const std::string& name);
-    [[nodiscard]] static const EnumVariant* find_enum_variant(const Program* program, const std::string& name,
-                                                   const EnumDef** owning_enum = nullptr);
+    [[nodiscard]] static const EnumDef* find_enum_def(const Program* program [[scpp::lifetime(p)]], const std::string& name) [[scpp::lifetime(p)]];
+    [[nodiscard]] static const EnumVariant* find_enum_variant(const Program* program [[scpp::lifetime(p)]], const std::string& name,
+                                                   const EnumDef** owning_enum = nullptr) [[scpp::lifetime(p)]];
 
     [[nodiscard]] static bool is_enum_cast_store_builtin_name(const std::string& name);
 
@@ -187,6 +206,10 @@ private:
         llvm::LLVMValueRef flag = nullptr;
 
         MovedFlag() = default;
+        MovedFlag(const MovedFlag&) = default;
+        MovedFlag& operator=(const MovedFlag&) = default;
+        MovedFlag(MovedFlag&&) = default;
+        MovedFlag& operator=(MovedFlag&&) = default;
         MovedFlag(std::vector<Projection> p, llvm::LLVMValueRef f = nullptr)
             : path{std::move(p)}, flag{f} {}
         virtual ~MovedFlag() = default;
@@ -204,6 +227,10 @@ private:
         std::vector<MovedFlag> moved_flags{};
 
         LocalSlot() = default;
+        LocalSlot(const LocalSlot&) = default;
+        LocalSlot& operator=(const LocalSlot&) = default;
+        LocalSlot(LocalSlot&&) = default;
+        LocalSlot& operator=(LocalSlot&&) = default;
         LocalSlot(llvm::LLVMValueRef a, Type t, bool c = false, bool s = false, std::vector<MovedFlag> mf = {})
             : alloca{a}, type{std::move(t)}, is_const{c}, is_static_storage{s}, moved_flags{std::move(mf)} {}
         virtual ~LocalSlot() = default;
@@ -247,6 +274,10 @@ private:
         bool is_const = false;
 
         GlobalSlot() = default;
+        GlobalSlot(const GlobalSlot&) = default;
+        GlobalSlot& operator=(const GlobalSlot&) = default;
+        GlobalSlot(GlobalSlot&&) = default;
+        GlobalSlot& operator=(GlobalSlot&&) = default;
         GlobalSlot(llvm::LLVMValueRef g, Type t, bool c = false)
             : global{g}, type{std::move(t)}, is_const{c} {}
         virtual ~GlobalSlot() = default;
@@ -276,10 +307,10 @@ private:
     // codegen_stmt/codegen_expr/codegen_lvalue recurse, purely so a
     // thrown CodegenError can report a location; never consulted by any
     // actual codegen decision.
-    SourceLocation current_loc_;
-    llvm::LLVMContextRef context_;
-    llvm::LLVMModuleRef module_;
-    llvm::LLVMBuilderRef builder_;
+    SourceLocation current_loc_{};
+    llvm::LLVMContextRef context_ = nullptr;
+    llvm::LLVMModuleRef module_ = nullptr;
+    llvm::LLVMBuilderRef builder_ = nullptr;
     // Unlike context_/module_/builder_ (unconditionally set by every
     // constructor call), dibuilder_ is only assigned a real value by
     // initialize_debug_info() when emit_debug_info_ is true -- so it
@@ -292,7 +323,7 @@ private:
     llvm::LLVMMetadataRef compile_unit_file_ = nullptr;
     llvm::LLVMMetadataRef current_debug_scope_ = nullptr;
     llvm::LLVMMetadataRef current_subprogram_ = nullptr;
-    std::string source_path_;
+    std::string source_path_{};
     bool emit_debug_info_ = false;
     // Storage for each of the current function's locals, keyed by the
     // declaration that introduced it -- never by its source name. Two
@@ -301,7 +332,7 @@ private:
     // keying by name aliased both onto one slot and, on scope exit,
     // erased the survivor's along with the shadow's -- silently dropping
     // the outer object's destructor.
-    std::unordered_map<LocalId, LocalSlot> locals_;
+    std::unordered_map<LocalId, LocalSlot> locals_{};
     // The place a reference local was bound to at its declaration, so a
     // place spelled through the reference (`S& r = s; std::move(r.a);`)
     // names the same object the move checker named -- `s.a`, not `r.a`.
@@ -310,10 +341,10 @@ private:
     // it bound. Absent for a reference whose initializer has no exact
     // place (a runtime subscript, a deref), which leaves the
     // conservative "no flag, so destroy it" answer in place.
-    std::unordered_map<LocalId, Place> reference_bound_places_;
-    std::unordered_map<std::string, GlobalSlot> globals_;
-    std::unordered_map<std::string, StructInfo> structs_;
-    std::unordered_set<std::string> declaring_aggregates_;
+    std::unordered_map<LocalId, Place> reference_bound_places_{};
+    std::unordered_map<std::string, GlobalSlot> globals_{};
+    std::unordered_map<std::string, StructInfo> structs_{};
+    std::unordered_set<std::string> declaring_aggregates_{};
     std::unordered_map<std::string, std::vector<const Function*>> call_candidates_cache_with_receiver_{};
     std::unordered_map<std::string, std::vector<const Function*>> call_candidates_cache_no_receiver_{};
     // ch05 §5.10: each Function's actual llvm::LLVM symbol name -- the plain
@@ -327,7 +358,7 @@ private:
     // build_overload_names, keyed by AST node identity (not by name:
     // that's exactly the one-to-many relationship this map exists to
     // resolve).
-    std::unordered_map<const Function*, std::string> overload_names_;
+    std::unordered_map<const Function*, std::string> overload_names_{};
     // A stack of block scopes, each holding the locals declared directly in
     // that block (in declaration order). Pushed/popped around every Block,
     // and around the (possibly brace-less) branches of if/while, so a
@@ -337,7 +368,7 @@ private:
     // previous iteration's allocation. Function parameters are not part
     // of any pushed scope; they live for the whole function and are only
     // freed at Return, same as before.
-    std::vector<std::vector<LocalId>> scope_stack_;
+    std::vector<std::vector<LocalId>> scope_stack_{};
     // A materialized temporary awaiting teardown: the storage, its type,
     // and -- when it was created inside a branch of its own full-
     // expression -- the i1 flag recording whether it was in fact created.
@@ -352,20 +383,25 @@ private:
         llvm::LLVMValueRef live_flag = nullptr;
         std::size_t locals_before = 0;
 
+        PendingTemporary() = default;
+        PendingTemporary(const PendingTemporary&) = default;
+        PendingTemporary& operator=(const PendingTemporary&) = default;
+        PendingTemporary(PendingTemporary&&) = default;
+        PendingTemporary& operator=(PendingTemporary&&) = default;
         virtual ~PendingTemporary() = default;
     };
     // One entry per open full-expression; nested because a full-
     // expression's own evaluation can open another (a default argument,
     // an immediately-invoked lambda body).
-    std::vector<std::vector<PendingTemporary>> full_expression_temporaries_;
+    std::vector<std::vector<PendingTemporary>> full_expression_temporaries_{};
     // The basic block each open full-expression started in. A temporary
     // created in that same block is reached whenever the full-expression
     // is, so it needs no liveness flag; one created in any other block
     // was reached conditionally and does.
-    std::vector<llvm::LLVMBasicBlockRef> full_expression_start_blocks_;
+    std::vector<llvm::LLVMBasicBlockRef> full_expression_start_blocks_{};
     // Parallel to scope_stack_: the lifetime-extended temporaries bound
     // to reference variables declared in each open block scope.
-    std::vector<std::vector<PendingTemporary>> scope_temporaries_;
+    std::vector<std::vector<PendingTemporary>> scope_temporaries_{};
     class ControlFlowFrame {
     public:
         std::optional<llvm::LLVMBasicBlockRef> continue_block = std::nullopt;
@@ -373,25 +409,29 @@ private:
         std::size_t scope_depth = 0;
 
         ControlFlowFrame() = default;
+        ControlFlowFrame(const ControlFlowFrame&) = default;
+        ControlFlowFrame& operator=(const ControlFlowFrame&) = default;
+        ControlFlowFrame(ControlFlowFrame&&) = default;
+        ControlFlowFrame& operator=(ControlFlowFrame&&) = default;
         ControlFlowFrame(std::optional<llvm::LLVMBasicBlockRef> cb, llvm::LLVMBasicBlockRef eb, std::size_t sd)
             : continue_block{std::move(cb)}, end_block{eb}, scope_depth{sd} {}
         virtual ~ControlFlowFrame() = default;
     };
-    std::vector<ControlFlowFrame> control_flow_stack_;
-    std::unordered_map<std::string, llvm::LLVMMetadataRef> debug_type_cache_;
-    std::unordered_map<std::string, llvm::LLVMMetadataRef> debug_file_cache_;
+    std::vector<ControlFlowFrame> control_flow_stack_{};
+    std::unordered_map<std::string, llvm::LLVMMetadataRef> debug_type_cache_{};
+    std::unordered_map<std::string, llvm::LLVMMetadataRef> debug_file_cache_{};
     llvm::LLVMTypeRef interface_representation_llvm_type_ = nullptr;
-    std::unordered_map<std::string, llvm::LLVMTypeRef> interface_dispatch_table_types_;
-    std::unordered_map<std::string, std::vector<const Function*>> interface_dispatch_methods_cache_;
-    std::unordered_map<std::string, std::unordered_map<std::string, std::size_t>> interface_slot_indices_cache_;
-    std::unordered_map<std::string, llvm::LLVMValueRef> interface_dispatch_tables_;
-    std::unordered_map<std::string, llvm::LLVMValueRef> interface_dispatch_thunks_;
-    std::unordered_map<std::string, llvm::LLVMTypeRef> ordinary_vtable_types_;
-    std::unordered_map<std::string, std::vector<const Function*>> ordinary_virtual_methods_cache_;
-    std::unordered_map<std::string, std::unordered_map<std::string, std::size_t>> ordinary_slot_indices_cache_;
-    std::unordered_map<std::string, llvm::LLVMValueRef> ordinary_vtables_;
-    std::unordered_map<std::string, llvm::LLVMValueRef> ordinary_destructor_thunks_;
-    std::vector<std::string> current_global_namespace_path_;
+    std::unordered_map<std::string, llvm::LLVMTypeRef> interface_dispatch_table_types_{};
+    std::unordered_map<std::string, std::vector<const Function*>> interface_dispatch_methods_cache_{};
+    std::unordered_map<std::string, std::unordered_map<std::string, std::size_t>> interface_slot_indices_cache_{};
+    std::unordered_map<std::string, llvm::LLVMValueRef> interface_dispatch_tables_{};
+    std::unordered_map<std::string, llvm::LLVMValueRef> interface_dispatch_thunks_{};
+    std::unordered_map<std::string, llvm::LLVMTypeRef> ordinary_vtable_types_{};
+    std::unordered_map<std::string, std::vector<const Function*>> ordinary_virtual_methods_cache_{};
+    std::unordered_map<std::string, std::unordered_map<std::string, std::size_t>> ordinary_slot_indices_cache_{};
+    std::unordered_map<std::string, llvm::LLVMValueRef> ordinary_vtables_{};
+    std::unordered_map<std::string, llvm::LLVMValueRef> ordinary_destructor_thunks_{};
+    std::vector<std::string> current_global_namespace_path_{};
 
     [[nodiscard]] std::string default_debug_source_path() const;
 
@@ -904,6 +944,7 @@ private:
 
     [[nodiscard]] std::expected<void, CodegenError> define_deleted_function(const Function& fn);
     [[nodiscard]] std::expected<void, CodegenError> define_defaulted_function(const Function& fn);
+    [[nodiscard]] std::expected<llvm::LLVMValueRef, CodegenError> compare_field_for_equality(llvm::LLVMValueRef lhs_ptr, llvm::LLVMValueRef rhs_ptr, const Type& type, const std::string& field_name, const std::string& class_name, const SourceLocation& loc);
 
     // ch05 §5.14: emits a thin, codegen-only wrapper body for a
     // Function::forwards_to stub (an inherited method a derived class
@@ -921,6 +962,10 @@ private:
     [[nodiscard]] std::expected<void, CodegenError> define_forwarding_function(const Function& fn);
 
     [[nodiscard]] std::expected<void, CodegenError> codegen_stmt(const Stmt& stmt, llvm::LLVMValueRef current_function);
+    [[scpp::unsafe]] [[nodiscard]] std::expected<void, CodegenError> codegen_switch_stmt(const Stmt& stmt, llvm::LLVMValueRef current_function);
+    llvm::LLVMValueRef add_internal_global(llvm::LLVMTypeRef llvm_type, const std::string& name, llvm::LLVMValueRef init);
+    llvm::LLVMValueRef get_or_declare_runtime_fn(const std::string& name, llvm::LLVMTypeRef fn_type);
+    llvm::LLVMValueRef define_static_local_destructor_helper(const std::string& helper_name, const Type& type, const SourceLocation& loc, llvm::LLVMValueRef storage, llvm::LLVMValueRef moved_flag);
 
     // Builds and emits the actual `call` instruction for `expr` (a Call
     // expression naming a real, non-builtin function -- callers handle
@@ -1038,6 +1083,11 @@ private:
         bool was_bound = false;
         LocalSlot slot{};
 
+        SavedLocalSlot() = default;
+        SavedLocalSlot(const SavedLocalSlot&) = default;
+        SavedLocalSlot& operator=(const SavedLocalSlot&) = default;
+        SavedLocalSlot(SavedLocalSlot&&) = default;
+        SavedLocalSlot& operator=(SavedLocalSlot&&) = default;
         virtual ~SavedLocalSlot() = default;
     };
 
@@ -1104,7 +1154,9 @@ private:
         if (!field_storage_result.has_value()) return std::unexpected(std::move(field_storage_result).error());
         LValue field_storage = std::move(field_storage_result).value();
         if (selected_init == nullptr) return initialize_storage_from_brace_args(field_storage, {});
-        return initialize_storage(field_storage, *selected_init);
+        [[scpp::unsafe]] {
+            return initialize_storage(field_storage, *selected_init);
+        }
     }
 
     // Runs every field's initializer in declaration order.
@@ -1121,10 +1173,12 @@ private:
         for (const FieldT& field : fields) {
             const Initializer* explicit_initializer = nullptr;
             if (member_initializers != nullptr) {
-                for (const MemberInitializer& init : *member_initializers) {
-                    if (init.member_name == field.name) {
-                        explicit_initializer = &init.initializer;
-                        break;
+                [[scpp::unsafe]] {
+                    for (std::size_t i = 0; i < member_initializers->size(); ++i) {
+                        if ((*member_initializers)[i].member_name == field.name) {
+                            explicit_initializer = &(*member_initializers)[i].initializer;
+                            break;
+                        }
                     }
                 }
             }
@@ -1595,7 +1649,28 @@ private:
 
     // Runs `body` under `if (!moved_flag)`, or unconditionally when the
     // flag is null. The one spelling of the moved-out teardown guard.
-    void emit_unless_moved(llvm::LLVMValueRef moved_flag, const std::function<void()>& body);
+    template <typename BodyFn>
+    void emit_unless_moved(llvm::LLVMValueRef moved_flag, BodyFn&& body) {
+        if (moved_flag == nullptr) {
+            body();
+            return;
+        }
+        llvm::LLVMBasicBlockRef then_bb = nullptr;
+        llvm::LLVMBasicBlockRef merge_bb = nullptr;
+        [[scpp::unsafe]] {
+            llvm::LLVMValueRef was_moved = create_load(llvm::LLVMInt1TypeInContext(context_), moved_flag, std::nullopt, "wasmoved");
+            llvm::LLVMValueRef current_fn = llvm::LLVMGetBasicBlockParent(llvm::LLVMGetInsertBlock(builder_));
+            then_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "dtorcall");
+            merge_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "dtorskip");
+            llvm::LLVMBuildCondBr(builder_, was_moved, merge_bb, then_bb);
+            llvm::LLVMPositionBuilderAtEnd(builder_, then_bb);
+        }
+        body();
+        [[scpp::unsafe]] {
+            llvm::LLVMBuildBr(builder_, merge_bb);
+            llvm::LLVMPositionBuilderAtEnd(builder_, merge_bb);
+        }
+    }
 
     // Array teardown with one statically known place per element, used
     // where an element was moved out and the runtime induction variable
@@ -1667,39 +1742,50 @@ private:
         if (!array_llvm_type_result.has_value()) return std::unexpected(std::move(array_llvm_type_result).error());
         llvm::LLVMTypeRef array_llvm_type = std::move(array_llvm_type_result).value();
 
-        llvm::LLVMTypeRef i64 = llvm::LLVMInt64TypeInContext(context_);
-        llvm::LLVMValueRef current_fn = llvm::LLVMGetBasicBlockParent(llvm::LLVMGetInsertBlock(builder_));
-        llvm::LLVMBasicBlockRef entry_bb = llvm::LLVMGetInsertBlock(builder_);
-        llvm::LLVMBasicBlockRef body_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "arrayelem.body");
-        llvm::LLVMBasicBlockRef end_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "arrayelem.end");
-        llvm::LLVMBuildBr(builder_, body_bb);
+        llvm::LLVMTypeRef i64 = nullptr;
+        llvm::LLVMValueRef element_ptr = nullptr;
+        llvm::LLVMBasicBlockRef end_bb = nullptr;
+        llvm::LLVMBasicBlockRef body_bb = nullptr;
+        llvm::LLVMValueRef index = nullptr;
+        llvm::LLVMValueRef first = nullptr;
+        llvm::LLVMBasicBlockRef entry_bb = nullptr;
+        [[scpp::unsafe]] {
+            i64 = llvm::LLVMInt64TypeInContext(context_);
+            llvm::LLVMValueRef current_fn = llvm::LLVMGetBasicBlockParent(llvm::LLVMGetInsertBlock(builder_));
+            entry_bb = llvm::LLVMGetInsertBlock(builder_);
+            body_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "arrayelem.body");
+            end_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "arrayelem.end");
+            llvm::LLVMBuildBr(builder_, body_bb);
 
-        llvm::LLVMPositionBuilderAtEnd(builder_, body_bb);
-        llvm::LLVMValueRef index = llvm::LLVMBuildPhi(builder_, i64, "arrayelem.i");
-        llvm::LLVMValueRef first = llvm::LLVMConstInt(i64,
-                                                       reverse ? static_cast<std::uint64_t>(count - 1)
-                                                               : static_cast<std::uint64_t>(begin_index),
-                                                       /*SignExtend=*/0);
-        llvm::LLVMValueRef element_ptr = build_array_element_gep(array_llvm_type, array_ptr, index);
+            llvm::LLVMPositionBuilderAtEnd(builder_, body_bb);
+            index = llvm::LLVMBuildPhi(builder_, i64, "arrayelem.i");
+            first = llvm::LLVMConstInt(i64,
+                                           reverse ? static_cast<unsigned long>(count - 1)
+                                                   : static_cast<unsigned long>(begin_index),
+                                           /*SignExtend=*/0);
+            element_ptr = build_array_element_gep(array_llvm_type, array_ptr, index);
+        }
         auto r = emit_element(element_ptr, index);
         if (!r.has_value()) return std::unexpected(std::move(r).error());
 
-        llvm::LLVMBasicBlockRef latch_bb = llvm::LLVMGetInsertBlock(builder_);
-        llvm::LLVMValueRef next = reverse ? llvm::LLVMBuildSub(builder_, index, llvm::LLVMConstInt(i64, 1, 0), "arrayelem.prev")
-                                          : llvm::LLVMBuildAdd(builder_, index, llvm::LLVMConstInt(i64, 1, 0), "arrayelem.next");
-        llvm::LLVMValueRef done =
-            reverse ? llvm::LLVMBuildICmp(builder_, llvm::LLVMIntEQ, index,
-                                          llvm::LLVMConstInt(i64, static_cast<std::uint64_t>(begin_index), 0),
-                                          "arrayelem.done")
-                    : llvm::LLVMBuildICmp(builder_, llvm::LLVMIntEQ, next,
-                                          llvm::LLVMConstInt(i64, static_cast<std::uint64_t>(count), 0), "arrayelem.done");
-        llvm::LLVMBuildCondBr(builder_, done, end_bb, body_bb);
+        [[scpp::unsafe]] {
+            llvm::LLVMBasicBlockRef latch_bb = llvm::LLVMGetInsertBlock(builder_);
+            llvm::LLVMValueRef next = reverse ? llvm::LLVMBuildSub(builder_, index, llvm::LLVMConstInt(i64, 1UL, 0), "arrayelem.prev")
+                                              : llvm::LLVMBuildAdd(builder_, index, llvm::LLVMConstInt(i64, 1UL, 0), "arrayelem.next");
+            llvm::LLVMValueRef done =
+                reverse ? llvm::LLVMBuildICmp(builder_, llvm::LLVMIntEQ, index,
+                                              llvm::LLVMConstInt(i64, static_cast<unsigned long>(begin_index), 0),
+                                              "arrayelem.done")
+                        : llvm::LLVMBuildICmp(builder_, llvm::LLVMIntEQ, next,
+                                              llvm::LLVMConstInt(i64, static_cast<unsigned long>(count), 0), "arrayelem.done");
+            llvm::LLVMBuildCondBr(builder_, done, end_bb, body_bb);
 
-        llvm::LLVMValueRef incoming_values[2] = {first, next};
-        llvm::LLVMBasicBlockRef incoming_blocks[2] = {entry_bb, latch_bb};
-        llvm::LLVMAddIncoming(index, incoming_values, incoming_blocks, 2);
+            llvm::LLVMValueRef incoming_values[2] = {first, next};
+            llvm::LLVMBasicBlockRef incoming_blocks[2] = {entry_bb, latch_bb};
+            llvm::LLVMAddIncoming(index, incoming_values, incoming_blocks, 2U);
 
-        llvm::LLVMPositionBuilderAtEnd(builder_, end_bb);
+            llvm::LLVMPositionBuilderAtEnd(builder_, end_bb);
+        }
         return {};
     }
 
@@ -1835,6 +1921,12 @@ private:
         bool popped = false;
         explicit FullExpressionFrame(Codegen* owner) : codegen{owner} {
             [[scpp::unsafe]] {
+                codegen->push_full_expression();
+            }
+        }
+        explicit FullExpressionFrame(Codegen& owner) {
+            [[scpp::unsafe]] {
+                codegen = &owner;
                 codegen->push_full_expression();
             }
         }

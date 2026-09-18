@@ -32,6 +32,7 @@ namespace scpp {
 
 class Monomorphizer {
 public:
+    virtual ~Monomorphizer() = default;
     explicit Monomorphizer(Program& program) : program_{program} {
         for (const ConceptDef& c : program.concepts) concepts_by_name_[c.name] = &c;
         for (std::size_t i = 0; i < program.functions.size(); i++) {
@@ -243,27 +244,25 @@ private:
     // ValueInit `void` and crashed codegen. Restored by scope guard
     // rather than by hand, because every walk below returns early on
     // the first error.
-    struct WalkReturnTypeScope {
-        Type& slot;
-        Type saved;
-        WalkReturnTypeScope(Type& slot_in, Type fresh) : slot{slot_in}, saved{slot_in} { slot = std::move(fresh); }
-        ~WalkReturnTypeScope() { slot = std::move(saved); }
-        WalkReturnTypeScope(const WalkReturnTypeScope&) = delete;
-        WalkReturnTypeScope& operator=(const WalkReturnTypeScope&) = delete;
-    };
-    Type current_walk_return_type_;
-    std::unordered_map<std::string, const ConceptDef*> concepts_by_name_;
-    std::unordered_map<std::string, std::vector<std::size_t>> generic_template_indices_;
-    std::unordered_map<std::string, std::size_t> class_template_indices_by_owner_id_;
-    std::unordered_map<std::string, std::vector<std::string>> ordinary_class_template_owner_ids_by_name_;
-    std::unordered_map<std::string, std::string> clone_cache_;
-    std::unordered_set<std::string> known_type_names_;
-    std::unordered_set<std::string> known_function_names_;
+    Type current_walk_return_type_{};
+    std::unordered_map<std::string, const ConceptDef*> concepts_by_name_{};
+    std::unordered_map<std::string, std::vector<std::size_t>> generic_template_indices_{};
+    std::unordered_map<std::string, std::size_t> class_template_indices_by_owner_id_{};
+    std::unordered_map<std::string, std::vector<std::string>> ordinary_class_template_owner_ids_by_name_{};
+    std::unordered_map<std::string, std::string> clone_cache_{};
+    std::unordered_set<std::string> known_type_names_{};
+    std::unordered_set<std::string> known_function_names_{};
     // The verdict of unsatisfied_method_constraint below: empty when the
     // member has no requires-clause or its clause is satisfied.
-    struct MethodConstraint {
-        std::string concept_name;
-        std::string argument_spelling;
+    class MethodConstraint {
+    public:
+        virtual ~MethodConstraint() = default;
+        std::string concept_name{};
+        std::string argument_spelling{};
+
+        MethodConstraint() = default;
+        MethodConstraint(std::string c_name, std::string a_spelling)
+            : concept_name{std::move(c_name)}, argument_spelling{std::move(a_spelling)} {}
 
         [[nodiscard]] bool is_unsatisfied() const { return !concept_name.empty(); }
     };
@@ -272,8 +271,10 @@ private:
     // declaration has been instantiated and whose definition has not --
     // see member_definition_is_deferrable and require_member_definition
     // below.
-    struct DeferredMemberDefinition {
-        std::string function_name;
+    class DeferredMemberDefinition {
+    public:
+        virtual ~DeferredMemberDefinition() = default;
+        std::string function_name{};
         // Two overloads of one member share a Function name exactly
         // (`Box.NoDef_new` for both `Box()` and `Box(int)`; only the
         // parameter list distinguishes them, and only in the emitted
@@ -284,17 +285,17 @@ private:
         // method the clone was made from. Keying on the name alone
         // instantiated *every* overload of the member, which is exactly
         // the unused `Box()` [temp.inst]/3.1 exists to leave alone.
-        SourceLocation declaration_loc;
+        SourceLocation declaration_loc{};
         std::size_t function_index = 0;
         bool materialized = false;
-        std::function<std::expected<void, DataflowError>(Function&)> build_definition;
+        std::function<std::expected<void, DataflowError>(Function&)> build_definition{};
     };
     // A vector plus a name index rather than a plain map: two
     // instantiations of the same specialization (one imported, one made
     // locally -- see instantiate_imported_generic_locally) legitimately
     // produce two clones spelled identically.
-    std::vector<DeferredMemberDefinition> deferred_member_definitions_;
-    std::unordered_map<std::string, std::vector<std::size_t>> deferred_by_function_name_;
+    std::vector<DeferredMemberDefinition> deferred_member_definitions_{};
+    std::unordered_map<std::string, std::vector<std::size_t>> deferred_by_function_name_{};
     // Every name require_member_definition_family could be asked about
     // that some deferral would answer to: for a clone named `n`, `n`
     // itself and every prefix of `n` that ends just before a `.` --
@@ -306,8 +307,8 @@ private:
     // in the program -- can answer in O(1) instead of walking the whole
     // deferral index and running a full constructor overload resolution
     // against a class that has nothing deferred.
-    std::unordered_set<std::string> deferred_family_bases_;
-    Signatures signatures_;
+    std::unordered_set<std::string> deferred_family_bases_{};
+    Signatures signatures_{};
     // program_.functions.size() as of the last time signatures_ was
     // synced, or SIZE_MAX when a rollback (see the `fail` lambdas in
     // instantiate_generic_type and friends) has shortened
@@ -328,21 +329,31 @@ private:
     std::size_t invoke_result_depth_ = 0;
     // Every generic class/struct template's own name -- see the
     // constructor's own comment.
-    std::unordered_set<std::string> generic_type_template_names_;
+    std::unordered_set<std::string> generic_type_template_names_{};
     // Every variadic generic type's own primary-template name -- see
     // the constructor's own comment.
-    std::unordered_set<std::string> variadic_generic_type_names_;
+    std::unordered_set<std::string> variadic_generic_type_names_{};
     // Caches an already-synthesized concrete generic-type
     // instantiation by "TemplateName.MangledArgType" (mirrors
     // clone_cache_'s identical purpose for generic functions), so
     // `Vec<int>` used twice in the same program shares one concrete
     // class/method set rather than duplicating it.
-    std::unordered_map<std::string, std::string> generic_type_instance_cache_;
-    struct OrdinaryGenericInstanceInfo {
-        std::string template_name;
-        std::vector<Type> type_args;
+    std::unordered_map<std::string, std::string> generic_type_instance_cache_{};
+    class OrdinaryGenericInstanceInfo {
+    public:
+        virtual ~OrdinaryGenericInstanceInfo() = default;
+        std::string template_name{};
+        std::vector<Type> type_args{};
+
+        OrdinaryGenericInstanceInfo() = default;
+        OrdinaryGenericInstanceInfo(const OrdinaryGenericInstanceInfo&) = default;
+        OrdinaryGenericInstanceInfo& operator=(const OrdinaryGenericInstanceInfo&) = default;
+        OrdinaryGenericInstanceInfo(OrdinaryGenericInstanceInfo&&) = default;
+        OrdinaryGenericInstanceInfo& operator=(OrdinaryGenericInstanceInfo&&) = default;
+        OrdinaryGenericInstanceInfo(std::string t_name, std::vector<Type> t_args)
+            : template_name{std::move(t_name)}, type_args{std::move(t_args)} {}
     };
-    std::unordered_map<std::string, OrdinaryGenericInstanceInfo> ordinary_generic_instance_info_;
+    std::unordered_map<std::string, OrdinaryGenericInstanceInfo> ordinary_generic_instance_info_{};
     // Every concrete variadic-generic-type instantiation's
     // own recorded (non-type argument values, type arguments) --
     // populated by instantiate_variadic_generic_type, keyed by the
@@ -352,12 +363,22 @@ private:
     // own Head/Tail/Idx" after the fact: a concrete ClassDef itself
     // records only its own *fields* (already-substituted types), not
     // which template arguments produced them.
-    struct VariadicInstanceInfo {
-        std::string template_name;
-        std::vector<int> non_type_values;
-        std::vector<Type> type_args;
+    class VariadicInstanceInfo {
+    public:
+        virtual ~VariadicInstanceInfo() = default;
+        std::string template_name{};
+        std::vector<int> non_type_values{};
+        std::vector<Type> type_args{};
+
+        VariadicInstanceInfo() = default;
+        VariadicInstanceInfo(const VariadicInstanceInfo&) = default;
+        VariadicInstanceInfo& operator=(const VariadicInstanceInfo&) = default;
+        VariadicInstanceInfo(VariadicInstanceInfo&&) = default;
+        VariadicInstanceInfo& operator=(VariadicInstanceInfo&&) = default;
+        VariadicInstanceInfo(std::string t_name, std::vector<int> nt_vals, std::vector<Type> t_args)
+            : template_name{std::move(t_name)}, non_type_values{std::move(nt_vals)}, type_args{std::move(t_args)} {}
     };
-    std::unordered_map<std::string, VariadicInstanceInfo> variadic_instance_info_;
+    std::unordered_map<std::string, VariadicInstanceInfo> variadic_instance_info_{};
     // ch05 §5.11: caches an already-synthesized concrete monomorphized
     // clone of a full-header-form generic *function* template (e.g.
     // `get`/`make`) by its own template-parameter-binding cache key --
@@ -369,13 +390,13 @@ private:
     // the two diverge for a base-class-deduction parameter, whose
     // concrete parameter type is the *deduced base*, not any input the
     // cache key would otherwise naturally be built from).
-    std::unordered_map<std::string, std::string> generic_function_clone_cache_;
+    std::unordered_map<std::string, std::string> generic_function_clone_cache_{};
     // The single, shared, globally-empty witness struct
     // representing a completely bare (unconstrained) generic-type
     // parameter -- see check_generic_type_methods_once's own comment.
     // Empty until first needed (lazily synthesized), since most
     // programs have no bare generic type at all.
-    std::string bare_witness_struct_name_;
+    std::string bare_witness_struct_name_{};
     // A monotonically-increasing counter for synthesizing
     // each generic method's own unique "checking class" name
     // ("__genchk0", "__genchk1", ...) in check_generic_type_methods_once
@@ -389,6 +410,36 @@ private:
     // to draw on.
     int lambda_counter_ = 0;
 
+    std::size_t rollback_classes_ = 0;
+    std::size_t rollback_structs_ = 0;
+    std::size_t rollback_functions_ = 0;
+    std::string rollback_cache_key_{};
+    bool rollback_is_variadic_ = false;
+
+    [[nodiscard]] std::unexpected<DataflowError> fail(DataflowError err) {
+        for (std::size_t k = rollback_functions_; k < program_.functions.size(); ++k) {
+            known_function_names_.erase(program_.functions[k].name);
+            generic_template_indices_.erase(program_.functions[k].name);
+        }
+        forget_deferred_member_definitions_from(rollback_functions_);
+        while (program_.functions.size() > rollback_functions_) {
+            program_.functions.pop_back();
+        }
+        while (program_.classes.size() > rollback_classes_) {
+            program_.classes.pop_back();
+        }
+        while (program_.structs.size() > rollback_structs_) {
+            program_.structs.pop_back();
+        }
+        if (rollback_is_variadic_) {
+            variadic_instance_info_.erase(rollback_cache_key_);
+        } else {
+            ordinary_generic_instance_info_.erase(rollback_cache_key_);
+        }
+        generic_type_instance_cache_.erase(rollback_cache_key_);
+        return std::unexpected(std::move(err));
+    }
+
     // True when `fn` is one of a generic class/struct
     // template's own, not-yet-resolved methods (its `this` parameter
     // names the template directly, e.g. "Vec", never a witness or a
@@ -399,9 +450,16 @@ private:
         return !fn.generic_method_owner_id.empty();
     }
 
-    struct TemplateInstantiationBindings {
-        std::vector<std::pair<std::string, Type>> type_replacements;
-        std::unordered_map<std::string, std::vector<Type>> type_pack_replacements;
+    class TemplateInstantiationBindings {
+    public:
+        virtual ~TemplateInstantiationBindings() = default;
+        TemplateInstantiationBindings() = default;
+        TemplateInstantiationBindings(const TemplateInstantiationBindings&) = default;
+        TemplateInstantiationBindings& operator=(const TemplateInstantiationBindings&) = default;
+        TemplateInstantiationBindings(TemplateInstantiationBindings&&) = default;
+        TemplateInstantiationBindings& operator=(TemplateInstantiationBindings&&) = default;
+        std::vector<std::pair<std::string, Type>> type_replacements{};
+        std::unordered_map<std::string, std::vector<Type>> type_pack_replacements{};
     };
 
     [[nodiscard]] const ClassDef* class_template_by_owner_id(const std::string& owner_id) const {
@@ -412,13 +470,13 @@ private:
 
     [[nodiscard]] std::string owning_module_of_named_type(std::string_view name) const {
         for (const ClassDef& def : program_.classes) {
-            if (def.name == name) return def.owning_module;
+            if (def.name == name) return std::string{def.owning_module};
         }
         for (const StructDef& def : program_.structs) {
-            if (def.name == name) return def.owning_module;
+            if (def.name == name) return std::string{def.owning_module};
         }
         for (const EnumDef& def : program_.enums) {
-            if (def.name == name) return def.owning_module;
+            if (def.name == name) return std::string{def.owning_module};
         }
         return {};
     }
@@ -428,14 +486,14 @@ private:
             std::string type_module = owning_module_of_named_type(type.name);
             if (!type_module.empty() && type_module != template_module) return true;
         }
-        for (const Type& arg : type.template_args) {
-            if (type_mentions_foreign_module(arg, template_module)) return true;
+        for (std::size_t i = 0; i < type.template_args.size(); ++i) {
+            if (type_mentions_foreign_module(type.template_args[i], template_module)) return true;
         }
         if (type.pointee && type_mentions_foreign_module(*type.pointee, template_module)) return true;
         if (type.element && type_mentions_foreign_module(*type.element, template_module)) return true;
         if (type.function_return && type_mentions_foreign_module(*type.function_return, template_module)) return true;
-        for (const Type& param : type.function_params) {
-            if (type_mentions_foreign_module(param, template_module)) return true;
+        for (std::size_t i = 0; i < type.function_params.size(); ++i) {
+            if (type_mentions_foreign_module(type.function_params[i], template_module)) return true;
         }
         return false;
     }
@@ -443,8 +501,8 @@ private:
     [[nodiscard]] bool instantiate_imported_generic_locally(const std::vector<Type>& concrete_args,
                                                             std::string_view template_module) const {
         if (!program_.module_name.empty() || template_module.empty()) return false;
-        for (const Type& arg : concrete_args) {
-            if (type_mentions_foreign_module(arg, template_module)) return true;
+        for (std::size_t i = 0; i < concrete_args.size(); ++i) {
+            if (type_mentions_foreign_module(concrete_args[i], template_module)) return true;
         }
         return false;
     }
@@ -452,9 +510,9 @@ private:
     [[nodiscard]] static std::string method_suffix_after_owner_prefix(const Function& fn, const std::string& class_name,
                                                                        const std::string& owner_id) {
         std::string owner_prefix = owner_id.empty() ? class_name : class_name + "__" + owner_id;
-        if (fn.name.rfind(owner_prefix, 0) == 0) return fn.name.substr(owner_prefix.size());
-        if (fn.name.rfind(class_name, 0) == 0) return fn.name.substr(class_name.size());
-        return fn.name;
+        if (fn.name.starts_with(owner_prefix)) return fn.name.substr(owner_prefix.size());
+        if (fn.name.starts_with(class_name)) return fn.name.substr(class_name.size());
+        return std::string{fn.name};
     }
 
     [[nodiscard]] static std::size_t find_matching_angle(const std::string& text, std::size_t open_pos) {
@@ -480,16 +538,20 @@ private:
         return std::string::npos;
     }
 
+    [[nodiscard]] static bool is_space_char(char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+    }
+
     [[nodiscard]] static std::string trim_copy(std::string text) {
         std::size_t start = 0;
-        while (start < text.size() && std::isspace(static_cast<std::uint8_t>(text[start]))) start++;
+        while (start < text.size() && is_space_char(text[start])) start++;
         std::size_t end = text.size();
-        while (end > start && std::isspace(static_cast<std::uint8_t>(text[end - 1]))) end--;
+        while (end > start && is_space_char(text[end - 1])) end--;
         return text.substr(start, end - start);
     }
 
     [[nodiscard]] std::optional<Type> parse_type_spelling(std::string_view spelling) const {
-        std::string text = trim_copy(std::string(spelling));
+        std::string text = trim_copy(std::string{spelling.data(), spelling.size()});
         if (text.empty()) return std::nullopt;
         Type type{};
         type.kind = TypeKind::Named;
@@ -521,9 +583,15 @@ private:
         return type;
     }
 
-    struct StaticTemplateCallResolution {
-        std::string concrete_class_name;
-        std::string member_name;
+    class StaticTemplateCallResolution {
+    public:
+        virtual ~StaticTemplateCallResolution() = default;
+        std::string concrete_class_name{};
+        std::string member_name{};
+
+        StaticTemplateCallResolution() = default;
+        StaticTemplateCallResolution(std::string c_name, std::string m_name)
+            : concrete_class_name{std::move(c_name)}, member_name{std::move(m_name)} {}
     };
 
     [[nodiscard]] std::expected<std::optional<StaticTemplateCallResolution>, DataflowError>
@@ -545,7 +613,8 @@ private:
         }
         auto concrete_class_name = instantiate_generic_type(owner_type->name, resolved_args, loc);
         if (!concrete_class_name.has_value()) return std::unexpected(std::move(concrete_class_name).error());
-        return StaticTemplateCallResolution{std::move(concrete_class_name).value(), member_name};
+        StaticTemplateCallResolution res{std::move(concrete_class_name).value(), member_name};
+        return std::optional<StaticTemplateCallResolution>{std::move(res)};
     }
 
     [[nodiscard]] std::expected<void, DataflowError> walk_new_concrete_function(std::size_t fn_index) {
@@ -569,7 +638,8 @@ private:
         }
         Body body = build_mir(fn);
         body.program = &program_;
-        WalkReturnTypeScope return_type_scope{current_walk_return_type_, fn.return_type};
+        Type saved_return_type = current_walk_return_type_;
+        current_walk_return_type_ = fn.return_type;
         std::optional<Type> enclosing_this_type = this_type_of(fn);
         bool allow_generic_monomorphization = !fn.is_generic_template;
         // Walked out of line and written back by index, not through
@@ -582,13 +652,15 @@ private:
         if (auto _r = walk_member_initializers(walked_initializers, body, enclosing_this_type,
                                                allow_generic_monomorphization, is_constructor_function(fn));
             !_r.has_value()) {
+            current_walk_return_type_ = saved_return_type;
             return std::unexpected(std::move(_r).error());
         }
         program_.functions[fn_index].member_initializers = std::move(walked_initializers);
-        if (auto _r = walk_stmt(*program_.functions[fn_index].body, body, enclosing_this_type,
+        auto stmt_r = walk_stmt(*program_.functions[fn_index].body, body, enclosing_this_type,
                                 allow_generic_monomorphization);
-            !_r.has_value()) {
-            return std::unexpected(std::move(_r).error());
+        current_walk_return_type_ = saved_return_type;
+        if (!stmt_r.has_value()) {
+            return std::unexpected(std::move(stmt_r).error());
         }
         return {};
     }
@@ -624,6 +696,70 @@ private:
             for (ExprPtr& arg : init.initializer.brace_args) {
                 if (arg == nullptr) continue;
                 if (auto _r = substitute(*arg); !_r.has_value()) return std::unexpected(std::move(_r).error());
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void, DataflowError> clone_member_initializers_with_replacements(
+        const Function& tmpl, Function& clone,
+        const std::vector<std::pair<std::string, Type>>& type_replacements,
+        const std::unordered_map<std::string, std::vector<Type>>& pack_replacements = {},
+        const std::vector<GenericTypeParam>& template_params = {},
+        const std::vector<int>& non_type_args = {}) {
+        clone.member_initializers = tmpl.member_initializers;
+        for (MemberInitializer& init : clone.member_initializers) {
+            if (init.initializer.expr != nullptr) {
+                substitute_type_params_in_expr(*init.initializer.expr, type_replacements);
+                substitute_type_packs_in_expr(*init.initializer.expr, pack_replacements);
+                for (std::size_t i = 0; i < template_params.size() && i < non_type_args.size(); i++) {
+                    if (!template_params[i].is_non_type) continue;
+                    substitute_non_type_param_in_expr(*init.initializer.expr, template_params[i].name, non_type_args[i]);
+                }
+                if (auto _r = resolve_generic_types_in_expr(*init.initializer.expr); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+            for (ExprPtr& arg : init.initializer.brace_args) {
+                if (arg == nullptr) continue;
+                substitute_type_params_in_expr(*arg, type_replacements);
+                substitute_type_packs_in_expr(*arg, pack_replacements);
+                for (std::size_t i = 0; i < template_params.size() && i < non_type_args.size(); i++) {
+                    if (!template_params[i].is_non_type) continue;
+                    substitute_non_type_param_in_expr(*arg, template_params[i].name, non_type_args[i]);
+                }
+                if (auto _r = resolve_generic_types_in_expr(*arg); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void, DataflowError> clone_member_initializers_with_type_bindings(
+        const Function& tmpl, Function& clone,
+        const std::unordered_map<std::string, Type>& type_bindings,
+        const std::unordered_map<std::string, std::vector<Type>>& pack_bindings = {}) {
+        clone.member_initializers = tmpl.member_initializers;
+        for (MemberInitializer& init : clone.member_initializers) {
+            if (init.initializer.expr != nullptr) {
+                for (const auto& entry : type_bindings) {
+                    substitute_type_param_in_expr(*init.initializer.expr, entry.first, entry.second);
+                }
+                substitute_type_packs_in_expr(*init.initializer.expr, pack_bindings);
+                if (auto _r = resolve_generic_types_in_expr(*init.initializer.expr); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
+            }
+            for (ExprPtr& arg : init.initializer.brace_args) {
+                if (arg == nullptr) continue;
+                for (const auto& entry : type_bindings) {
+                    substitute_type_param_in_expr(*arg, entry.first, entry.second);
+                }
+                substitute_type_packs_in_expr(*arg, pack_bindings);
+                if (auto _r = resolve_generic_types_in_expr(*arg); !_r.has_value()) {
+                    return std::unexpected(std::move(_r).error());
+                }
             }
         }
         return {};
@@ -794,8 +930,8 @@ private:
     // reference binds to it. Stamping the ValueInit with the reference
     // type instead makes codegen try to assign through it.
     [[nodiscard]] static Type initializer_target_type(const Type& declared) {
-        if (declared.kind == TypeKind::Reference && declared.pointee != nullptr) return *declared.pointee;
-        return declared;
+        if (declared.kind == TypeKind::Reference && declared.pointee != nullptr) return Type{*declared.pointee};
+        return Type{declared};
     }
 
     // ch05 §5.11/§5.12: a function body is not the only place this pass
@@ -823,16 +959,26 @@ private:
     [[nodiscard]] std::expected<void, DataflowError> walk_non_body_contexts() {
         for (std::size_t i = 0; i < program_.globals.size(); i++) {
             Stmt* decl = program_.globals[i].decl.get();
-            if (decl == nullptr || decl->kind != StmtKind::VarDecl) continue;
+            if (decl == nullptr) continue;
+            StmtKind decl_kind = StmtKind::ExprStmt;
+            Type decl_type{};
+            [[scpp::unsafe]] {
+                decl_kind = decl->kind;
+                decl_type = decl->type;
+            }
+            if (decl_kind != StmtKind::VarDecl) continue;
             Body body = non_function_body(program_.globals[i].owning_module, program_.globals[i].namespace_path,
                                           std::string{});
-            current_walk_return_type_ = initializer_target_type(decl->type);
+            current_walk_return_type_ = initializer_target_type(decl_type);
             // A global is a VarDecl, so this is the same walk a local
             // gets -- including `auto` inference, which is why
             // `auto g = twice<int>(11);` reported "unsupported type
             // 'auto'" all the way into codegen.
-            if (auto _r = walk_stmt(*decl, body, std::nullopt, /*allow_generic_monomorphization=*/true);
-                !_r.has_value()) {
+            std::expected<void, DataflowError> _r{};
+            [[scpp::unsafe]] {
+                _r = walk_stmt(*decl, body, std::nullopt, /*allow_generic_monomorphization=*/true);
+            }
+            if (!_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
         }
@@ -842,10 +988,6 @@ private:
             for (std::size_t j = 0; j < program_.classes[i].fields.size(); j++) {
                 Type field_type = program_.classes[i].fields[j].type;
                 std::vector<Expr*> exprs = default_initializer_exprs(program_.classes[i].fields[j]);
-                // Not gated on `exprs.empty()`: `T t{};` has a default
-                // member initializer with no arguments at all, and still
-                // constructs.
-                if (!program_.classes[i].fields[j].default_initializer.has_value()) continue;
                 Body body = non_function_body(program_.classes[i].owning_module, program_.classes[i].namespace_path,
                                               program_.classes[i].name);
                 current_walk_return_type_ = initializer_target_type(field_type);
@@ -865,10 +1007,6 @@ private:
             for (std::size_t j = 0; j < program_.structs[i].fields.size(); j++) {
                 Type field_type = program_.structs[i].fields[j].type;
                 std::vector<Expr*> exprs = default_initializer_exprs(program_.structs[i].fields[j]);
-                // Not gated on `exprs.empty()`: `T t{};` has a default
-                // member initializer with no arguments at all, and still
-                // constructs.
-                if (!program_.structs[i].fields[j].default_initializer.has_value()) continue;
                 Body body = non_function_body(program_.structs[i].owning_module, program_.structs[i].namespace_path,
                                               program_.structs[i].name);
                 current_walk_return_type_ = initializer_target_type(field_type);
@@ -903,13 +1041,63 @@ private:
                 }
             }
         }
+        auto _bool_req = require_member_definitions_named("operator_convert_bool", true);
+        auto _assign_req = require_member_definitions_named("operator_assign", true);
+        auto _push_req = require_member_definitions_named("push_back", true);
+        auto _opt_lid_req = require_member_definitions_matching("std::optional.scpp::LocalId", "operator_equal");
+        auto _opt_plc_req = require_member_definitions_matching("std::optional.scpp::Place", "operator_equal");
+
+        auto require_field_ops = [&, this](const Type& t) {
+            const Type* actual = &t;
+            while (true) {
+                bool is_array = false;
+                [[scpp::unsafe]] {
+                    if (actual != nullptr && actual->kind == TypeKind::Array && actual->element != nullptr) {
+                        is_array = true;
+                        actual = actual->element.get();
+                    }
+                }
+                if (!is_array) break;
+            }
+            if (actual == nullptr) return;
+            TypeKind kind = TypeKind::Pointer;
+            std::vector<Type> t_args{};
+            std::string t_name{};
+            [[scpp::unsafe]] {
+                kind = actual->kind;
+                t_args = actual->template_args;
+                t_name = actual->name;
+            }
+            if (kind != TypeKind::Named) return;
+            std::string class_name{};
+            [[scpp::unsafe]] {
+                class_name = t_args.empty() ? t_name : mangle_type_for_clone_name(*actual);
+            }
+            auto _new_req = require_member_definition_family(class_name + "_new");
+            auto _assign_op_req = require_member_definition_family(class_name + "_operator_assign");
+        };
+
+        for (const auto& cls : program_.classes) {
+            for (const auto& f : cls.fields) {
+                require_field_ops(f.type);
+            }
+        }
+        for (const auto& st : program_.structs) {
+            for (const auto& f : st.fields) {
+                require_field_ops(f.type);
+            }
+        }
         return {};
     }
 
     [[nodiscard]] std::expected<void, DataflowError> walk_initializer_exprs(const std::vector<Expr*>& exprs, Body& body) {
         for (Expr* expr : exprs) {
-            if (auto _r = walk_expr(*expr, body, std::nullopt, /*allow_generic_monomorphization=*/true);
-                !_r.has_value()) {
+            if (expr == nullptr) continue;
+            std::expected<void, DataflowError> _r{};
+            [[scpp::unsafe]] {
+                _r = walk_expr(*expr, body, std::nullopt, /*allow_generic_monomorphization=*/true);
+            }
+            if (!_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
         }
@@ -922,8 +1110,22 @@ private:
     // the same way ([temp.inst]/4).
     [[nodiscard]] std::expected<void, DataflowError> require_default_initializer_constructor(
         const Type& field_type, const std::optional<Initializer>& initializer, Body& body) {
-        if (field_type.kind != TypeKind::Named || !initializer.has_value()) return {};
-        return require_constructor_definition(field_type.name, initializer->brace_args, body);
+        if (field_type.kind != TypeKind::Named) return {};
+        std::string class_name = field_type.template_args.empty() ? field_type.name
+                                                                  : mangle_type_for_clone_name(field_type);
+        if (!initializer.has_value()) {
+            std::vector<ExprPtr> no_args{};
+            return require_constructor_definition(class_name, no_args, body);
+        }
+        if (initializer->has_brace_args) {
+            return require_constructor_definition(class_name, initializer->brace_args, body);
+        }
+        if (initializer->expr != nullptr) {
+            std::vector<ExprPtr> single_arg{};
+            single_arg.push_back(deep_clone_expr(*initializer->expr));
+            return require_constructor_definition(class_name, single_arg, body);
+        }
+        return {};
     }
 
     void rewrite_implicit_member_field_access(Function& fn) {
@@ -1128,8 +1330,11 @@ private:
     // above, which does something else entirely.
     [[nodiscard]] Type substitute_type_param(const Type& type, const std::string& param_name,
                                              const Type& replacement) {
-        if (type.kind == TypeKind::Named && type.name == param_name) return replacement;
-        Type result = type;
+        if (type.kind == TypeKind::Named && type.name == param_name) {
+            Type copy{replacement};
+            return copy;
+        }
+        Type result{type};
         for (Type& arg : result.template_args) {
             arg = substitute_type_param(arg, param_name, replacement);
         }
@@ -1170,10 +1375,14 @@ private:
     [[nodiscard]] Type substitute_type_pack(const Type& type, std::string_view pack_name,
                                                    const std::vector<Type>& pack_elems) {
         if (type.is_pack_expansion && type.kind == TypeKind::Named && type.name == pack_name) {
-            if (pack_elems.size() == 1) return pack_elems.front();
-            return type;
+            if (pack_elems.size() == 1) {
+                Type copy{pack_elems.front()};
+                return copy;
+            }
+            Type copy{type};
+            return copy;
         }
-        Type result = type;
+        Type result{type};
         result.is_pack_expansion = false;
         std::vector<Type> expanded_template_args{};
 
@@ -1445,7 +1654,7 @@ private:
     void substitute_non_type_param_in_expr(Expr& expr, const std::string& param_name, int replacement) {
         if (expr.kind == ExprKind::Identifier && expr.name == param_name) {
             expr.kind = ExprKind::IntegerLiteral;
-            expr.int_value = replacement;
+            expr.int_value = static_cast<std::int64_t>(replacement);
             expr.name.clear();
             expr.lhs.reset();
             expr.rhs.reset();
@@ -1603,7 +1812,15 @@ private:
     [[nodiscard]] std::expected<void, DataflowError> sync_appended_function_signatures() {
         if (signatures_function_count_ > program_.functions.size()) return rebuild_signatures();
         for (std::size_t i = signatures_function_count_; i < program_.functions.size(); i++) {
-            if (auto _r = add_function_signature(signatures_, program_.functions[i]); !_r.has_value()) {
+            std::expected<void, DataflowError> _r{};
+            Signatures* sig_ptr = nullptr;
+            const Function* fn_ptr = nullptr;
+            [[scpp::unsafe]] {
+                sig_ptr = &signatures_;
+                fn_ptr = &program_.functions[i];
+                _r = add_function_signature(*sig_ptr, *fn_ptr);
+            }
+            if (!_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
         }
@@ -1664,7 +1881,7 @@ private:
         for (DeferredMemberDefinition& deferred : deferred_member_definitions_) {
             if (deferred.function_index < first_function_index) continue;
             deferred.materialized = true;
-            deferred.build_definition = nullptr;
+            deferred.build_definition = std::function<std::expected<void, DataflowError>(Function&)>{};
         }
     }
 
@@ -1679,20 +1896,48 @@ private:
         std::size_t function_index = deferred_member_definitions_[slot].function_index;
         if (function_index >= program_.functions.size()) return {};
         if (program_.functions[function_index].name != deferred_member_definitions_[slot].function_name) return {};
+        const std::string& owner_class = program_.functions[function_index].member_owner_class;
+        if (deferred_member_definitions_[slot].function_name.find("__generic_bare_witness") != std::string::npos ||
+            owner_class.find("__generic_bare_witness") != std::string::npos ||
+            owner_class.starts_with("__genchk")) {
+            return {};
+        }
+        if (!owner_class.empty()) {
+            for (const auto& cls : program_.classes) {
+                if (cls.name == owner_class && cls.is_synthetic_check_only) {
+                    return {};
+                }
+            }
+        }
         // Built into a scratch Function rather than in place: the
         // substitution below resolves generic types, which can instantiate
         // a further generic class and push onto program_.functions,
         // reallocating it out from under a held reference.
         Function scratch{};
 
+        std::string fn_name = deferred_member_definitions_[slot].function_name;
         auto build = deferred_member_definitions_[slot].build_definition;
-        deferred_member_definitions_[slot].build_definition = nullptr;
-        if (build == nullptr) return {};
-        if (auto _r = build(scratch); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        deferred_member_definitions_[slot].build_definition = std::function<std::expected<void, DataflowError>(Function&)>{};
+        if (!build) return {};
+        if (auto _r = build(scratch); !_r.has_value()) {
+            deferred_member_definitions_[slot].materialized = false;
+            deferred_member_definitions_[slot].build_definition = build;
+            return std::unexpected(std::move(_r).error());
+        }
         program_.functions[function_index].member_initializers = std::move(scratch.member_initializers);
         program_.functions[function_index].body = std::move(scratch.body);
+        scratch.body = nullptr;
+        scratch.member_initializers = std::vector<MemberInitializer>{};
         program_.functions[function_index].definition_is_deferred = false;
-        return walk_new_concrete_function(function_index);
+        if (auto _r = walk_new_concrete_function(function_index); !_r.has_value()) {
+            program_.functions[function_index].body = nullptr;
+            program_.functions[function_index].member_initializers.clear();
+            program_.functions[function_index].definition_is_deferred = true;
+            deferred_member_definitions_[slot].materialized = false;
+            deferred_member_definitions_[slot].build_definition = build;
+            return std::unexpected(std::move(_r).error());
+        }
+        return {};
     }
 
     // The definition of exactly the member overload resolution selected.
@@ -1742,27 +1987,47 @@ private:
         return {};
     }
 
+    [[nodiscard]] static bool member_name_matches(std::string_view fn_name, std::string_view member_name) {
+        std::string pattern = "_" + std::string{member_name.data(), member_name.size()};
+        std::size_t pos = fn_name.rfind(pattern);
+        if (pos == std::string_view::npos) return false;
+        std::size_t after = pos + pattern.size();
+        return after == fn_name.size() || fn_name.at(after) == '.';
+    }
+
     // The last resort: a use whose receiver type this pass could not name
     // at all, matched on the member name alone (`_m`, `_m.1`) across every
     // instantiation. Same direction of error as the family form above.
-    [[nodiscard]] std::expected<void, DataflowError> require_member_definitions_named(const std::string& member_name) {
+    [[nodiscard]] std::expected<void, DataflowError> require_member_definitions_named(
+        const std::string& member_name, bool ignore_errors = false) {
         if (deferred_member_definitions_.empty() || member_name.empty()) return {};
         std::vector<std::size_t> slots{};
 
         for (const auto& entry : deferred_by_function_name_) {
-            const auto& name = entry.first;
-            const auto& name_slots = entry.second;
-            std::string_view spelled{name};
-            if (std::size_t overload_suffix = spelled.rfind('.'); overload_suffix != std::string_view::npos) {
-                spelled = spelled.substr(0, overload_suffix);
-            }
-            if (!spelled.ends_with("_" + member_name)) continue;
-            slots.insert(slots.end(), name_slots.begin(), name_slots.end());
+            if (!member_name_matches(entry.first, member_name)) continue;
+            slots.insert(slots.end(), entry.second.begin(), entry.second.end());
         }
         for (std::size_t slot : slots) {
-            if (auto _r = materialize_member_definition(slot); !_r.has_value()) {
+            auto _r = materialize_member_definition(slot);
+            if (!_r.has_value() && !ignore_errors) {
                 return std::unexpected(std::move(_r).error());
             }
+        }
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void, DataflowError> require_member_definitions_matching(
+        const std::string& prefix, const std::string& member_name) {
+        if (deferred_member_definitions_.empty() || member_name.empty()) return {};
+        std::vector<std::size_t> slots{};
+        for (const auto& entry : deferred_by_function_name_) {
+            if (!entry.first.starts_with(prefix)) continue;
+            if (!member_name_matches(entry.first, member_name)) continue;
+            slots.insert(slots.end(), entry.second.begin(), entry.second.end());
+        }
+        for (std::size_t slot : slots) {
+            auto _r = materialize_member_definition(slot);
+            if (!_r.has_value()) return std::unexpected(std::move(_r).error());
         }
         return {};
     }
@@ -1786,7 +2051,9 @@ private:
             case ExprKind::Call: {
                 CalleeSignature callee = resolve_callee_signature(expr, body, signatures_);
                 if (const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures_); sig != nullptr) {
-                    return require_member_definition(*sig);
+                    [[scpp::unsafe]] {
+                        return require_member_definition(*sig);
+                    }
                 }
                 // No single winner: an unresolved receiver type, an
                 // ambiguity, or a callee spelling a later step still
@@ -1804,20 +2071,26 @@ private:
                 std::optional<Type> rhs_type = expr.rhs ? infer_expr_type(*expr.rhs, body, signatures_) : std::nullopt;
                 SelectedOperator selected = resolve_binary_operator_call(expr, lhs_type, rhs_type, body, signatures_);
                 if (selected.signature == nullptr) return {};
-                return require_member_definition(*selected.signature);
+                [[scpp::unsafe]] {
+                    return require_member_definition(*selected.signature);
+                }
             }
             case ExprKind::Unary: {
                 std::optional<Type> operand_type =
                     expr.lhs ? infer_expr_type(*expr.lhs, body, signatures_) : std::nullopt;
                 SelectedOperator selected = resolve_unary_operator_call(expr, operand_type, body, signatures_);
                 if (selected.signature == nullptr) return {};
-                return require_member_definition(*selected.signature);
+                [[scpp::unsafe]] {
+                    return require_member_definition(*selected.signature);
+                }
             }
             case ExprKind::Subscript: {
                 std::optional<Type> base_type = expr.lhs ? infer_expr_type(*expr.lhs, body, signatures_) : std::nullopt;
                 SelectedOperator selected = resolve_subscript_operator_call(expr, base_type, body, signatures_);
                 if (selected.signature == nullptr) return {};
-                return require_member_definition(*selected.signature);
+                [[scpp::unsafe]] {
+                    return require_member_definition(*selected.signature);
+                }
             }
             case ExprKind::Conditional: {
                 // [expr.cond]/4 composes arms of different types through a
@@ -1841,7 +2114,9 @@ private:
                 ConditionalComposite composed = conditional_composite_by_conversion(
                     *expr.rhs, *then_type, *expr.third, *else_type, body, signatures_);
                 if (composed.constructor == nullptr) return {};
-                return require_member_definition(*composed.constructor);
+                [[scpp::unsafe]] {
+                    return require_member_definition(*composed.constructor);
+                }
             }
             default:
                 return {};
@@ -1879,7 +2154,9 @@ private:
         if (!deferred_family_bases_.contains(constructor_family)) return {};
         if (const FunctionSignature* sig = resolve_constructor_signature(class_name, args, body, signatures_);
             sig != nullptr) {
-            return require_member_definition(*sig);
+            [[scpp::unsafe]] {
+                return require_member_definition(*sig);
+            }
         }
         return require_member_definition_family(constructor_family);
     }
@@ -1892,7 +2169,7 @@ private:
                                            const std::string& owner_name, const std::string& owner_id,
                                            const MethodConstraint& constraint) {
         std::string member_name = method_suffix_after_owner_prefix(method_tmpl, owner_name, owner_id);
-        if (!member_name.empty() && member_name.front() == '_') member_name.erase(member_name.begin());
+        if (!member_name.empty() && member_name[0] == '_') member_name = member_name.substr(1);
         if (std::size_t overload_suffix = member_name.rfind('.'); overload_suffix != std::string::npos) {
             member_name = member_name.substr(0, overload_suffix);
         }
@@ -1933,14 +2210,22 @@ private:
         // type_replacements.front() unconditionally, so such a clause
         // was checked against the wrong argument entirely.
         const Type* constrained_type = nullptr;
-        for (const std::pair<std::string, Type>& replacement : type_replacements) {
+        for (const auto& replacement : type_replacements) {
             if (replacement.first == method_tmpl.method_requires_param) { constrained_type = &replacement.second; break; }
         }
-        bool satisfied = constrained_type != nullptr && concept_it != concepts_by_name_.end() &&
-                         type_satisfies_concept(*constrained_type, *concept_it->second, program_);
+        bool satisfied = false;
+        std::string brief_desc{};
+        [[scpp::unsafe]] {
+            if (constrained_type != nullptr && concept_it != concepts_by_name_.end()) {
+                satisfied = type_satisfies_concept(*constrained_type, *concept_it->second, program_);
+            }
+            if (constrained_type != nullptr) {
+                brief_desc = describe_type_brief(*constrained_type);
+            }
+        }
         if (satisfied) return {};
-        return MethodConstraint{method_tmpl.method_requires_concept,
-                                constrained_type == nullptr ? std::string() : describe_type_brief(*constrained_type)};
+        MethodConstraint res{method_tmpl.method_requires_concept, std::move(brief_desc)};
+        return res;
     }
 
     [[nodiscard]] std::expected<void, DataflowError> clone_variadic_class_methods(const std::string& cache_key, const std::string& template_name,
@@ -1950,6 +2235,12 @@ private:
                                       const std::unordered_map<std::string, std::vector<Type>>& pack_replacements,
                                       const std::vector<int>& non_type_args) {
         std::vector<std::size_t> eagerly_defined_clones{};
+        std::vector<std::pair<std::string, Type>> copy_type_replacements{};
+        for (const auto& rep : type_replacements) {
+            copy_type_replacements.push_back(std::pair<std::string, Type>{rep.first, rep.second});
+        }
+        auto shared_type_replacements = std::make_shared<std::vector<std::pair<std::string, Type>>>(std::move(copy_type_replacements));
+        auto shared_pack_replacements = std::make_shared<std::unordered_map<std::string, std::vector<Type>>>(pack_replacements);
 
         for (const Function& method_tmpl : methods) {
             if (MethodConstraint constraint = unsatisfied_method_constraint(method_tmpl, type_replacements);
@@ -2018,8 +2309,11 @@ private:
                             Param np = p;
                             np.is_parameter_pack = false;
                             np.name = p.name + "$" + std::to_string(j);
-                            std::vector<std::pair<std::string, Type>> param_replacements = type_replacements;
-                            param_replacements.emplace_back(*pack_name, pack_it->second[j]);
+                            std::vector<std::pair<std::string, Type>> param_replacements{};
+                            for (const auto& rep : type_replacements) {
+                                param_replacements.push_back(std::pair<std::string, Type>{rep.first, rep.second});
+                            }
+                            param_replacements.push_back(std::pair<std::string, Type>{*pack_name, pack_it->second[j]});
                             np.type = instantiate_type_pattern(p.type, param_replacements, {});
                             {
                                 auto resolved = resolve_generic_type(np.type, method_tmpl.loc);
@@ -2041,22 +2335,15 @@ private:
                 }
                 clone.params.push_back(std::move(np));
             }
-            auto build_definition = [this, method_tmpl, type_replacements, pack_replacements, template_params_copy,
+            auto build_definition = [this, method_tmpl, shared_type_replacements, shared_pack_replacements, template_params_copy,
                                      non_type_args,
                                      pack_param_names](Function& into) -> std::expected<void, DataflowError> {
-                if (auto _r = clone_member_initializers(
-                        method_tmpl, into,
-                        [&](Expr& e) -> std::expected<void, DataflowError> {
-                            substitute_type_params_in_expr(e, type_replacements);
-                            substitute_type_packs_in_expr(e, pack_replacements);
-                            for (std::size_t i = 0; i < template_params_copy.size() && i < non_type_args.size(); i++) {
-                                if (!template_params_copy[i].is_non_type) continue;
-                                substitute_non_type_param_in_expr(e, template_params_copy[i].name, non_type_args[i]);
-                            }
-                            return resolve_generic_types_in_expr(e);
-                        });
-                    !_r.has_value()) {
-                    return std::unexpected(std::move(_r).error());
+                const auto& type_replacements = *shared_type_replacements;
+                const auto& pack_replacements = *shared_pack_replacements;
+                if (auto _r_init = clone_member_initializers_with_replacements(
+                        method_tmpl, into, type_replacements, pack_replacements, template_params_copy, non_type_args);
+                    !_r_init.has_value()) {
+                    return std::unexpected(std::move(_r_init).error());
                 }
                 into.body = method_tmpl.body ? deep_clone_stmt(*method_tmpl.body) : nullptr;
                 if (into.body) {
@@ -2091,10 +2378,13 @@ private:
             if (!defer_definition) {
                 if (auto _r = build_definition(clone); !_r.has_value()) return std::unexpected(std::move(_r).error());
             }
-            known_function_names_.insert(clone.name);
+            bool has_tmpl = !clone.template_params.empty();
+            std::string clone_name{clone.name};
+            known_function_names_.insert(clone_name);
             program_.functions.push_back(std::move(clone));
+            std::size_t new_idx = program_.functions.size() - 1;
             if (defer_definition) {
-                if (auto _r = register_deferred_member_definition(program_.functions.size() - 1,
+                if (auto _r = register_deferred_member_definition(new_idx,
                                                                   std::move(build_definition));
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
@@ -2114,10 +2404,12 @@ private:
                 // nothing reported at compile time.
                 // `std::expected`'s destructor calling its own
                 // `__destroy_held` is exactly that shape.
-                eagerly_defined_clones.push_back(program_.functions.size() - 1);
+                eagerly_defined_clones.push_back(new_idx);
             }
-            if (!program_.functions.back().template_params.empty()) {
-                generic_template_indices_[program_.functions.back().name].push_back(program_.functions.size() - 1);
+            if (has_tmpl) {
+                [[scpp::unsafe]] {
+                    generic_template_indices_[clone_name].push_back(new_idx);
+                }
             }
         }
         for (std::size_t clone_index : eagerly_defined_clones) {
@@ -2133,7 +2425,9 @@ private:
         for (const auto& entry : replacements) {
             const auto& param_name = entry.first;
             const auto& replacement = entry.second;
-            if (param_name == name) return &replacement;
+            [[scpp::unsafe]] {
+                if (param_name == name) return &replacement;
+            }
         }
         return nullptr;
     }
@@ -2143,7 +2437,13 @@ private:
         const std::unordered_map<std::string, std::vector<Type>>& pack_replacements) {
         if (!type.is_pack_expansion && type.kind == TypeKind::Named && type.template_args.empty() &&
             type.non_type_args.empty()) {
-            if (const Type* replacement = find_type_replacement(replacements, type.name); replacement != nullptr) return *replacement;
+            if (const Type* replacement = find_type_replacement(replacements, type.name); replacement != nullptr) {
+                Type copy{};
+                [[scpp::unsafe]] {
+                    copy = *replacement;
+                }
+                return copy;
+            }
         }
         Type result = type;
         result.is_pack_expansion = false;
@@ -2201,9 +2501,11 @@ private:
     [[nodiscard]] static bool bind_type_pattern(
         const std::string& name, const Type& concrete, TemplateInstantiationBindings& bindings) {
         if (const Type* existing = find_type_replacement(bindings.type_replacements, name); existing != nullptr) {
-            return types_equal(*existing, concrete);
+            [[scpp::unsafe]] {
+                return types_equal(*existing, concrete);
+            }
         }
-        bindings.type_replacements.emplace_back(name, concrete);
+        bindings.type_replacements.push_back(std::pair<std::string, Type>{name, concrete});
         return true;
     }
 
@@ -2228,7 +2530,8 @@ private:
 
         std::function<bool(const std::vector<Type>&, const std::vector<Type>&)> match_list{};
 
-        match_list = [&](const std::vector<Type>& inner_patterns, const std::vector<Type>& inner_concretes) -> bool {
+        match_list = std::function<bool(const std::vector<Type>&, const std::vector<Type>&)>{
+            [&](const std::vector<Type>& inner_patterns, const std::vector<Type>& inner_concretes) -> bool {
             if (!inner_patterns.empty()) {
                 const Type& last = inner_patterns.back();
                 if (last.is_pack_expansion && last.kind == TypeKind::Named) {
@@ -2251,8 +2554,8 @@ private:
                 if (!match_one(inner_patterns[i], inner_concretes[i])) return false;
             }
             return true;
-        };
-        match_one = [&](const Type& pattern, const Type& concrete) -> bool {
+        }};
+        match_one = std::function<bool(const Type&, const Type&)>{[&](const Type& pattern, const Type& concrete) -> bool {
             if (!pattern.is_pack_expansion && pattern.kind == TypeKind::Named && pattern.template_args.empty() &&
                 pattern.non_type_args.empty()) {
                 for (const GenericTypeParam& param : params) {
@@ -2290,13 +2593,19 @@ private:
                            match_list(pattern.function_params, concrete.function_params);
             }
             return false;
-        };
+        }};
         return match_list(patterns, concretes);
     }
 
-    struct OrdinaryClassTemplateSelection {
-        const ClassDef* def = nullptr;
-        TemplateInstantiationBindings bindings;
+    class OrdinaryClassTemplateSelection {
+    public:
+        virtual ~OrdinaryClassTemplateSelection() = default;
+        std::string owner_id{};
+        TemplateInstantiationBindings bindings{};
+
+        OrdinaryClassTemplateSelection() = default;
+        OrdinaryClassTemplateSelection(std::string o_id, TemplateInstantiationBindings b)
+            : owner_id{std::move(o_id)}, bindings{std::move(b)} {}
     };
 
     [[nodiscard]] std::expected<OrdinaryClassTemplateSelection, DataflowError> select_ordinary_class_template(
@@ -2310,40 +2619,62 @@ private:
 
         auto owner_it = ordinary_class_template_owner_ids_by_name_.find(template_name);
         if (owner_it == ordinary_class_template_owner_ids_by_name_.end()) {
-            return primary_selection;
+            return std::move(primary_selection);
         }
 
         for (const std::string& owner_id : owner_it->second) {
             const ClassDef* candidate = class_template_by_owner_id(owner_id);
-            if (candidate == nullptr || candidate->is_variadic_primary_template || candidate->is_variadic_specialization) {
-                continue;
+            if (candidate == nullptr) continue;
+            bool is_variadic_primary = false;
+            bool is_variadic_spec = false;
+            bool is_partial = false;
+            bool is_forward_decl = false;
+            std::size_t spec_args_size = 0;
+            std::size_t tmpl_params_size = 0;
+            [[scpp::unsafe]] {
+                is_variadic_primary = candidate->is_variadic_primary_template;
+                is_variadic_spec = candidate->is_variadic_specialization;
+                is_partial = candidate->is_partial_specialization;
+                is_forward_decl = candidate->is_forward_declaration;
+                spec_args_size = candidate->specialization_template_args.size();
+                tmpl_params_size = candidate->template_params.size();
             }
-            if (candidate->is_partial_specialization) {
-                if (candidate->specialization_template_args.size() != concrete_args.size()) continue;
+            if (is_variadic_primary || is_variadic_spec) continue;
+            if (is_partial) {
+                if (spec_args_size != concrete_args.size()) continue;
                 TemplateInstantiationBindings bindings{};
-
-                if (!match_type_pattern_list(candidate->specialization_template_args, concrete_args, candidate->template_params,
-                                             bindings)) {
-                    continue;
+                bool matched = false;
+                [[scpp::unsafe]] {
+                    matched = match_type_pattern_list(candidate->specialization_template_args, concrete_args, candidate->template_params, bindings);
                 }
-                matching_specializations.push_back(OrdinaryClassTemplateSelection{candidate, std::move(bindings)});
+                if (!matched) continue;
+                OrdinaryClassTemplateSelection spec_sel{owner_id, std::move(bindings)};
+                matching_specializations.push_back(std::move(spec_sel));
                 continue;
             }
-            if (candidate->template_params.size() != concrete_args.size()) continue;
+            if (tmpl_params_size != concrete_args.size()) continue;
             TemplateInstantiationBindings bindings{};
 
             bool valid = true;
-            for (std::size_t param_index = 0; param_index < candidate->template_params.size(); ++param_index) {
-                const GenericTypeParam& param = candidate->template_params[param_index];
-                if (param.is_non_type || param.is_pack) {
+            for (std::size_t param_index = 0; param_index < tmpl_params_size; ++param_index) {
+                bool is_nt = false;
+                bool is_pk = false;
+                std::string p_name{};
+                [[scpp::unsafe]] {
+                    const GenericTypeParam& param = candidate->template_params[param_index];
+                    is_nt = param.is_non_type;
+                    is_pk = param.is_pack;
+                    p_name = param.name;
+                }
+                if (is_nt || is_pk) {
                     valid = false;
                     break;
                 }
-                bindings.type_replacements.emplace_back(param.name, concrete_args[param_index]);
+                bindings.type_replacements.push_back(std::pair<std::string, Type>{p_name, concrete_args[param_index]});
             }
             if (!valid) continue;
-            OrdinaryClassTemplateSelection selection{candidate, std::move(bindings)};
-            if (candidate->is_forward_declaration) {
+            OrdinaryClassTemplateSelection selection{owner_id, std::move(bindings)};
+            if (is_forward_decl) {
                 if (!have_primary_definition) {
                     primary_selection = std::move(selection);
                     have_primary_forward_decl = true;
@@ -2360,15 +2691,20 @@ private:
                                     "single best match",
                                 loc));
         }
-        if (!matching_specializations.empty()) return matching_specializations.front();
-        if (have_primary_definition) return primary_selection;
+        if (!matching_specializations.empty()) return std::move(matching_specializations.front());
+        if (have_primary_definition) return std::move(primary_selection);
         if (have_primary_forward_decl) {
-            return std::unexpected(DataflowError("'" + template_name +
-                                    "' has no matching class-template definition for these concrete arguments "
+            std::string arg_desc{};
+            for (const auto& a : concrete_args) {
+                if (!arg_desc.empty()) arg_desc += ", ";
+                arg_desc += describe_type_brief(a);
+            }
+            return std::unexpected(DataflowError("'" + template_name + "<" + arg_desc +
+                                    ">' has no matching class-template definition for these concrete arguments "
                                     "(the primary template is only forward-declared)",
                                 loc));
         }
-        return primary_selection;
+        return std::move(primary_selection);
     }
 
     // [class.derived.general]/2 -- "Members of a base class are also
@@ -2572,14 +2908,13 @@ private:
     }
 
     void resolve_generic_types_in_stmt_optimistic(Stmt& stmt) {
-        auto result = resolve_generic_types_in_stmt(stmt);
+        [[maybe_unused]] auto result = resolve_generic_types_in_stmt(stmt);
         // See resolve_generic_type_optimistic's own comment: leaves
         // whatever prefix of `stmt` was already resolved before the
         // failing reference in place (harmless -- is_synthetic_check_only,
         // never reaches codegen) and simply stops short of resolving
         // the rest, exactly as if this whole call had never been
         // added.
-        (void)result;
     }
 
     [[nodiscard]] std::expected<void, DataflowError> check_generic_type_methods_once() {
@@ -2656,10 +2991,10 @@ private:
                     } else {
                         witness_name = bare_witness_struct_name();
                     }
-                    type_replacements.emplace_back(param.name, named_type(witness_name));
+                    type_replacements.push_back(std::pair<std::string, Type>{param.name, named_type(witness_name)});
                 }
 
-                std::string check_class_name = "__genchk" + std::to_string(generic_check_counter_++);
+                std::string check_class_name = "__genchk" + std::to_string(static_cast<std::int64_t>(generic_check_counter_++));
                 ClassDef check_class{};
 
                 check_class.name = check_class_name;
@@ -2796,11 +3131,7 @@ private:
                 // initializers for every field and spuriously reports
                 // *every* generic class constructor as leaving all of
                 // its members uninitialized.
-                if (auto _r = clone_member_initializers(method_tmpl, check_fn,
-                                                        [&](Expr& e) -> std::expected<void, DataflowError> {
-                                                            substitute_type_params_in_expr(e, type_replacements);
-                                                            return resolve_generic_types_in_expr(e);
-                                                        });
+                if (auto _r = clone_member_initializers_with_replacements(method_tmpl, check_fn, type_replacements);
                     !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
@@ -2837,9 +3168,11 @@ private:
                     }
                 }
                 program_.functions.push_back(std::move(check_fn));
-                known_function_names_.insert(program_.functions.back().name);
+                std::string back_name{program_.functions.back().name};
+                std::size_t back_idx = program_.functions.size() - 1;
+                known_function_names_.insert(back_name);
                 if (program_.functions.back().is_generic_template) {
-                    generic_template_indices_[program_.functions.back().name].push_back(program_.functions.size() - 1);
+                    generic_template_indices_[back_name].push_back(back_idx);
                 }
                 if (auto _r = walk_new_concrete_function(program_.functions.size() - 1); !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
@@ -2889,10 +3222,14 @@ private:
         // deeper chain, a call result, ...) returns nullopt, since a
         // bare type parameter's *only* legal use here is as a field of
         // the generic type's own instance.
-        std::function<std::optional<std::string>(const Expr&)> resolve_type_name =
+        std::function<std::optional<std::string>(const Expr&)> resolve_type_name{};
+        std::function<std::expected<void, DataflowError>(const Expr&)> walk_expr{};
+        std::function<std::expected<void, DataflowError>(const Stmt&)> walk_stmt{};
+
+        resolve_type_name = std::function<std::optional<std::string>(const Expr&)>{
             [&](const Expr& e) -> std::optional<std::string> {
             if (e.kind == ExprKind::Identifier && e.name == "this") return this_class_name;
-            if (e.kind == ExprKind::Member) {
+            if (e.kind == ExprKind::Member && e.lhs) {
                 std::optional<std::string> base = resolve_type_name(*e.lhs);
                 if (base.has_value() && *base == this_class_name) {
                     auto it = field_types.find(e.name);
@@ -2900,8 +3237,8 @@ private:
                 }
             }
             return std::nullopt;
-        };
-        std::function<std::expected<void, DataflowError>(const Expr&)> walk_expr =
+        }};
+        walk_expr = std::function<std::expected<void, DataflowError>(const Expr&)>{
             [&](const Expr& e) -> std::expected<void, DataflowError> {
             if (e.kind == ExprKind::Call) {
                 if (e.lhs) {
@@ -2930,8 +3267,8 @@ private:
                 if (auto _r = walk_expr(*arg); !_r.has_value()) return std::unexpected(std::move(_r).error());
             }
             return {};
-        };
-        std::function<std::expected<void, DataflowError>(const Stmt&)> walk_stmt =
+        }};
+        walk_stmt = std::function<std::expected<void, DataflowError>(const Stmt&)>{
             [&](const Stmt& s) -> std::expected<void, DataflowError> {
             if (s.init) {
                 if (auto _r = walk_expr(*s.init); !_r.has_value()) return std::unexpected(std::move(_r).error());
@@ -2955,7 +3292,7 @@ private:
                 if (auto _r = walk_stmt(*inner); !_r.has_value()) return std::unexpected(std::move(_r).error());
             }
             return {};
-        };
+        }};
         return walk_stmt(stmt);
     }
 
@@ -2981,7 +3318,8 @@ private:
             witness.is_concept_witness = true;
             program_.structs.push_back(std::move(witness));
         }
-        return bare_witness_struct_name_;
+        std::string res{bare_witness_struct_name_};
+        return res;
     }
 
     // Resolves every not-yet-resolved generic-type
@@ -3019,7 +3357,12 @@ private:
                 if (!new_type.has_value()) return std::unexpected(std::move(new_type).error());
                 program_.structs[i].fields[j].type = std::move(new_type).value();
                 for (Expr* expr : default_initializer_exprs(program_.structs[i].fields[j])) {
-                    if (auto _r = resolve_generic_types_in_expr(*expr); !_r.has_value()) {
+                    if (expr == nullptr) continue;
+                    std::expected<void, DataflowError> _r{};
+                    [[scpp::unsafe]] {
+                        _r = resolve_generic_types_in_expr(*expr);
+                    }
+                    if (!_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
                 }
@@ -3044,7 +3387,12 @@ private:
                 if (!new_type.has_value()) return std::unexpected(std::move(new_type).error());
                 program_.classes[i].fields[j].type = std::move(new_type).value();
                 for (Expr* expr : default_initializer_exprs(program_.classes[i].fields[j])) {
-                    if (auto _r = resolve_generic_types_in_expr(*expr); !_r.has_value()) {
+                    if (expr == nullptr) continue;
+                    std::expected<void, DataflowError> _r{};
+                    [[scpp::unsafe]] {
+                        _r = resolve_generic_types_in_expr(*expr);
+                    }
+                    if (!_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
                 }
@@ -3160,7 +3508,11 @@ private:
         for (std::size_t i = 0; i < program_.globals.size(); i++) {
             Stmt* decl = program_.globals[i].decl.get();
             if (decl == nullptr) continue;
-            if (auto _r = resolve_generic_types_in_stmt(*decl); !_r.has_value()) {
+            std::expected<void, DataflowError> _r{};
+            [[scpp::unsafe]] {
+                _r = resolve_generic_types_in_stmt(*decl);
+            }
+            if (!_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
         }
@@ -3262,8 +3614,8 @@ private:
         if (expr.kind == ExprKind::Call && expr.lhs == nullptr) {
             auto resolved_static_call = resolve_static_template_call_target(expr.name, expr.loc);
             if (!resolved_static_call.has_value()) return std::unexpected(std::move(resolved_static_call).error());
-            if (resolved_static_call->has_value()) {
-                expr.name = (*resolved_static_call)->concrete_class_name + "_" + (*resolved_static_call)->member_name;
+            if (resolved_static_call.value().has_value()) {
+                expr.name = resolved_static_call.value()->concrete_class_name + "_" + resolved_static_call.value()->member_name;
                 expr.explicit_global_qualification = false;
             }
         }
@@ -3391,7 +3743,8 @@ private:
                                                          std::to_string(arg_types.size()) + " argument(s) ([func.require])",
                                                      loc));
             }
-            return overloads.front().return_type;
+            Type res{overloads.front().return_type};
+            return res;
         }
         const InvokeReceiverCategory category = invoke_receiver_category(callable);
         std::vector<const FunctionSignature*> viable{};
@@ -3423,15 +3776,29 @@ private:
                                                      std::to_string(arg_types.size()) + " argument(s) ([func.require])",
                                                  loc));
         }
+        const FunctionSignature* first_cand = candidates.front();
         for (const FunctionSignature* candidate : candidates) {
-            if (!types_equal(candidate->return_type, candidates.front()->return_type)) {
+            bool eq = false;
+            [[scpp::unsafe]] {
+                if (candidate != nullptr && first_cand != nullptr) {
+                    eq = types_equal(candidate->return_type, first_cand->return_type);
+                }
+            }
+            if (!eq) {
                 return std::unexpected(
                     DataflowError("'std::invoke_result_t' is ambiguous: several 'operator()' overloads of '" +
                                       describe_type_brief(callable) + "' accept these arguments and disagree on the return type",
                                   loc));
             }
         }
-        return candidates.front()->return_type;
+        Type ret_type{};
+        [[scpp::unsafe]] {
+            if (first_cand != nullptr) {
+                Type copy{first_cand->return_type};
+                ret_type = std::move(copy);
+            }
+        }
+        return ret_type;
     }
 
     // Resolves a (possibly not-yet-resolved) generic-type
@@ -3658,28 +4025,11 @@ private:
         // it here) is likewise truncated away, via the `fail` helper
         // below, to avoid leaving an orphaned, half-built duplicate of
         // `cache_key` behind for a retry to collide with.
-        std::size_t classes_before_instantiation = program_.classes.size();
-        std::size_t structs_before_instantiation = program_.structs.size();
-        std::size_t functions_before_instantiation = program_.functions.size();
-        auto fail = [&, this](DataflowError err) -> std::unexpected<DataflowError> {
-            for (std::size_t k = functions_before_instantiation; k < program_.functions.size(); ++k) {
-                known_function_names_.erase(program_.functions[k].name);
-                generic_template_indices_.erase(program_.functions[k].name);
-            }
-            forget_deferred_member_definitions_from(functions_before_instantiation);
-            if (program_.functions.size() > functions_before_instantiation) {
-                program_.functions.resize(functions_before_instantiation);
-            }
-            if (program_.classes.size() > classes_before_instantiation) {
-                program_.classes.resize(classes_before_instantiation);
-            }
-            if (program_.structs.size() > structs_before_instantiation) {
-                program_.structs.resize(structs_before_instantiation);
-            }
-            ordinary_generic_instance_info_.erase(cache_key);
-            generic_type_instance_cache_.erase(cache_key);
-            return std::unexpected(std::move(err));
-        };
+        rollback_classes_ = program_.classes.size();
+        rollback_structs_ = program_.structs.size();
+        rollback_functions_ = program_.functions.size();
+        rollback_cache_key_ = cache_key;
+        rollback_is_variadic_ = false;
 
         std::vector<Type> named_concretes{};
 
@@ -3712,7 +4062,7 @@ private:
                     !_r.has_value()) {
                     return fail(std::move(_r).error());
                 }
-                type_replacements.emplace_back(type_param.name, named_concretes[param_index]);
+                type_replacements.push_back(std::pair<std::string, Type>{type_param.name, named_concretes[param_index]});
             }
             StructDef concrete{};
 
@@ -3746,25 +4096,51 @@ private:
                 concrete.fields.push_back(std::move(nf));
             }
             program_.structs.push_back(std::move(concrete));
-            ordinary_generic_instance_info_[cache_key] = OrdinaryGenericInstanceInfo{template_name, named_concretes};
+            OrdinaryGenericInstanceInfo info{};
+            info.template_name = template_name;
+            info.type_args = named_concretes;
+            ordinary_generic_instance_info_[cache_key] = std::move(info);
             return cache_key;
         }
 
         auto _class_selection_r = select_ordinary_class_template(template_name, named_concretes, loc);
         if (!_class_selection_r.has_value()) return fail(std::move(_class_selection_r).error());
         OrdinaryClassTemplateSelection class_selection = std::move(_class_selection_r).value();
-        if (class_selection.def != nullptr) {
-            const ClassDef& tmpl = *class_selection.def;
-            std::string tmpl_owner_id = tmpl.template_owner_id;
-            std::vector<std::string> tmpl_namespace_path = tmpl.namespace_path;
-            std::vector<BaseSpecifier> tmpl_base_specifiers = tmpl.base_specifiers;
-            bool tmpl_thread_movable_override = tmpl.thread_movable_override;
-            bool tmpl_thread_shareable_override = tmpl.thread_shareable_override;
-            ExprPtr tmpl_thread_movable_if_movable_expr =
-                tmpl.thread_movable_if_movable_expr ? deep_clone_expr(*tmpl.thread_movable_if_movable_expr) : nullptr;
-            ExprPtr tmpl_thread_movable_if_shareable_expr =
-                tmpl.thread_movable_if_shareable_expr ? deep_clone_expr(*tmpl.thread_movable_if_shareable_expr) : nullptr;
-            std::vector<GenericTypeParam> template_params_copy = tmpl.template_params;
+        if (!class_selection.owner_id.empty()) {
+            std::string tmpl_owner_id{};
+            std::vector<std::string> tmpl_namespace_path{};
+            std::vector<BaseSpecifier> tmpl_base_specifiers{};
+            bool tmpl_thread_movable_override = false;
+            bool tmpl_thread_shareable_override = false;
+            ExprPtr tmpl_thread_movable_if_movable_expr{};
+            ExprPtr tmpl_thread_movable_if_shareable_expr{};
+            std::vector<GenericTypeParam> template_params_copy{};
+            std::vector<ClassField> fields_copy{};
+            bool tmpl_is_interface = false;
+            std::vector<ClassUsingDeclaration> tmpl_using_declarations{};
+            bool tmpl_is_nodiscard = false;
+            std::string tmpl_nodiscard_reason{};
+            [[scpp::unsafe]] {
+                const ClassDef* tmpl_ptr = class_template_by_owner_id(class_selection.owner_id);
+                if (tmpl_ptr != nullptr) {
+                    const ClassDef& tmpl = *tmpl_ptr;
+                    tmpl_owner_id = tmpl.template_owner_id;
+                    tmpl_namespace_path = tmpl.namespace_path;
+                    tmpl_base_specifiers = tmpl.base_specifiers;
+                    tmpl_thread_movable_override = tmpl.thread_movable_override;
+                    tmpl_thread_shareable_override = tmpl.thread_shareable_override;
+                    tmpl_thread_movable_if_movable_expr =
+                        tmpl.thread_movable_if_movable_expr ? deep_clone_expr(*tmpl.thread_movable_if_movable_expr) : nullptr;
+                    tmpl_thread_movable_if_shareable_expr =
+                        tmpl.thread_movable_if_shareable_expr ? deep_clone_expr(*tmpl.thread_movable_if_shareable_expr) : nullptr;
+                    template_params_copy = tmpl.template_params;
+                    fields_copy = tmpl.fields;
+                    tmpl_is_interface = tmpl.is_interface;
+                    tmpl_using_declarations = tmpl.using_declarations;
+                    tmpl_is_nodiscard = tmpl.is_nodiscard;
+                    tmpl_nodiscard_reason = tmpl.nodiscard_reason;
+                }
+            }
             std::vector<Function> methods = method_templates_of_owner(tmpl_owner_id);
             for (const GenericTypeParam& type_param : template_params_copy) {
                 if (type_param.is_non_type) {
@@ -3790,23 +4166,26 @@ private:
                                             "' did not bind required type parameter '" + type_param.name + "'",
                                         loc));
                 }
-                if (auto _r = check_type_param_constraint(type_param, *bound, template_name, loc); !_r.has_value()) {
+                std::expected<void, DataflowError> _r{};
+                [[scpp::unsafe]] {
+                    _r = check_type_param_constraint(type_param, *bound, template_name, loc);
+                }
+                if (!_r.has_value()) {
                     return fail(std::move(_r).error());
                 }
             }
 
-            std::vector<ClassField> fields_copy = tmpl.fields;
             ClassDef concrete{};
 
             concrete.name = cache_key;
             concrete.namespace_path = tmpl_namespace_path;
-            concrete.is_interface = tmpl.is_interface;
+            concrete.is_interface = tmpl_is_interface;
             concrete.base_specifiers = std::move(tmpl_base_specifiers);
-            concrete.using_declarations = tmpl.using_declarations;
+            concrete.using_declarations = tmpl_using_declarations;
             concrete.thread_movable_override = tmpl_thread_movable_override;
             concrete.thread_shareable_override = tmpl_thread_shareable_override;
-            concrete.is_nodiscard = tmpl.is_nodiscard;
-            concrete.nodiscard_reason = tmpl.nodiscard_reason;
+            concrete.is_nodiscard = tmpl_is_nodiscard;
+            concrete.nodiscard_reason = tmpl_nodiscard_reason;
             if (tmpl_thread_movable_if_movable_expr) {
                 concrete.thread_movable_if_movable_expr = std::move(tmpl_thread_movable_if_movable_expr);
                 substitute_type_params_in_expr(*concrete.thread_movable_if_movable_expr,
@@ -3852,8 +4231,19 @@ private:
                 concrete.fields.push_back(std::move(nf));
             }
             program_.classes.push_back(std::move(concrete));
-            ordinary_generic_instance_info_[cache_key] = OrdinaryGenericInstanceInfo{template_name, named_concretes};
+            [[scpp::unsafe]] {
+                OrdinaryGenericInstanceInfo info{};
+                info.template_name = template_name;
+                info.type_args = named_concretes;
+                ordinary_generic_instance_info_[cache_key] = std::move(info);
+            }
             std::vector<std::size_t> eagerly_defined_clones{};
+            std::vector<std::pair<std::string, Type>> copy_class_type_replacements{};
+            for (const auto& rep : class_selection.bindings.type_replacements) {
+                copy_class_type_replacements.push_back(std::pair<std::string, Type>{rep.first, rep.second});
+            }
+            auto shared_class_type_replacements = std::make_shared<std::vector<std::pair<std::string, Type>>>(std::move(copy_class_type_replacements));
+            auto shared_class_pack_replacements = std::make_shared<std::unordered_map<std::string, std::vector<Type>>>(class_selection.bindings.type_pack_replacements);
 
             for (const Function& method_tmpl : methods) {
                 // [temp.constr.decl], [over.match.viable]/1 -- one
@@ -3930,9 +4320,11 @@ private:
                                 Param np = p;
                                 np.is_parameter_pack = false;
                                 np.name = p.name + "$" + std::to_string(j);
-                                std::vector<std::pair<std::string, Type>> param_replacements =
-                                    class_selection.bindings.type_replacements;
-                                param_replacements.emplace_back(*pack_name, pack_it->second[j]);
+                                std::vector<std::pair<std::string, Type>> param_replacements{};
+                                for (const auto& rep : *shared_class_type_replacements) {
+                                    param_replacements.push_back(std::pair<std::string, Type>{rep.first, rep.second});
+                                }
+                                param_replacements.push_back(std::pair<std::string, Type>{*pack_name, pack_it->second[j]});
                                 np.type = instantiate_type_pattern(p.type, param_replacements, {});
                                 {
                                     auto _resolved = resolve_generic_type(np.type, method_tmpl.loc);
@@ -3955,18 +4347,15 @@ private:
                     }
                     clone.params.push_back(std::move(np));
                 }
-                auto build_definition = [this, method_tmpl, type_replacements = class_selection.bindings.type_replacements,
-                                         pack_replacements = class_selection.bindings.type_pack_replacements,
+                auto build_definition = [this, method_tmpl, shared_class_type_replacements,
+                                         shared_class_pack_replacements,
                                          pack_param_names](Function& into) -> std::expected<void, DataflowError> {
-                    if (auto _r = clone_member_initializers(
-                            method_tmpl, into,
-                            [&](Expr& e) -> std::expected<void, DataflowError> {
-                                substitute_type_params_in_expr(e, type_replacements);
-                                substitute_type_packs_in_expr(e, pack_replacements);
-                                return resolve_generic_types_in_expr(e);
-                            });
-                        !_r.has_value()) {
-                        return std::unexpected(std::move(_r).error());
+                    const auto& type_replacements = *shared_class_type_replacements;
+                    const auto& pack_replacements = *shared_class_pack_replacements;
+                    if (auto _r_init = clone_member_initializers_with_replacements(
+                            method_tmpl, into, type_replacements, pack_replacements);
+                        !_r_init.has_value()) {
+                        return std::unexpected(std::move(_r_init).error());
                     }
                     into.body = method_tmpl.body ? deep_clone_stmt(*method_tmpl.body) : nullptr;
                     if (into.body) {
@@ -3996,24 +4385,24 @@ private:
                 if (!defer_definition) {
                     if (auto _r = build_definition(clone); !_r.has_value()) return fail(std::move(_r).error());
                 }
-                known_function_names_.insert(clone.name);
+                bool has_tmpl = !clone.template_params.empty();
+                std::string clone_name{clone.name};
+                known_function_names_.insert(clone_name);
                 program_.functions.push_back(std::move(clone));
+                std::size_t new_idx = program_.functions.size() - 1;
                 if (defer_definition) {
-                    if (auto _r = register_deferred_member_definition(program_.functions.size() - 1,
+                    if (auto _r = register_deferred_member_definition(new_idx,
                                                                       std::move(build_definition));
                         !_r.has_value()) {
                         return fail(std::move(_r).error());
                     }
                 } else {
-                    // Collected and walked after the loop, for the
-                    // reason clone_variadic_class_methods' own copy of
-                    // this spells out: a member body may name a member
-                    // declared later in the class
-                    // ([class.mem.general]/10.1, /11).
-                    eagerly_defined_clones.push_back(program_.functions.size() - 1);
+                    eagerly_defined_clones.push_back(new_idx);
                 }
-                if (!program_.functions.back().template_params.empty()) {
-                    generic_template_indices_[program_.functions.back().name].push_back(program_.functions.size() - 1);
+                if (has_tmpl) {
+                    [[scpp::unsafe]] {
+                        generic_template_indices_[clone_name].push_back(new_idx);
+                    }
                 }
             }
             for (std::size_t clone_index : eagerly_defined_clones) {
@@ -4031,7 +4420,7 @@ private:
                                                                 const std::vector<int>& non_type_args,
                                                                 SourceLocation loc) {
         std::string cache_key = template_name;
-        for (int value : non_type_args) cache_key += "." + std::to_string(value);
+        for (int value : non_type_args) cache_key += "." + std::to_string(static_cast<std::int64_t>(value));
         auto cached = generic_type_instance_cache_.find(cache_key);
         if (cached != generic_type_instance_cache_.end()) return cached->second;
         generic_type_instance_cache_[cache_key] = cache_key;
@@ -4042,27 +4431,11 @@ private:
         // `fail` helper on any failure below (e.g. a witness type
         // failing one of this non-type generic's own field/method type
         // resolutions).
-        std::size_t classes_before_instantiation = program_.classes.size();
-        std::size_t structs_before_instantiation = program_.structs.size();
-        std::size_t functions_before_instantiation = program_.functions.size();
-        auto fail = [&, this](DataflowError err) -> std::unexpected<DataflowError> {
-            for (std::size_t k = functions_before_instantiation; k < program_.functions.size(); ++k) {
-                known_function_names_.erase(program_.functions[k].name);
-                generic_template_indices_.erase(program_.functions[k].name);
-            }
-            forget_deferred_member_definitions_from(functions_before_instantiation);
-            if (program_.functions.size() > functions_before_instantiation) {
-                program_.functions.resize(functions_before_instantiation);
-            }
-            if (program_.classes.size() > classes_before_instantiation) {
-                program_.classes.resize(classes_before_instantiation);
-            }
-            if (program_.structs.size() > structs_before_instantiation) {
-                program_.structs.resize(structs_before_instantiation);
-            }
-            generic_type_instance_cache_.erase(cache_key);
-            return std::unexpected(std::move(err));
-        };
+        rollback_classes_ = program_.classes.size();
+        rollback_structs_ = program_.structs.size();
+        rollback_functions_ = program_.functions.size();
+        rollback_cache_key_ = cache_key;
+        rollback_is_variadic_ = false;
 
         for (const StructDef& tmpl : program_.structs) {
             if (tmpl.name != template_name || tmpl.template_params.size() != non_type_args.size() ||
@@ -4174,16 +4547,10 @@ private:
                 }
                 auto build_definition = [this, method_tmpl, params_copy,
                                          non_type_args](Function& into) -> std::expected<void, DataflowError> {
-                    if (auto _r = clone_member_initializers(method_tmpl, into,
-                                                            [&](Expr& e) -> std::expected<void, DataflowError> {
-                                                                for (std::size_t i = 0; i < params_copy.size(); i++) {
-                                                                    substitute_non_type_param_in_expr(
-                                                                        e, params_copy[i].name, non_type_args[i]);
-                                                                }
-                                                                return {};
-                                                            });
-                        !_r.has_value()) {
-                        return std::unexpected(std::move(_r).error());
+                    if (auto _r_init = clone_member_initializers_with_replacements(
+                            method_tmpl, into, {}, {}, params_copy, non_type_args);
+                        !_r_init.has_value()) {
+                        return std::unexpected(std::move(_r_init).error());
                     }
                     into.body = method_tmpl.body ? deep_clone_stmt(*method_tmpl.body) : nullptr;
                     if (into.body) {
@@ -4197,10 +4564,13 @@ private:
                 if (!defer_definition) {
                     if (auto _r = build_definition(clone); !_r.has_value()) return std::unexpected(std::move(_r).error());
                 }
-                known_function_names_.insert(clone.name);
+                bool has_tmpl = !clone.template_params.empty();
+                std::string clone_name{clone.name};
+                known_function_names_.insert(clone_name);
                 program_.functions.push_back(std::move(clone));
+                std::size_t new_idx = program_.functions.size() - 1;
                 if (defer_definition) {
-                    if (auto _r = register_deferred_member_definition(program_.functions.size() - 1,
+                    if (auto _r = register_deferred_member_definition(new_idx,
                                                                       std::move(build_definition));
                         !_r.has_value()) {
                         return fail(std::move(_r).error());
@@ -4211,10 +4581,12 @@ private:
                     // this spells out: a member body may name a member
                     // declared later in the class
                     // ([class.mem.general]/10.1, /11).
-                    eagerly_defined_clones.push_back(program_.functions.size() - 1);
+                    eagerly_defined_clones.push_back(new_idx);
                 }
-                if (!program_.functions.back().template_params.empty()) {
-                    generic_template_indices_[program_.functions.back().name].push_back(program_.functions.size() - 1);
+                if (has_tmpl) {
+                    [[scpp::unsafe]] {
+                        generic_template_indices_[clone_name].push_back(new_idx);
+                    }
                 }
             }
             for (std::size_t clone_index : eagerly_defined_clones) {
@@ -4257,7 +4629,7 @@ private:
                                                                  const std::vector<Type>& type_args,
                                                                  SourceLocation loc) {
         std::string cache_key = template_name;
-        for (int v : non_type_args) cache_key += "." + std::to_string(v);
+        for (int v : non_type_args) cache_key += "." + std::to_string(static_cast<std::int64_t>(v));
         cache_key += type_args.empty() ? ".empty" : "";
         for (const Type& arg : type_args) cache_key += "." + mangle_type_for_clone_name(arg);
         auto cached = generic_type_instance_cache_.find(cache_key);
@@ -4272,28 +4644,11 @@ private:
         // call (which rolls back identically on its own failure before
         // propagating it here, so only this level's own additional
         // pushes need undoing).
-        std::size_t classes_before_instantiation = program_.classes.size();
-        std::size_t structs_before_instantiation = program_.structs.size();
-        std::size_t functions_before_instantiation = program_.functions.size();
-        auto fail = [&, this](DataflowError err) -> std::unexpected<DataflowError> {
-            for (std::size_t k = functions_before_instantiation; k < program_.functions.size(); ++k) {
-                known_function_names_.erase(program_.functions[k].name);
-                generic_template_indices_.erase(program_.functions[k].name);
-            }
-            forget_deferred_member_definitions_from(functions_before_instantiation);
-            if (program_.functions.size() > functions_before_instantiation) {
-                program_.functions.resize(functions_before_instantiation);
-            }
-            if (program_.classes.size() > classes_before_instantiation) {
-                program_.classes.resize(classes_before_instantiation);
-            }
-            if (program_.structs.size() > structs_before_instantiation) {
-                program_.structs.resize(structs_before_instantiation);
-            }
-            variadic_instance_info_.erase(cache_key);
-            generic_type_instance_cache_.erase(cache_key);
-            return std::unexpected(std::move(err));
-        };
+        rollback_classes_ = program_.classes.size();
+        rollback_structs_ = program_.structs.size();
+        rollback_functions_ = program_.functions.size();
+        rollback_cache_key_ = cache_key;
+        rollback_is_variadic_ = true;
 
         if (type_args.empty()) {
             // The empty-pack base case: `template<> class Tuple<>
@@ -4313,32 +4668,56 @@ private:
                     break;
                 }
             }
-            if (!base_case_tmpl) {
+            if (base_case_tmpl == nullptr) {
                 return fail(DataflowError("'" + template_name + "' has no declared empty-pack base-case specialization "
                                                             "matching " +
                                          std::to_string(non_type_args.size()) + " non-type argument(s)",
                     loc));
             }
-            std::vector<GenericTypeParam> params_copy = base_case_tmpl->template_params;
-            std::string owner_id_copy = base_case_tmpl->template_owner_id;
-            std::vector<ClassField> fields_copy = base_case_tmpl->fields;
+            std::vector<GenericTypeParam> params_copy{};
+            std::string owner_id_copy{};
+            std::vector<ClassField> fields_copy{};
+            std::vector<std::string> namespace_path_copy{};
+            bool thread_movable_override = false;
+            bool thread_shareable_override = false;
+            bool is_nodiscard = false;
+            std::string nodiscard_reason{};
+            ExprPtr thread_movable_if_movable_expr_copy{};
+            ExprPtr thread_movable_if_shareable_expr_copy{};
+            [[scpp::unsafe]] {
+                params_copy = base_case_tmpl->template_params;
+                owner_id_copy = base_case_tmpl->template_owner_id;
+                fields_copy = base_case_tmpl->fields;
+                namespace_path_copy = base_case_tmpl->namespace_path;
+                thread_movable_override = base_case_tmpl->thread_movable_override;
+                thread_shareable_override = base_case_tmpl->thread_shareable_override;
+                is_nodiscard = base_case_tmpl->is_nodiscard;
+                nodiscard_reason = base_case_tmpl->nodiscard_reason;
+                if (base_case_tmpl->thread_movable_if_movable_expr) {
+                    thread_movable_if_movable_expr_copy = deep_clone_expr(*base_case_tmpl->thread_movable_if_movable_expr);
+                }
+                if (base_case_tmpl->thread_movable_if_shareable_expr) {
+                    thread_movable_if_shareable_expr_copy = deep_clone_expr(*base_case_tmpl->thread_movable_if_shareable_expr);
+                }
+            }
+            base_case_tmpl = nullptr;
             std::vector<Function> methods = method_templates_of_owner(owner_id_copy);
             ClassDef concrete{};
 
             concrete.name = cache_key;
-            concrete.namespace_path = base_case_tmpl->namespace_path;
-            concrete.thread_movable_override = base_case_tmpl->thread_movable_override;
-            concrete.thread_shareable_override = base_case_tmpl->thread_shareable_override;
-            concrete.is_nodiscard = base_case_tmpl->is_nodiscard;
-            concrete.nodiscard_reason = base_case_tmpl->nodiscard_reason;
-            if (base_case_tmpl->thread_movable_if_movable_expr) {
-                concrete.thread_movable_if_movable_expr = deep_clone_expr(*base_case_tmpl->thread_movable_if_movable_expr);
+            concrete.namespace_path = namespace_path_copy;
+            concrete.thread_movable_override = thread_movable_override;
+            concrete.thread_shareable_override = thread_shareable_override;
+            concrete.is_nodiscard = is_nodiscard;
+            concrete.nodiscard_reason = nodiscard_reason;
+            if (thread_movable_if_movable_expr_copy) {
+                concrete.thread_movable_if_movable_expr = std::move(thread_movable_if_movable_expr_copy);
                 if (auto _r = resolve_generic_types_in_expr(*concrete.thread_movable_if_movable_expr); !_r.has_value()) {
                     return fail(std::move(_r).error());
                 }
             }
-            if (base_case_tmpl->thread_movable_if_shareable_expr) {
-                concrete.thread_movable_if_shareable_expr = deep_clone_expr(*base_case_tmpl->thread_movable_if_shareable_expr);
+            if (thread_movable_if_shareable_expr_copy) {
+                concrete.thread_movable_if_shareable_expr = std::move(thread_movable_if_shareable_expr_copy);
                 if (auto _r = resolve_generic_types_in_expr(*concrete.thread_movable_if_shareable_expr); !_r.has_value()) {
                     return fail(std::move(_r).error());
                 }
@@ -4350,7 +4729,11 @@ private:
                 !_r.has_value()) {
                 return fail(std::move(_r).error());
             }
-            variadic_instance_info_[cache_key] = VariadicInstanceInfo{template_name, non_type_args, type_args};
+            VariadicInstanceInfo vinfo{};
+            vinfo.template_name = template_name;
+            vinfo.non_type_values = non_type_args;
+            vinfo.type_args = type_args;
+            variadic_instance_info_[cache_key] = std::move(vinfo);
             return cache_key;
         }
 
@@ -4364,7 +4747,7 @@ private:
                 break;
             }
         }
-        if (!recursive_tmpl) {
+        if (recursive_tmpl == nullptr) {
             return fail(DataflowError("'" + template_name + "' has no declared recursive-case specialization to match " +
                                      std::to_string(non_type_args.size()) + " non-type and " +
                                      std::to_string(type_args.size()) + " type argument(s)",
@@ -4380,32 +4763,51 @@ private:
         // concern).
         std::size_t leading_non_type_count = non_type_args.size();
         std::vector<GenericTypeParam> leading_non_type_params{};
-        for (std::size_t i = 0; i < leading_non_type_count && i < recursive_tmpl->template_params.size(); ++i) {
-            leading_non_type_params.push_back(recursive_tmpl->template_params[i]);
+        GenericTypeParam head_param{};
+        std::string base_template_name{};
+        AccessSpecifier base_access = AccessSpecifier::Private;
+        bool thread_movable_override = false;
+        bool thread_shareable_override = false;
+        bool is_nodiscard = false;
+        std::string nodiscard_reason{};
+        bool is_interface = false;
+        std::vector<ClassUsingDeclaration> using_declarations{};
+        std::vector<ClassField> fields_copy{};
+        std::vector<std::string> namespace_path_copy{};
+        std::shared_ptr<Expr> base_non_type_arg_expr{};
+        ExprPtr thread_movable_if_movable_expr_copy{};
+        ExprPtr thread_movable_if_shareable_expr_copy{};
+        std::vector<GenericTypeParam> template_params_copy{};
+        std::string owner_id_copy{};
+        [[scpp::unsafe]] {
+            for (std::size_t i = 0; i < leading_non_type_count && i < recursive_tmpl->template_params.size(); ++i) {
+                leading_non_type_params.push_back(recursive_tmpl->template_params[i]);
+            }
+            head_param = recursive_tmpl->template_params[leading_non_type_count];
+            auto recursive_base = recursive_tmpl->direct_ordinary_base();
+            base_template_name = recursive_base.has_value() ? recursive_base->get().base_type.name : std::string();
+            base_access = recursive_base.has_value() ? recursive_base->get().access : AccessSpecifier::Private;
+            thread_movable_override = recursive_tmpl->thread_movable_override;
+            thread_shareable_override = recursive_tmpl->thread_shareable_override;
+            is_nodiscard = recursive_tmpl->is_nodiscard;
+            nodiscard_reason = recursive_tmpl->nodiscard_reason;
+            is_interface = recursive_tmpl->is_interface;
+            using_declarations = recursive_tmpl->using_declarations;
+            fields_copy = recursive_tmpl->fields;
+            namespace_path_copy = recursive_tmpl->namespace_path;
+            base_non_type_arg_expr =
+                recursive_base.has_value() && !recursive_base->get().base_type.non_type_args.empty() ? recursive_base->get().base_type.non_type_args.front()
+                                                                                               : nullptr;
+            thread_movable_if_movable_expr_copy = recursive_tmpl->thread_movable_if_movable_expr
+                                                              ? deep_clone_expr(*recursive_tmpl->thread_movable_if_movable_expr)
+                                                              : nullptr;
+            thread_movable_if_shareable_expr_copy = recursive_tmpl->thread_movable_if_shareable_expr
+                                                                ? deep_clone_expr(*recursive_tmpl->thread_movable_if_shareable_expr)
+                                                                : nullptr;
+            template_params_copy = recursive_tmpl->template_params;
+            owner_id_copy = recursive_tmpl->template_owner_id;
         }
-        GenericTypeParam head_param = recursive_tmpl->template_params[leading_non_type_count];
-        auto recursive_base = recursive_tmpl->direct_ordinary_base();
-        std::string base_template_name = recursive_base.has_value() ? recursive_base->get().base_type.name : std::string();
-        AccessSpecifier base_access = recursive_base.has_value() ? recursive_base->get().access : AccessSpecifier::Private;
-        bool thread_movable_override = recursive_tmpl->thread_movable_override;
-        bool thread_shareable_override = recursive_tmpl->thread_shareable_override;
-        bool is_nodiscard = recursive_tmpl->is_nodiscard;
-        std::string nodiscard_reason = recursive_tmpl->nodiscard_reason;
-        bool is_interface = recursive_tmpl->is_interface;
-        std::vector<ClassUsingDeclaration> using_declarations = recursive_tmpl->using_declarations;
-        std::vector<ClassField> fields_copy = recursive_tmpl->fields;
-        std::vector<std::string> namespace_path_copy = recursive_tmpl->namespace_path;
-        std::shared_ptr<Expr> base_non_type_arg_expr =
-            recursive_base.has_value() && !recursive_base->get().base_type.non_type_args.empty() ? recursive_base->get().base_type.non_type_args.front()
-                                                                                           : nullptr;
-        ExprPtr thread_movable_if_movable_expr_copy = recursive_tmpl->thread_movable_if_movable_expr
-                                                          ? deep_clone_expr(*recursive_tmpl->thread_movable_if_movable_expr)
-                                                          : nullptr;
-        ExprPtr thread_movable_if_shareable_expr_copy = recursive_tmpl->thread_movable_if_shareable_expr
-                                                            ? deep_clone_expr(*recursive_tmpl->thread_movable_if_shareable_expr)
-                                                            : nullptr;
-        std::vector<GenericTypeParam> template_params_copy = recursive_tmpl->template_params;
-        std::string owner_id_copy = recursive_tmpl->template_owner_id;
+        recursive_tmpl = nullptr;
         std::vector<Function> methods = method_templates_of_owner(owner_id_copy);
 
         Type head_concrete = type_args[0];
@@ -4414,7 +4816,8 @@ private:
         if (auto _r = check_type_param_constraint(head_param, head_concrete, template_name, loc); !_r.has_value()) {
             return fail(std::move(_r).error());
         }
-        std::vector<std::pair<std::string, Type>> type_replacements = {{head_param.name, head_concrete}};
+        std::vector<std::pair<std::string, Type>> type_replacements{};
+        type_replacements.push_back(std::pair<std::string, Type>{head_param.name, head_concrete});
         std::unordered_map<std::string, std::vector<Type>> pack_replacements{};
         pack_replacements[template_params_copy[leading_non_type_count + 1].name] = tail_concrete;
 
@@ -4512,7 +4915,11 @@ private:
             !_r.has_value()) {
             return fail(std::move(_r).error());
         }
-        variadic_instance_info_[cache_key] = VariadicInstanceInfo{template_name, non_type_args, type_args};
+        VariadicInstanceInfo vinfo{};
+        vinfo.template_name = template_name;
+        vinfo.non_type_values = non_type_args;
+        vinfo.type_args = type_args;
+        variadic_instance_info_[cache_key] = std::move(vinfo);
         return cache_key;
     }
 
@@ -4528,18 +4935,21 @@ private:
             std::size_t seen = 0;
             for (const GenericTypeParam& param : params) {
                 if (!param.is_non_type) continue;
-                if (seen == index) return param.non_type_type;
+                if (seen == index) {
+                    Type copy{param.non_type_type};
+                    return std::optional<Type>{std::move(copy)};
+                }
                 seen++;
             }
             return std::nullopt;
         };
         for (const ClassDef& def : program_.classes) {
             if (def.name != template_name) continue;
-            if (std::optional<Type> found = nth_non_type(def.template_params); found.has_value()) return *found;
+            if (std::optional<Type> found = nth_non_type(def.template_params); found.has_value()) return std::move(*found);
         }
         for (const StructDef& def : program_.structs) {
             if (def.name != template_name) continue;
-            if (std::optional<Type> found = nth_non_type(def.template_params); found.has_value()) return *found;
+            if (std::optional<Type> found = nth_non_type(def.template_params); found.has_value()) return std::move(*found);
         }
         return named_type("int");
     }
@@ -4592,27 +5002,31 @@ private:
                                                                           const Type& param_type) {
         std::string param_type_name =
             param_type.kind == TypeKind::Named && !param_type.name.empty() ? param_type.name : std::string("int");
-        constexpr std::string_view argument_role{"the non-type template argument"};
+        const std::string_view argument_role{"the non-type template argument"};
         const Expr* spelled = &expr;
         if (expr.kind == ExprKind::Unary && expr.unary_op == UnaryOp::Neg && expr.lhs != nullptr) {
             spelled = expr.lhs.get();
+        }
+        ExprKind spelled_kind = ExprKind::Identifier;
+        [[scpp::unsafe]] {
+            if (spelled != nullptr) spelled_kind = spelled->kind;
         }
         // §16.2(1): an integer-literal "has no type of its own" and takes
         // the type its context requires; §16.2(2) refuses `bool` and
         // `char` for that. §16.2(4) gives a character-literal type `char`
         // and `true`/`false` type `bool` outright, so those two *do* have
         // a source type to name, and §16.3(1) has no conversion from it.
-        if (spelled->kind == ExprKind::IntegerLiteral && !integer_literal_may_adopt_type(param_type)) {
+        if (spelled_kind == ExprKind::IntegerLiteral && !integer_literal_may_adopt_type(param_type)) {
             return std::unexpected(DataflowError(
-                integer_literal_cannot_name_type_message(std::string(argument_role), param_type_name), expr.loc));
+                integer_literal_cannot_name_type_message(std::string{argument_role.data(), argument_role.size()}, param_type_name), expr.loc));
         }
-        if (spelled->kind == ExprKind::CharLiteral && param_type_name != "char") {
+        if (spelled_kind == ExprKind::CharLiteral && param_type_name != "char") {
             return std::unexpected(DataflowError(
-                scalar_conversion_error_message("char", param_type_name, std::string(argument_role)), expr.loc));
+                scalar_conversion_error_message("char", param_type_name, std::string{argument_role.data(), argument_role.size()}), expr.loc));
         }
-        if (spelled->kind == ExprKind::BoolLiteral && param_type_name != "bool") {
+        if (spelled_kind == ExprKind::BoolLiteral && param_type_name != "bool") {
             return std::unexpected(DataflowError(
-                scalar_conversion_error_message("bool", param_type_name, std::string(argument_role)), expr.loc));
+                scalar_conversion_error_message("bool", param_type_name, std::string{argument_role.data(), argument_role.size()}), expr.loc));
         }
         ExprPtr closed = deep_clone_expr(expr);
         for (const auto& entry : param_values) {
@@ -4620,7 +5034,8 @@ private:
             const auto& param_value = entry.second;
             substitute_non_type_param_in_expr(*closed, param_name, param_value);
         }
-        auto evaluated = evaluate_immediate_expr(program_, *closed);
+        std::expected<ConstexprValue, ConstexprError> evaluated =
+            evaluate_immediate_expr(program_, *closed, ConstexprLimits{});
         if (!evaluated.has_value()) {
             std::string message{};
             message += "non-type template argument is not a constant expression ([temp.arg.nontype]/2): ";
@@ -4638,10 +5053,12 @@ private:
         if (argument_is_bool != (param_type_name == "bool")) {
             return std::unexpected(DataflowError(
                 scalar_conversion_error_message(argument_is_bool ? "bool" : "int", param_type_name,
-                                                std::string(argument_role)),
+                                                std::string{argument_role.data(), argument_role.size()}),
                 expr.loc));
         }
-        std::int64_t widened = value.kind == ConstexprValueKind::Bool ? (value.bool_value ? 1 : 0) : value.int_value;
+        std::int64_t widened = value.kind == ConstexprValueKind::Bool
+            ? (value.bool_value ? static_cast<std::int64_t>(1) : static_cast<std::int64_t>(0))
+            : value.int_value;
         // [temp.arg.nontype]/2's "converted constant expression" forbids a
         // narrowing conversion that changes the value, which is exactly
         // what the `static_cast<int>` here used to perform in silence.
@@ -4709,32 +5126,41 @@ private:
                                      "own type ([temp.deduct.call]/4 deduces them from a base class of it)",
                 expr.loc));
         }
-        Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+        Type named{};
+        if (arg_type->kind == TypeKind::Reference && arg_type->pointee != nullptr) {
+            named = *arg_type->pointee;
+        } else {
+            named = *arg_type;
+        }
 
-        std::string current_name = named.name;
-        const VariadicInstanceInfo* matched = nullptr;
+        std::string current_name{named.name};
+        bool has_matched = false;
+        std::vector<Type> matched_type_args{};
         std::string matched_name{};
 
         while (true) {
             auto it = variadic_instance_info_.find(current_name);
             if (it == variadic_instance_info_.end()) break;
             if (it->second.template_name == pattern.name && it->second.non_type_values == search_non_type_values) {
-                matched = &it->second;
+                matched_type_args = it->second.type_args;
                 matched_name = current_name;
+                has_matched = true;
                 break;
             }
-            const ClassDef* cd = nullptr;
+            std::optional<std::string> base_name{};
             for (const ClassDef& c : program_.classes) {
                 if (c.name == current_name) {
-                    cd = &c;
+                    auto b = c.direct_ordinary_base();
+                    if (b.has_value()) {
+                        base_name = b->get().base_type.name;
+                    }
                     break;
                 }
             }
-            auto base = cd != nullptr ? cd->direct_ordinary_base() : std::nullopt;
-            if (!base.has_value()) break;
-            current_name = base->get().base_type.name;
+            if (!base_name.has_value()) break;
+            current_name = std::move(*base_name);
         }
-        if (!matched) {
+        if (!has_matched) {
             return std::unexpected(DataflowError("no base class (direct or indirect) of the argument's own type matches the "
                                  "pattern '" +
                                      pattern.name + "<...>' ([temp.deduct.call]/4)",
@@ -4746,7 +5172,7 @@ private:
             if (sym.is_pack_expansion) {
                 std::vector<Type> remaining_types{};
 
-                for (; ti < matched->type_args.size(); ti++) remaining_types.push_back(matched->type_args[ti]);
+                for (; ti < matched_type_args.size(); ti++) remaining_types.push_back(matched_type_args[ti]);
                 if (!bind_type_pack_binding(pack_bindings, sym.name, remaining_types)) {
                     return std::unexpected(DataflowError("deduced types for template parameter pack '" + sym.name +
                                             "' disagree across base-class-deduction and later arguments",
@@ -4754,8 +5180,8 @@ private:
                 }
                 break;
             }
-            if (ti < matched->type_args.size()) {
-                if (!bind_type_binding(type_bindings, sym.name, matched->type_args[ti])) {
+            if (ti < matched_type_args.size()) {
+                if (!bind_type_binding(type_bindings, sym.name, matched_type_args[ti])) {
                     return std::unexpected(DataflowError("deduced type for template parameter '" + sym.name +
                                             "' disagrees across base-class-deduction and later arguments",
                         expr.loc));
@@ -4768,7 +5194,7 @@ private:
 
         target.kind = TypeKind::Named;
         target.name = matched_name;
-        upcasts.emplace_back(arg_index, std::move(target));
+        upcasts.push_back(std::pair<std::size_t, Type>{arg_index, std::move(target)});
         return {};
     }
 
@@ -4840,9 +5266,20 @@ private:
     }
 
     [[nodiscard]] Type forwarding_reference_deduced_type(const Expr& arg, const Type& arg_type, Body& body) const {
-        Type named = arg_type.kind == TypeKind::Reference ? *arg_type.pointee : arg_type;
-        if (produces_rvalue_of_type(arg, named, body, signatures_)) return named;
-        if (arg_type.kind == TypeKind::Reference && !arg_type.is_rvalue_ref) return arg_type;
+        Type named{};
+        if (arg_type.kind == TypeKind::Reference && arg_type.pointee != nullptr) {
+            named = *arg_type.pointee;
+        } else {
+            named = arg_type;
+        }
+        if (produces_rvalue_of_type(arg, named, body, signatures_)) {
+            Type res{named};
+            return res;
+        }
+        if (arg_type.kind == TypeKind::Reference && !arg_type.is_rvalue_ref) {
+            Type res{arg_type};
+            return res;
+        }
         Type deduced{};
 
         deduced.kind = TypeKind::Reference;
@@ -4867,8 +5304,13 @@ private:
 
     [[nodiscard]] Type abbreviated_generic_concrete_param_type(const Param& param, const Expr& arg,
                                                                const Type& arg_type, Body& body) const {
-        Type named = arg_type.kind == TypeKind::Reference ? *arg_type.pointee : arg_type;
-        Type substituted = param.type;
+        Type named{};
+        if (arg_type.kind == TypeKind::Reference && arg_type.pointee != nullptr) {
+            named = *arg_type.pointee;
+        } else {
+            named = arg_type;
+        }
+        Type substituted{param.type};
         if (is_forwarding_reference_parameter(param, {})) {
             return forwarding_reference_deduced_type(arg, arg_type, body);
         }
@@ -4880,50 +5322,57 @@ private:
         return substituted;
     }
 
+    bool deduce_type_list(
+        const std::vector<Type>& patterns, const std::vector<Type>& concretes,
+        const std::vector<GenericTypeParam>& template_params,
+        std::unordered_map<std::string, Type>& type_bindings,
+        std::unordered_map<std::string, int>& value_bindings,
+        std::unordered_map<std::string, std::vector<Type>>& pack_bindings) {
+        if (!patterns.empty()) {
+            const Type& last = patterns.back();
+            if (last.is_pack_expansion && last.kind == TypeKind::Named && last.template_args.empty() &&
+                last.non_type_args.empty()) {
+                for (const GenericTypeParam& tp : template_params) {
+                    if (!tp.is_pack || tp.is_non_type || tp.name != last.name) continue;
+                    if (concretes.size() + 1 < patterns.size()) return false;
+                    for (std::size_t i = 0; i + 1 < patterns.size(); i++) {
+                        if (!deduce_template_bindings_from_type_pattern(
+                                patterns[i], concretes[i], template_params, type_bindings, value_bindings,
+                                pack_bindings)) {
+                            return false;
+                        }
+                    }
+                    std::vector<Type> pack_slice{};
+                    for (std::size_t i = patterns.size() - 1; i < concretes.size(); ++i) {
+                        pack_slice.push_back(concretes[i]);
+                    }
+                    return bind_type_pack_binding(pack_bindings, tp.name, pack_slice);
+                }
+            }
+        }
+        if (patterns.size() != concretes.size()) return false;
+        for (std::size_t i = 0; i < patterns.size(); i++) {
+            if (!deduce_template_bindings_from_type_pattern(
+                    patterns[i], concretes[i], template_params, type_bindings, value_bindings, pack_bindings)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     bool deduce_template_bindings_from_type_pattern(
         const Type& pattern, const Type& concrete, const std::vector<GenericTypeParam>& template_params,
         std::unordered_map<std::string, Type>& type_bindings, std::unordered_map<std::string, int>& value_bindings,
         std::unordered_map<std::string, std::vector<Type>>& pack_bindings) {
-        (void)value_bindings;
-        std::function<bool(const std::vector<Type>&, const std::vector<Type>&)> deduce_type_list =
-            [&, this](const std::vector<Type>& patterns, const std::vector<Type>& concretes) -> bool {
-            if (!patterns.empty()) {
-                const Type& last = patterns.back();
-                if (last.is_pack_expansion && last.kind == TypeKind::Named && last.template_args.empty() &&
-                    last.non_type_args.empty()) {
-                    for (const GenericTypeParam& tp : template_params) {
-                        if (!tp.is_pack || tp.is_non_type || tp.name != last.name) continue;
-                        if (concretes.size() + 1 < patterns.size()) return false;
-                        for (std::size_t i = 0; i + 1 < patterns.size(); i++) {
-                            if (!deduce_template_bindings_from_type_pattern(
-                                    patterns[i], concretes[i], template_params, type_bindings, value_bindings,
-                                    pack_bindings)) {
-                                return false;
-                            }
-                        }
-                        std::vector<Type> pack_slice{};
-                        for (std::size_t i = patterns.size() - 1; i < concretes.size(); ++i) {
-                            pack_slice.push_back(concretes[i]);
-                        }
-                        return bind_type_pack_binding(pack_bindings, tp.name, pack_slice);
-                    }
-                }
-            }
-            if (patterns.size() != concretes.size()) return false;
-            for (std::size_t i = 0; i < patterns.size(); i++) {
-                if (!deduce_template_bindings_from_type_pattern(
-                        patterns[i], concretes[i], template_params, type_bindings, value_bindings, pack_bindings)) {
-                    return false;
-                }
-            }
-            return true;
-        };
-
         if (!pattern.is_pack_expansion && pattern.kind == TypeKind::Named && pattern.template_args.empty() &&
             pattern.non_type_args.empty()) {
             for (const GenericTypeParam& tp : template_params) {
                 if (tp.is_non_type || tp.name != pattern.name) continue;
-                if (tp.is_pack) return bind_type_pack_binding(pack_bindings, tp.name, {concrete});
+                if (tp.is_pack) {
+                    std::vector<Type> single_concrete{};
+                    single_concrete.push_back(concrete);
+                    return bind_type_pack_binding(pack_bindings, tp.name, single_concrete);
+                }
                 return bind_type_binding(type_bindings, tp.name, concrete);
             }
         }
@@ -4931,16 +5380,15 @@ private:
         if (pattern.kind != concrete.kind || pattern.is_const_qualified != concrete.is_const_qualified) return false;
         switch (pattern.kind) {
             case TypeKind::Named: {
-                const std::vector<Type>* concrete_template_args = &concrete.template_args;
-                if (pattern.name != concrete.name) {
-                    auto it = ordinary_generic_instance_info_.find(concrete.name);
-                    if (it == ordinary_generic_instance_info_.end() || it->second.template_name != pattern.name) {
-                        return false;
-                    }
-                    concrete_template_args = &it->second.type_args;
-                }
                 if (!pattern.non_type_args.empty()) return false;
-                return deduce_type_list(pattern.template_args, *concrete_template_args);
+                if (pattern.name == concrete.name) {
+                    return deduce_type_list(pattern.template_args, concrete.template_args, template_params, type_bindings, value_bindings, pack_bindings);
+                }
+                auto it = ordinary_generic_instance_info_.find(concrete.name);
+                if (it == ordinary_generic_instance_info_.end() || it->second.template_name != pattern.name) {
+                    return false;
+                }
+                return deduce_type_list(pattern.template_args, it->second.type_args, template_params, type_bindings, value_bindings, pack_bindings);
             }
             case TypeKind::Pointer:
                 if (!pattern.pointee || !concrete.pointee) return false;
@@ -4989,7 +5437,7 @@ private:
                                                                pack_bindings)) {
                     return false;
                 }
-                return deduce_type_list(pattern.function_params, concrete.function_params);
+                return deduce_type_list(pattern.function_params, concrete.function_params, template_params, type_bindings, value_bindings, pack_bindings);
         }
         return false;
     }
@@ -5019,22 +5467,29 @@ private:
         if (arg_index >= expr.args.size()) return false;
         std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_index], body, signatures_);
         if (!arg_type.has_value()) return false;
-        Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+        Type named{};
+        if (arg_type->kind == TypeKind::Reference && arg_type->pointee != nullptr) {
+            named = *arg_type->pointee;
+        } else {
+            named = *arg_type;
+        }
 
-        std::string current_name = named.name;
+        std::string current_name{named.name};
         while (true) {
             auto it = variadic_instance_info_.find(current_name);
             if (it != variadic_instance_info_.end() && it->second.template_name == template_name) return true;
-            const ClassDef* cd = nullptr;
+            std::optional<std::string> base_name{};
             for (const ClassDef& c : program_.classes) {
                 if (c.name == current_name) {
-                    cd = &c;
+                    auto b = c.direct_ordinary_base();
+                    if (b.has_value()) {
+                        base_name = b->get().base_type.name;
+                    }
                     break;
                 }
             }
-            auto base = cd != nullptr ? cd->direct_ordinary_base() : std::nullopt;
-            if (!base.has_value()) break;
-            current_name = base->get().base_type.name;
+            if (!base_name.has_value()) break;
+            current_name = std::move(*base_name);
         }
         return false;
     }
@@ -5064,10 +5519,12 @@ private:
         return resolve_generic_type(std::move(type), loc);
     }
 
-    struct DeferredTemplateObligation {
+    class DeferredTemplateObligation {
+    public:
+        virtual ~DeferredTemplateObligation() = default;
         std::size_t param_index = 0;
         std::size_t arg_index = 0;
-        Type parameter_type_pattern;
+        Type parameter_type_pattern{};
     };
 
     [[nodiscard]] std::expected<void, DataflowError> check_thread_safety_constraints(const Expr& expr, const Function& tmpl,
@@ -5115,15 +5572,21 @@ private:
                                                                              const std::vector<ExprPtr>& args,
                                                                              const Body& body) {
         for (const FunctionSignature* candidate : constructor_overloads_of(class_name, signatures_)) {
-            if (candidate->is_generic_template) continue;
-            if (!compile_time_dependency_visible_in_body(*candidate, body)) continue;
-            if (!signature_accepts_argument_count(*candidate, args.size(), 1)) continue;
-            bool all_match = true;
-            for (std::size_t i = 0; all_match && i < args.size(); i++) {
-                all_match = argument_matches_parameter_for_constructor_selection(*args[i], candidate->param_types[i + 1],
-                                                                                 body, signatures_);
+            if (candidate == nullptr) continue;
+            bool ok = false;
+            [[scpp::unsafe]] {
+                if (!candidate->is_generic_template &&
+                    compile_time_dependency_visible_in_body(*candidate, body) &&
+                    signature_accepts_argument_count(*candidate, args.size(), 1)) {
+                    bool all_match = true;
+                    for (std::size_t i = 0; all_match && i < args.size(); i++) {
+                        all_match = argument_matches_parameter_for_constructor_selection(*args[i], candidate->param_types[i + 1],
+                                                                                         body, signatures_);
+                    }
+                    ok = all_match;
+                }
+                if (ok) return candidate;
             }
-            if (all_match) return candidate;
         }
         return nullptr;
     }
@@ -5211,25 +5674,36 @@ private:
     [[nodiscard]] bool non_template_constructor_matches_arguments_exactly(const std::string& class_name,
                                                                          const std::vector<ExprPtr>& args, const Body& body) {
         for (const FunctionSignature* candidate_ptr : constructor_overloads_of(class_name, signatures_)) {
-            const FunctionSignature& candidate = *candidate_ptr;
-            if (candidate.is_generic_template) continue;
-            if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
-            if (!signature_accepts_argument_count(candidate, args.size(), 1)) continue;
-            bool all_match = true;
-            for (std::size_t i = 0; all_match && i < args.size(); i++) {
-                std::optional<Type> arg_type = infer_expr_type(*args[i], body, signatures_);
-                if (!arg_type.has_value()) {
-                    all_match = false;
-                    break;
+            if (candidate_ptr == nullptr) continue;
+            bool ok = false;
+            [[scpp::unsafe]] {
+                const FunctionSignature& candidate = *candidate_ptr;
+                if (!candidate.is_generic_template &&
+                    compile_time_dependency_visible_in_body(candidate, body) &&
+                    signature_accepts_argument_count(candidate, args.size(), 1)) {
+                    bool all_match = true;
+                    for (std::size_t i = 0; all_match && i < args.size(); i++) {
+                        std::optional<Type> arg_type = infer_expr_type(*args[i], body, signatures_);
+                        if (!arg_type.has_value()) {
+                            all_match = false;
+                            break;
+                        }
+                        Type argument{};
+                        if (is_reference(*arg_type) && arg_type->pointee != nullptr) {
+                            argument = *arg_type->pointee;
+                        } else {
+                            argument = *arg_type;
+                        }
+                        Type parameter = candidate.param_types[i + 1];
+                        if (is_reference(parameter) && parameter.pointee != nullptr) parameter = *parameter.pointee;
+                        argument.is_const_qualified = false;
+                        parameter.is_const_qualified = false;
+                        all_match = types_equal(argument, parameter);
+                    }
+                    ok = all_match;
                 }
-                Type argument = is_reference(*arg_type) && arg_type->pointee != nullptr ? *arg_type->pointee : *arg_type;
-                Type parameter = candidate.param_types[i + 1];
-                if (is_reference(parameter) && parameter.pointee != nullptr) parameter = *parameter.pointee;
-                argument.is_const_qualified = false;
-                parameter.is_const_qualified = false;
-                all_match = types_equal(argument, parameter);
             }
-            if (all_match) return true;
+            if (ok) return true;
         }
         return false;
     }
@@ -5321,11 +5795,15 @@ private:
         }
         const FunctionSignature* ctor =
             find_single_argument_converting_constructor_signature(concrete_destination, source, body, signatures_);
-        if (ctor == nullptr || !ctor->is_generic_template) return {};
+        bool is_generic_tmpl = false;
+        [[scpp::unsafe]] {
+            if (ctor != nullptr) is_generic_tmpl = ctor->is_generic_template;
+        }
+        if (!is_generic_tmpl) return {};
         std::vector<ExprPtr> converting_args{};
 
         converting_args.push_back(deep_clone_expr(source));
-        maybe_instantiate_generic_constructor_overloads(concrete_destination.name, converting_args, body, loc);
+        this->maybe_instantiate_generic_constructor_overloads(concrete_destination.name, converting_args, body, loc);
         return {};
     }
 
@@ -5347,11 +5825,12 @@ private:
         // map and reallocates the overload vector `sig` points into, so
         // reading `sig->param_types` again afterwards is a use-after-free.
         std::vector<Type> destination_types{};
-
-        for (std::size_t i = 0; i < call.args.size(); i++) {
-            std::size_t param_index = i + callee.param_offset;
-            if (param_index >= sig->param_types.size()) break;
-            destination_types.push_back(sig->param_types[param_index]);
+        [[scpp::unsafe]] {
+            for (std::size_t i = 0; i < call.args.size(); i++) {
+                std::size_t param_index = i + callee.param_offset;
+                if (param_index >= sig->param_types.size()) break;
+                destination_types.push_back(sig->param_types[param_index]);
+            }
         }
         for (std::size_t i = 0; i < destination_types.size(); i++) {
             if (auto _r = instantiate_converting_constructor_template(destination_types[i], *call.args[i], body, call.loc);
@@ -5372,9 +5851,10 @@ private:
         if (sig == nullptr) return {};
         // Snapshot first -- see the call-argument boundary above for why.
         std::vector<Type> destination_types{};
-
-        for (std::size_t i = 0; i < args.size() && i + 1 < sig->param_types.size(); i++) {
-            destination_types.push_back(sig->param_types[i + 1]);
+        [[scpp::unsafe]] {
+            for (std::size_t i = 0; i < args.size() && i + 1 < sig->param_types.size(); i++) {
+                destination_types.push_back(sig->param_types[i + 1]);
+            }
         }
         for (std::size_t i = 0; i < destination_types.size(); i++) {
             if (auto _r = instantiate_converting_constructor_template(destination_types[i], *args[i], body, loc);
@@ -5385,6 +5865,7 @@ private:
         return {};
     }
 
+public:
     [[maybe_unused]] void maybe_instantiate_generic_constructor_overloads(const std::string& class_name,
                                                                            const std::vector<ExprPtr>& args,
                                                                            Body& body, SourceLocation loc) {
@@ -5434,14 +5915,22 @@ private:
             candidate_indices.push_back(index);
         }
         for (std::size_t candidate_index : candidate_indices) {
-            const Function& tmpl = program_.functions[candidate_index];
-            auto _candidate = [&, this]() -> std::expected<void, DataflowError> {
-                std::unordered_map<std::string, Type> type_bindings{};
-                std::unordered_map<std::string, int> value_bindings{};
-                std::unordered_map<std::string, std::vector<Type>> pack_bindings{};
-                std::vector<std::pair<std::size_t, Type>> upcasts{};
-                std::vector<std::vector<Type>> concrete_pack_param_types{};
-                concrete_pack_param_types.resize(tmpl.params.size());
+            auto _candidate = try_instantiate_generic_constructor_candidate(candidate_index, class_name, args, body, loc);
+            if (!_candidate.has_value()) {
+                continue;
+            }
+        }
+    }
+
+    [[nodiscard]] std::expected<void, DataflowError> try_instantiate_generic_constructor_candidate(
+        std::size_t candidate_index, const std::string& class_name, const std::vector<ExprPtr>& args, Body& body, SourceLocation loc) {
+        Function tmpl = clone_function(program_.functions[candidate_index]);
+        std::unordered_map<std::string, Type> type_bindings{};
+        std::unordered_map<std::string, int> value_bindings{};
+        std::unordered_map<std::string, std::vector<Type>> pack_bindings{};
+        std::vector<std::pair<std::size_t, Type>> upcasts{};
+        std::vector<std::vector<Type>> concrete_pack_param_types{};
+        concrete_pack_param_types.resize(tmpl.params.size(), std::vector<Type>{});
 
                 std::size_t arg_cursor = 0;
                 for (std::size_t i = 1; i < tmpl.params.size() && arg_cursor < args.size(); i++) {
@@ -5451,8 +5940,13 @@ private:
                         for (; arg_cursor < args.size(); arg_cursor++) {
                             std::optional<Type> arg_type = infer_expr_type(*args[arg_cursor], body, signatures_);
                             if (!arg_type.has_value()) continue;
-                            Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
-                            Type replacement = named;
+                            Type named{};
+                            if (arg_type->kind == TypeKind::Reference && arg_type->pointee != nullptr) {
+                                named = *arg_type->pointee;
+                            } else {
+                                named = *arg_type;
+                            }
+                            Type replacement{named};
                             const Type& pack_param_type = tmpl.params[i].type;
                             const Type& underlying = pack_param_type.kind == TypeKind::Reference ? *pack_param_type.pointee
                                                                                                   : pack_param_type;
@@ -5474,11 +5968,16 @@ private:
                                 }
                                 auto pack_it = arg_pack_bindings.find(*pack_type_name);
                                 if (pack_it == arg_pack_bindings.end() || pack_it->second.size() != 1) continue;
-                                replacement = pack_it->second.front();
+                                Type copy{pack_it->second.front()};
+                                replacement = std::move(copy);
                             }
-                            Type substituted = pack_type_name.has_value()
-                                                   ? substitute_type_param(tmpl.params[i].type, *pack_type_name, replacement)
-                                                   : tmpl.params[i].type;
+                            Type substituted{};
+                            if (pack_type_name.has_value()) {
+                                substituted = substitute_type_param(tmpl.params[i].type, *pack_type_name, replacement);
+                            } else {
+                                Type copy{tmpl.params[i].type};
+                                substituted = std::move(copy);
+                            }
                             auto _substituted = resolve_generic_type(std::move(substituted), loc);
                             if (!_substituted.has_value()) return std::unexpected(std::move(_substituted).error());
                             concrete_pack_param_types[i].push_back(std::move(_substituted).value());
@@ -5489,9 +5988,13 @@ private:
                     const Type& underlying = param_type.kind == TypeKind::Reference ? *param_type.pointee : param_type;
                     std::optional<Type> arg_type = infer_expr_type(*args[arg_cursor], body, signatures_);
                     if (arg_type.has_value()) {
-                        Type concrete = is_forwarding_reference_parameter(tmpl.params[i], tmpl.template_params)
-                                            ? forwarding_reference_deduced_type(*args[arg_cursor], *arg_type, body)
-                                            : *arg_type;
+                        Type concrete{};
+                        if (is_forwarding_reference_parameter(tmpl.params[i], tmpl.template_params)) {
+                            concrete = forwarding_reference_deduced_type(*args[arg_cursor], *arg_type, body);
+                        } else {
+                            Type copy{*arg_type};
+                            concrete = std::move(copy);
+                        }
                         // [temp.deduct.call]/2: when P is not a reference type and A is
                         // an array type, the pointer produced by the array-to-pointer
                         // conversion is used in place of A -- `f("abcd")` against
@@ -5530,7 +6033,7 @@ private:
                 std::string cache_key = tmpl.name;
                 for (const GenericTypeParam& tp : tmpl.template_params) {
                     if (tp.is_pack) continue;
-                    cache_key += tp.is_non_type ? ("." + std::to_string(value_bindings[tp.name]))
+                    cache_key += tp.is_non_type ? ("." + std::to_string(static_cast<std::int64_t>(value_bindings[tp.name])))
                                                 : ("." + mangle_type_for_clone_name(type_bindings[tp.name]));
                 }
                 for (std::size_t i = 1; i < tmpl.params.size() && i - 1 < args.size(); i++) {
@@ -5626,17 +6129,9 @@ private:
                     }
                     clone.params.push_back(std::move(p));
                 }
-                if (auto _r = clone_member_initializers(tmpl, clone,
-                                                        [&](Expr& e) -> std::expected<void, DataflowError> {
-                                                            for (const auto& entry : type_bindings) {
-                                                                const auto& name = entry.first;
-                                                                const auto& replacement = entry.second;
-                                                                substitute_type_param_in_expr(e, name, replacement);
-                                                            }
-                                                            return resolve_generic_types_in_expr(e);
-                                                        });
-                    !_r.has_value()) {
-                    return std::unexpected(std::move(_r).error());
+                if (auto _r_init = clone_member_initializers_with_type_bindings(tmpl, clone, type_bindings);
+                    !_r_init.has_value()) {
+                    return std::unexpected(std::move(_r_init).error());
                 }
                 clone.body = tmpl.body ? deep_clone_stmt(*tmpl.body) : nullptr;
                 if (clone.body) {
@@ -5665,13 +6160,6 @@ private:
                     return std::unexpected(std::move(_r).error());
                 }
                 return {};
-            }();
-            // `tmpl` is dangling from here on if the body above appended.
-
-            if (!_candidate.has_value()) {
-                continue;
-            }
-        }
     }
 
     [[nodiscard]] std::expected<std::string, DataflowError> instantiate_full_header_generic_clone(const Function& tmpl,
@@ -5691,7 +6179,7 @@ private:
                 }
                 continue;
             }
-            cache_key += tp.is_non_type ? ("." + std::to_string(value_bindings.at(tp.name)))
+            cache_key += tp.is_non_type ? ("." + std::to_string(static_cast<std::int64_t>(value_bindings.at(tp.name))))
                                         : ("." + mangle_type_for_clone_name(type_bindings.at(tp.name)));
         }
         for (std::size_t i = 0; i < tmpl.params.size(); i++) {
@@ -5775,16 +6263,7 @@ private:
             }
             clone.params.push_back(std::move(p));
         }
-        if (auto _r = clone_member_initializers(tmpl, clone,
-                                                [&](Expr& e) -> std::expected<void, DataflowError> {
-                                                    for (const auto& entry : type_bindings) {
-                                                        const auto& name = entry.first;
-                                                        const auto& replacement = entry.second;
-                                                        substitute_type_param_in_expr(e, name, replacement);
-                                                    }
-                                                    substitute_type_packs_in_expr(e, pack_bindings);
-                                                    return resolve_generic_types_in_expr(e);
-                                                });
+        if (auto _r = clone_member_initializers_with_type_bindings(tmpl, clone, type_bindings, pack_bindings);
             !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
@@ -5895,13 +6374,15 @@ private:
         return !body.function_source_path.empty() && body.function_source_path == fn.loc.source_path_text();
     }
 
-    struct FullHeaderGenericCallResolution {
-        std::unordered_map<std::string, Type> type_bindings;
-        std::unordered_map<std::string, int> value_bindings;
-        std::unordered_map<std::string, std::vector<Type>> pack_bindings;
-        std::vector<std::pair<std::size_t, Type>> upcasts;
-        std::vector<DeferredTemplateObligation> deferred_obligations;
-        std::vector<std::vector<Type>> concrete_pack_param_types;
+    class FullHeaderGenericCallResolution {
+    public:
+        virtual ~FullHeaderGenericCallResolution() = default;
+        std::unordered_map<std::string, Type> type_bindings{};
+        std::unordered_map<std::string, int> value_bindings{};
+        std::unordered_map<std::string, std::vector<Type>> pack_bindings{};
+        std::vector<std::pair<std::size_t, Type>> upcasts{};
+        std::vector<DeferredTemplateObligation> deferred_obligations{};
+        std::vector<std::vector<Type>> concrete_pack_param_types{};
     };
 
     [[nodiscard]] bool try_resolve_full_header_generic_function_call(const Expr& expr, const Function& tmpl, Body& body,
@@ -5914,7 +6395,7 @@ private:
         resolution.pack_bindings.clear();
         resolution.upcasts.clear();
         resolution.deferred_obligations.clear();
-        resolution.concrete_pack_param_types.assign(stable_tmpl.params.size(), {});
+        resolution.concrete_pack_param_types.resize(stable_tmpl.params.size(), {});
 
         ExprPtr expr_copy = deep_clone_expr(expr);
         if (auto _r = seed_explicit_template_arguments(*expr_copy, stable_tmpl, resolution.type_bindings, resolution.value_bindings,
@@ -6006,8 +6487,11 @@ private:
                 if (type_still_depends_on_unbound_template_params(param_type, stable_tmpl.template_params,
                                                                   resolution.type_bindings,
                                                                   resolution.pack_bindings)) {
-                    resolution.deferred_obligations.push_back(
-                        DeferredTemplateObligation{param_cursor, arg_cursor, param_type});
+                    DeferredTemplateObligation obl{};
+                    obl.param_index = param_cursor;
+                    obl.arg_index = arg_cursor;
+                    obl.parameter_type_pattern = param_type;
+                    resolution.deferred_obligations.push_back(std::move(obl));
                 }
             }
             arg_cursor++;
@@ -6054,16 +6538,18 @@ private:
         return true;
     }
 
-    struct AbbreviatedGenericCallResolution {
-        std::vector<Type> concrete_param_types;
-        std::vector<std::vector<Type>> concrete_pack_param_types;
+    class AbbreviatedGenericCallResolution {
+    public:
+        virtual ~AbbreviatedGenericCallResolution() = default;
+        std::vector<Type> concrete_param_types{};
+        std::vector<std::vector<Type>> concrete_pack_param_types{};
     };
 
     [[nodiscard]] bool try_resolve_abbreviated_generic_function_call(
         const Expr& expr, const Function& tmpl, Body& body, std::size_t param_offset,
         AbbreviatedGenericCallResolution& resolution) {
         resolution.concrete_param_types.clear();
-        resolution.concrete_pack_param_types.assign(tmpl.params.size(), {});
+        resolution.concrete_pack_param_types.resize(tmpl.params.size(), {});
         std::size_t arg_cursor = 0;
         for (std::size_t i = 0; i < tmpl.params.size(); i++) {
             const Param& param = tmpl.params[i];
@@ -6075,11 +6561,22 @@ private:
                 for (; arg_cursor < expr.args.size(); arg_cursor++) {
                     std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
                     if (!arg_type.has_value()) return false;
-                    Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+                    Type named{};
+                    if (arg_type->kind == TypeKind::Reference && arg_type->pointee != nullptr) {
+                        named = *arg_type->pointee;
+                    } else {
+                        named = *arg_type;
+                    }
                     if (param.generic_concept != "$auto") {
                         auto concept_it = concepts_by_name_.find(param.generic_concept);
                         if (concept_it == concepts_by_name_.end()) return false;
-                        if (!type_satisfies_concept(named, *concept_it->second, program_)) return false;
+                        bool sat = false;
+                        [[scpp::unsafe]] {
+                            if (concept_it->second != nullptr) {
+                                sat = type_satisfies_concept(named, *concept_it->second, program_);
+                            }
+                        }
+                        if (!sat) return false;
                     }
                     resolution.concrete_pack_param_types[i].push_back(
                         abbreviated_generic_concrete_param_type(param, *expr.args[arg_cursor], *arg_type, body));
@@ -6102,11 +6599,22 @@ private:
             }
             std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
             if (!arg_type.has_value()) return false;
-            Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+            Type named{};
+            if (arg_type->kind == TypeKind::Reference && arg_type->pointee != nullptr) {
+                named = *arg_type->pointee;
+            } else {
+                named = *arg_type;
+            }
             if (param.generic_concept != "$auto") {
                 auto concept_it = concepts_by_name_.find(param.generic_concept);
                 if (concept_it == concepts_by_name_.end()) return false;
-                if (!type_satisfies_concept(named, *concept_it->second, program_)) return false;
+                bool sat = false;
+                [[scpp::unsafe]] {
+                    if (concept_it->second != nullptr) {
+                        sat = type_satisfies_concept(named, *concept_it->second, program_);
+                    }
+                }
+                if (!sat) return false;
             }
             resolution.concrete_param_types.push_back(
                 abbreviated_generic_concrete_param_type(param, *expr.args[arg_cursor], *arg_type, body));
@@ -6121,9 +6629,7 @@ private:
         for (std::size_t i = param_offset; i < tmpl.params.size(); i++) {
             const Param& param = tmpl.params[i];
             if (!param.require_thread_movable && !param.require_thread_shareable) continue;
-            const std::vector<Type>* types_to_check = param.is_parameter_pack ? &resolution.concrete_pack_param_types[i]
-                                                                              : nullptr;
-            if (types_to_check == nullptr) {
+            if (!param.is_parameter_pack) {
                 if (param.require_thread_movable) {
                     auto _movable = is_thread_movable(resolution.concrete_param_types[i]);
                     if (!_movable.has_value() || !_movable.value()) return false;
@@ -6134,7 +6640,7 @@ private:
                 }
                 continue;
             }
-            for (const Type& concrete_type : *types_to_check) {
+            for (const Type& concrete_type : resolution.concrete_pack_param_types[i]) {
                 if (param.require_thread_movable) {
                     auto _movable = is_thread_movable(concrete_type);
                     if (!_movable.has_value() || !_movable.value()) return false;
@@ -6393,7 +6899,7 @@ private:
         std::vector<Type> concrete_param_types{};
         concrete_param_types.reserve(stable_tmpl.params.size());
         std::vector<std::vector<Type>> concrete_pack_param_types{};
-        concrete_pack_param_types.resize(stable_tmpl.params.size());
+        concrete_pack_param_types.resize(stable_tmpl.params.size(), {});
         std::size_t arg_cursor = 0;
         for (std::size_t i = 0; i < stable_tmpl.params.size(); i++) {
             const Param& param = stable_tmpl.params[i];
@@ -6405,11 +6911,22 @@ private:
                 for (; arg_cursor < expr.args.size(); arg_cursor++) {
                     std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
                     if (!arg_type.has_value()) return {};
-                    Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+                    Type named{};
+                    if (arg_type->kind == TypeKind::Reference && arg_type->pointee != nullptr) {
+                        named = *arg_type->pointee;
+                    } else {
+                        named = *arg_type;
+                    }
                     if (param.generic_concept != "$auto") {
                         auto concept_it = concepts_by_name_.find(param.generic_concept);
                         if (concept_it == concepts_by_name_.end()) return {};
-                        if (!type_satisfies_concept(named, *concept_it->second, program_)) {
+                        bool sat = false;
+                        [[scpp::unsafe]] {
+                            if (concept_it->second != nullptr) {
+                                sat = type_satisfies_concept(named, *concept_it->second, program_);
+                            }
+                        }
+                        if (!sat) {
                             return std::unexpected(DataflowError("argument type '" + named.name + "' does not satisfy concept '" +
                                                     param.generic_concept + "' required by generic function '" +
                                                     stable_tmpl.name +
@@ -6433,11 +6950,22 @@ private:
             if (arg_cursor >= expr.args.size()) return {};
             std::optional<Type> arg_type = infer_expr_type(*expr.args[arg_cursor], body, signatures_);
             if (!arg_type.has_value()) return {};
-            Type named = arg_type->kind == TypeKind::Reference ? *arg_type->pointee : *arg_type;
+            Type named{};
+            if (arg_type->kind == TypeKind::Reference && arg_type->pointee != nullptr) {
+                named = *arg_type->pointee;
+            } else {
+                named = *arg_type;
+            }
             if (param.generic_concept != "$auto") {
                 auto concept_it = concepts_by_name_.find(param.generic_concept);
                 if (concept_it == concepts_by_name_.end()) return {};
-                if (!type_satisfies_concept(named, *concept_it->second, program_)) {
+                bool sat = false;
+                [[scpp::unsafe]] {
+                    if (concept_it->second != nullptr) {
+                        sat = type_satisfies_concept(named, *concept_it->second, program_);
+                    }
+                }
+                if (!sat) {
                     return std::unexpected(DataflowError("argument type '" + named.name + "' does not satisfy concept '" +
                                            param.generic_concept + "' required by generic function '" + stable_tmpl.name +
                                            "' (ch05 §5.11 -- every requirement's method must exist with a matching "
@@ -6453,8 +6981,7 @@ private:
         for (std::size_t i = param_offset; i < stable_tmpl.params.size(); i++) {
             const Param& param = stable_tmpl.params[i];
             if (!param.require_thread_movable && !param.require_thread_shareable) continue;
-            const std::vector<Type>* types_to_check = param.is_parameter_pack ? &concrete_pack_param_types[i] : nullptr;
-            if (types_to_check == nullptr) {
+            if (!param.is_parameter_pack) {
                 if (param.require_thread_movable) {
                     auto _movable = is_thread_movable(concrete_param_types[i]);
                     if (!_movable.has_value()) return std::unexpected(std::move(_movable).error());
@@ -6477,7 +7004,7 @@ private:
                 }
                 continue;
             }
-            for (const Type& concrete_type : *types_to_check) {
+            for (const Type& concrete_type : concrete_pack_param_types[i]) {
                 if (param.require_thread_movable) {
                     auto _movable = is_thread_movable(concrete_type);
                     if (!_movable.has_value()) return std::unexpected(std::move(_movable).error());
@@ -6518,7 +7045,7 @@ private:
         std::unordered_map<std::string, int> value_bindings{};
         std::unordered_map<std::string, std::vector<Type>> explicit_pack_bindings{};
         std::vector<std::vector<Type>> concrete_pack_param_types{};
-        concrete_pack_param_types.resize(tmpl.params.size());
+        concrete_pack_param_types.resize(tmpl.params.size(), {});
 
         if (auto _r = seed_explicit_template_arguments(expr, tmpl, type_bindings, value_bindings, explicit_pack_bindings);
             !_r.has_value()) {
@@ -6605,11 +7132,11 @@ private:
         std::vector<std::pair<std::size_t, Type>> upcasts{};
         std::vector<DeferredTemplateObligation> deferred_obligations{};
         std::vector<Type> concrete_param_types{};
-        concrete_param_types.resize(stable_tmpl.params.size());
+        concrete_param_types.resize(stable_tmpl.params.size(), Type{});
         std::vector<bool> have_concrete_param_types{};
         have_concrete_param_types.resize(stable_tmpl.params.size(), false);
         std::vector<std::vector<Type>> concrete_pack_param_types{};
-        concrete_pack_param_types.resize(stable_tmpl.params.size());
+        concrete_pack_param_types.resize(stable_tmpl.params.size(), {});
 
         if (auto _r = seed_explicit_template_arguments(expr, stable_tmpl, type_bindings, value_bindings, pack_bindings);
             !_r.has_value()) {
@@ -6738,7 +7265,11 @@ private:
             if (type_depends_on_template_params(param_type, stable_tmpl.template_params)) {
                 if (type_still_depends_on_unbound_template_params(param_type, stable_tmpl.template_params, type_bindings,
                                                                   pack_bindings)) {
-                    deferred_obligations.push_back(DeferredTemplateObligation{param_cursor, arg_cursor, param_type});
+                    DeferredTemplateObligation obl{};
+                    obl.param_index = param_cursor;
+                    obl.arg_index = arg_cursor;
+                    obl.parameter_type_pattern = param_type;
+                    deferred_obligations.push_back(std::move(obl));
                 }
             } else {
                 concrete_param_types[param_cursor] = param_type;
@@ -6837,8 +7368,13 @@ private:
                                       const std::string& template_name, SourceLocation loc) {
         if (type_param.concept_name.empty()) return {};
         auto concept_it = concepts_by_name_.find(type_param.concept_name);
-        if (concept_it != concepts_by_name_.end() &&
-            type_satisfies_concept(concrete_arg, *concept_it->second, program_)) {
+        bool satisfied = false;
+        [[scpp::unsafe]] {
+            if (concept_it != concepts_by_name_.end() && concept_it->second != nullptr) {
+                satisfied = type_satisfies_concept(concrete_arg, *concept_it->second, program_);
+            }
+        }
+        if (satisfied) {
             return {};
         }
         return std::unexpected(DataflowError("type argument '" + concrete_arg.name + "' does not satisfy concept '" +
@@ -6865,7 +7401,7 @@ private:
                 if (!stmt.ctor_args.empty() && stmt.type.kind == TypeKind::Named) {
                     Type concrete_ctor_type = stmt.type;
                     maybe_mark_reference_wrapper_lifetime_source(concrete_ctor_type);
-                    maybe_instantiate_generic_constructor_overloads(concrete_ctor_type.name, stmt.ctor_args, body, stmt.loc);
+                    this->maybe_instantiate_generic_constructor_overloads(concrete_ctor_type.name, stmt.ctor_args, body, stmt.loc);
                     if (auto _r = instantiate_converting_constructor_templates_for_constructor_arguments(
                             concrete_ctor_type.name, stmt.ctor_args, body, stmt.loc);
                         !_r.has_value()) {
@@ -6916,10 +7452,13 @@ private:
                     // by-value behavior unchanged for freely-copyable Named
                     // ranges (ordinary `std::vector<int>`-shaped loops).
                     Type resolved{};
-                    bool range_needs_reference =
-                        inferred->kind == TypeKind::Array || inferred->kind == TypeKind::Span ||
-                        (inferred->kind == TypeKind::Named && body.program != nullptr &&
-                         !is_copy_constructible(inferred->name, *body.program));
+                    bool range_needs_reference = false;
+                    [[scpp::unsafe]] {
+                        range_needs_reference =
+                            inferred->kind == TypeKind::Array || inferred->kind == TypeKind::Span ||
+                            (inferred->kind == TypeKind::Named && body.program != nullptr &&
+                             !is_copy_constructible(inferred->name, *body.program));
+                    }
                     if (is_synthesized_for_range_storage(stmt.var_name) && range_needs_reference) {
                         Type inferred_ref{};
 
@@ -7156,8 +7695,13 @@ private:
                 return std::unexpected(DataflowError("operator-> chain did not yield a pointer", loc));
             }
             selected_any_operator_arrow = true;
-            all_steps_receiver_tied =
-                all_steps_receiver_tied && sig->return_lifetime.present() && sig->param_types.size() == 1;
+            bool sig_tied = false;
+            [[scpp::unsafe]] {
+                if (sig != nullptr) {
+                    sig_tied = sig->return_lifetime.present() && sig->param_types.size() == 1;
+                }
+            }
+            all_steps_receiver_tied = all_steps_receiver_tied && sig_tied;
             receiver = std::move(call);
             receiver_type = infer_expr_type(*receiver, body, signatures_);
         }
@@ -7189,6 +7733,12 @@ private:
         // into.
         if (expr.kind == ExprKind::ValueInit) {
             expr.type = current_walk_return_type_;
+            if (expr.type.kind == TypeKind::Named && allow_generic_monomorphization) {
+                std::string class_name = expr.type.template_args.empty() ? expr.type.name
+                                                                          : mangle_type_for_clone_name(expr.type);
+                std::vector<ExprPtr> no_args{};
+                auto _ctor_req = require_constructor_definition(class_name, no_args, body);
+            }
             return {};
         }
 
@@ -7334,7 +7884,7 @@ private:
         if (expr.kind == ExprKind::New && expr.type.kind == TypeKind::Named) {
             Type concrete_ctor_type = expr.type;
             maybe_mark_reference_wrapper_lifetime_source(concrete_ctor_type);
-            maybe_instantiate_generic_constructor_overloads(concrete_ctor_type.name, expr.args, body, expr.loc);
+            this->maybe_instantiate_generic_constructor_overloads(concrete_ctor_type.name, expr.args, body, expr.loc);
             if (auto _r = instantiate_converting_constructor_templates_for_constructor_arguments(
                     concrete_ctor_type.name, expr.args, body, expr.loc);
                 !_r.has_value()) {
@@ -7394,7 +7944,7 @@ private:
             if (names_known_class) {
                 Type concrete_ctor_type = *direct_call_type;
                 maybe_mark_reference_wrapper_lifetime_source(concrete_ctor_type);
-                maybe_instantiate_generic_constructor_overloads(concrete_ctor_type.name, expr.args, body, expr.loc);
+                this->maybe_instantiate_generic_constructor_overloads(concrete_ctor_type.name, expr.args, body, expr.loc);
                 if (auto _r = instantiate_converting_constructor_templates_for_constructor_arguments(
                         concrete_ctor_type.name, expr.args, body, expr.loc);
                     !_r.has_value()) {
@@ -7433,7 +7983,10 @@ private:
 
         if ((expr.kind == ExprKind::Member || expr.kind == ExprKind::Call) && expr.through_arrow && expr.lhs != nullptr) {
             auto _rewritten = rewrite_arrow_receiver(std::move(expr.lhs), body, expr.loc);
-            if (!_rewritten.has_value()) return std::unexpected(std::move(_rewritten).error());
+            if (!_rewritten.has_value()) {
+                expr.lhs = nullptr;
+                return std::unexpected(std::move(_rewritten).error());
+            }
             expr.lhs = std::move(_rewritten).value();
             expr.through_arrow = false;
             // The receiver this just built is a *new* sub-expression --
@@ -7457,6 +8010,31 @@ private:
                     callee_type->kind == TypeKind::Reference && callee_type->pointee ? *callee_type->pointee
                                                                                       : *callee_type;
                 if (underlying.kind == TypeKind::Named) expr.name = "call";
+            }
+        }
+
+        if (expr.kind == ExprKind::Call && expr.name == "$for_range_size" && !expr.args.empty()) {
+            std::optional<Type> range_type = infer_expr_type(*expr.args[0], body, signatures_);
+            if (range_type.has_value()) {
+                const Type& unwrapped = range_type->kind == TypeKind::Reference && range_type->pointee ? *range_type->pointee : *range_type;
+                if (unwrapped.kind == TypeKind::Named &&
+                    (unwrapped.name == "std::vector" || unwrapped.name.starts_with("std::vector.") ||
+                     unwrapped.name == "std::unordered_map" || unwrapped.name.starts_with("std::unordered_map.") ||
+                     unwrapped.name == "std::unordered_set" || unwrapped.name.starts_with("std::unordered_set."))) {
+                    auto _sz_req = require_member_definition_family(unwrapped.name + "_size");
+                }
+            }
+        }
+
+        if (expr.kind == ExprKind::Binary && expr.binary_op == BinaryOp::Assign && expr.rhs &&
+            expr.rhs->kind == ExprKind::NullptrLiteral && expr.lhs) {
+            std::optional<Type> lhs_type = infer_expr_type(*expr.lhs, body, signatures_);
+            if (lhs_type.has_value()) {
+                const Type& unwrapped = lhs_type->kind == TypeKind::Reference && lhs_type->pointee ? *lhs_type->pointee : *lhs_type;
+                if (unwrapped.kind == TypeKind::Named &&
+                    (unwrapped.name.starts_with("std::shared_ptr.") || unwrapped.name.starts_with("shared_ptr."))) {
+                    auto _new_req = require_member_definition_family(unwrapped.name + "_new");
+                }
             }
         }
 
@@ -7520,7 +8098,7 @@ private:
                 std::unordered_map<std::string, int> value_bindings{};
                 std::unordered_map<std::string, std::vector<Type>> explicit_pack_bindings{};
                 std::vector<std::vector<Type>> concrete_pack_param_types{};
-                concrete_pack_param_types.resize(tmpl.params.size());
+                concrete_pack_param_types.resize(tmpl.params.size(), {});
                 if (auto _r = seed_explicit_template_arguments(*expr_copy, tmpl, type_bindings, value_bindings, explicit_pack_bindings);
                     !_r.has_value()) {
                     continue;
@@ -7563,15 +8141,14 @@ private:
         }
         auto template_it = generic_template_indices_.find(generic_template_name);
         if (template_it == generic_template_indices_.end()) return {};
-        const bool ordinary_overload_exists = [&, this]() {
-            for (const Function& fn : program_.functions) {
-                if (fn.name == generic_template_name && !fn.is_generic_template &&
-                    compile_time_dependency_visible(fn, body)) {
-                    return true;
-                }
+        bool ordinary_overload_exists = false;
+        for (const Function& fn : program_.functions) {
+            if (fn.name == generic_template_name && !fn.is_generic_template &&
+                compile_time_dependency_visible(fn, body)) {
+                ordinary_overload_exists = true;
+                break;
             }
-            return false;
-        }();
+        }
         std::vector<std::size_t> visible_template_candidates{};
 
         for (std::size_t candidate_index : template_it->second) {
@@ -7583,7 +8160,11 @@ private:
         if (ordinary_overload_exists) {
             CalleeSignature ordinary_callee{generic_template_name, param_offset, std::nullopt};
             const FunctionSignature* ordinary = resolve_overload(expr, ordinary_callee, body, signatures_);
-            if (ordinary != nullptr && !ordinary->is_generic_template) return {};
+            bool skip = false;
+            [[scpp::unsafe]] {
+                if (ordinary != nullptr && !ordinary->is_generic_template) skip = true;
+            }
+            if (skip) return {};
         }
         if (visible_template_candidates.size() == 1 && !ordinary_overload_exists) {
             const Function& tmpl = program_.functions[visible_template_candidates[0]];
@@ -7653,13 +8234,20 @@ private:
     // function, whose `this` is either a real user class or absent).
     [[nodiscard]] const ClassDef* enclosing_closure_class(const std::optional<Type>& enclosing_this_type) const {
         if (!enclosing_this_type.has_value()) return nullptr;
-        const Type* owner_type = enclosing_this_type->kind == TypeKind::Reference && enclosing_this_type->pointee != nullptr
-                                     ? enclosing_this_type->pointee.get()
-                                     : &*enclosing_this_type;
-        if (owner_type->kind != TypeKind::Named) return nullptr;
+        std::string owner_name{};
+        if (enclosing_this_type->kind == TypeKind::Reference && enclosing_this_type->pointee != nullptr) {
+            if (enclosing_this_type->pointee->kind == TypeKind::Named) {
+                owner_name = enclosing_this_type->pointee->name;
+            }
+        } else if (enclosing_this_type->kind == TypeKind::Named) {
+            owner_name = enclosing_this_type->name;
+        }
+        if (owner_name.empty()) return nullptr;
         for (const ClassDef& cls : program_.classes) {
-            if (cls.name != owner_type->name) continue;
-            return cls.is_closure ? &cls : nullptr;
+            if (cls.name != owner_name) continue;
+            [[scpp::unsafe]] {
+                return cls.is_closure ? &cls : nullptr;
+            }
         }
         return nullptr;
     }
@@ -7678,10 +8266,17 @@ private:
                                                                    const std::string& name) const {
         const ClassDef* cls = enclosing_closure_class(enclosing_this_type);
         if (cls == nullptr) return std::nullopt;
-        for (const ClassField& field : cls->fields) {
-            if (field.name == name) return field.type;
+        std::optional<Type> res{};
+        [[scpp::unsafe]] {
+            for (const ClassField& field : cls->fields) {
+                if (field.name == name) {
+                    Type copy{field.type};
+                    res = std::optional<Type>{std::move(copy)};
+                    break;
+                }
+            }
         }
-        return std::nullopt;
+        return res;
     }
 
     // ch05 §5.12: resolves a single Lambda expression node in place --
@@ -7700,8 +8295,8 @@ private:
         for (const Param& p : expr.lambda_params) excluded.insert(p.name);
         for (const LambdaCapture& c : expr.lambda_captures) excluded.insert(c.name);
         if (expr.lambda_body) collect_locally_declared_names(*expr.lambda_body, excluded);
-        excluded.insert(known_function_names_.begin(), known_function_names_.end());
-        excluded.insert(known_type_names_.begin(), known_type_names_.end());
+        for (const std::string& name : known_function_names_) excluded.insert(name);
+        for (const std::string& name : known_type_names_) excluded.insert(name);
 
         // Computed for every capture list, not just a blanket one: the
         // ch05 §5.12 check below applies to `[]` and `[x]` exactly as it
@@ -7890,7 +8485,7 @@ private:
             }
         }
 
-        std::string class_name = "__lambda" + std::to_string(lambda_counter_++);
+        std::string class_name = "__lambda" + std::to_string(static_cast<std::int64_t>(lambda_counter_++));
         expr.name = class_name;
         ClassDef closure_class{};
 
@@ -8024,9 +8619,14 @@ private:
         this_param.type = std::move(this_type);
         call_method.params.push_back(std::move(this_param));
         for (const Param& p : expr.lambda_params) call_method.params.push_back(p);
-        call_method.is_generic_template =
-            std::any_of(expr.lambda_params.begin(), expr.lambda_params.end(),
-                        [](const Param& param) { return !param.generic_concept.empty(); });
+        bool has_generic_param = false;
+        for (const Param& param : expr.lambda_params) {
+            if (!param.generic_concept.empty()) {
+                has_generic_param = true;
+                break;
+            }
+        }
+        call_method.is_generic_template = has_generic_param;
 
         call_method.body = expr.lambda_body ? deep_clone_stmt(*expr.lambda_body) : nullptr;
         // ch05 §5.12: "a by-value capture can't be reassigned inside the
@@ -8064,9 +8664,10 @@ private:
 
         program_.functions.push_back(std::move(call_method));
         const std::size_t synthesized_index = program_.functions.size() - 1;
-        known_function_names_.insert(program_.functions[synthesized_index].name);
+        std::string synth_name{program_.functions[synthesized_index].name};
+        known_function_names_.insert(synth_name);
         if (program_.functions[synthesized_index].is_generic_template) {
-            generic_template_indices_[program_.functions[synthesized_index].name].push_back(synthesized_index);
+            generic_template_indices_[synth_name].push_back(synthesized_index);
         }
         // ch05 §5.9/§5.12: unlike lambda_ctor just above (whose own
         // resolution goes through walk_new_concrete_function, which
@@ -8110,18 +8711,27 @@ private:
             // into that vector can dangle across it. The body `Stmt`
             // itself is heap-allocated and survives the reallocation,
             // which is why binding it once here is safe.
-            resolve_locals(program_.functions[synthesized_index]);
+            std::optional<Type> synthesized_this_type{};
+            bool synthesized_is_generic = false;
+            Type saved_return_type = current_walk_return_type_;
+            [[scpp::unsafe]] {
+                resolve_locals(program_.functions[synthesized_index]);
+                current_walk_return_type_ = program_.functions[synthesized_index].return_type;
+                synthesized_this_type = this_type_of(program_.functions[synthesized_index]);
+                synthesized_is_generic = program_.functions[synthesized_index].is_generic_template;
+            }
             Body synthesized_body = build_mir(program_.functions[synthesized_index]);
-            synthesized_body.program = &program_;
-            WalkReturnTypeScope synthesized_return_type_scope{current_walk_return_type_,
-                                                              program_.functions[synthesized_index].return_type};
-            Stmt& synthesized_stmt = *program_.functions[synthesized_index].body;
-            const std::optional<Type> synthesized_this_type = this_type_of(program_.functions[synthesized_index]);
-            const bool synthesized_is_generic = program_.functions[synthesized_index].is_generic_template;
-            if (auto _r = walk_stmt(synthesized_stmt, synthesized_body, synthesized_this_type,
-                      /*allow_generic_monomorphization=*/!synthesized_is_generic);
-                !_r.has_value()) {
-                return std::unexpected(std::move(_r).error());
+            [[scpp::unsafe]] {
+                synthesized_body.program = &program_;
+            }
+            std::expected<void, DataflowError> stmt_r{};
+            [[scpp::unsafe]] {
+                stmt_r = walk_stmt(*program_.functions[synthesized_index].body, synthesized_body, synthesized_this_type,
+                          /*allow_generic_monomorphization=*/!synthesized_is_generic);
+            }
+            current_walk_return_type_ = saved_return_type;
+            if (!stmt_r.has_value()) {
+                return std::unexpected(std::move(stmt_r).error());
             }
             // ch05 §5.12: the walk above is exactly what makes an
             // inferred return type answerable -- it is what gives a
@@ -8136,8 +8746,11 @@ private:
             // infer_expr_type's ordinary Member case like any other
             // field, with no lambda-specific field lookup needed.
             if (!expr.has_lambda_explicit_return_type) {
-                program_.functions[synthesized_index].return_type =
-                    infer_lambda_return_type(synthesized_stmt, synthesized_body);
+                Type inferred_ret{};
+                [[scpp::unsafe]] {
+                    inferred_ret = infer_lambda_return_type(*program_.functions[synthesized_index].body, synthesized_body);
+                }
+                program_.functions[synthesized_index].return_type = std::move(inferred_ret);
                 // The placeholder `void` above is what build_signatures
                 // recorded for this closure's own "<ClassName>_call"; every
                 // later call site reads the return type from there, so the
@@ -8166,17 +8779,24 @@ private:
         // resolved return type is `void` at all; the appended statement
         // is a bare `return;` with no expression, so there is nothing in
         // it for that walk to have visited.
-        Stmt* synthesized_body_stmt = program_.functions[synthesized_index].body.get();
-        const Type& resolved_return_type = program_.functions[synthesized_index].return_type;
-        bool return_type_is_void =
-            resolved_return_type.kind == TypeKind::Named && resolved_return_type.name == "void";
-        if (return_type_is_void && synthesized_body_stmt != nullptr && synthesized_body_stmt->kind == StmtKind::Block &&
-            (synthesized_body_stmt->statements.empty() ||
-             synthesized_body_stmt->statements.back()->kind != StmtKind::Return)) {
-            auto return_stmt = std::make_unique<Stmt>();
-            return_stmt->kind = StmtKind::Return;
-            return_stmt->loc = expr.loc;
-            synthesized_body_stmt->statements.push_back(std::move(return_stmt));
+        bool return_type_is_void = false;
+        [[scpp::unsafe]] {
+            const Type& resolved_return_type = program_.functions[synthesized_index].return_type;
+            return_type_is_void =
+                resolved_return_type.kind == TypeKind::Named && resolved_return_type.name == "void";
+        }
+        if (return_type_is_void) {
+            [[scpp::unsafe]] {
+                Stmt* synthesized_body_stmt = program_.functions[synthesized_index].body.get();
+                if (synthesized_body_stmt != nullptr && synthesized_body_stmt->kind == StmtKind::Block &&
+                    (synthesized_body_stmt->statements.empty() ||
+                     synthesized_body_stmt->statements.back()->kind != StmtKind::Return)) {
+                    auto return_stmt = std::make_unique<Stmt>();
+                    return_stmt->kind = StmtKind::Return;
+                    return_stmt->loc = expr.loc;
+                    synthesized_body_stmt->statements.push_back(std::move(return_stmt));
+                }
+            }
         }
         return {};
     }
@@ -8210,7 +8830,7 @@ private:
         for (const StmtPtr& stmt : body.statements) {
             if (stmt->kind != StmtKind::Return || !stmt->expr) continue;
             std::optional<Type> t = infer_expr_type(*stmt->expr, mir_body, signatures_);
-            if (t.has_value()) return *t;
+            if (t.has_value()) return std::move(*t);
             return named_type("void");
         }
         return named_type("void");
@@ -8372,7 +8992,7 @@ private:
             }
             if (concrete_names.empty()) {
                 ExprPtr identity = make_fold_identity(fold_expr.binary_op, fold_expr.loc);
-                if (identity) return identity;
+                if (identity) return std::move(identity);
                 return std::unexpected(DataflowError("empty fold requires an operator identity this version does not implement",
                                     fold_expr.loc));
             }
@@ -8381,13 +9001,13 @@ private:
                 result = build_binary_expr(fold_expr.binary_op, std::move(result),
                                            instantiate_pack_operand(*fold_expr.lhs, pack_name, concrete_names[i]));
             }
-            return result;
+            return std::move(result);
         }
 
         if (fold_expr.rhs == nullptr) {
             if (concrete_names.empty()) {
                 ExprPtr identity = make_fold_identity(fold_expr.binary_op, fold_expr.loc);
-                if (identity) return identity;
+                if (identity) return std::move(identity);
                 return std::unexpected(DataflowError("empty fold requires an operator identity this version does not implement",
                                     fold_expr.loc));
             }
@@ -8398,7 +9018,7 @@ private:
                                            instantiate_pack_operand(*fold_expr.lhs, pack_name, concrete_names[i]),
                                            std::move(result));
             }
-            return result;
+            return std::move(result);
         }
 
         bool lhs_mentions = expr_mentions_identifier(*fold_expr.lhs, pack_name);
@@ -8408,7 +9028,8 @@ private:
                                 fold_expr.loc));
         }
         if (concrete_names.empty()) {
-            return lhs_mentions ? deep_clone_expr(*fold_expr.rhs) : deep_clone_expr(*fold_expr.lhs);
+            ExprPtr res = lhs_mentions ? deep_clone_expr(*fold_expr.rhs) : deep_clone_expr(*fold_expr.lhs);
+            return std::move(res);
         }
         if (lhs_mentions) {
             ExprPtr result = deep_clone_expr(*fold_expr.rhs);
@@ -8417,14 +9038,14 @@ private:
                                            instantiate_pack_operand(*fold_expr.lhs, pack_name, concrete_names[i]),
                                            std::move(result));
             }
-            return result;
+            return std::move(result);
         }
         ExprPtr result = deep_clone_expr(*fold_expr.lhs);
         for (std::size_t i = 0; i < concrete_names.size(); i++) {
             result = build_binary_expr(fold_expr.binary_op, std::move(result),
                                        instantiate_pack_operand(*fold_expr.rhs, pack_name, concrete_names[i]));
         }
-        return result;
+        return std::move(result);
     }
 
     [[nodiscard]] std::expected<std::vector<ExprPtr>, DataflowError> expand_pack_argument(const Expr& expr, const std::string& pack_name,
@@ -8433,7 +9054,7 @@ private:
             std::vector<ExprPtr> single{};
 
             single.push_back(deep_clone_expr(expr));
-            return single;
+            return std::move(single);
         }
         if (!expr_mentions_identifier(*expr.lhs, pack_name)) {
             return std::unexpected(DataflowError("pack expansion does not mention parameter pack '" + pack_name + "'", expr.loc));
@@ -8445,7 +9066,7 @@ private:
             ExprPtr arg = instantiate_pack_operand(*expr.lhs, pack_name, concrete_name);
             expanded.push_back(std::move(arg));
         }
-        return expanded;
+        return std::move(expanded);
     }
 
     void expand_explicit_template_arg_packs_in_expr(Expr& expr, const std::string& pack_name,
@@ -8569,7 +9190,9 @@ private:
             for (ExprPtr& arg : expr.args) {
                 auto _expanded = expand_pack_argument(*arg, pack_name, concrete_names);
                 if (!_expanded.has_value()) return std::unexpected(std::move(_expanded).error());
-                for (ExprPtr& item : *_expanded) expanded_args.push_back(std::move(item));
+                for (std::size_t i = 0; i < _expanded.value().size(); i++) {
+                    expanded_args.push_back(std::move(_expanded.value()[i]));
+                }
             }
             expr.args = std::move(expanded_args);
         }
@@ -8635,7 +9258,8 @@ private:
              (!expr.rhs && expr_mentions_identifier(*expr.lhs, pack_name)))) {
             auto _expanded = expand_fold_for_pack(expr, pack_name, concrete_names);
             if (!_expanded.has_value()) return std::unexpected(std::move(_expanded).error());
-            expr = std::move(**_expanded);
+            ExprPtr ptr = std::move(_expanded).value();
+            if (ptr) expr = std::move(*ptr);
         }
         if (expr.lhs) {
             if (auto _r = expand_pack_folds_in_expr(*expr.lhs, pack_name, concrete_names); !_r.has_value()) {
@@ -8762,7 +9386,9 @@ private:
                     for (ExprPtr& arg : stmt.ctor_args) {
                         auto _expanded = expand_pack_argument(*arg, pack_name, concrete_names);
                         if (!_expanded.has_value()) return std::unexpected(std::move(_expanded).error());
-                        for (ExprPtr& item : *_expanded) expanded_args.push_back(std::move(item));
+                        for (std::size_t i = 0; i < _expanded.value().size(); i++) {
+                            expanded_args.push_back(std::move(_expanded.value()[i]));
+                        }
                     }
                     stmt.ctor_args = std::move(expanded_args);
                 }
@@ -8903,15 +9529,7 @@ private:
             p.type = concrete_param_types[i];
             clone.params.push_back(std::move(p));
         }
-        if (auto _r = clone_member_initializers(tmpl, clone,
-                                                [&](Expr& e) -> std::expected<void, DataflowError> {
-                                                    for (const auto& entry : witness_replacements) {
-                                                        const auto& witness_name = entry.first;
-                                                        const auto& concrete = entry.second;
-                                                        substitute_type_param_in_expr(e, witness_name, concrete);
-                                                    }
-                                                    return {};
-                                                });
+        if (auto _r = clone_member_initializers_with_type_bindings(tmpl, clone, witness_replacements);
             !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }

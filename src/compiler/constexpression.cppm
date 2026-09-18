@@ -4586,9 +4586,11 @@ private:
                     }
                     if (expr.lhs) {
                         std::optional<Type> receiver = infer_unevaluated_expr_type(*expr.lhs);
-                        const Type& receiver_named = receiver.has_value() && receiver->kind == TypeKind::Reference ? *receiver->pointee
-                                                                                                                     : *receiver;
-                        if (!receiver.has_value() || receiver_named.kind != TypeKind::Named) return std::nullopt;
+                        if (!receiver.has_value()) return std::nullopt;
+                        const Type& receiver_named = receiver->kind == TypeKind::Reference && receiver->pointee != nullptr
+                                                         ? *receiver->pointee
+                                                         : *receiver;
+                        if (receiver_named.kind != TypeKind::Named) return std::nullopt;
                         std::string full_name{};
                         full_name += receiver_named.name;
                         full_name += "_";

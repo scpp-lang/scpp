@@ -36,23 +36,6 @@ constexpr unsigned int kDwAteSigned = 0x05;
 constexpr unsigned int kDwAteSignedChar = 0x06;
 constexpr unsigned int kDwAteUnsigned = 0x07;
 
-inline llvm::LLVMTargetDataRef data_layout_ref(llvm::LLVMModuleRef mod) { return llvm::LLVMGetModuleDataLayout(mod); }
-
-// llvm::DataLayout::getPointerABIAlignment(address_space).value() has no
-// function in llvm-c/Target.h with this exact shape (a data layout plus a
-// bare address space), but llvm::LLVMABIAlignmentOfType() queried against an
-// opaque pointer type *for that same address space* reads the exact same
-// per-address-space entry in the DataLayout's own pointer-alignment
-// table -- empirically confirmed identical (via a standalone llvm::LLVM-C++ vs.
-// llvm::LLVM-C comparison program) across several representative data layouts
-// and address spaces, including a synthetic one with an unusual, non-
-// default alignment. So this composes two already-official llvm::LLVM-C calls
-// instead of needing any wrapper of our own.
-inline unsigned int pointer_abi_alignment_for_as(llvm::LLVMModuleRef mod, unsigned int address_space) {
-    return llvm::LLVMABIAlignmentOfType(llvm::LLVMGetModuleDataLayout(mod),
-                                  llvm::LLVMPointerTypeInContext(llvm::LLVMGetModuleContext(mod), address_space));
-}
-
     [[nodiscard]] std::string Codegen::default_debug_source_path() const
 {
         return source_path_.empty() ? std::string{"memory.scpp"} : source_path_;
@@ -63,7 +46,11 @@ inline unsigned int pointer_abi_alignment_for_as(llvm::LLVMModuleRef mod, unsign
 {
         if (!emit_debug_info_) return nullptr;
         auto it = debug_file_cache_.find(path);
-        if (it != debug_file_cache_.end()) return it->second;
+        if (it != debug_file_cache_.end()) {
+            [[scpp::unsafe]] {
+                return it->second;
+            }
+        }
         std::string filename = path;
         std::string dir{};
         std::size_t slash = path.rfind('/');
@@ -71,7 +58,10 @@ inline unsigned int pointer_abi_alignment_for_as(llvm::LLVMModuleRef mod, unsign
             filename = path.substr(slash + 1);
             dir = (slash == 0) ? "/" : path.substr(0, slash);
         }
-        llvm::LLVMMetadataRef file = llvm::LLVMDIBuilderCreateFile(dibuilder_, filename.c_str(), filename.size(), dir.c_str(), dir.size());
+        llvm::LLVMMetadataRef file = nullptr;
+        [[scpp::unsafe]] {
+            file = llvm::LLVMDIBuilderCreateFile(dibuilder_, filename.c_str(), static_cast<unsigned long>(filename.size()), dir.c_str(), static_cast<unsigned long>(dir.size()));
+        }
         debug_file_cache_.emplace(path, file);
         return file;
     }
@@ -95,24 +85,28 @@ inline unsigned int pointer_abi_alignment_for_as(llvm::LLVMModuleRef mod, unsign
     void Codegen::initialize_debug_info()
 {
         if (!emit_debug_info_) return;
-        dibuilder_ = llvm::LLVMCreateDIBuilder(module_);
-        llvm::LLVMMetadataRef file = debug_file_for_program();
-        static const char* const kProducer = "scpp";
-        compile_unit_ = llvm::LLVMDIBuilderCreateCompileUnit(
-            dibuilder_, llvm::LLVMDWARFSourceLanguageC_plus_plus_17, file, kProducer, std::strlen(kProducer),
-            /*isOptimized=*/0, "", 0, /*RuntimeVer=*/0, "", 0, llvm::LLVMDWARFEmissionFull, /*DWOId=*/0,
-            /*SplitDebugInlining=*/0, /*DebugInfoForProfiling=*/0, "", 0, "", 0);
-        llvm::LLVMAddModuleFlag(module_, llvm::LLVMModuleFlagBehaviorWarning, "Debug Info Version", sizeof("Debug Info Version") - 1,
-                          llvm::LLVMValueAsMetadata(llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), llvm::LLVMDebugMetadataVersion(), 0)));
-        llvm::LLVMAddModuleFlag(module_, llvm::LLVMModuleFlagBehaviorWarning, "Dwarf Version", sizeof("Dwarf Version") - 1,
-                          llvm::LLVMValueAsMetadata(llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), 5, 0)));
+        [[scpp::unsafe]] {
+            dibuilder_ = llvm::LLVMCreateDIBuilder(module_);
+            llvm::LLVMMetadataRef file = debug_file_for_program();
+            static const char* const kProducer = "scpp";
+            compile_unit_ = llvm::LLVMDIBuilderCreateCompileUnit(
+                dibuilder_, llvm::LLVMDWARFSourceLanguageC_plus_plus_17, file, kProducer, 4UL,
+                /*isOptimized=*/0, "", 0UL, /*RuntimeVer=*/0U, "", 0UL, llvm::LLVMDWARFEmissionFull, /*DWOId=*/0U,
+                /*SplitDebugInlining=*/0, /*DebugInfoForProfiling=*/0, "", 0UL, "", 0UL);
+            llvm::LLVMAddModuleFlag(module_, llvm::LLVMModuleFlagBehaviorWarning, "Debug Info Version", static_cast<unsigned long>(sizeof("Debug Info Version") - 1),
+                              llvm::LLVMValueAsMetadata(llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), static_cast<unsigned long>(llvm::LLVMDebugMetadataVersion()), 0)));
+            llvm::LLVMAddModuleFlag(module_, llvm::LLVMModuleFlagBehaviorWarning, "Dwarf Version", static_cast<unsigned long>(sizeof("Dwarf Version") - 1),
+                              llvm::LLVMValueAsMetadata(llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), 5UL, 0)));
+        }
     }
 
 
     void Codegen::finalize_debug_info()
 {
         if (!emit_debug_info_ || dibuilder_ == nullptr) return;
-        llvm::LLVMDIBuilderFinalize(dibuilder_);
+        [[scpp::unsafe]] {
+            llvm::LLVMDIBuilderFinalize(dibuilder_);
+        }
     }
 
 
@@ -128,8 +122,10 @@ inline unsigned int pointer_abi_alignment_for_as(llvm::LLVMModuleRef mod, unsign
                 auto basic = [&, this](llvm::LLVMDWARFTypeEncoding encoding) -> std::expected<llvm::LLVMMetadataRef, CodegenError> {
                     auto llvm_type_result = to_llvm_type(type);
                     if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
-                    return llvm::LLVMDIBuilderCreateBasicType(dibuilder_, type.name.c_str(), type.name.size(),
-                        llvm::LLVMSizeOfTypeInBits(data_layout_ref(module_), std::move(llvm_type_result).value()), encoding, llvm::LLVMDIFlagZero);
+                    [[scpp::unsafe]] {
+                        return llvm::LLVMDIBuilderCreateBasicType(dibuilder_, type.name.c_str(), static_cast<unsigned long>(type.name.size()),
+                            llvm::LLVMSizeOfTypeInBits(data_layout_ref(module_), std::move(llvm_type_result).value()), encoding, llvm::LLVMDIFlagZero);
+                    }
                 };
                 if (type.name == "bool") {
                     auto basic_result = basic(kDwAteBoolean);
@@ -158,7 +154,9 @@ inline unsigned int pointer_abi_alignment_for_as(llvm::LLVMModuleRef mod, unsign
                     if (!basic_result.has_value()) return std::unexpected(std::move(basic_result).error());
                     result = std::move(basic_result).value();
                 } else {
-                    result = llvm::LLVMDIBuilderCreateUnspecifiedType(dibuilder_, type.name.c_str(), type.name.size());
+                    [[scpp::unsafe]] {
+                        result = llvm::LLVMDIBuilderCreateUnspecifiedType(dibuilder_, type.name.c_str(), static_cast<unsigned long>(type.name.size()));
+                    }
                 }
                 break;
             }
@@ -166,7 +164,9 @@ inline unsigned int pointer_abi_alignment_for_as(llvm::LLVMModuleRef mod, unsign
             case TypeKind::Reference: {
                 if (is_interface_representation_type(type)) {
                     const std::string name = type.kind == TypeKind::Pointer ? "interface_ptr" : "interface_ref";
-                    result = llvm::LLVMDIBuilderCreateUnspecifiedType(dibuilder_, name.c_str(), name.size());
+                    [[scpp::unsafe]] {
+                        result = llvm::LLVMDIBuilderCreateUnspecifiedType(dibuilder_, name.c_str(), static_cast<unsigned long>(name.size()));
+                    }
                     break;
                 }
                 llvm::LLVMMetadataRef pointee = nullptr;
@@ -175,31 +175,37 @@ inline unsigned int pointer_abi_alignment_for_as(llvm::LLVMModuleRef mod, unsign
                     if (!pointee_result.has_value()) return std::unexpected(std::move(pointee_result).error());
                     pointee = std::move(pointee_result).value();
                 }
-                result = llvm::LLVMDIBuilderCreatePointerType(
-                    dibuilder_, pointee, 8ULL * llvm::LLVMPointerSizeForAS(data_layout_ref(module_), 0),
-                    static_cast<std::uint32_t>(pointer_abi_alignment_for_as(module_, 0) * 8), /*AddressSpace=*/0, "",
-                    0);
+                [[scpp::unsafe]] {
+                    result = llvm::LLVMDIBuilderCreatePointerType(
+                        dibuilder_, pointee, static_cast<unsigned long>(8 * llvm::LLVMPointerSizeForAS(data_layout_ref(module_), 0)),
+                        static_cast<unsigned int>(pointer_abi_alignment_for_as(module_, 0) * 8), /*AddressSpace=*/0U, "",
+                        0UL);
+                }
                 break;
             }
             case TypeKind::Array: {
                 auto element_result = debug_type_for(*type.element);
                 if (!element_result.has_value()) return std::unexpected(std::move(element_result).error());
                 llvm::LLVMMetadataRef element = std::move(element_result).value();
-                llvm::LLVMMetadataRef subrange =
-                    llvm::LLVMDIBuilderGetOrCreateSubrange(dibuilder_, 0, static_cast<std::int64_t>(type.array_size));
-                llvm::LLVMMetadataRef subscripts = llvm::LLVMDIBuilderGetOrCreateArray(dibuilder_, &subrange, 1);
                 auto llvm_type_result = to_llvm_type(type);
                 if (!llvm_type_result.has_value()) return std::unexpected(std::move(llvm_type_result).error());
                 llvm::LLVMTypeRef llvm_type = std::move(llvm_type_result).value();
-                result = llvm::LLVMDIBuilderCreateArrayType(
-                    dibuilder_, llvm::LLVMSizeOfTypeInBits(data_layout_ref(module_), llvm_type),
-                    static_cast<std::uint32_t>(llvm::LLVMABIAlignmentOfType(data_layout_ref(module_), llvm_type) * 8),
-                    element, &subscripts, 1);
+                [[scpp::unsafe]] {
+                    llvm::LLVMMetadataRef subrange =
+                        llvm::LLVMDIBuilderGetOrCreateSubrange(dibuilder_, 0L, static_cast<long>(type.array_size));
+                    llvm::LLVMMetadataRef subscripts = llvm::LLVMDIBuilderGetOrCreateArray(dibuilder_, &subrange, 1UL);
+                    result = llvm::LLVMDIBuilderCreateArrayType(
+                        dibuilder_, llvm::LLVMSizeOfTypeInBits(data_layout_ref(module_), llvm_type),
+                        static_cast<unsigned int>(llvm::LLVMABIAlignmentOfType(data_layout_ref(module_), llvm_type) * 8),
+                        element, &subscripts, 1U);
+                }
                 break;
             }
             case TypeKind::Span: {
                 static const char* const kName = "std::span";
-                result = llvm::LLVMDIBuilderCreateUnspecifiedType(dibuilder_, kName, std::strlen(kName));
+                [[scpp::unsafe]] {
+                    result = llvm::LLVMDIBuilderCreateUnspecifiedType(dibuilder_, kName, 9UL);
+                }
                 break;
             }
             case TypeKind::Function:
@@ -217,14 +223,16 @@ inline unsigned int pointer_abi_alignment_for_as(llvm::LLVMModuleRef mod, unsign
                     if (!param_result.has_value()) return std::unexpected(std::move(param_result).error());
                     elems.push_back(std::move(param_result).value());
                 }
-                llvm::LLVMMetadataRef subroutine = llvm::LLVMDIBuilderCreateSubroutineType(
-                    dibuilder_, nullptr, elems.data(), static_cast<unsigned int>(elems.size()), llvm::LLVMDIFlagZero);
-                result = type.kind == TypeKind::FunctionPointer
-                             ? llvm::LLVMDIBuilderCreatePointerType(
-                                   dibuilder_, subroutine, 8ULL * llvm::LLVMPointerSizeForAS(data_layout_ref(module_), 0),
-                                   static_cast<std::uint32_t>(pointer_abi_alignment_for_as(module_, 0) * 8),
-                                   /*AddressSpace=*/0, "", 0)
-                             : subroutine;
+                [[scpp::unsafe]] {
+                    llvm::LLVMMetadataRef subroutine = llvm::LLVMDIBuilderCreateSubroutineType(
+                        dibuilder_, nullptr, elems.data(), static_cast<unsigned int>(elems.size()), llvm::LLVMDIFlagZero);
+                    result = type.kind == TypeKind::FunctionPointer
+                                 ? llvm::LLVMDIBuilderCreatePointerType(
+                                       dibuilder_, subroutine, static_cast<unsigned long>(8 * llvm::LLVMPointerSizeForAS(data_layout_ref(module_), 0)),
+                                       static_cast<unsigned int>(pointer_abi_alignment_for_as(module_, 0) * 8),
+                                       /*AddressSpace=*/0U, "", 0UL)
+                                 : subroutine;
+                }
                 break;
             }
         }
@@ -236,12 +244,14 @@ inline unsigned int pointer_abi_alignment_for_as(llvm::LLVMModuleRef mod, unsign
     void Codegen::refresh_debug_location(SourceLocation loc)
 {
         current_loc_ = loc;
-        if (!emit_debug_info_ || current_debug_scope_ == nullptr || !loc.is_known()) {
-            llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
-            return;
+        [[scpp::unsafe]] {
+            if (!emit_debug_info_ || current_debug_scope_ == nullptr || !loc.is_known()) {
+                llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
+                return;
+            }
+            llvm::LLVMSetCurrentDebugLocation2(builder_, llvm::LLVMDIBuilderCreateDebugLocation(context_, static_cast<unsigned int>(loc.line), static_cast<unsigned int>(std::max(loc.column, 1)),
+                                                                                    current_debug_scope_, nullptr));
         }
-        llvm::LLVMSetCurrentDebugLocation2(builder_, llvm::LLVMDIBuilderCreateDebugLocation(context_, loc.line, std::max(loc.column, 1),
-                                                                                current_debug_scope_, nullptr));
     }
 
 
@@ -252,14 +262,16 @@ inline unsigned int pointer_abi_alignment_for_as(llvm::LLVMModuleRef mod, unsign
         if (!type_result.has_value()) return std::unexpected(std::move(type_result).error());
         llvm::LLVMMetadataRef type = std::move(type_result).value();
         if (type == nullptr) return {};
-        llvm::LLVMMetadataRef var = llvm::LLVMDIBuilderCreateParameterVariable(
-            dibuilder_, current_subprogram_, param.name.c_str(), param.name.size(), index,
-            debug_file_for_loc(current_function_def_->loc), std::max(current_function_def_->loc.line, 1), type,
-            /*AlwaysPreserve=*/1, llvm::LLVMDIFlagZero);
-        llvm::LLVMMetadataRef expr = llvm::LLVMDIBuilderCreateExpression(dibuilder_, nullptr, 0);
-        llvm::LLVMMetadataRef loc = llvm::LLVMDIBuilderCreateDebugLocation(context_, std::max(current_function_def_->loc.line, 1), 1,
-                                                               current_subprogram_, nullptr);
-        llvm::LLVMDIBuilderInsertDeclareRecordAtEnd(dibuilder_, slot, var, expr, loc, llvm::LLVMGetInsertBlock(builder_));
+        [[scpp::unsafe]] {
+            llvm::LLVMMetadataRef var = llvm::LLVMDIBuilderCreateParameterVariable(
+                dibuilder_, current_subprogram_, param.name.c_str(), static_cast<unsigned long>(param.name.size()), index,
+                debug_file_for_loc(current_function_def_->loc), static_cast<unsigned int>(std::max(current_function_def_->loc.line, 1)), type,
+                /*AlwaysPreserve=*/1, llvm::LLVMDIFlagZero);
+            llvm::LLVMMetadataRef expr = llvm::LLVMDIBuilderCreateExpression(dibuilder_, nullptr, 0UL);
+            llvm::LLVMMetadataRef loc = llvm::LLVMDIBuilderCreateDebugLocation(context_, static_cast<unsigned int>(std::max(current_function_def_->loc.line, 1)), 1U,
+                                                                   current_subprogram_, nullptr);
+            llvm::LLVMDIBuilderInsertDeclareRecordAtEnd(dibuilder_, slot, var, expr, loc, llvm::LLVMGetInsertBlock(builder_));
+        }
         return {};
     }
 
@@ -271,13 +283,15 @@ inline unsigned int pointer_abi_alignment_for_as(llvm::LLVMModuleRef mod, unsign
         if (!debug_type_result.has_value()) return std::unexpected(std::move(debug_type_result).error());
         llvm::LLVMMetadataRef debug_type = std::move(debug_type_result).value();
         if (debug_type == nullptr) return {};
-        llvm::LLVMMetadataRef var = llvm::LLVMDIBuilderCreateAutoVariable(dibuilder_, current_debug_scope_, name.c_str(), name.size(),
-                                                              debug_file_for_loc(loc), std::max(loc.line, 1), debug_type,
-                                                              /*AlwaysPreserve=*/1, llvm::LLVMDIFlagZero, /*AlignInBits=*/0);
-        llvm::LLVMMetadataRef expr = llvm::LLVMDIBuilderCreateExpression(dibuilder_, nullptr, 0);
-        llvm::LLVMMetadataRef debug_loc = llvm::LLVMDIBuilderCreateDebugLocation(context_, std::max(loc.line, 1), std::max(loc.column, 1),
-                                                                     current_debug_scope_, nullptr);
-        llvm::LLVMDIBuilderInsertDeclareRecordAtEnd(dibuilder_, slot, var, expr, debug_loc, llvm::LLVMGetInsertBlock(builder_));
+        [[scpp::unsafe]] {
+            llvm::LLVMMetadataRef var = llvm::LLVMDIBuilderCreateAutoVariable(dibuilder_, current_debug_scope_, name.c_str(), static_cast<unsigned long>(name.size()),
+                debug_file_for_loc(loc), static_cast<unsigned int>(std::max(loc.line, 1)), debug_type,
+                /*AlwaysPreserve=*/1, llvm::LLVMDIFlagZero, /*AlignInBits=*/0U);
+            llvm::LLVMMetadataRef expr = llvm::LLVMDIBuilderCreateExpression(dibuilder_, nullptr, 0UL);
+            llvm::LLVMMetadataRef debug_loc = llvm::LLVMDIBuilderCreateDebugLocation(context_, static_cast<unsigned int>(std::max(loc.line, 1)), static_cast<unsigned int>(std::max(loc.column, 1)),
+                                                                         current_debug_scope_, nullptr);
+            llvm::LLVMDIBuilderInsertDeclareRecordAtEnd(dibuilder_, slot, var, expr, debug_loc, llvm::LLVMGetInsertBlock(builder_));
+        }
         return {};
     }
 
@@ -285,43 +299,45 @@ inline unsigned int pointer_abi_alignment_for_as(llvm::LLVMModuleRef mod, unsign
     llvm::LLVMValueRef Codegen::create_entry_block_alloca(llvm::LLVMTypeRef type, const std::string& name,
                                                 std::optional<unsigned int> alignment)
 {
-        llvm::LLVMBasicBlockRef current_block = llvm::LLVMGetInsertBlock(builder_);
-        if (current_block == nullptr) {
+        [[scpp::unsafe]] {
+            llvm::LLVMBasicBlockRef current_block = llvm::LLVMGetInsertBlock(builder_);
+            if (current_block == nullptr) {
+                llvm::LLVMValueRef slot = llvm::LLVMBuildAlloca(builder_, type, name.c_str());
+                if (alignment.has_value()) llvm::LLVMSetAlignment(slot, *alignment);
+                return slot;
+            }
+            // Every real call site reaches this function with the builder
+            // positioned at the end of whatever block it's currently
+            // building (this function is the only place that ever
+            // temporarily repositions the builder mid-block, always
+            // restoring before returning), so saving just the current block
+            // (rather than a full IRBuilderBase::InsertPoint, which
+            // llvm-c has no equivalent handle for) and restoring via
+            // llvm::LLVMPositionBuilderAtEnd is equivalent here.
+            llvm::LLVMBasicBlockRef saved_block = current_block;
+            llvm::LLVMMetadataRef saved_dbg = llvm::LLVMGetCurrentDebugLocation2(builder_);
+            llvm::LLVMBasicBlockRef entry = llvm::LLVMGetEntryBasicBlock(llvm::LLVMGetBasicBlockParent(current_block));
+            // Entry blocks have no predecessors, hence no PHI/landingpad
+            // instructions -- so "first insertion point" degenerates to
+            // simply the first instruction (or none, if empty), matching
+            // getFirstInsertionPt()'s general PHI/landingpad-skipping
+            // behavior for this specific (entry-block-only) use.
+            llvm::LLVMValueRef insert_before = llvm::LLVMGetFirstInstruction(entry);
+            while (insert_before != nullptr && llvm::LLVMIsAAllocaInst(insert_before) != nullptr) {
+                insert_before = llvm::LLVMGetNextInstruction(insert_before);
+            }
+            if (insert_before != nullptr) {
+                llvm::LLVMPositionBuilderBefore(builder_, insert_before);
+            } else {
+                llvm::LLVMPositionBuilderAtEnd(builder_, entry);
+            }
+            llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
             llvm::LLVMValueRef slot = llvm::LLVMBuildAlloca(builder_, type, name.c_str());
             if (alignment.has_value()) llvm::LLVMSetAlignment(slot, *alignment);
+            llvm::LLVMPositionBuilderAtEnd(builder_, saved_block);
+            llvm::LLVMSetCurrentDebugLocation2(builder_, saved_dbg);
             return slot;
         }
-        // Every real call site reaches this function with the builder
-        // positioned at the end of whatever block it's currently
-        // building (this function is the only place that ever
-        // temporarily repositions the builder mid-block, always
-        // restoring before returning), so saving just the current block
-        // (rather than a full IRBuilderBase::InsertPoint, which
-        // llvm-c has no equivalent handle for) and restoring via
-        // llvm::LLVMPositionBuilderAtEnd is equivalent here.
-        llvm::LLVMBasicBlockRef saved_block = current_block;
-        llvm::LLVMMetadataRef saved_dbg = llvm::LLVMGetCurrentDebugLocation2(builder_);
-        llvm::LLVMBasicBlockRef entry = llvm::LLVMGetEntryBasicBlock(llvm::LLVMGetBasicBlockParent(current_block));
-        // Entry blocks have no predecessors, hence no PHI/landingpad
-        // instructions -- so "first insertion point" degenerates to
-        // simply the first instruction (or none, if empty), matching
-        // getFirstInsertionPt()'s general PHI/landingpad-skipping
-        // behavior for this specific (entry-block-only) use.
-        llvm::LLVMValueRef insert_before = llvm::LLVMGetFirstInstruction(entry);
-        while (insert_before != nullptr && llvm::LLVMIsAAllocaInst(insert_before) != nullptr) {
-            insert_before = llvm::LLVMGetNextInstruction(insert_before);
-        }
-        if (insert_before != nullptr) {
-            llvm::LLVMPositionBuilderBefore(builder_, insert_before);
-        } else {
-            llvm::LLVMPositionBuilderAtEnd(builder_, entry);
-        }
-        llvm::LLVMSetCurrentDebugLocation2(builder_, nullptr);
-        llvm::LLVMValueRef slot = llvm::LLVMBuildAlloca(builder_, type, name.c_str());
-        if (alignment.has_value()) llvm::LLVMSetAlignment(slot, *alignment);
-        llvm::LLVMPositionBuilderAtEnd(builder_, saved_block);
-        llvm::LLVMSetCurrentDebugLocation2(builder_, saved_dbg);
-        return slot;
     }
 
 
@@ -337,18 +353,20 @@ inline unsigned int pointer_abi_alignment_for_as(llvm::LLVMModuleRef mod, unsign
             if (!param_type_result.has_value()) return std::unexpected(std::move(param_type_result).error());
             type_elems.push_back(std::move(param_type_result).value());
         }
-        llvm::LLVMMetadataRef fn_type = llvm::LLVMDIBuilderCreateSubroutineType(
-            dibuilder_, nullptr, type_elems.data(), static_cast<unsigned int>(type_elems.size()), llvm::LLVMDIFlagZero);
         llvm::LLVMMetadataRef file = debug_file_for_loc(fn.loc);
-        std::size_t linkage_name_len = 0;
-        const char* linkage_name = llvm::LLVMGetValueName2(llvm_fn, &linkage_name_len);
-        llvm::LLVMMetadataRef subprogram = llvm::LLVMDIBuilderCreateFunction(
-            dibuilder_, file, fn.name.c_str(), fn.name.size(), linkage_name, linkage_name_len, file,
-            std::max(fn.loc.line, 1), fn_type, /*IsLocalToUnit=*/0, /*IsDefinition=*/1, std::max(fn.loc.line, 1),
-            llvm::LLVMDIFlagPrototyped, /*IsOptimized=*/0);
-        llvm::LLVMSetSubprogram(llvm_fn, subprogram);
-        current_subprogram_ = subprogram;
-        current_debug_scope_ = subprogram;
+        [[scpp::unsafe]] {
+            llvm::LLVMMetadataRef fn_type = llvm::LLVMDIBuilderCreateSubroutineType(
+                dibuilder_, nullptr, type_elems.data(), static_cast<unsigned int>(type_elems.size()), llvm::LLVMDIFlagZero);
+            unsigned long linkage_name_len = 0;
+            const char* linkage_name = llvm::LLVMGetValueName2(llvm_fn, &linkage_name_len);
+            llvm::LLVMMetadataRef subprogram = llvm::LLVMDIBuilderCreateFunction(
+                dibuilder_, file, fn.name.c_str(), static_cast<unsigned long>(fn.name.size()), linkage_name, linkage_name_len, file,
+                static_cast<unsigned int>(std::max(fn.loc.line, 1)), fn_type, /*IsLocalToUnit=*/0, /*IsDefinition=*/1, static_cast<unsigned int>(std::max(fn.loc.line, 1)),
+                llvm::LLVMDIFlagPrototyped, /*IsOptimized=*/0);
+            llvm::LLVMSetSubprogram(llvm_fn, subprogram);
+            current_subprogram_ = subprogram;
+            current_debug_scope_ = subprogram;
+        }
         return {};
     }
 

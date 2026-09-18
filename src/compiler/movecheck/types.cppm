@@ -33,14 +33,14 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred);
 
 [[nodiscard]] bool is_scalar_type_name(const std::string& name);
 [[nodiscard]] bool is_integral_scalar_type_name(const std::string& name);
-[[nodiscard]] const EnumDef* find_enum_def(const Program* program, const std::string& name);
-[[nodiscard]] const EnumVariant* find_enum_variant(const Program* program, const std::string& name,
-                                                  const EnumDef** owning_enum = nullptr);
+[[nodiscard]] const EnumDef* find_enum_def(const Program* program [[scpp::lifetime(p)]], const std::string& name) [[scpp::lifetime(p)]];
+[[nodiscard]] const EnumVariant* find_enum_variant(const Program* program [[scpp::lifetime(p)]], const std::string& name,
+                                                  const EnumDef** owning_enum = nullptr) [[scpp::lifetime(p)]];
 [[nodiscard]] bool is_enum_type(const Type& type, const Program* program);
-[[nodiscard]] const Type* enum_underlying_type(const Type& type, const Program* program);
+[[nodiscard]] const Type* enum_underlying_type(const Type& type, const Program* program [[scpp::lifetime(p)]]) [[scpp::lifetime(p)]];
 
-[[nodiscard]] const ClassDef* find_class_def(const Program& program, const std::string& class_name);
-[[nodiscard]] const StructDef* find_struct_def(const Program& program, const std::string& struct_name);
+[[nodiscard]] const ClassDef* find_class_def(const Program& program [[scpp::lifetime(p)]], const std::string& class_name) [[scpp::lifetime(p)]];
+[[nodiscard]] const StructDef* find_struct_def(const Program& program [[scpp::lifetime(p)]], const std::string& struct_name) [[scpp::lifetime(p)]];
 [[nodiscard]] bool type_contains_lifetime_carrying_state(const Type& type, const Program& program,
                                                          std::unordered_set<std::string> visiting = {});
 [[nodiscard]] std::string named_type_name(const Type& type);
@@ -85,7 +85,7 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred);
 [[nodiscard]] bool is_for_range_size_builtin(const Expr& expr) {
     return expr.kind == ExprKind::Call && expr.lhs == nullptr && expr.name == "$for_range_size" && expr.args.size() == 1;
 }
-[[nodiscard]] bool is_synthesized_for_range_storage(std::string_view name) { return name.rfind("$for_range_", 0) == 0; }
+[[nodiscard]] bool is_synthesized_for_range_storage(std::string_view name) { return name.starts_with("$for_range_"); }
 
 void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
     if (!has_declared_local(stmt)) return;
@@ -121,7 +121,7 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
            expr.lhs->kind == ExprKind::Identifier && expr.lhs->name == "this";
 }
 [[nodiscard]] Type by_reference_capture_type(const Type& captured_type, bool source_is_const) {
-    if (is_reference(captured_type)) return captured_type;
+    if (is_reference(captured_type)) return Type{captured_type};
     Type capture_type{};
     capture_type.kind = TypeKind::Reference;
     capture_type.pointee = std::make_shared<Type>(captured_type);
@@ -136,7 +136,7 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
     // parameter. Copying the whole object here would silently change
     // what every member access through the closure refers to, and would
     // put a class through copy rules it never asked for.
-    if (capture.name == "this") return captured_type;
+    if (capture.name == "this") return Type{captured_type};
     // A by-value capture is an *owned* field of the closure object
     // (docs/book ch11-01: "by-value captures become ordinary owned
     // fields"), so what it stores is the referent, copied -- never the
@@ -155,9 +155,9 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
         // ordinary `int` field, which a `mutable` lambda may then write,
         // because the copy is the closure's own object and writing it
         // cannot reach the original.
-        return *captured_type.pointee;
+        return Type{*captured_type.pointee};
     }
-    return captured_type;
+    return Type{captured_type};
 }
 
 // The scalar predicates below are thin re-exports of `scpp.ast`'s
@@ -194,49 +194,61 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
 // Forwards to scpp::find_enum_definition_index (scpp.ast), the one
 // enum-by-name lookup -- this file and codegen/layout.cppm each used to
 // carry their own identical copy of the loop.
-[[nodiscard]] const EnumDef* find_enum_def(const Program* program, const std::string& name) {
+[[nodiscard]] const EnumDef* find_enum_def(const Program* program [[scpp::lifetime(p)]], const std::string& name) [[scpp::lifetime(p)]] {
     if (program == nullptr) return nullptr;
-    std::optional<std::size_t> index = scpp::find_enum_definition_index(*program, name);
-    return index.has_value() ? &program->enums[*index] : nullptr;
+    std::optional<std::size_t> index{};
+    [[scpp::unsafe]] {
+        index = scpp::find_enum_definition_index(*program, name);
+        if (index.has_value()) {
+            return &program->enums[*index];
+        }
+    }
+    return nullptr;
 }
 
 // Forwards to scpp::find_enum_variant_index (scpp.ast), the one
 // enumerator-by-name lookup.
-[[nodiscard]] const EnumVariant* find_enum_variant(const Program* program, const std::string& name,
-                                                   const EnumDef** owning_enum) {
+[[nodiscard]] const EnumVariant* find_enum_variant(const Program* program [[scpp::lifetime(p)]], const std::string& name,
+                                                   const EnumDef** owning_enum) [[scpp::lifetime(p)]] {
     if (program == nullptr) return nullptr;
-    std::optional<EnumVariantIndex> found = scpp::find_enum_variant_index(*program, name);
-    if (!found.has_value()) return nullptr;
-    const EnumDef& def = program->enums[found->enum_index];
-    if (owning_enum != nullptr) *owning_enum = &def;
-    return &def.variants[found->variant_index];
+    std::optional<EnumVariantIndex> found{};
+    [[scpp::unsafe]] {
+        found = scpp::find_enum_variant_index(*program, name);
+        if (!found.has_value()) return nullptr;
+        const EnumDef& def = program->enums[found->enum_index];
+        if (owning_enum != nullptr) *owning_enum = &def;
+        return &def.variants[found->variant_index];
+    }
+    return nullptr;
 }
 
 [[nodiscard]] bool is_enum_type(const Type& type, const Program* program) {
     return type.kind == TypeKind::Named && find_enum_def(program, type.name) != nullptr;
 }
 
-[[nodiscard]] const Type* enum_underlying_type(const Type& type, const Program* program) {
+[[nodiscard]] const Type* enum_underlying_type(const Type& type, const Program* program [[scpp::lifetime(p)]]) [[scpp::lifetime(p)]] {
     const EnumDef* def = find_enum_def(program, type.name);
     return def == nullptr ? nullptr : &def->underlying_type;
 }
 
-[[nodiscard]] const ClassDef* find_class_def(const Program& program, const std::string& class_name) {
+[[nodiscard]] const ClassDef* find_class_def(const Program& program [[scpp::lifetime(p)]], const std::string& class_name) [[scpp::lifetime(p)]] {
     const ClassDef* forward_decl = nullptr;
-    for (const ClassDef& def : program.classes) {
+    for (std::size_t i = 0; i < program.classes.size(); i++) {
+        const ClassDef& def = program.classes[i];
         if (def.name != class_name) continue;
-        if (!def.is_forward_declaration) return &def;
-        if (forward_decl == nullptr) forward_decl = &def;
+        if (!def.is_forward_declaration) return &program.classes[i];
+        if (forward_decl == nullptr) forward_decl = &program.classes[i];
     }
     return forward_decl;
 }
 
-[[nodiscard]] const StructDef* find_struct_def(const Program& program, const std::string& struct_name) {
+[[nodiscard]] const StructDef* find_struct_def(const Program& program [[scpp::lifetime(p)]], const std::string& struct_name) [[scpp::lifetime(p)]] {
     const StructDef* forward_decl = nullptr;
-    for (const StructDef& def : program.structs) {
+    for (std::size_t i = 0; i < program.structs.size(); i++) {
+        const StructDef& def = program.structs[i];
         if (def.name != struct_name) continue;
-        if (!def.is_forward_declaration) return &def;
-        if (forward_decl == nullptr) forward_decl = &def;
+        if (!def.is_forward_declaration) return &program.structs[i];
+        if (forward_decl == nullptr) forward_decl = &program.structs[i];
     }
     return forward_decl;
 }
@@ -250,8 +262,16 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
     if (type.kind != TypeKind::Named) return false;
     if (!visiting.insert(type.name).second) return false;
     if (const ClassDef* def = find_class_def(program, type.name); def != nullptr) {
-        for (const ClassField& field : def->fields) {
-            if (type_contains_lifetime_carrying_state(field.type, program, visiting)) return true;
+        std::size_t f_size = 0;
+        [[scpp::unsafe]] {
+            f_size = def->fields.size();
+        }
+        for (std::size_t i = 0; i < f_size; i++) {
+            Type field_type{};
+            [[scpp::unsafe]] {
+                field_type = def->fields[i].type;
+            }
+            if (type_contains_lifetime_carrying_state(field_type, program, visiting)) return true;
         }
     }
     // ch02 §6.2(24) is about "a class, struct, union, array, closure, or
@@ -264,15 +284,23 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
     // stored a named-group reference and was accepted, in the returned
     // form and in the plain `Holder h{x};` form alike.
     if (const StructDef* struct_def = find_struct_def(program, type.name); struct_def != nullptr) {
-        for (const StructField& field : struct_def->fields) {
-            if (type_contains_lifetime_carrying_state(field.type, program, visiting)) return true;
+        std::size_t f_size = 0;
+        [[scpp::unsafe]] {
+            f_size = struct_def->fields.size();
+        }
+        for (std::size_t i = 0; i < f_size; i++) {
+            Type field_type{};
+            [[scpp::unsafe]] {
+                field_type = struct_def->fields[i].type;
+            }
+            if (type_contains_lifetime_carrying_state(field_type, program, visiting)) return true;
         }
     }
     return false;
 }
 [[nodiscard]] std::string named_type_name(const Type& type) {
-    if (type.kind == TypeKind::Named) return type.name;
-    if (type.kind == TypeKind::Reference && type.pointee->kind == TypeKind::Named) return type.pointee->name;
+    if (type.kind == TypeKind::Named) return std::string{type.name};
+    if (type.kind == TypeKind::Reference && type.pointee->kind == TypeKind::Named) return std::string{type.pointee->name};
     return "";
 }
 
@@ -482,7 +510,10 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
 
 [[nodiscard]] bool type_names_interface(const Program& program, const std::string& name) {
     const ClassDef* def = find_class_def(program, name);
-    return def != nullptr && def->is_interface;
+    if (def == nullptr) return false;
+    [[scpp::unsafe]] {
+        return def->is_interface;
+    }
 }
 
 [[nodiscard]] bool is_interface_representation_type(const Type& type, const Program& program) {
@@ -499,7 +530,15 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
     if (source_name == target_name) return true;
     const ClassDef* def = find_class_def(program, source_name);
     if (def == nullptr) return false;
-    for (const BaseSpecifier& base : def->base_specifiers) {
+    std::size_t num_bases = 0;
+    [[scpp::unsafe]] {
+        num_bases = def->base_specifiers.size();
+    }
+    for (std::size_t i = 0; i < num_bases; i++) {
+        BaseSpecifier base{};
+        [[scpp::unsafe]] {
+            base = def->base_specifiers[i];
+        }
         if (base.access == AccessSpecifier::Private && current_class != source_name) {
             continue;
         }

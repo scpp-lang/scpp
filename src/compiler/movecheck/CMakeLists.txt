@@ -16,3 +16,7 @@ target_sources(scpp_movecheck
             lambdas.cppm
             monomorphize.cppm)
 target_link_libraries(scpp_movecheck PUBLIC scpp_ast scpp_mir scpp_constexpr)
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(scpp_movecheck PRIVATE -Wno-unknown-attributes)
+endif()

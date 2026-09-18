@@ -15,10 +15,24 @@ void collect_interfaces_for_thread_safety(const Program& program, const std::str
                                           std::unordered_set<std::string>& out) {
     const ClassDef* def = find_class_def(program, class_name);
     if (def == nullptr) return;
-    for (const BaseSpecifier& base : def->base_specifiers) {
+    std::size_t num_bases = 0;
+    [[scpp::unsafe]] {
+        num_bases = def->base_specifiers.size();
+    }
+    for (std::size_t i = 0; i < num_bases; i++) {
+        BaseSpecifier base{};
+        [[scpp::unsafe]] {
+            base = def->base_specifiers[i];
+        }
         const ClassDef* base_def = find_class_def(program, base.base_type.name);
         if (base_def == nullptr) continue;
-        if (base_def->is_interface) out.insert(base_def->name);
+        bool is_if = false;
+        std::string bname{};
+        [[scpp::unsafe]] {
+            is_if = base_def->is_interface;
+            bname = base_def->name;
+        }
+        if (is_if) out.insert(bname);
         collect_interfaces_for_thread_safety(program, base.base_type.name, out);
     }
 }
@@ -46,14 +60,18 @@ void collect_interfaces_for_thread_safety(const Program& program, const std::str
 }
 
 [[nodiscard]] std::string parameter_display_name(const FunctionSignature& sig, std::size_t param_index) {
-    if (param_index < sig.param_names.size() && !sig.param_names[param_index].empty()) return sig.param_names[param_index];
+    if (param_index < sig.param_names.size() && !sig.param_names[param_index].empty()) return std::string{sig.param_names[param_index]};
     return "#" + std::to_string(param_index + 1);
 }
 
 [[nodiscard]] bool parameter_names_interface_type(const Type& param_type, const Body& body) {
     if (body.program == nullptr || param_type.pointee == nullptr || param_type.pointee->kind != TypeKind::Named) return false;
-    const ClassDef* param_interface = find_class_def(*body.program, param_type.pointee->name);
-    return param_interface != nullptr && param_interface->is_interface;
+    const ClassDef* param_interface = nullptr;
+    [[scpp::unsafe]] {
+        param_interface = find_class_def(*body.program, param_type.pointee->name);
+        if (param_interface != nullptr) return param_interface->is_interface;
+    }
+    return false;
 }
 
 [[nodiscard]] std::optional<Type> concrete_interface_argument_type(const Expr& arg, const Type& param_type, const Body& body,
@@ -64,8 +82,8 @@ void collect_interfaces_for_thread_safety(const Program& program, const std::str
     const Type& source = *source_type;
     if (!argument_type_matches_parameter(source, param_type, body)) return std::nullopt;
     if (source.kind == TypeKind::Reference && source.pointee != nullptr) return *source.pointee;
-    if (source.kind == TypeKind::Pointer && source.pointee != nullptr) return *source.pointee;
-    if (source.kind == TypeKind::Named) return source;
+    if (source.kind == TypeKind::Pointer && source.pointee != nullptr) return Type{*source.pointee};
+    if (source.kind == TypeKind::Named) return Type{source};
     return std::nullopt;
 }
 
@@ -73,13 +91,13 @@ void collect_interfaces_for_thread_safety(const Program& program, const std::str
                                                          const Signatures& signatures) {
     if (param_type.kind == TypeKind::Named && !param_type.name.empty()) {
         std::optional<Type> source_type = infer_expr_type(arg, body, signatures);
-        if (source_type.has_value()) return *source_type;
+        if (source_type.has_value()) return Type{*source_type};
     }
     if (std::optional<Type> concrete = concrete_interface_argument_type(arg, param_type, body, signatures);
         concrete.has_value()) {
-        return *concrete;
+        return Type{*concrete};
     }
-    return param_type;
+    return Type{param_type};
 }
 
 [[nodiscard]] std::expected<void, DataflowError> enforce_thread_safety_constraints_for_argument(const Expr& arg, const FunctionSignature& sig, std::size_t param_index,
@@ -98,30 +116,41 @@ void collect_interfaces_for_thread_safety(const Program& program, const std::str
     }
     std::string param_name = parameter_display_name(sig, param_index);
     if (sig.param_require_thread_movable[param_index]) {
-        auto _r = thread_movable_of(subject, *body.program);
+        std::expected<bool, DataflowError> _r = true;
+        [[scpp::unsafe]] {
+            _r = thread_movable_of(subject, *body.program);
+        }
         if (!_r.has_value()) return std::unexpected(std::move(_r).error());
         if (!_r.value()) {
-            return std::unexpected(DataflowError("argument for parameter '" + param_name + "' of " + std::string(callee_kind) + " '" +
+            std::string ckind{callee_kind.data(), callee_kind.size()};
+            return std::unexpected(DataflowError("argument for parameter '" + param_name + "' of " + ckind + " '" +
                                     callee_name + "' does not satisfy '[[scpp::thread_movable]]' (spec §8.1/§8.5(6))",
                 loc));
         }
     }
     bool shareable_ok = true;
     if (sig.param_require_thread_shareable[param_index]) {
-        auto _r = thread_shareable_of(subject, *body.program);
+        std::expected<bool, DataflowError> _r = true;
+        [[scpp::unsafe]] {
+            _r = thread_shareable_of(subject, *body.program);
+        }
         if (!_r.has_value()) return std::unexpected(std::move(_r).error());
         shareable_ok = _r.value();
     }
     if (!shareable_ok) {
         if (std::optional<Type> concrete = concrete_interface_argument_type(arg, sig.param_types[param_index], body, signatures);
             concrete.has_value()) {
-            auto _r = thread_shareable_of(*concrete, *body.program);
+            std::expected<bool, DataflowError> _r = true;
+            [[scpp::unsafe]] {
+                _r = thread_shareable_of(*concrete, *body.program);
+            }
             if (!_r.has_value()) return std::unexpected(std::move(_r).error());
             shareable_ok = _r.value();
         }
     }
     if (!shareable_ok) {
-        return std::unexpected(DataflowError("argument for parameter '" + param_name + "' of " + std::string(callee_kind) + " '" +
+        std::string ckind{callee_kind.data(), callee_kind.size()};
+        return std::unexpected(DataflowError("argument for parameter '" + param_name + "' of " + ckind + " '" +
                                 callee_name + "' does not satisfy '[[scpp::thread_shareable]]' (spec §8.1/§8.5(6))",
             loc));
     }
@@ -246,7 +275,11 @@ void collect_interfaces_for_thread_safety(const Program& program, const std::str
                 collect_interfaces_for_thread_safety(program, c.name, interfaces);
                 for (const std::string& interface_name : interfaces) {
                     const ClassDef* iface = find_class_def(program, interface_name);
-                    if (iface != nullptr && iface->thread_shareable_override && c.fields.empty()) return true;
+                    bool override_val = false;
+                    [[scpp::unsafe]] {
+                        if (iface != nullptr) override_val = iface->thread_shareable_override;
+                    }
+                    if (override_val && c.fields.empty()) return true;
                 }
                 for (const ClassField& f : c.fields) {
                     auto _r = thread_shareable_of(f.type, program, visiting);
