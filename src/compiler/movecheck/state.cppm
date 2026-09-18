@@ -221,7 +221,7 @@ void forget_place_tree(StateMap& state, const Place& place);
 
 bool DataflowState::operator==(const DataflowState& other) const {
     if (parameter_lifetimes.size() != other.parameter_lifetimes.size()) return false;
-    for (const auto& entry : parameter_lifetimes) {
+    for (const std::pair<const std::string, LifetimeAnnotation>& entry : parameter_lifetimes) {
         const auto& name = entry.first;
         const auto& lifetime = entry.second;
         auto it = other.parameter_lifetimes.find(name);
@@ -261,13 +261,13 @@ LocalState join(LocalState a, LocalState b) {
 // destroying.
 StateMap join_maps(const StateMap& a, const StateMap& b) {
     StateMap result = a;
-    for (const auto& entry : b) {
+    for (const std::pair<const Place, LocalState>& entry : b) {
         const auto& place = entry.first;
         const auto& state = entry.second;
         auto it = result.find(place);
         result[place] = it == result.end() ? join(lookup(a, place), state) : join(it->second, state);
     }
-    for (const auto& entry : a) {
+    for (const std::pair<const Place, LocalState>& entry : a) {
         const auto& place = entry.first;
         const auto& state = entry.second;
         if (b.contains(place)) continue;
@@ -293,7 +293,7 @@ BorrowState join_borrow(const BorrowState& a, const BorrowState& b) {
 
 BorrowMap join_borrow_maps(const BorrowMap& a, const BorrowMap& b) {
     BorrowMap result = a;
-    for (const auto& entry : b) {
+    for (const std::pair<const LocalId, BorrowState>& entry : b) {
         const auto& place = entry.first;
         const auto& borrow = entry.second;
         auto it = result.find(place);
@@ -309,7 +309,7 @@ BorrowMap join_borrow_maps(const BorrowMap& a, const BorrowMap& b) {
 // iteration computes along the way.
 RefTargetMap join_ref_targets(const RefTargetMap& a, const RefTargetMap& b) {
     RefTargetMap result = a;
-    for (const auto& entry : b) {
+    for (const std::pair<const LocalId, RefTarget>& entry : b) {
         const auto& ref_name = entry.first;
         const auto& target = entry.second;
         result.insert_or_assign(ref_name, target);
@@ -319,7 +319,7 @@ RefTargetMap join_ref_targets(const RefTargetMap& a, const RefTargetMap& b) {
 
 LocalLifetimeSourceMap join_local_lifetime_sources(const LocalLifetimeSourceMap& a, const LocalLifetimeSourceMap& b) {
     LocalLifetimeSourceMap result = a;
-    for (const auto& entry : b) {
+    for (const std::pair<const LocalId, RootSet>& entry : b) {
         const auto& name = entry.first;
         const auto& roots = entry.second;
         result.insert_or_assign(name, roots);
@@ -329,7 +329,7 @@ LocalLifetimeSourceMap join_local_lifetime_sources(const LocalLifetimeSourceMap&
 
 ReborrowSuspensionMap join_suspended_reborrows(const ReborrowSuspensionMap& a, const ReborrowSuspensionMap& b) {
     ReborrowSuspensionMap result = a;
-    for (const auto& entry : b) {
+    for (const std::pair<const LocalId, ReborrowSuspension>& entry : b) {
         const auto& name = entry.first;
         const auto& suspension = entry.second;
         auto it = result.find(name);
@@ -345,7 +345,7 @@ ReborrowSuspensionMap join_suspended_reborrows(const ReborrowSuspensionMap& a, c
 
 ClosureCaptureBorrowMap join_closure_capture_borrows(const ClosureCaptureBorrowMap& a, const ClosureCaptureBorrowMap& b) {
     ClosureCaptureBorrowMap result = a;
-    for (const auto& entry : b) {
+    for (const std::pair<const LocalId, std::vector<ClosureCaptureBorrow>>& entry : b) {
         const auto& name = entry.first;
         const auto& borrows = entry.second;
         result.insert_or_assign(name, borrows);
@@ -424,7 +424,11 @@ RootSet canonicalize_roots(RootSet roots) {
     return roots;
 }
 
-[[nodiscard]] RootSet single_root(LocalId root) { return RootSet{root}; }
+[[nodiscard]] RootSet single_root(LocalId root) {
+    RootSet r{};
+    r.push_back(root);
+    return r;
+}
 
 [[nodiscard]] RootSet program_lifetime_root() { return single_root(kProgramLifetimeRoot); }
 
@@ -489,7 +493,7 @@ RootSet union_roots(RootSet lhs, const RootSet& rhs) {
 
 [[nodiscard]] std::optional<Place> find_moved_subobject(const StateMap& state, const Place& place) {
     std::optional<Place> found{};
-    for (const auto& entry : state) {
+    for (const std::pair<const Place, LocalState>& entry : state) {
         const auto& key = entry.first;
         const auto& value = entry.second;
         if (value == LocalState::Initialized || value == LocalState::Bottom) continue;

@@ -2157,7 +2157,7 @@ private:
         }
         for (const ClassDef& def : program.classes) {
             if (!def.is_exported || def.name != name) continue;
-            if (!def.template_params.empty() || def.is_variadic_primary_template) return true;
+            if (!def.template_params.empty() || def.is_variadic_primary_template || def.is_partial_specialization) return true;
         }
         return false;
     }
@@ -2585,6 +2585,7 @@ private:
     [[nodiscard]] bool imported_function_body_must_stay_available(const Program& imported, const Function& fn) const {
         if (fn.is_compile_time_dependency) return true;
         if (fn.is_generic_template || fn.eval_mode != FunctionEvalMode::RuntimeOnly) return true;
+        if (!fn.generic_method_owner_id.empty()) return true;
         if (!fn.member_owner_class.empty()) {
             std::string owner_name = fn.member_owner_class;
             if (!fn.params.empty() && fn.params[0].name == "this" && fn.params[0].type.pointee != nullptr) {
@@ -6119,7 +6120,9 @@ private:
         // would need the very decoding this function performs in order
         // to be read at all.
         std::uint64_t largest = 0;
-        largest = largest - 1;
+        [[scpp::unsafe]] {
+            largest = largest - 1;
+        }
         std::uint64_t unsigned_base = static_cast<std::uint64_t>(base);
         std::uint64_t value = 0;
         std::size_t digit_count = 0;

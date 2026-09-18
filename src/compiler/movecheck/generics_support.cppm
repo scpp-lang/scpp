@@ -170,6 +170,18 @@ namespace scpp {
 // rule is specific to this concept-checking pass.
 [[nodiscard]] bool type_has_matching_constructor(const Type& target_type, const std::vector<Type>& arg_types,
                                                  const Program& program) {
+    if (target_type.kind == TypeKind::Pointer) {
+        if (arg_types.empty()) return true;
+        if (arg_types.size() == 1) {
+            Type single_arg = arg_types[0];
+            if (single_arg.kind == TypeKind::Reference && single_arg.pointee != nullptr) single_arg = *single_arg.pointee;
+            single_arg.is_const_qualified = false;
+            Type unqualified_target = target_type;
+            unqualified_target.is_const_qualified = false;
+            return types_equal(single_arg, unqualified_target);
+        }
+        return false;
+    }
     if (target_type.kind != TypeKind::Named) return false;
     // A single argument structurally identical to target_type itself is
     // exactly real C++'s own copy-construction shape -- the spec's own
@@ -276,7 +288,7 @@ namespace scpp {
 // checked differently -- see type_has_matching_constructor -- rather
 // than searching for a same-named method at all.
 [[nodiscard]] bool type_satisfies_concept(const Type& type, const ConceptDef& concept_def, const Program& program) {
-    if (type.kind != TypeKind::Named) return false;
+    if (type.kind != TypeKind::Named && type.kind != TypeKind::Pointer) return false;
     for (const ConceptRequirement& req : concept_def.requirements) {
         if (req.is_construct) {
             Type target_type{};
@@ -295,6 +307,7 @@ namespace scpp {
             if (!type_has_matching_constructor(target_type, substituted_args, program)) return false;
             continue;
         }
+        if (type.kind != TypeKind::Named) return false;
         std::string method_name = type.name + "_" + req.method_name;
         bool found = false;
         for (const Function& fn : program.functions) {

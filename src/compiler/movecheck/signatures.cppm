@@ -46,6 +46,7 @@ struct FunctionSignature {
     // copy-initialization, so this has to reach overload resolution
     // rather than stay behind on the Function.
     bool is_explicit = false;
+    bool has_definition = false;
     std::string display_name;
 };
 
@@ -1463,7 +1464,7 @@ struct ConstructedOwner {
 // itself a reference/span) is always writable here -- move/
 // initialization-state legality is checked separately, this is purely
 // about const-ness.
-inline std::uint64_t g_signatures_version = 1;
+std::uint64_t g_signatures_version = 1;
 
 [[nodiscard]] std::expected<Signatures, DataflowError> build_signatures(const Program& program) {
     ++g_signatures_version;
@@ -1537,21 +1538,31 @@ inline std::uint64_t g_signatures_version = 1;
     sig.is_generic_template = fn.is_generic_template;
     sig.is_deleted = fn.is_deleted;
     sig.is_explicit = fn.is_explicit;
+    sig.has_definition = fn.body != nullptr || fn.is_defaulted || fn.is_deleted || fn.definition_is_deferred;
     sig.display_name = fn.name;
     std::vector<FunctionSignature>& overloads = signatures[fn.name];
-    for (const FunctionSignature& existing : overloads) {
+    for (std::size_t e_idx = 0; e_idx < overloads.size(); e_idx++) {
+        FunctionSignature& existing = overloads[e_idx];
         if (existing.is_generic_template != sig.is_generic_template) continue;
         bool same_params = existing.param_types.size() == sig.param_types.size();
         for (std::size_t i = 0; same_params && i < sig.param_types.size(); i++) {
             same_params = types_equal(existing.param_types[i], sig.param_types[i]);
         }
         if (same_params && existing.receiver_ref_qualifier == sig.receiver_ref_qualifier) {
-            return std::unexpected(DataflowError("redefinition of '" + fn.name +
-                                 "': a previous declaration with an identical parameter list already "
-                                 "exists ([basic.def.odr]/1 with [over.load]/2 -- functions can only be "
-                                 "overloaded by parameter list, return type alone doesn't count as a "
-                                 "difference)",
-                fn.loc));
+            if (existing.has_definition && sig.has_definition) {
+                return std::unexpected(DataflowError("redefinition of '" + fn.name +
+                                     "': a previous declaration with an identical parameter list already "
+                                     "exists ([basic.def.odr]/1 with [over.load]/2 -- functions can only be "
+                                     "overloaded by parameter list, return type alone doesn't count as a "
+                                     "difference)",
+                    fn.loc));
+            }
+            if (!existing.has_definition && sig.has_definition) {
+                existing = std::move(sig);
+                ++g_signatures_version;
+                return {};
+            }
+            return {};
         }
     }
     overloads.push_back(std::move(sig));
@@ -1573,7 +1584,7 @@ struct ConstructorOverloadCache {
     const Signatures* sigs = nullptr;
     std::unordered_map<std::string, std::vector<const FunctionSignature*>> map{};
 };
-inline thread_local ConstructorOverloadCache g_ctor_cache{};
+ConstructorOverloadCache g_ctor_cache{};
 
 // [class.ctor], [over.match.ctor]: every constructor overload
 // `class_name` declares -- the candidate set every constructor question
@@ -1616,7 +1627,7 @@ inline thread_local ConstructorOverloadCache g_ctor_cache{};
         }
     }
     const std::string specialization_prefix = constructor_name + ".";
-    for (const auto& entry : signatures) {
+    for (const std::pair<const std::string, std::vector<FunctionSignature>>& entry : signatures) {
         const auto& name = entry.first;
         if (!name.starts_with(specialization_prefix)) continue;
         for (const FunctionSignature& candidate : entry.second) {

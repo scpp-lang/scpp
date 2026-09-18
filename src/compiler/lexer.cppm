@@ -338,11 +338,6 @@ private:
         return c;
     }
 
-    [[nodiscard]] bool starts_with_at_pos(std::string_view prefix) const {
-        if (pos_ + prefix.size() > source_.size()) return false;
-        return source_.substr(pos_, prefix.size()) == prefix;
-    }
-
     void skip_whitespace_and_comments() {
         for (;;) {
             char c = peek();
@@ -358,29 +353,6 @@ private:
                     advance();
                     advance();
                 }
-            } else if (c == '#' && starts_with_at_pos("#ifdef __clang__")) {
-                int depth = 1;
-                while (!at_end() && peek() != '\n') advance();
-                while (!at_end() && depth > 0) {
-                    if (starts_with_at_pos("#ifdef") || starts_with_at_pos("#if")) {
-                        depth++;
-                        while (!at_end() && peek() != '\n') advance();
-                    } else if (starts_with_at_pos("#endif")) {
-                        depth--;
-                        while (!at_end() && peek() != '\n') advance();
-                    } else if (depth == 1 && starts_with_at_pos("#else")) {
-                        while (!at_end() && peek() != '\n') advance();
-                        break;
-                    } else {
-                        advance();
-                    }
-                }
-            } else if (c == '#' && starts_with_at_pos("#ifndef __clang__")) {
-                while (!at_end() && peek() != '\n') advance();
-            } else if (c == '#' && starts_with_at_pos("#endif")) {
-                while (!at_end() && peek() != '\n') advance();
-            } else if (c == '#' && starts_with_at_pos("#include")) {
-                while (!at_end() && peek() != '\n') advance();
             } else {
                 break;
             }

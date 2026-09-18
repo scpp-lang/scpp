@@ -57,13 +57,9 @@ namespace scpp {
     const Function& fn, const Body& body, const Signatures& signatures, const ClassFieldTypes& class_field_types);
 [[nodiscard]] std::expected<void, DataflowError> check_initializer_scope_conversions(const Program& program,
                                                                                      const Signatures& signatures);
-[[nodiscard]] std::expected<void, DataflowError> validate_deref_expr(const Expr& expr, const DataflowState& state, const Body& body,
-                         const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> validate_place_indirections(const Expr& expr, const DataflowState& state,
                                                                              const Body& body,
                                                                              const Signatures& signatures);
-[[nodiscard]] std::expected<void, DataflowError> validate_subscript_expr(const Expr& expr, const DataflowState& state, const Body& body,
-                             const Signatures& signatures);
 [[nodiscard]] std::expected<void, DataflowError> apply_deref(const Expr& expr, const DataflowState& state, const Body& body, const Signatures& signatures,
                  bool report_errors);
 // A form-based rejection ("this variable can only be initialized
@@ -77,10 +73,6 @@ namespace scpp {
 [[nodiscard]] std::optional<DataflowError> diagnose_expression_itself(const Expr& expr, const DataflowState& state,
                                                                       const Body& body, const Signatures& signatures);
 
-[[nodiscard]] std::expected<void, DataflowError> apply_expr(const Expr& expr, bool is_move_target_context, DataflowState& state, const Body& body,
-                const Signatures& signatures, bool report_errors);
-[[nodiscard]] std::expected<void, DataflowError> check_call_arguments(const Expr& expr, DataflowState& state, const Body& body,
-                          const Signatures& signatures, bool report_errors);
 // [over.match.conv]/1: resolves the conversion function that takes
 // `expr` to `destination` and checks the call it stands for -- true when
 // one was selected. Declared here because every boundary that requires a
@@ -97,9 +89,6 @@ namespace scpp {
                                                                       const Body& body,
                                                                       const Signatures& signatures,
                                                                       bool report_errors);
-[[nodiscard]] std::expected<void, DataflowError> apply_reference_argument(const Expr& arg, const Type& param_type, DataflowState& state,
-                              InCallBorrows& in_call_borrows, const Body& body,
-                              const Signatures& signatures, bool report_errors);
 [[nodiscard]] std::expected<void, DataflowError> check_constructor_arguments(const Type& constructed_type, const std::vector<ExprPtr>& ctor_args,
                                  DataflowState& state, const Body& body, const Signatures& signatures,
                                  bool report_errors);
@@ -151,7 +140,8 @@ namespace scpp {
 [[nodiscard]] const GlobalVar* find_visible_global_for_name(const std::string& name, bool explicit_global_qualification,
                                                             const Body& body) {
     if (body.program == nullptr) {
-        return find_visible_global(OptionalProgramRef{}, body.function_namespace_path, name, explicit_global_qualification);
+        OptionalProgramRef none{};
+        return find_visible_global(none, body.function_namespace_path, name, explicit_global_qualification);
     }
     std::reference_wrapper<const Program> program_ref{*body.program};
     return find_visible_global(OptionalProgramRef{program_ref}, body.function_namespace_path, name,
@@ -635,7 +625,7 @@ namespace scpp {
     int attributable_shared = 0;
     bool attributable_mutable = false;
     bool overlaps = false;
-    for (const auto& entry : state.ref_targets) {
+    for (const std::pair<const LocalId, RefTarget>& entry : state.ref_targets) {
         LocalId ref_local = entry.first;
         const auto& target = entry.second;
         if (target.is_reborrow()) continue;
@@ -807,7 +797,7 @@ namespace scpp {
     const DataflowState& state, const Body& body, const std::optional<LocalId>& scope_root,
     std::string_view when) {
     std::optional<Place> worst{};
-    for (const auto& entry : state.locals) {
+    for (const std::pair<const Place, LocalState>& entry : state.locals) {
         const Place& place = entry.first;
         LocalState place_state = entry.second;
         if (place.is_whole_local()) continue;
@@ -4120,7 +4110,8 @@ struct ConvertingConstructorBinding {
                 state.local_lifetime_sources[stmt.local] =
                     resolve_lifetime_source_roots(*(*stmt.ctor_args)[0], state, body, signatures, report_errors);
             } else if (stmt.type.kind == TypeKind::Pointer) {
-                state.local_lifetime_sources[stmt.local] = RootSet{};
+                RootSet empty_roots{};
+                state.local_lifetime_sources[stmt.local] = std::move(empty_roots);
             } else if (is_lifetime_eligible_type(stmt.type)) {
                 state.local_lifetime_sources.erase(stmt.local);
             }

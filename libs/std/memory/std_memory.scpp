@@ -195,7 +195,7 @@ public:
 // void*` carries everything the handle actually uses. The typed pointer
 // each shared_ptr<T> hands out is its own `ptr_` field, which never
 // passes through the erasure and so never needs unerasing.
-template<typename T>
+export template<typename T>
 void __shared_ptr_detail_destroy(const void* erased) {
     [[scpp::unsafe]] {
         const T* typed = static_cast<const T*>(erased);
@@ -204,8 +204,8 @@ void __shared_ptr_detail_destroy(const void* erased) {
     return;
 }
 
-template<typename T>
-const void* __shared_ptr_detail_erase(T* ptr) {
+export template<typename T>
+const void* __shared_ptr_detail_erase(const T* ptr) {
     return static_cast<const void*>(ptr);
 }
 
@@ -347,7 +347,8 @@ public:
 
     shared_ptr(T* ptr) {
         this->ptr_ = ptr;
-        this->handle_.reset(std::__shared_ptr_detail_erase<T>(ptr), std::__shared_ptr_detail_destroy<T>);
+        const void* erased = static_cast<const void*>(ptr);
+        this->handle_.reset(erased, std::__shared_ptr_detail_destroy<T>);
         return;
     }
 
@@ -360,7 +361,8 @@ public:
     shared_ptr(unique_ptr<T>&& other) {
         T* raw = other.release();
         this->ptr_ = raw;
-        this->handle_.reset(std::__shared_ptr_detail_erase<T>(raw), std::__shared_ptr_detail_destroy<T>);
+        const void* erased = static_cast<const void*>(raw);
+        this->handle_.reset(erased, std::__shared_ptr_detail_destroy<T>);
         return;
     }
 
@@ -444,7 +446,8 @@ public:
 
     void reset(T* ptr) {
         this->ptr_ = ptr;
-        this->handle_.reset(std::__shared_ptr_detail_erase<T>(ptr), std::__shared_ptr_detail_destroy<T>);
+        const void* erased = static_cast<const void*>(ptr);
+        this->handle_.reset(erased, std::__shared_ptr_detail_destroy<T>);
         return;
     }
 

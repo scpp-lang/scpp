@@ -731,12 +731,11 @@ inline void write_enum(ByteWriter& out, Enum value) {
 
 template<typename T, typename U>
 bool __enum_cast_store(U value [[maybe_unused]], T& out [[maybe_unused]]) {
-#ifdef __clang__
-    out = static_cast<T>(value);
+    [[scpp::unsafe]] {
+        auto ptr = static_cast<U*>(static_cast<void*>(&out));
+        *ptr = value;
+    }
     return true;
-#else
-    return false;
-#endif
 }
 
 template<typename Enum>
@@ -2520,7 +2519,7 @@ void merge_compile_time_payload(Program& imported, StructuredCompileTimePayload&
     }
 }
 
-extern "C" {
+export extern "C" {
     int open(const char* pathname, int flags, ...);
     int close(int fd);
     long read(int fd, void* buf, unsigned long count);
@@ -2675,7 +2674,25 @@ extern "C" {
     return {};
 }
 
-extern "C" {
+export extern "C" {
+    struct dirent {
+        unsigned long d_ino;
+        long d_off;
+        std::uint16_t d_reclen;
+        std::uint8_t d_type;
+        char d_name[256];
+    };
+    struct posix_stat {
+        unsigned long st_dev;
+        unsigned long st_ino;
+        unsigned long st_nlink;
+        unsigned int st_mode;
+        char __pad[116];
+    };
+    void* opendir(const char* name);
+    dirent* readdir(void* dirp);
+    int closedir(void* dirp);
+    int stat(const char* pathname, posix_stat* statbuf);
     long readlink(const char* path, char* buf, unsigned long bufsiz);
     int access(const char* pathname, int mode);
     int unlink(const char* pathname);
@@ -3686,51 +3703,75 @@ private:
         return it->second;
     }
 
-#ifdef __clang__
-    [[nodiscard]] std::expected<void, ParseError> scan_source_root(const std::string& root) {
-        std::filesystem::path normalized_root = std::filesystem::path(root).lexically_normal();
-        if (normalized_root.empty()) normalized_root = ".";
-        std::string root_key = normalized_root.string();
-        if (scanned_source_roots_.contains(root_key)) return {};
-        scanned_source_roots_.insert(root_key);
-        if (!std::filesystem::exists(normalized_root)) return {};
-        std::error_code ec;
-        std::filesystem::recursive_directory_iterator it(normalized_root, ec);
-        std::filesystem::recursive_directory_iterator end;
-        while (!ec && it != end) {
-            const std::filesystem::directory_entry& entry = *it;
-            if (entry.is_directory(ec)) {
-                if (entry.path().filename() == ".scpp") it.disable_recursion_pending();
-                it.increment(ec);
-                continue;
+    [[nodiscard]] std::expected<void, ParseError> scan_source_root_dir(const std::string& dir_path) {
+        void* dir = nullptr;
+        [[scpp::unsafe]] {
+            dir = opendir(dir_path.c_str());
+        }
+        if (dir == nullptr) return {};
+        while (true) {
+            dirent* entry = nullptr;
+            [[scpp::unsafe]] {
+                entry = readdir(dir);
             }
-            if (!entry.is_regular_file(ec)) {
-                it.increment(ec);
-                continue;
+            if (entry == nullptr) break;
+            std::string name{};
+            [[scpp::unsafe]] {
+                name = std::string{entry->d_name};
             }
-            std::string ext = entry.path().extension().string();
-            if (ext != ".scpp" && ext != ".cppm" && ext != ".cpp" && ext != ".cc" && ext != ".cxx") {
-                it.increment(ec);
-                continue;
+            if (name == "." || name == "..") continue;
+            std::string full_path = path_join(dir_path, name);
+            posix_stat st{};
+            int rc = -1;
+            [[scpp::unsafe]] {
+                rc = stat(full_path.c_str(), &st);
             }
-            auto loaded_r = read_module_file(entry.path().string());
-            if (!loaded_r.has_value()) return std::unexpected(ParseError{0, 0, loaded_r.error().what()});
-            LoadedModuleFile loaded = std::move(loaded_r.value());
-            if (std::optional<ScannedModuleDecl> decl = scan_declared_module_from_source(loaded.interface_source);
-                decl.has_value()) {
-                std::string key = decl->module_name;
-                if (!decl->partition_name.empty()) key += ":" + decl->partition_name;
-                register_discovered_source(key, entry.path().lexically_normal().string());
+            if (rc != 0) continue;
+            bool is_dir = (st.st_mode & 0170000) == 0040000;
+            bool is_reg = (st.st_mode & 0170000) == 0100000;
+            if (is_dir) {
+                if (name == ".scpp") continue;
+                if (auto r = scan_source_root_dir(full_path); !r.has_value()) {
+                    [[scpp::unsafe]] {
+                        closedir(dir);
+                    }
+                    return r;
+                }
+            } else if (is_reg) {
+                if (path_ends_with(name, ".scpp") || path_ends_with(name, ".cppm") ||
+                    path_ends_with(name, ".cpp") || path_ends_with(name, ".cc") ||
+                    path_ends_with(name, ".cxx")) {
+                    auto loaded_r = read_module_file(full_path);
+                    if (!loaded_r.has_value()) {
+                        [[scpp::unsafe]] {
+                            closedir(dir);
+                        }
+                        return std::unexpected(ParseError{0, 0, loaded_r.error().what()});
+                    }
+                    LoadedModuleFile loaded = std::move(loaded_r.value());
+                    if (std::optional<ScannedModuleDecl> decl = scan_declared_module_from_source(loaded.interface_source);
+                        decl.has_value()) {
+                        std::string key = decl->module_name;
+                        if (!decl->partition_name.empty()) key += ":" + decl->partition_name;
+                        register_discovered_source(key, path_lexically_normal(full_path));
+                    }
+                }
             }
-            it.increment(ec);
+        }
+        [[scpp::unsafe]] {
+            closedir(dir);
         }
         return {};
     }
-#else
+
     [[nodiscard]] std::expected<void, ParseError> scan_source_root(const std::string& root) {
-        return {};
+        std::string normalized_root = path_lexically_normal(root);
+        if (normalized_root.empty()) normalized_root = std::string{"."};
+        if (scanned_source_roots_.contains(normalized_root)) return {};
+        scanned_source_roots_.insert(normalized_root);
+        if (!path_exists(normalized_root)) return {};
+        return scan_source_root_dir(normalized_root);
     }
-#endif
 
     [[nodiscard]] std::expected<void, ParseError> ensure_module_source_root_scanned(const std::string& module_name) {
         auto module_it = import_paths_.find(module_name);
@@ -3892,7 +3933,6 @@ private:
 
     std::string out{};
     std::size_t line_start = 0;
-    bool skipping_clang = false;
     while (line_start <= source.size()) {
         std::size_t line_end = source.find('\n', line_start);
         bool had_newline = line_end != std::string::npos;
@@ -3900,20 +3940,6 @@ private:
             had_newline ? std::string_view(source).substr(line_start, line_end - line_start)
                         : std::string_view(source).substr(line_start);
         std::string trimmed = trim_copy(line);
-        if (trimmed == "#ifdef __clang__") {
-            skipping_clang = true;
-            if (!had_newline) break;
-            line_start = line_end + 1;
-            continue;
-        }
-        if (skipping_clang) {
-            if (trimmed == "#endif") {
-                skipping_clang = false;
-            }
-            if (!had_newline) break;
-            line_start = line_end + 1;
-            continue;
-        }
         bool is_module_decl = starts_with(trimmed, "export module ") || starts_with(trimmed, "module ") || trimmed == "module;";
         if (is_module_decl) {
             if (keep_module_declaration) {
@@ -3951,7 +3977,6 @@ std::string hoist_non_partition_imports(std::string source) {
     bool module_line_set = false;
 
     std::size_t line_start = 0;
-    bool skipping_clang = false;
     while (line_start <= source.size()) {
         std::size_t line_end = source.find('\n', line_start);
         bool had_newline = line_end != std::string::npos;
@@ -3960,20 +3985,6 @@ std::string hoist_non_partition_imports(std::string source) {
                         : std::string_view(source).substr(line_start);
         std::string line_text = string_from_view(line);
         std::string trimmed = trim_copy(line);
-        if (trimmed == "#ifdef __clang__") {
-            skipping_clang = true;
-            if (!had_newline) break;
-            line_start = line_end + 1;
-            continue;
-        }
-        if (skipping_clang) {
-            if (trimmed == "#endif") {
-                skipping_clang = false;
-            }
-            if (!had_newline) break;
-            line_start = line_end + 1;
-            continue;
-        }
         bool is_module_decl = starts_with(trimmed, "export module ") || starts_with(trimmed, "module ");
         if (is_module_decl && !module_line_set) {
             module_line = line_text;

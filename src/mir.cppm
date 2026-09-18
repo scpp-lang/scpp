@@ -339,7 +339,7 @@ struct PlaceHash {
 
 namespace std {
 
-template<>
+export template<>
 class hash<scpp::Place> {
 public:
     uint64_t operator()(const scpp::Place& place) const {
@@ -347,6 +347,36 @@ public:
     }
 
     virtual ~hash() = default;
+};
+
+export template<>
+class equal_to<scpp::Place> {
+public:
+    bool operator()(const scpp::Place& lhs, const scpp::Place& rhs) const {
+        return lhs == rhs;
+    }
+
+    virtual ~equal_to() = default;
+};
+
+export template<>
+class hash<scpp::LocalId> {
+public:
+    uint64_t operator()(scpp::LocalId value) const {
+        return std::hash<std::size_t>{}(scpp::local_index(value));
+    }
+
+    virtual ~hash() = default;
+};
+
+export template<>
+class equal_to<scpp::LocalId> {
+public:
+    bool operator()(scpp::LocalId lhs, scpp::LocalId rhs) const {
+        return lhs == rhs;
+    }
+
+    virtual ~equal_to() = default;
 };
 
 } // namespace std

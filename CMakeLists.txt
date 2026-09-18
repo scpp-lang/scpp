@@ -344,4 +344,59 @@ add_custom_target(scpp_workspace_artifacts ALL
 # scpp_workspace_artifacts.
 add_dependencies(driver_test scpp_workspace_artifacts)
 
+file(GLOB STAGE1_LLVM_STATIC_LIBS "${LLVM_LIBRARY_DIRS}/libLLVM*.a")
+
+add_library(stage1_partitions OBJECT src/stage1_partitions.cpp)
+target_include_directories(stage1_partitions PRIVATE ${LLVM_INCLUDE_DIRS})
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(stage1_partitions PRIVATE -Wno-error=unknown-attributes -Wno-error=unused-parameter)
+endif()
+
+# =============================================================================
+# Bootstrap Stage 2: Build Stage-1 scpp using Stage-0 scpp
+# =============================================================================
+# Takes the Stage-0 compiler binary produced by Clang ($<TARGET_FILE:scpp>) and
+# uses it to compile the self-hosted compiler modules/sources into a new
+# standalone executable: ${CMAKE_CURRENT_BINARY_DIR}/scpp_stage1.
+# Smoke tests verify that scpp_stage1 --version succeeds and can compile real
+# scpp source files to object files.
+add_custom_target(scpp_stage1 ALL
+    COMMAND $<TARGET_FILE:scpp> -c "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp"
+        -o "${CMAKE_CURRENT_BINARY_DIR}/main_stage1.o"
+        -I "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-cli/modules"
+        -I "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-compiler/modules"
+        -I "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-driver/modules"
+        -I "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-project/modules"
+        -I "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-codegen/modules"
+        -I "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-movecheck/modules"
+        -I "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/llvm/modules"
+        -I "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/std/modules"
+        -I "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp/modules"
+    COMMAND ${CMAKE_CXX_COMPILER}
+        "${CMAKE_CURRENT_BINARY_DIR}/main_stage1.o"
+        "$<TARGET_OBJECTS:stage1_partitions>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-cli/archives/libscpp-cli.scppa"
+        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-project/archives/libscpp-project.scppa"
+        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-driver/archives/libscpp-driver.scppa"
+        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-codegen/archives/libscpp-codegen.scppa"
+        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-movecheck/archives/libscpp-movecheck.scppa"
+        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-compiler/archives/libscpp.ast.scppa"
+        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-compiler/archives/libscpp.constexpression.scppa"
+        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-compiler/archives/libscpp.lexer.scppa"
+        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-compiler/archives/libscpp.mir.scppa"
+        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-compiler/archives/libscpp.parser.scppa"
+        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/llvm/archives/libllvm.scppa"
+        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp/archives/libscpp.scppa"
+        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/std/archives/libstd.scppa"
+        -Wl,--start-group ${STAGE1_LLVM_STATIC_LIBS} -Wl,--end-group
+        ${SQLITE3_LIB}
+        -lz3 -lz -lzstd -lrt -ldl -lm -lpthread
+        -o "${CMAKE_CURRENT_BINARY_DIR}/scpp_stage1"
+    COMMAND "${CMAKE_CURRENT_BINARY_DIR}/scpp_stage1" --version
+    COMMAND "${CMAKE_CURRENT_BINARY_DIR}/scpp_stage1" -c
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/codegentest_source/return_constant.scpp"
+        -o "${CMAKE_CURRENT_BINARY_DIR}/stage1_smoke_test.o"
+    DEPENDS scpp scpp_workspace_artifacts stage1_partitions
+    VERBATIM)
+
 add_subdirectory(applications/httpserver)

@@ -76,10 +76,13 @@ namespace scpp {
 
     const ClassDef* Codegen::find_class_def(const std::string& name) const
 {
+        const ClassDef* forward_decl = nullptr;
         for (const ClassDef& def : program_->classes) {
-            if (def.name == name) return &def;
+            if (def.name != name) continue;
+            if (!def.is_forward_declaration) return &def;
+            if (forward_decl == nullptr) forward_decl = &def;
         }
-        return nullptr;
+        return forward_decl;
     }
 
 

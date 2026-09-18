@@ -17,7 +17,7 @@ export module scpp.compiler.codegen:api;
 
 import std;
 import llvm;
-import scpp.ast;
+export import scpp.ast;
 import scpp.constexpression;
 // For LocalId and the resolved_local_of/declared_local_of accessors.
 // Name resolution is a property of the source program, decided once (see
@@ -51,6 +51,10 @@ public:
     Type expected_param_type{};
 
     CallCandidateRejection() = default;
+    CallCandidateRejection(const CallCandidateRejection&) = default;
+    CallCandidateRejection& operator=(const CallCandidateRejection&) = default;
+    CallCandidateRejection(CallCandidateRejection&&) = default;
+    CallCandidateRejection& operator=(CallCandidateRejection&&) = default;
     CallCandidateRejection(CallRejectionReason r, std::size_t idx = 0, Type t = {})
         : reason{r}, argument_index{idx}, expected_param_type{std::move(t)} {}
     virtual ~CallCandidateRejection() = default;
@@ -108,6 +112,11 @@ private:
         bool has_ordinary_vtable = false;
         unsigned int abi_align = 1;
 
+        StructInfo() = default;
+        StructInfo(const StructInfo&) = default;
+        StructInfo& operator=(const StructInfo&) = default;
+        StructInfo(StructInfo&&) = default;
+        StructInfo& operator=(StructInfo&&) = default;
         virtual ~StructInfo() = default;
 
         // ch05 §5.14: finds `name`'s own index in `field_names`, searching
@@ -147,6 +156,10 @@ private:
         std::optional<unsigned int> alignment = std::nullopt;
 
         LValue() = default;
+        LValue(const LValue&) = default;
+        LValue& operator=(const LValue&) = default;
+        LValue(LValue&&) = default;
+        LValue& operator=(LValue&&) = default;
         LValue(llvm::LLVMValueRef ptr, Type type, std::optional<unsigned int> alignment = std::nullopt)
             : ptr{ptr}, type{std::move(type)}, alignment{alignment} {}
         virtual ~LValue() = default;
@@ -187,6 +200,10 @@ private:
         llvm::LLVMValueRef flag = nullptr;
 
         MovedFlag() = default;
+        MovedFlag(const MovedFlag&) = default;
+        MovedFlag& operator=(const MovedFlag&) = default;
+        MovedFlag(MovedFlag&&) = default;
+        MovedFlag& operator=(MovedFlag&&) = default;
         MovedFlag(std::vector<Projection> p, llvm::LLVMValueRef f = nullptr)
             : path{std::move(p)}, flag{f} {}
         virtual ~MovedFlag() = default;
@@ -204,6 +221,10 @@ private:
         std::vector<MovedFlag> moved_flags{};
 
         LocalSlot() = default;
+        LocalSlot(const LocalSlot&) = default;
+        LocalSlot& operator=(const LocalSlot&) = default;
+        LocalSlot(LocalSlot&&) = default;
+        LocalSlot& operator=(LocalSlot&&) = default;
         LocalSlot(llvm::LLVMValueRef a, Type t, bool c = false, bool s = false, std::vector<MovedFlag> mf = {})
             : alloca{a}, type{std::move(t)}, is_const{c}, is_static_storage{s}, moved_flags{std::move(mf)} {}
         virtual ~LocalSlot() = default;
@@ -247,6 +268,10 @@ private:
         bool is_const = false;
 
         GlobalSlot() = default;
+        GlobalSlot(const GlobalSlot&) = default;
+        GlobalSlot& operator=(const GlobalSlot&) = default;
+        GlobalSlot(GlobalSlot&&) = default;
+        GlobalSlot& operator=(GlobalSlot&&) = default;
         GlobalSlot(llvm::LLVMValueRef g, Type t, bool c = false)
             : global{g}, type{std::move(t)}, is_const{c} {}
         virtual ~GlobalSlot() = default;
@@ -276,10 +301,10 @@ private:
     // codegen_stmt/codegen_expr/codegen_lvalue recurse, purely so a
     // thrown CodegenError can report a location; never consulted by any
     // actual codegen decision.
-    SourceLocation current_loc_;
-    llvm::LLVMContextRef context_;
-    llvm::LLVMModuleRef module_;
-    llvm::LLVMBuilderRef builder_;
+    SourceLocation current_loc_{};
+    llvm::LLVMContextRef context_ = nullptr;
+    llvm::LLVMModuleRef module_ = nullptr;
+    llvm::LLVMBuilderRef builder_ = nullptr;
     // Unlike context_/module_/builder_ (unconditionally set by every
     // constructor call), dibuilder_ is only assigned a real value by
     // initialize_debug_info() when emit_debug_info_ is true -- so it
@@ -292,7 +317,7 @@ private:
     llvm::LLVMMetadataRef compile_unit_file_ = nullptr;
     llvm::LLVMMetadataRef current_debug_scope_ = nullptr;
     llvm::LLVMMetadataRef current_subprogram_ = nullptr;
-    std::string source_path_;
+    std::string source_path_{};
     bool emit_debug_info_ = false;
     // Storage for each of the current function's locals, keyed by the
     // declaration that introduced it -- never by its source name. Two
@@ -301,7 +326,7 @@ private:
     // keying by name aliased both onto one slot and, on scope exit,
     // erased the survivor's along with the shadow's -- silently dropping
     // the outer object's destructor.
-    std::unordered_map<LocalId, LocalSlot> locals_;
+    std::unordered_map<LocalId, LocalSlot> locals_{};
     // The place a reference local was bound to at its declaration, so a
     // place spelled through the reference (`S& r = s; std::move(r.a);`)
     // names the same object the move checker named -- `s.a`, not `r.a`.
@@ -310,10 +335,10 @@ private:
     // it bound. Absent for a reference whose initializer has no exact
     // place (a runtime subscript, a deref), which leaves the
     // conservative "no flag, so destroy it" answer in place.
-    std::unordered_map<LocalId, Place> reference_bound_places_;
-    std::unordered_map<std::string, GlobalSlot> globals_;
-    std::unordered_map<std::string, StructInfo> structs_;
-    std::unordered_set<std::string> declaring_aggregates_;
+    std::unordered_map<LocalId, Place> reference_bound_places_{};
+    std::unordered_map<std::string, GlobalSlot> globals_{};
+    std::unordered_map<std::string, StructInfo> structs_{};
+    std::unordered_set<std::string> declaring_aggregates_{};
     std::unordered_map<std::string, std::vector<const Function*>> call_candidates_cache_with_receiver_{};
     std::unordered_map<std::string, std::vector<const Function*>> call_candidates_cache_no_receiver_{};
     // ch05 §5.10: each Function's actual llvm::LLVM symbol name -- the plain
@@ -327,7 +352,7 @@ private:
     // build_overload_names, keyed by AST node identity (not by name:
     // that's exactly the one-to-many relationship this map exists to
     // resolve).
-    std::unordered_map<const Function*, std::string> overload_names_;
+    std::unordered_map<const Function*, std::string> overload_names_{};
     // A stack of block scopes, each holding the locals declared directly in
     // that block (in declaration order). Pushed/popped around every Block,
     // and around the (possibly brace-less) branches of if/while, so a
@@ -337,7 +362,7 @@ private:
     // previous iteration's allocation. Function parameters are not part
     // of any pushed scope; they live for the whole function and are only
     // freed at Return, same as before.
-    std::vector<std::vector<LocalId>> scope_stack_;
+    std::vector<std::vector<LocalId>> scope_stack_{};
     // A materialized temporary awaiting teardown: the storage, its type,
     // and -- when it was created inside a branch of its own full-
     // expression -- the i1 flag recording whether it was in fact created.
@@ -352,20 +377,25 @@ private:
         llvm::LLVMValueRef live_flag = nullptr;
         std::size_t locals_before = 0;
 
+        PendingTemporary() = default;
+        PendingTemporary(const PendingTemporary&) = default;
+        PendingTemporary& operator=(const PendingTemporary&) = default;
+        PendingTemporary(PendingTemporary&&) = default;
+        PendingTemporary& operator=(PendingTemporary&&) = default;
         virtual ~PendingTemporary() = default;
     };
     // One entry per open full-expression; nested because a full-
     // expression's own evaluation can open another (a default argument,
     // an immediately-invoked lambda body).
-    std::vector<std::vector<PendingTemporary>> full_expression_temporaries_;
+    std::vector<std::vector<PendingTemporary>> full_expression_temporaries_{};
     // The basic block each open full-expression started in. A temporary
     // created in that same block is reached whenever the full-expression
     // is, so it needs no liveness flag; one created in any other block
     // was reached conditionally and does.
-    std::vector<llvm::LLVMBasicBlockRef> full_expression_start_blocks_;
+    std::vector<llvm::LLVMBasicBlockRef> full_expression_start_blocks_{};
     // Parallel to scope_stack_: the lifetime-extended temporaries bound
     // to reference variables declared in each open block scope.
-    std::vector<std::vector<PendingTemporary>> scope_temporaries_;
+    std::vector<std::vector<PendingTemporary>> scope_temporaries_{};
     class ControlFlowFrame {
     public:
         std::optional<llvm::LLVMBasicBlockRef> continue_block = std::nullopt;
@@ -373,25 +403,29 @@ private:
         std::size_t scope_depth = 0;
 
         ControlFlowFrame() = default;
+        ControlFlowFrame(const ControlFlowFrame&) = default;
+        ControlFlowFrame& operator=(const ControlFlowFrame&) = default;
+        ControlFlowFrame(ControlFlowFrame&&) = default;
+        ControlFlowFrame& operator=(ControlFlowFrame&&) = default;
         ControlFlowFrame(std::optional<llvm::LLVMBasicBlockRef> cb, llvm::LLVMBasicBlockRef eb, std::size_t sd)
             : continue_block{std::move(cb)}, end_block{eb}, scope_depth{sd} {}
         virtual ~ControlFlowFrame() = default;
     };
-    std::vector<ControlFlowFrame> control_flow_stack_;
-    std::unordered_map<std::string, llvm::LLVMMetadataRef> debug_type_cache_;
-    std::unordered_map<std::string, llvm::LLVMMetadataRef> debug_file_cache_;
+    std::vector<ControlFlowFrame> control_flow_stack_{};
+    std::unordered_map<std::string, llvm::LLVMMetadataRef> debug_type_cache_{};
+    std::unordered_map<std::string, llvm::LLVMMetadataRef> debug_file_cache_{};
     llvm::LLVMTypeRef interface_representation_llvm_type_ = nullptr;
-    std::unordered_map<std::string, llvm::LLVMTypeRef> interface_dispatch_table_types_;
-    std::unordered_map<std::string, std::vector<const Function*>> interface_dispatch_methods_cache_;
-    std::unordered_map<std::string, std::unordered_map<std::string, std::size_t>> interface_slot_indices_cache_;
-    std::unordered_map<std::string, llvm::LLVMValueRef> interface_dispatch_tables_;
-    std::unordered_map<std::string, llvm::LLVMValueRef> interface_dispatch_thunks_;
-    std::unordered_map<std::string, llvm::LLVMTypeRef> ordinary_vtable_types_;
-    std::unordered_map<std::string, std::vector<const Function*>> ordinary_virtual_methods_cache_;
-    std::unordered_map<std::string, std::unordered_map<std::string, std::size_t>> ordinary_slot_indices_cache_;
-    std::unordered_map<std::string, llvm::LLVMValueRef> ordinary_vtables_;
-    std::unordered_map<std::string, llvm::LLVMValueRef> ordinary_destructor_thunks_;
-    std::vector<std::string> current_global_namespace_path_;
+    std::unordered_map<std::string, llvm::LLVMTypeRef> interface_dispatch_table_types_{};
+    std::unordered_map<std::string, std::vector<const Function*>> interface_dispatch_methods_cache_{};
+    std::unordered_map<std::string, std::unordered_map<std::string, std::size_t>> interface_slot_indices_cache_{};
+    std::unordered_map<std::string, llvm::LLVMValueRef> interface_dispatch_tables_{};
+    std::unordered_map<std::string, llvm::LLVMValueRef> interface_dispatch_thunks_{};
+    std::unordered_map<std::string, llvm::LLVMTypeRef> ordinary_vtable_types_{};
+    std::unordered_map<std::string, std::vector<const Function*>> ordinary_virtual_methods_cache_{};
+    std::unordered_map<std::string, std::unordered_map<std::string, std::size_t>> ordinary_slot_indices_cache_{};
+    std::unordered_map<std::string, llvm::LLVMValueRef> ordinary_vtables_{};
+    std::unordered_map<std::string, llvm::LLVMValueRef> ordinary_destructor_thunks_{};
+    std::vector<std::string> current_global_namespace_path_{};
 
     [[nodiscard]] std::string default_debug_source_path() const;
 
@@ -1038,6 +1072,11 @@ private:
         bool was_bound = false;
         LocalSlot slot{};
 
+        SavedLocalSlot() = default;
+        SavedLocalSlot(const SavedLocalSlot&) = default;
+        SavedLocalSlot& operator=(const SavedLocalSlot&) = default;
+        SavedLocalSlot(SavedLocalSlot&&) = default;
+        SavedLocalSlot& operator=(SavedLocalSlot&&) = default;
         virtual ~SavedLocalSlot() = default;
     };
 
@@ -1835,6 +1874,12 @@ private:
         bool popped = false;
         explicit FullExpressionFrame(Codegen* owner) : codegen{owner} {
             [[scpp::unsafe]] {
+                codegen->push_full_expression();
+            }
+        }
+        explicit FullExpressionFrame(Codegen& owner) {
+            [[scpp::unsafe]] {
+                codegen = &owner;
                 codegen->push_full_expression();
             }
         }

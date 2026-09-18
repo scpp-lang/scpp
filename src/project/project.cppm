@@ -1,8 +1,5 @@
 module;
 
-#include <unistd.h>
-#include <cstdlib>
-
 export module scpp.project;
 
 import std;
@@ -43,24 +40,6 @@ extern "C" {
     int sqlite3_bind_text(sqlite3_stmt* stmt, int index, const char* val, int len, void* destructor);
     const char* sqlite3_column_text(sqlite3_stmt* stmt, int iCol);
 
-    struct dirent {
-        unsigned long d_ino;
-        long d_off;
-        std::uint16_t d_reclen;
-        std::uint8_t d_type;
-        char d_name[256];
-    };
-    struct posix_stat {
-        unsigned long st_dev;
-        unsigned long st_ino;
-        unsigned long st_nlink;
-        unsigned int st_mode;
-        char __pad[116];
-    };
-    void* opendir(const char* name);
-    dirent* readdir(void* dirp);
-    int closedir(void* dirp);
-    int stat(const char* pathname, posix_stat* statbuf);
     int lstat(const char* pathname, posix_stat* statbuf);
     int rmdir(const char* pathname);
     int mkdir(const char* pathname, unsigned int mode);
@@ -71,13 +50,6 @@ extern "C" {
     long read(int fd, void* buf, unsigned long count);
     long write(int fd, const void* buf, unsigned long count);
     int system(const char* command);
-#ifndef __clang__
-    int access(const char* pathname, int mode);
-    int unlink(const char* pathname);
-    long readlink(const char* path, char* buf, unsigned long bufsiz);
-    char* realpath(const char* path, char* resolved_path);
-    char* getenv(const char* name);
-#endif
 }
 
 constexpr int SQLITE_OK = 0;
@@ -424,13 +396,13 @@ class StringMap {
 public:
     virtual ~StringMap() = default;
     StringMap() = default;
-    StringMap(const StringMap& other) {
+    StringMap(const StringMap& other) requires std::copy_constructible<V> {
         for (std::size_t i = 0; i < other.keys_.size(); i++) {
             this->keys_.push_back(other.keys_[i]);
             this->values_.push_back(other.values_[i]);
         }
     }
-    void operator=(const StringMap& other) {
+    void operator=(const StringMap& other) requires std::copy_constructible<V> {
         this->keys_.clear();
         this->values_.clear();
         for (std::size_t i = 0; i < other.keys_.size(); i++) {
