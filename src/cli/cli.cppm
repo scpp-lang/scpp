@@ -373,7 +373,7 @@ bool validate_import_paths(const std::vector<ImportEntry>& import_entries) {
     for (std::size_t i = 0; i < import_entries.size(); i++) {
         const std::string& module_name = import_entries.at(i).name;
         const std::string& path = import_entries.at(i).path;
-        if (ends_with(path, ".scpp") || ends_with(path, ".scppm")) continue;
+        if (ends_with(path, ".scpp") || ends_with(path, ".scppm") || ends_with(path, ".cppm")) continue;
         eprint("error: import path for module '");
         eprint(module_name);
         eprint("' must use the .scpp or .scppm extension, got '");

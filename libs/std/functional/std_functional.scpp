@@ -388,7 +388,8 @@ public:
         // -- every other `call()`/`__move_only_function_invoke*` below
         // shares it for the same reason.
         [[scpp::unsafe]] {
-            return this->invoke_(this->object_, args...);
+            auto invoke_fn = this->invoke_;
+            return invoke_fn(this->object_, args...);
         }
     }
 
@@ -485,7 +486,8 @@ public:
     R call(Args... args) const {
         if (this->invoke_ == nullptr) std::abort();
         [[scpp::unsafe]] {
-            return this->invoke_(this->object_, args...);
+            auto invoke_fn = this->invoke_;
+            return invoke_fn(this->object_, args...);
         }
     }
 
@@ -581,7 +583,8 @@ public:
     R call(Args... args) & {
         if (this->invoke_ == nullptr) std::abort();
         [[scpp::unsafe]] {
-            return this->invoke_(this->object_, args...);
+            auto invoke_fn = this->invoke_;
+            return invoke_fn(this->object_, args...);
         }
     }
 
@@ -677,7 +680,8 @@ public:
     R call(Args... args) const & {
         if (this->invoke_ == nullptr) std::abort();
         [[scpp::unsafe]] {
-            return this->invoke_(this->object_, args...);
+            auto invoke_fn = this->invoke_;
+            return invoke_fn(this->object_, args...);
         }
     }
 
@@ -773,7 +777,8 @@ public:
     R call(Args... args) && {
         if (this->invoke_ == nullptr) std::abort();
         [[scpp::unsafe]] {
-            return this->invoke_(this->object_, args...);
+            auto invoke_fn = this->invoke_;
+            return invoke_fn(this->object_, args...);
         }
     }
 
@@ -869,7 +874,8 @@ public:
     R call(Args... args) const && {
         if (this->invoke_ == nullptr) std::abort();
         [[scpp::unsafe]] {
-            return this->invoke_(this->object_, args...);
+            auto invoke_fn = this->invoke_;
+            return invoke_fn(this->object_, args...);
         }
     }
 
@@ -891,7 +897,7 @@ class hash;
 export template<typename T>
 class equal_to;
 
-uint64_t __hash_mix_uint64(uint64_t value) {
+export uint64_t __hash_mix_uint64(uint64_t value) {
     uint64_t mixed = value;
     [[scpp::unsafe]] {
         mixed = mixed * static_cast<uint64_t>(1099511628211);
@@ -900,7 +906,7 @@ uint64_t __hash_mix_uint64(uint64_t value) {
     return mixed;
 }
 
-uint64_t __hash_string_bytes(const std::string& value) {
+export uint64_t __hash_string_bytes(const std::string& value) {
     uint64_t mixed = static_cast<uint64_t>(1469598103934665603) * 10 + 7;
     uint64_t prime = static_cast<uint64_t>(1099511628211);
     const char* bytes = value.c_str();

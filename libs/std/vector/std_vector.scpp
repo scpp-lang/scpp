@@ -11,20 +11,20 @@ extern "C" {
 
 namespace std {
 
-void* __vector_allocate(uint64_t bytes, uint64_t align) {
+export void* __vector_allocate(uint64_t bytes, uint64_t align) {
     [[scpp::unsafe]] {
         return scpp_vector_allocate(bytes, align);
     }
 }
 
-void __vector_deallocate(void* ptr, uint64_t align) {
+export void __vector_deallocate(void* ptr, uint64_t align) {
     [[scpp::unsafe]] {
         scpp_vector_deallocate(ptr, align);
     }
     return;
 }
 
-void __vector_relocate_bytes(void* dst, void* src, uint64_t bytes) {
+export void __vector_relocate_bytes(void* dst, void* src, uint64_t bytes) {
     [[scpp::unsafe]] {
         scpp_vector_relocate_bytes(dst, src, bytes);
     }
@@ -390,6 +390,24 @@ public:
         return this->size_;
     }
 
+    bool operator==(const vector<T>& other) const {
+        if (this->size_ != other.size_) return false;
+        size_t index = 0;
+        while (index < this->size_) {
+            bool matches = false;
+            [[scpp::unsafe]] {
+                matches = this->data_[index] == other.data_[index];
+            }
+            if (!matches) return false;
+            index = index + 1;
+        }
+        return true;
+    }
+
+    bool operator!=(const vector<T>& other) const {
+        return !(*this == other);
+    }
+
     size_t capacity() const {
         return this->capacity_;
     }
@@ -416,6 +434,19 @@ public:
     // `requires std::copy_constructible<T>` reports a non-copyable T at
     // the point this member is called ([temp.inst]/4) rather than
     // removing resize() from every std::vector<T> that never calls it.
+    void resize(size_t new_size) {
+        while (this->size_ > new_size) {
+            this->pop_back();
+        }
+        if (new_size > this->size_) {
+            this->reserve(new_size);
+            while (this->size_ < new_size) {
+                this->emplace_back();
+            }
+        }
+        return;
+    }
+
     void resize(size_t new_size, const T& value) {
         while (this->size_ > new_size) {
             this->pop_back();

@@ -49,18 +49,37 @@ using BorrowMap = std::unordered_map<LocalId, BorrowState>;
 // A vector rather than a map: the conflict is *overlap*, not key
 // equality (a whole object conflicts with any of its members), and one
 // call has a handful of reference arguments.
-struct InCallBorrow {
-    Place place;
+class InCallBorrow {
+  public:
+    virtual ~InCallBorrow() = default;
+    InCallBorrow() = default;
+    InCallBorrow(const InCallBorrow&) = default;
+    InCallBorrow& operator=(const InCallBorrow&) = default;
+    InCallBorrow(InCallBorrow&&) = default;
+    InCallBorrow& operator=(InCallBorrow&&) = default;
+    InCallBorrow(Place p, bool m) : place{std::move(p)}, mutable_borrow{m} {}
+
+    Place place{};
     bool mutable_borrow = false;
 };
 
 using InCallBorrows = std::vector<InCallBorrow>;
 
-struct RefTarget {
-    RootSet roots;
+class RefTarget {
+  public:
+    virtual ~RefTarget() = default;
+    RefTarget() = default;
+    RefTarget(const RefTarget&) = default;
+    RefTarget& operator=(const RefTarget&) = default;
+    RefTarget(RefTarget&&) = default;
+    RefTarget& operator=(RefTarget&&) = default;
+    RefTarget(RootSet r, std::optional<LocalId> l, std::optional<Place> bp, bool bpe, bool m)
+        : roots{std::move(r)}, lender{l}, bound_place{std::move(bp)}, bound_place_is_exact{bpe}, is_mutable{m} {}
+
+    RootSet roots{};
     // Set only when this reference was tracked by suspending a
     // mutable-reborrow lender rather than by incrementing root borrows.
-    std::optional<LocalId> lender;
+    std::optional<LocalId> lender{};
     // The place this binding was bound to, when it names one --
     // `roots` records which whole locals the borrow is *accounted*
     // against (deliberately coarse: a borrow of `s.a` conflicts with a
@@ -68,7 +87,7 @@ struct RefTarget {
     // the name now denotes. `S& r = s;` makes `r.a` and `s.a` the same
     // object, and move state has to agree about that or moving through
     // one alias would leave the other reading as still-initialized.
-    std::optional<Place> bound_place;
+    std::optional<Place> bound_place{};
     // False when bound_place merely *contains* the object bound (a
     // non-constant subscript: `S& r = arr[i];` records `arr`). Such a
     // place is enough to prove two accesses disjoint, but not to record
@@ -113,8 +132,8 @@ using ParameterLifetimeMap = std::unordered_map<std::string, LifetimeAnnotation>
 // local_decls -- Body::is_valid_local rejects it -- so any attempt to ask
 // for its type or its declaration fails loudly instead of aliasing a real
 // local. format_roots spells it out for diagnostics.
-constexpr LocalId kProgramLifetimeRoot = static_cast<LocalId>(static_cast<std::size_t>(-1));
-constexpr std::string_view kProgramLifetimeRootName = "<program-lifetime>";
+constexpr LocalId kProgramLifetimeRoot = LocalId::ProgramLifetime;
+constexpr const char* kProgramLifetimeRootName = "<program-lifetime>";
 
 // One by-reference capture's hold on the enclosing frame, kept so it can
 // be released when the closure variable dies
@@ -128,10 +147,20 @@ constexpr std::string_view kProgramLifetimeRootName = "<program-lifetime>";
 //    it holds `suspended_reborrows[*lender]` instead -- `[&r]` where `r`
 //    is `int& r = x;`. Entering such a capture against `root` would
 //    double-count the very borrow `r` itself installed.
-struct ClosureCaptureBorrow {
+class ClosureCaptureBorrow {
+  public:
+    virtual ~ClosureCaptureBorrow() = default;
+    ClosureCaptureBorrow() = default;
+    ClosureCaptureBorrow(const ClosureCaptureBorrow&) = default;
+    ClosureCaptureBorrow& operator=(const ClosureCaptureBorrow&) = default;
+    ClosureCaptureBorrow(ClosureCaptureBorrow&&) = default;
+    ClosureCaptureBorrow& operator=(ClosureCaptureBorrow&&) = default;
+    ClosureCaptureBorrow(LocalId r, bool m, std::optional<LocalId> l)
+        : root{r}, is_mutable{m}, lender{l} {}
+
     LocalId root{};
     bool is_mutable = false;
-    std::optional<LocalId> lender;
+    std::optional<LocalId> lender{};
 
     bool operator==(const ClosureCaptureBorrow&) const = default;
 };
@@ -140,16 +169,38 @@ using ClosureCaptureBorrowMap = std::unordered_map<LocalId, std::vector<ClosureC
 using ClassFieldTypes = std::unordered_map<std::string, std::unordered_map<std::string, Type>>;
 using ClassFieldAccess = std::unordered_map<std::string, std::unordered_map<std::string, AccessSpecifier>>;
 
-struct DataflowState {
-    StateMap locals;
-    BorrowMap borrows;
-    RefTargetMap ref_targets;
-    LocalLifetimeSourceMap local_lifetime_sources;
-    ParameterLifetimeMap parameter_lifetimes;
-    ReborrowSuspensionMap suspended_reborrows;
-    ClosureCaptureBorrowMap closure_capture_borrows;
+class DataflowState {
+  public:
+    virtual ~DataflowState() = default;
+    DataflowState() = default;
+    DataflowState(const DataflowState&) = default;
+    DataflowState& operator=(const DataflowState&) = default;
+    DataflowState(DataflowState&&) = default;
+    DataflowState& operator=(DataflowState&&) = default;
+
+    DataflowState(StateMap l, BorrowMap b, RefTargetMap rt, LocalLifetimeSourceMap lls,
+                  ParameterLifetimeMap pl, ReborrowSuspensionMap sr, ClosureCaptureBorrowMap ccb,
+                  int ud, std::string cc, std::string lacc, const std::string* w,
+                  const std::unordered_set<std::string>* cn, const ClassFieldTypes* cft,
+                  const ClassFieldAccess* cfa, const std::unordered_set<std::string>* cwc,
+                  const std::unordered_set<std::string>* cwa, SourceLocation cl)
+        : locals{std::move(l)}, borrows{std::move(b)}, ref_targets{std::move(rt)},
+          local_lifetime_sources{std::move(lls)}, parameter_lifetimes{std::move(pl)},
+          suspended_reborrows{std::move(sr)}, closure_capture_borrows{std::move(ccb)},
+          unsafe_depth{ud}, current_class{std::move(cc)}, lexical_access_context_class{std::move(lacc)},
+          witness_check_owner_class{w}, class_names{cn}, class_field_types{cft},
+          class_field_access{cfa}, classes_with_copy_ctor{cwc}, classes_with_copy_assign{cwa},
+          current_loc{cl} {}
+
+    StateMap locals{};
+    BorrowMap borrows{};
+    RefTargetMap ref_targets{};
+    LocalLifetimeSourceMap local_lifetime_sources{};
+    ParameterLifetimeMap parameter_lifetimes{};
+    ReborrowSuspensionMap suspended_reborrows{};
+    ClosureCaptureBorrowMap closure_capture_borrows{};
     int unsafe_depth = 0;
-    std::string current_class;
+    std::string current_class{};
     // Non-empty only inside a lambda's synthesized `_call` method (see
     // Function::access_context_class's own doc comment, ast.cppm) --
     // the *additional* class whose private members are also accessible
@@ -157,7 +208,7 @@ struct DataflowState {
     // current_class (which for such a method names the closure's own,
     // unrelated synthetic class). grants_private_access (dataflow.cppm)
     // is the only reader; every ordinary function leaves this empty.
-    std::string lexical_access_context_class;
+    std::string lexical_access_context_class{};
     // Function::witness_check_owner_class, carried through so
     // grants_private_access can recognize a generic class's own
     // witness-instantiated spelling from inside that class's synthetic
@@ -173,7 +224,7 @@ struct DataflowState {
     const ClassFieldAccess* class_field_access = nullptr;
     const std::unordered_set<std::string>* classes_with_copy_ctor = nullptr;
     const std::unordered_set<std::string>* classes_with_copy_assign = nullptr;
-    SourceLocation current_loc;
+    SourceLocation current_loc{};
 
     [[nodiscard]] bool operator==(const DataflowState& other) const;
 };
@@ -220,14 +271,7 @@ void forget_place_tree(StateMap& state, const Place& place);
 [[nodiscard]] bool is_program_lifetime_root(LocalId root);
 
 bool DataflowState::operator==(const DataflowState& other) const {
-    if (parameter_lifetimes.size() != other.parameter_lifetimes.size()) return false;
-    for (const auto& entry : parameter_lifetimes) {
-        const auto& name = entry.first;
-        const auto& lifetime = entry.second;
-        auto it = other.parameter_lifetimes.find(name);
-        if (it == other.parameter_lifetimes.end()) return false;
-        if (lifetime.name != it->second.name) return false;
-    }
+    if (parameter_lifetimes != other.parameter_lifetimes) return false;
     return locals == other.locals && borrows == other.borrows && ref_targets == other.ref_targets &&
            local_lifetime_sources == other.local_lifetime_sources &&
            suspended_reborrows == other.suspended_reborrows &&
@@ -419,12 +463,29 @@ std::string describe_bad_state(const std::string& name, LocalState state) {
     }
 }
 RootSet canonicalize_roots(RootSet roots) {
-    std::sort(roots.begin(), roots.end());
-    roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
-    return roots;
+    for (std::size_t i = 1; i < roots.size(); i++) {
+        LocalId key = roots[i];
+        std::size_t j = i;
+        while (j > 0 && local_index(roots[j - 1]) > local_index(key)) {
+            roots[j] = roots[j - 1];
+            j--;
+        }
+        roots[j] = key;
+    }
+    RootSet dedup{};
+    for (std::size_t i = 0; i < roots.size(); i++) {
+        if (dedup.empty() || dedup.back() != roots[i]) {
+            dedup.push_back(roots[i]);
+        }
+    }
+    return dedup;
 }
 
-[[nodiscard]] RootSet single_root(LocalId root) { return RootSet{root}; }
+[[nodiscard]] RootSet single_root(LocalId root) {
+    RootSet r{};
+    r.push_back(root);
+    return r;
+}
 
 [[nodiscard]] RootSet program_lifetime_root() { return single_root(kProgramLifetimeRoot); }
 
@@ -479,12 +540,21 @@ RootSet union_roots(RootSet lhs, const RootSet& rhs) {
     while (true) {
         auto it = state.find(current);
         if (it != state.end() && it->second != LocalState::Initialized) return current;
-        if (current.is_whole_local()) return place;
+        if (current.is_whole_local()) return Place{place};
         current = current.parent();
     }
 }
 [[nodiscard]] LocalState lookup(const StateMap& state, LocalId local) {
     return lookup(state, whole_local_place(local));
+}
+
+[[nodiscard]] inline bool projection_path_less(const std::vector<Projection>& a, const std::vector<Projection>& b) {
+    if (a.size() != b.size()) return a.size() < b.size();
+    for (std::size_t i = 0; i < a.size(); i++) {
+        if (a[i] < b[i]) return true;
+        if (b[i] < a[i]) return false;
+    }
+    return false;
 }
 
 [[nodiscard]] std::optional<Place> find_moved_subobject(const StateMap& state, const Place& place) {
@@ -497,7 +567,7 @@ RootSet union_roots(RootSet lhs, const RootSet& rhs) {
         // Deterministic across runs: an unordered_map's iteration order
         // is not, and a diagnostic that names a different member on
         // different runs is not a diagnostic anyone can act on.
-        if (!found.has_value() || key.path < found->path) found = key;
+        if (!found.has_value() || projection_path_less(key.path, found->path)) found = key;
     }
     return found;
 }
@@ -507,7 +577,11 @@ void reinitialize_place(StateMap& state, const Place& place) {
     // §6.2(4)): the stale MovedOut entry on `s.a` must not outlive
     // `s = ...`, or the next read of `s.a` would report a move that the
     // assignment already undid.
-    std::erase_if(state, [&](const auto& entry) { return entry.first.is_strictly_under(place); });
+    std::vector<Place> to_erase{};
+    for (const auto& entry : state) {
+        if (entry.first.is_strictly_under(place)) to_erase.push_back(entry.first);
+    }
+    for (const Place& p : to_erase) state.erase(p);
     state[place] = LocalState::Initialized;
 }
 
@@ -516,12 +590,20 @@ void mark_place_moved_out(StateMap& state, const Place& place) {
     // lookup already derives a subobject's state from what contains it,
     // so keeping them would be a second copy of the same fact -- and a
     // stale one the moment the place is reinitialized.
-    std::erase_if(state, [&](const auto& entry) { return entry.first.is_strictly_under(place); });
+    std::vector<Place> to_erase{};
+    for (const auto& entry : state) {
+        if (entry.first.is_strictly_under(place)) to_erase.push_back(entry.first);
+    }
+    for (const Place& p : to_erase) state.erase(p);
     state[place] = LocalState::MovedOut;
 }
 
 void forget_place_tree(StateMap& state, const Place& place) {
-    std::erase_if(state, [&](const auto& entry) { return entry.first.is_at_or_under(place); });
+    std::vector<Place> to_erase{};
+    for (const auto& entry : state) {
+        if (entry.first.is_at_or_under(place)) to_erase.push_back(entry.first);
+    }
+    for (const Place& p : to_erase) state.erase(p);
 }
 
 } // namespace scpp

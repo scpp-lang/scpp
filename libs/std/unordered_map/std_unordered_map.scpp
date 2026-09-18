@@ -12,13 +12,13 @@ extern "C" {
 
 namespace std {
 
-void* unordered_map_allocate_bytes(uint64_t bytes, uint64_t align) {
+export void* unordered_map_allocate_bytes(uint64_t bytes, uint64_t align) {
     [[scpp::unsafe]] {
         return scpp_vector_allocate(bytes, align);
     }
 }
 
-void unordered_map_deallocate_bytes(void* ptr, uint64_t align) {
+export void unordered_map_deallocate_bytes(void* ptr, uint64_t align) {
     [[scpp::unsafe]] {
         scpp_vector_deallocate(ptr, align);
     }
@@ -561,6 +561,103 @@ public:
     bool contains(const K& key) const {
         unordered_map_entry<K, V>* empty{};
         return this->__find_entry(key) != empty;
+    }
+
+    bool erase(const K& key) {
+        size_t index = this->__bucket_index_for_hash(this->__hash(key), this->slot_count_);
+        size_t probes = 0;
+        while (probes < this->slot_count_) {
+            int state = 0;
+            [[scpp::unsafe]] {
+                state = this->states_[index];
+            }
+            if (state == 0) return false;
+            if (state == 1) {
+                unordered_map_entry<K, V>* candidate{};
+                [[scpp::unsafe]] {
+                    candidate = this->slots_[index];
+                }
+                bool matches = false;
+                [[scpp::unsafe]] {
+                    matches = this->__equals(candidate->first, key);
+                }
+                if (matches) {
+                    this->__delete_entry(candidate);
+                    [[scpp::unsafe]] {
+                        this->states_[index] = 2;
+                    }
+                    this->size_ = this->size_ - 1;
+                    this->tombstones_ = this->tombstones_ + 1;
+                    if (this->size_ == 0) {
+                        this->clear();
+                    } else if (this->tombstones_ > this->size_) {
+                        this->__rehash(this->slot_count_);
+                    }
+                    return true;
+                }
+            }
+            index = this->__probe_next(index);
+            probes = probes + 1;
+        }
+        return false;
+    }
+
+    bool operator==(const unordered_map<K, V>& other) const {
+        if (this->size_ != other.size_) return false;
+        size_t index = 0;
+        unordered_map_entry<K, V>* empty{};
+        while (index < this->slot_count_) {
+            int state = 0;
+            [[scpp::unsafe]] {
+                state = this->states_[index];
+            }
+            if (state == 1) {
+                unordered_map_entry<K, V>* entry{};
+                unordered_map_entry<K, V>* other_entry{};
+                bool matches = false;
+                [[scpp::unsafe]] {
+                    entry = this->slots_[index];
+                    other_entry = other.__find_entry(entry->first);
+                    if (other_entry != empty) {
+                        matches = entry->second == other_entry->second;
+                    }
+                }
+                if (other_entry == empty || !matches) return false;
+            }
+            index = index + 1;
+        }
+        return true;
+    }
+
+    bool operator!=(const unordered_map<K, V>& other) const {
+        return !(*this == other);
+    }
+
+    unordered_map_entry<K, V>& __entry_at_linear_index(size_t linear_index) const {
+        size_t count = 0;
+        size_t idx = 0;
+        while (idx < this->slot_count_) {
+            int state = 0;
+            [[scpp::unsafe]] {
+                state = this->states_[idx];
+            }
+            if (state == 1) {
+                if (count == linear_index) {
+                    [[scpp::unsafe]] {
+                        return *this->slots_[idx];
+                    }
+                }
+                count = count + 1;
+            }
+            idx = idx + 1;
+        }
+        [[scpp::unsafe]] {
+            return *this->slots_[0];
+        }
+    }
+
+    unordered_map_entry<K, V>& operator[](int linear_index) const {
+        return this->__entry_at_linear_index(static_cast<size_t>(linear_index));
     }
 
     // [unord.map.elem]/1: `mapped_type& operator[](const key_type& k);`
