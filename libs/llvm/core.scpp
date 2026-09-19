@@ -146,11 +146,15 @@ export constexpr llvm::LLVMTypeKind LLVMIntegerTypeKind = llvm::LLVMTypeKind::LL
 
 export enum class LLVMLinkage {
     LLVMExternalLinkage = 0,
+    LLVMLinkOnceODRLinkage = 3,
+    LLVMWeakODRLinkage = 6,
     LLVMAppendingLinkage = 7,
     LLVMInternalLinkage = 8,
     LLVMPrivateLinkage = 9,
 };
 export constexpr llvm::LLVMLinkage LLVMExternalLinkage = llvm::LLVMLinkage::LLVMExternalLinkage;
+export constexpr llvm::LLVMLinkage LLVMLinkOnceODRLinkage = llvm::LLVMLinkage::LLVMLinkOnceODRLinkage;
+export constexpr llvm::LLVMLinkage LLVMWeakODRLinkage = llvm::LLVMLinkage::LLVMWeakODRLinkage;
 export constexpr llvm::LLVMLinkage LLVMAppendingLinkage = llvm::LLVMLinkage::LLVMAppendingLinkage;
 export constexpr llvm::LLVMLinkage LLVMInternalLinkage = llvm::LLVMLinkage::LLVMInternalLinkage;
 export constexpr llvm::LLVMLinkage LLVMPrivateLinkage = llvm::LLVMLinkage::LLVMPrivateLinkage;

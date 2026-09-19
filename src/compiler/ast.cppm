@@ -5410,3 +5410,48 @@ enum class ConversionDestinationSet {
 }
 
 } // namespace scpp
+
+namespace std {
+
+export template<>
+class hash<const scpp::Function*> {
+public:
+    uint64_t operator()(const scpp::Function* fn) const {
+        if (fn == nullptr) return 0;
+        std::string fn_name{};
+        [[scpp::unsafe]] {
+            fn_name = fn->name;
+        }
+        return std::hash<std::string>{}(fn_name);
+    }
+    virtual ~hash() = default;
+};
+
+export template<>
+class equal_to<const scpp::Function*> {
+public:
+    bool operator()(const scpp::Function* lhs, const scpp::Function* rhs) const {
+        return lhs == rhs;
+    }
+    virtual ~equal_to() = default;
+};
+
+export template<>
+class hash<scpp::Function*> {
+public:
+    uint64_t operator()(scpp::Function* fn) const {
+        return std::hash<const scpp::Function*>{}(fn);
+    }
+    virtual ~hash() = default;
+};
+
+export template<>
+class equal_to<scpp::Function*> {
+public:
+    bool operator()(scpp::Function* lhs, scpp::Function* rhs) const {
+        return lhs == rhs;
+    }
+    virtual ~equal_to() = default;
+};
+
+} // namespace std

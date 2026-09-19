@@ -28,7 +28,11 @@ namespace scpp {
                 for (const auto& s : stmt.statements) {
                     // Once a block has a terminator (return), skip anything
                     // after it: unreachable code shouldn't be lowered.
-                    if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) != nullptr) break;
+                    bool has_term = false;
+                    [[scpp::unsafe]] {
+                        has_term = llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) != nullptr;
+                    }
+                    if (has_term) break;
                     if (auto r = codegen_stmt(*s, current_function); !r.has_value()) return std::unexpected(std::move(r).error());
                 }
                 if (stmt.is_unsafe) unsafe_depth_--;
@@ -58,7 +62,7 @@ namespace scpp {
                     }
                     std::optional<unsigned int> declared_alignment = alignment_for_type(stmt.type);
                     if (stmt.resolved_alignment != 0) {
-                        unsigned int explicit_align = stmt.resolved_alignment;
+                        unsigned int explicit_align = static_cast<unsigned int>(stmt.resolved_alignment);
                         if (!declared_alignment.has_value() || explicit_align > *declared_alignment) {
                             declared_alignment = explicit_align;
                         }
@@ -67,102 +71,129 @@ namespace scpp {
                         if (current_function_def_ == nullptr) {
                             return std::unexpected(CodegenError("internal error: function-local static outside a function body", current_loc_));
                         }
-                        auto add_internal_global = [&, this](llvm::LLVMTypeRef llvm_type, const std::string& name,
+                        Codegen* self = nullptr;
+                        [[scpp::unsafe]] {
+                            self = this;
+                        }
+                        auto add_internal_global = [self](llvm::LLVMTypeRef llvm_type, const std::string& name,
                                                        llvm::LLVMValueRef init) {
-                            llvm::LLVMValueRef global = llvm::LLVMAddGlobal(module_, llvm_type, name.c_str());
-                            llvm::LLVMSetLinkage(global, llvm::LLVMInternalLinkage);
-                            llvm::LLVMSetGlobalConstant(global, /*IsConstant=*/0);
-                            llvm::LLVMSetInitializer(global, init);
+                            llvm::LLVMValueRef global = nullptr;
+                            [[scpp::unsafe]] {
+                                global = llvm::LLVMAddGlobal(self->module_, llvm_type, name.c_str());
+                                llvm::LLVMSetLinkage(global, llvm::LLVMInternalLinkage);
+                                llvm::LLVMSetGlobalConstant(global, /*IsConstant=*/0);
+                                llvm::LLVMSetInitializer(global, init);
+                            }
                             return global;
                         };
-                        auto get_or_declare_runtime_fn = [&, this](const std::string& name, llvm::LLVMTypeRef fn_type) {
-                            llvm::LLVMValueRef fn = llvm::LLVMGetNamedFunction(module_, name.c_str());
-                            if (fn == nullptr) fn = llvm::LLVMAddFunction(module_, name.c_str(), fn_type);
+                        auto get_or_declare_runtime_fn = [self](const std::string& name, llvm::LLVMTypeRef fn_type) {
+                            llvm::LLVMValueRef fn = nullptr;
+                            [[scpp::unsafe]] {
+                                fn = llvm::LLVMGetNamedFunction(self->module_, name.c_str());
+                                if (fn == nullptr) fn = llvm::LLVMAddFunction(self->module_, name.c_str(), fn_type);
+                            }
                             return fn;
                         };
                         auto define_static_local_destructor_helper =
-                            [&, this](const std::string& helper_name, llvm::LLVMValueRef storage,
+                            [&, self](const std::string& helper_name, llvm::LLVMValueRef storage,
                                 llvm::LLVMValueRef moved_flag) -> llvm::LLVMValueRef {
-                            llvm::LLVMTypeRef fn_type =
-                                llvm::LLVMFunctionType(llvm::LLVMVoidTypeInContext(context_), nullptr, 0, /*IsVarArg=*/0);
-                            llvm::LLVMValueRef fn = llvm::LLVMGetNamedFunction(module_, helper_name.c_str());
-                            if (fn != nullptr) return fn;
-                            fn = llvm::LLVMAddFunction(module_, helper_name.c_str(), fn_type);
-                            llvm::LLVMSetLinkage(fn, llvm::LLVMInternalLinkage);
-                            llvm::LLVMBasicBlockRef saved_bb = llvm::LLVMGetInsertBlock(builder_);
-                            const Function* saved_function = current_function_def_;
-                            SourceLocation saved_loc = current_loc_;
-                            llvm::LLVMBasicBlockRef entry =
-                                llvm::LLVMAppendBasicBlockInContext(context_, fn, "entry");
-                            llvm::LLVMPositionBuilderAtEnd(builder_, entry);
-                            current_function_def_ = nullptr;
-                            current_loc_ = stmt.loc;
-                            codegen_destroy_storage_unless_moved(stmt.type, storage, moved_flag);
-                            llvm::LLVMBuildRetVoid(builder_);
-                            current_function_def_ = saved_function;
-                            current_loc_ = saved_loc;
-                            if (saved_bb != nullptr) llvm::LLVMPositionBuilderAtEnd(builder_, saved_bb);
-                            refresh_debug_location(stmt.loc);
+                            llvm::LLVMTypeRef fn_type{};
+                            llvm::LLVMValueRef fn = nullptr;
+                            [[scpp::unsafe]] {
+                                fn_type = llvm::LLVMFunctionType(llvm::LLVMVoidTypeInContext(self->context_), nullptr, 0, /*IsVarArg=*/0);
+                                fn = llvm::LLVMGetNamedFunction(self->module_, helper_name.c_str());
+                                if (fn != nullptr) return fn;
+                                fn = llvm::LLVMAddFunction(self->module_, helper_name.c_str(), fn_type);
+                                llvm::LLVMSetLinkage(fn, llvm::LLVMInternalLinkage);
+                            }
+                            llvm::LLVMBasicBlockRef saved_bb = nullptr;
+                            const Function* saved_function = nullptr;
+                            SourceLocation saved_loc{};
+                            llvm::LLVMBasicBlockRef entry = nullptr;
+                            [[scpp::unsafe]] {
+                                saved_bb = llvm::LLVMGetInsertBlock(self->builder_);
+                                saved_function = self->current_function_def_;
+                                saved_loc = self->current_loc_;
+                                entry = llvm::LLVMAppendBasicBlockInContext(self->context_, fn, "entry");
+                                llvm::LLVMPositionBuilderAtEnd(self->builder_, entry);
+                                self->current_function_def_ = nullptr;
+                                self->current_loc_ = stmt.loc;
+                                self->codegen_destroy_storage_unless_moved(stmt.type, storage, moved_flag);
+                                llvm::LLVMBuildRetVoid(self->builder_);
+                                self->current_function_def_ = saved_function;
+                                self->current_loc_ = saved_loc;
+                                if (saved_bb != nullptr) llvm::LLVMPositionBuilderAtEnd(self->builder_, saved_bb);
+                                self->refresh_debug_location(stmt.loc);
+                            }
                             return fn;
                         };
 
                         std::string static_base = "__scpp_static_local." + overload_names_.at(current_function_def_) + "." +
-                                                  stmt.var_name + "." + std::to_string(stmt.loc.line) + "." +
-                                                  std::to_string(stmt.loc.column);
+                                                  stmt.var_name + "." + std::to_string(static_cast<std::int64_t>(stmt.loc.line)) + "." +
+                                                  std::to_string(static_cast<std::int64_t>(stmt.loc.column));
                         llvm::LLVMTypeRef storage_type{};
                         if (stmt.type.kind == TypeKind::Reference) {
-                            storage_type = llvm::LLVMPointerTypeInContext(context_, 0);
+                            [[scpp::unsafe]] {
+                                storage_type = llvm::LLVMPointerTypeInContext(context_, 0);
+                            }
                         } else {
                             auto storage_type_result = to_llvm_type(stmt.type);
                             if (!storage_type_result.has_value()) return std::unexpected(std::move(storage_type_result).error());
                             storage_type = std::move(storage_type_result).value();
                         }
-                        llvm::LLVMValueRef storage =
-                            add_internal_global(storage_type, static_base + ".storage", llvm::LLVMConstNull(storage_type));
-                        if (declared_alignment.has_value()) llvm::LLVMSetAlignment(storage, *declared_alignment);
-                        llvm::LLVMTypeRef guard_type = llvm::LLVMInt64TypeInContext(context_);
-                        llvm::LLVMValueRef guard = add_internal_global(
-                            guard_type, static_base + ".guard",
-                            llvm::LLVMConstInt(guard_type, 0, /*SignExtend=*/0));
+                        llvm::LLVMValueRef storage = nullptr;
+                        llvm::LLVMValueRef guard = nullptr;
                         llvm::LLVMValueRef moved_flag = nullptr;
-                        if (type_has_destructor(stmt.type)) {
-                            llvm::LLVMTypeRef moved_flag_type = llvm::LLVMInt1TypeInContext(context_);
-                            moved_flag = add_internal_global(
-                                moved_flag_type, static_base + ".moved",
-                                llvm::LLVMConstInt(moved_flag_type, 0, /*SignExtend=*/0));
+                        llvm::LLVMValueRef guard_acquire = nullptr;
+                        llvm::LLVMValueRef guard_release = nullptr;
+                        llvm::LLVMValueRef atexit_fn = nullptr;
+                        llvm::LLVMValueRef acquired = nullptr;
+                        llvm::LLVMValueRef should_init = nullptr;
+                        llvm::LLVMValueRef current_fn = nullptr;
+                        llvm::LLVMBasicBlockRef init_bb = nullptr;
+                        llvm::LLVMBasicBlockRef cont_bb = nullptr;
+                        [[scpp::unsafe]] {
+                            storage =
+                                add_internal_global(storage_type, static_base + ".storage", llvm::LLVMConstNull(storage_type));
+                            if (declared_alignment.has_value()) llvm::LLVMSetAlignment(storage, *declared_alignment);
+                            llvm::LLVMTypeRef guard_type = llvm::LLVMInt64TypeInContext(context_);
+                            guard = add_internal_global(
+                                guard_type, static_base + ".guard",
+                                llvm::LLVMConstInt(guard_type, 0, /*SignExtend=*/0));
+                            if (type_has_destructor(stmt.type)) {
+                                llvm::LLVMTypeRef moved_flag_type = llvm::LLVMInt1TypeInContext(context_);
+                                moved_flag = add_internal_global(
+                                    moved_flag_type, static_base + ".moved",
+                                    llvm::LLVMConstInt(moved_flag_type, 0, /*SignExtend=*/0));
+                            }
+
+                            llvm::LLVMTypeRef guard_ptr_type = llvm::LLVMPointerTypeInContext(context_, 0);
+                            llvm::LLVMTypeRef guard_acquire_params[1] = {guard_ptr_type};
+                            guard_acquire = get_or_declare_runtime_fn(
+                                "__cxa_guard_acquire",
+                                llvm::LLVMFunctionType(llvm::LLVMInt32TypeInContext(context_), guard_acquire_params, 1,
+                                                       /*IsVarArg=*/0));
+                            guard_release = get_or_declare_runtime_fn(
+                                "__cxa_guard_release",
+                                llvm::LLVMFunctionType(llvm::LLVMVoidTypeInContext(context_), guard_acquire_params, 1,
+                                                       /*IsVarArg=*/0));
+                            llvm::LLVMTypeRef atexit_params[1] = {guard_ptr_type};
+                            atexit_fn = get_or_declare_runtime_fn(
+                                "atexit",
+                                llvm::LLVMFunctionType(llvm::LLVMInt32TypeInContext(context_), atexit_params,
+                                                       1, /*IsVarArg=*/0));
+
+                            acquired = build_call(guard_acquire, {guard});
+                            should_init = llvm::LLVMBuildICmp(
+                                builder_, llvm::LLVMIntNE, acquired,
+                                llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), 0, /*SignExtend=*/0),
+                                "staticguard");
+                            current_fn = llvm::LLVMGetBasicBlockParent(llvm::LLVMGetInsertBlock(builder_));
+                            init_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "static.init");
+                            cont_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "static.cont");
+                            llvm::LLVMBuildCondBr(builder_, should_init, init_bb, cont_bb);
+                            llvm::LLVMPositionBuilderAtEnd(builder_, init_bb);
                         }
-
-                        llvm::LLVMTypeRef guard_ptr_type = llvm::LLVMPointerTypeInContext(context_, 0);
-                        llvm::LLVMTypeRef guard_acquire_params[1] = {guard_ptr_type};
-                        llvm::LLVMValueRef guard_acquire = get_or_declare_runtime_fn(
-                            "__cxa_guard_acquire",
-                            llvm::LLVMFunctionType(llvm::LLVMInt32TypeInContext(context_), guard_acquire_params, 1,
-                                                   /*IsVarArg=*/0));
-                        llvm::LLVMValueRef guard_release = get_or_declare_runtime_fn(
-                            "__cxa_guard_release",
-                            llvm::LLVMFunctionType(llvm::LLVMVoidTypeInContext(context_), guard_acquire_params, 1,
-                                                   /*IsVarArg=*/0));
-                        llvm::LLVMValueRef atexit_fn = get_or_declare_runtime_fn(
-                            "atexit",
-                            [&, this]() {
-                                llvm::LLVMTypeRef atexit_params[1] = {guard_ptr_type};
-                                return llvm::LLVMFunctionType(llvm::LLVMInt32TypeInContext(context_), atexit_params,
-                                                              1, /*IsVarArg=*/0);
-                            }());
-
-                        llvm::LLVMValueRef acquired = build_call(guard_acquire, {guard});
-                        llvm::LLVMValueRef should_init = llvm::LLVMBuildICmp(
-                            builder_, llvm::LLVMIntNE, acquired,
-                            llvm::LLVMConstInt(llvm::LLVMInt32TypeInContext(context_), 0, /*SignExtend=*/0),
-                            "staticguard");
-                        llvm::LLVMValueRef current_fn = llvm::LLVMGetBasicBlockParent(llvm::LLVMGetInsertBlock(builder_));
-                        llvm::LLVMBasicBlockRef init_bb =
-                            llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "static.init");
-                        llvm::LLVMBasicBlockRef cont_bb =
-                            llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "static.cont");
-                        llvm::LLVMBuildCondBr(builder_, should_init, init_bb, cont_bb);
-
-                        llvm::LLVMPositionBuilderAtEnd(builder_, init_bb);
                         refresh_debug_location(stmt.loc);
                         if (stmt.type.kind == TypeKind::Reference) {
                             if (!stmt.init) {
@@ -181,7 +212,9 @@ namespace scpp {
                                 if (!lvalue_result.has_value()) return std::unexpected(std::move(lvalue_result).error());
                                 referent_addr = std::move(lvalue_result).value().ptr;
                             }
-                            llvm::LLVMBuildStore(builder_, referent_addr, storage);
+                            [[scpp::unsafe]] {
+                                llvm::LLVMBuildStore(builder_, referent_addr, storage);
+                            }
                         } else if (stmt.type.kind == TypeKind::Span) {
                             if (!stmt.init) {
                                 return std::unexpected(CodegenError("span '" + stmt.var_name +
@@ -191,7 +224,9 @@ namespace scpp {
                             auto span_value_result = codegen_span_value_for_target(*stmt.init, stmt.type);
                             if (!span_value_result.has_value()) return std::unexpected(std::move(span_value_result).error());
                             llvm::LLVMValueRef span_value = std::move(span_value_result).value();
-                            llvm::LLVMBuildStore(builder_, span_value, storage);
+                            [[scpp::unsafe]] {
+                                llvm::LLVMBuildStore(builder_, span_value, storage);
+                            }
                         } else if (stmt.init && stmt.init->kind == ExprKind::Lambda) {
                             if (auto r = codegen_construct_lambda(*stmt.init, storage); !r.has_value()) return std::unexpected(std::move(r).error());
                         } else if (stmt.has_ctor_args) {
@@ -232,24 +267,32 @@ namespace scpp {
                                             describe_constructor_resolution_failure(stmt.type.name, stmt.ctor_args),
                                             current_loc_));
                                     }
-                                } else if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
-                                    auto value_result =
-                                        codegen_constructed_class_value(stmt.type.name, stmt.ctor_args, ctor_def);
-                                    if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
-                                    create_store(std::move(value_result).value(), storage, declared_alignment);
                                 } else {
-                                    llvm::LLVMValueRef ctor =
-                                        llvm::LLVMGetNamedFunction(module_, overload_names_.at(ctor_def).c_str());
-                                    if (ctor == nullptr) {
-                                        return std::unexpected(CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
-                                            current_loc_));
+                                    bool is_consteval = false;
+                                    [[scpp::unsafe]] {
+                                        is_consteval = (ctor_def->eval_mode == FunctionEvalMode::Consteval);
                                     }
-                                    auto args_result = emit_constructor_arguments_and_virtual_bases(
-                                        stmt.type.name, ctor_def, stmt.ctor_args, storage);
-                                    if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
-                                    std::vector<llvm::LLVMValueRef> args = std::move(args_result).value();
-                                    args.insert(args.begin(), storage);
-                                    build_call(ctor, args);
+                                    if (is_consteval) {
+                                        auto value_result =
+                                            codegen_constructed_class_value(stmt.type.name, stmt.ctor_args, ctor_def);
+                                        if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
+                                        create_store(std::move(value_result).value(), storage, declared_alignment);
+                                    } else {
+                                        llvm::LLVMValueRef ctor = nullptr;
+                                        [[scpp::unsafe]] {
+                                            ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(ctor_def).c_str());
+                                        }
+                                        if (ctor == nullptr) {
+                                            return std::unexpected(CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
+                                                current_loc_));
+                                        }
+                                        auto args_result = emit_constructor_arguments_and_virtual_bases(
+                                            stmt.type.name, ctor_def, stmt.ctor_args, storage);
+                                        if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
+                                        std::vector<llvm::LLVMValueRef> args = std::move(args_result).value();
+                                        args.insert(args.begin(), storage);
+                                        build_call(ctor, args);
+                                    }
                                 }
                                 }
                             }
@@ -283,9 +326,14 @@ namespace scpp {
                                 if (!src_result.has_value()) return std::unexpected(std::move(src_result).error());
                                 Codegen::LValue src = std::move(src_result).value();
                                 if (const Function* user_ctor = find_user_declared_copy_ctor_ast(stmt.type.name); user_ctor != nullptr) {
-                                    llvm::LLVMValueRef ctor =
-                                        llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
-                                    build_call(ctor, {storage, src.ptr});
+                                    llvm::LLVMValueRef ctor = nullptr;
+                                    [[scpp::unsafe]] {
+                                        ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
+                                    }
+                                    std::vector<llvm::LLVMValueRef> call_args{};
+                                    call_args.push_back(storage);
+                                    call_args.push_back(src.ptr);
+                                    build_call(ctor, call_args);
                                 } else {
                                     if (auto r = codegen_memberwise_copy_construct(storage, src.ptr, stmt.type.name); !r.has_value()) return std::unexpected(std::move(r).error());
                                 }
@@ -329,8 +377,10 @@ namespace scpp {
                             std::string ctor_name = stmt.type.name + "_new";
                             const Function* ctor_def = resolve_overload_by_type(ctor_name, no_args, /*param_offset=*/1);
                             if (ctor_def != nullptr) {
-                                llvm::LLVMValueRef ctor =
-                                    llvm::LLVMGetNamedFunction(module_, overload_names_.at(ctor_def).c_str());
+                                llvm::LLVMValueRef ctor = nullptr;
+                                [[scpp::unsafe]] {
+                                    ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(ctor_def).c_str());
+                                }
                                 if (ctor == nullptr) {
                                     return std::unexpected(CodegenError("class '" + stmt.type.name + "' has no constructor matching this call",
                                         current_loc_));
@@ -338,7 +388,9 @@ namespace scpp {
                                 if (auto r = emit_constructor_arguments_and_virtual_bases(stmt.type.name, ctor_def,
                                                                                           no_args, storage);
                                     !r.has_value()) return std::unexpected(std::move(r).error());
-                                build_call(ctor, {storage});
+                                std::vector<llvm::LLVMValueRef> call_args{};
+                                call_args.push_back(storage);
+                                build_call(ctor, call_args);
                             } else if (record_is_implicitly_default_initializable(stmt.type.name)) {
                                 if (auto r = emit_default_initializers_for_record_storage(
                                     storage, stmt.type.name, /*initialize_virtual_interface_bases=*/true); !r.has_value()) return std::unexpected(std::move(r).error());
@@ -351,16 +403,23 @@ namespace scpp {
                         }
 
                         if (moved_flag != nullptr) {
-                            llvm::LLVMBuildStore(builder_,
-                                                 llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, 0), moved_flag);
+                            [[scpp::unsafe]] {
+                                llvm::LLVMBuildStore(builder_,
+                                                     llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 0, 0), moved_flag);
+                            }
                             llvm::LLVMValueRef dtor_helper = define_static_local_destructor_helper(
                                 static_base + ".dtor", storage, moved_flag);
-                            build_call(atexit_fn, {dtor_helper});
+                            std::vector<llvm::LLVMValueRef> atexit_args{};
+                            atexit_args.push_back(dtor_helper);
+                            build_call(atexit_fn, atexit_args);
                         }
-                        build_call(guard_release, {guard});
-                        llvm::LLVMBuildBr(builder_, cont_bb);
-
-                        llvm::LLVMPositionBuilderAtEnd(builder_, cont_bb);
+                        std::vector<llvm::LLVMValueRef> guard_args{};
+                        guard_args.push_back(guard);
+                        build_call(guard_release, guard_args);
+                        [[scpp::unsafe]] {
+                            llvm::LLVMBuildBr(builder_, cont_bb);
+                            llvm::LLVMPositionBuilderAtEnd(builder_, cont_bb);
+                        }
                         refresh_debug_location(stmt.loc);
                         locals_[declared_local_of(stmt)] = Codegen::LocalSlot{storage, stmt.type};
                         locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
@@ -427,9 +486,11 @@ namespace scpp {
                             if (!lvalue_result.has_value()) return std::unexpected(std::move(lvalue_result).error());
                             referent_addr = std::move(lvalue_result).value().ptr;
                         }
-                        llvm::LLVMValueRef slot =
-                            create_entry_block_alloca(llvm::LLVMPointerTypeInContext(context_, 0), stmt.var_name, declared_alignment);
-                        llvm::LLVMBuildStore(builder_, referent_addr, slot);
+                        llvm::LLVMValueRef slot = nullptr;
+                        [[scpp::unsafe]] {
+                            slot = create_entry_block_alloca(llvm::LLVMPointerTypeInContext(context_, 0), stmt.var_name, declared_alignment);
+                            llvm::LLVMBuildStore(builder_, referent_addr, slot);
+                        }
                         locals_[declared_local_of(stmt)] = Codegen::LocalSlot{slot, stmt.type};
                         locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
                         // Remember what this reference was bound to, so a
@@ -462,7 +523,9 @@ namespace scpp {
                         if (!span_value_result.has_value()) return std::unexpected(std::move(span_value_result).error());
                         llvm::LLVMValueRef span_value = std::move(span_value_result).value();
                         llvm::LLVMValueRef slot = create_entry_block_alloca(span_type, stmt.var_name, declared_alignment);
-                        llvm::LLVMBuildStore(builder_, span_value, slot);
+                        [[scpp::unsafe]] {
+                            llvm::LLVMBuildStore(builder_, span_value, slot);
+                        }
                         locals_[declared_local_of(stmt)] = Codegen::LocalSlot{slot, stmt.type};
                         locals_[declared_local_of(stmt)].is_const = stmt.is_const || stmt.is_constexpr;
                         if (auto r = maybe_emit_local_debug_decl(stmt.var_name, stmt.type, slot, stmt.loc); !r.has_value()) return std::unexpected(std::move(r).error());
@@ -557,8 +620,14 @@ namespace scpp {
                             if (!src_result.has_value()) return std::unexpected(std::move(src_result).error());
                             Codegen::LValue src = std::move(src_result).value();
                             if (const Function* user_ctor = find_user_declared_copy_ctor_ast(stmt.type.name); user_ctor != nullptr) {
-                                llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
-                                build_call(ctor, {slot, src.ptr});
+                                llvm::LLVMValueRef ctor = nullptr;
+                                [[scpp::unsafe]] {
+                                    ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(user_ctor).c_str());
+                                }
+                                std::vector<llvm::LLVMValueRef> call_args{};
+                                call_args.push_back(slot);
+                                call_args.push_back(src.ptr);
+                                build_call(ctor, call_args);
                             } else {
                                 if (auto r = codegen_memberwise_copy_construct(slot, src.ptr, stmt.type.name); !r.has_value()) return std::unexpected(std::move(r).error());
                             }
@@ -663,25 +732,39 @@ namespace scpp {
                     // (value stays null) but `return expr;` is only well-formed
                     // there when `expr` itself is void-typed, so the check needs
                     // the expression's own type, not the `ret` operand's.
-                    llvm::LLVMTypeRef returned_type = llvm::LLVMVoidTypeInContext(context_);
+                    llvm::LLVMTypeRef returned_type = nullptr;
+                    [[scpp::unsafe]] {
+                        returned_type = llvm::LLVMVoidTypeInContext(context_);
+                    }
+                    Type current_ret_type{};
+                    bool has_fn_def = false;
+                    [[scpp::unsafe]] {
+                        if (current_function_def_ != nullptr) {
+                            has_fn_def = true;
+                            current_ret_type = current_function_def_->return_type;
+                        }
+                    }
                     if (stmt.expr) {
-                        if (current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Named &&
-                            current_function_def_->return_type.name == "void") {
+                        if (has_fn_def && current_ret_type.kind == TypeKind::Named &&
+                            current_ret_type.name == "void") {
                             auto value_result = codegen_expr(*stmt.expr);
                             if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
-                            if (llvm::LLVMValueRef evaluated = std::move(value_result).value(); evaluated != nullptr)
-                                returned_type = llvm::LLVMTypeOf(evaluated);
-                        } else if (current_function_def_ != nullptr && is_interface_reference_type(current_function_def_->return_type)) {
-                            auto value_result = codegen_interface_value_for_target(*stmt.expr, current_function_def_->return_type);
+                            if (llvm::LLVMValueRef evaluated = std::move(value_result).value(); evaluated != nullptr) {
+                                [[scpp::unsafe]] {
+                                    returned_type = llvm::LLVMTypeOf(evaluated);
+                                }
+                            }
+                        } else if (has_fn_def && is_interface_reference_type(current_ret_type)) {
+                            auto value_result = codegen_interface_value_for_target(*stmt.expr, current_ret_type);
                             if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                             value = std::move(value_result).value();
-                        } else if (current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Reference) {
+                        } else if (has_fn_def && current_ret_type.kind == TypeKind::Reference) {
                             auto lvalue_result = codegen_lvalue(*stmt.expr);
                             if (!lvalue_result.has_value()) return std::unexpected(std::move(lvalue_result).error());
                             value = std::move(lvalue_result).value().ptr;
-                        } else if (current_function_def_ != nullptr &&
-                                              is_named_record_type(current_function_def_->return_type) &&
-                                              is_implicit_move_return_source(*stmt.expr, current_function_def_->return_type)) {
+                        } else if (has_fn_def &&
+                                              is_named_record_type(current_ret_type) &&
+                                              is_implicit_move_return_source(*stmt.expr, current_ret_type)) {
                             Expr implicit_move{};
                             implicit_move.kind = ExprKind::Move;
                             implicit_move.loc = stmt.expr->loc;
@@ -689,8 +772,8 @@ namespace scpp {
                             auto value_result = codegen_expr(implicit_move);
                             if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                             value = std::move(value_result).value();
-                        } else if (current_function_def_ != nullptr && current_function_def_->return_type.kind == TypeKind::Named &&
-                                              find_class_def(current_function_def_->return_type.name) != nullptr) {
+                        } else if (has_fn_def && current_ret_type.kind == TypeKind::Named &&
+                                              find_class_def(current_ret_type.name) != nullptr) {
                             // /*allow_implicit_converting_ctor=*/true: mirrors
                             // movecheck's own dataflow.cppm return-statement check
                             // (return_converting_ctor, via
@@ -703,12 +786,12 @@ namespace scpp {
                             // codegen would emit stmt.expr's own (mismatched) type
                             // directly as the `ret` operand instead of constructing
                             // the actual return type, tripping LLVM's IR verifier.
-                            auto value_result = codegen_class_value_for_boundary(*stmt.expr, current_function_def_->return_type,
+                            auto value_result = codegen_class_value_for_boundary(*stmt.expr, current_ret_type,
                                                                                  /*allow_implicit_converting_ctor=*/true);
                             if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                             value = std::move(value_result).value();
-                        } else if (current_function_def_ != nullptr) {
-                            auto value_result = codegen_value_for_target(*stmt.expr, current_function_def_->return_type);
+                        } else if (has_fn_def) {
+                            auto value_result = codegen_value_for_target(*stmt.expr, current_ret_type);
                             if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
                             value = std::move(value_result).value();
                         } else {
@@ -717,14 +800,20 @@ namespace scpp {
                             value = std::move(value_result).value();
                         }
                     }
-                    if (value != nullptr) returned_type = llvm::LLVMTypeOf(value);
+                    if (value != nullptr) {
+                        [[scpp::unsafe]] {
+                            returned_type = llvm::LLVMTypeOf(value);
+                        }
+                    }
                     if (auto r = check_return_type(returned_type, stmt); !r.has_value()) return std::unexpected(std::move(r).error());
                     frame.pop();
                     if (auto r = emit_function_exit_cleanup(); !r.has_value()) return std::unexpected(std::move(r).error());
-                    if (value != nullptr) {
-                        llvm::LLVMBuildRet(builder_, value);
-                    } else {
-                        llvm::LLVMBuildRetVoid(builder_);
+                    [[scpp::unsafe]] {
+                        if (value != nullptr) {
+                            llvm::LLVMBuildRet(builder_, value);
+                        } else {
+                            llvm::LLVMBuildRetVoid(builder_);
+                        }
                     }
                     return {};
                 }();
@@ -769,57 +858,61 @@ namespace scpp {
                         cond = std::move(cond_result).value();
                         frame.pop();
                     }
-                    llvm::LLVMBasicBlockRef then_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "if.then");
-                    llvm::LLVMBasicBlockRef else_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "if.else");
-                    llvm::LLVMBasicBlockRef merge_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "if.end");
-
-                    llvm::LLVMBuildCondBr(builder_, cond, then_block, else_block);
+                    llvm::LLVMBasicBlockRef then_block = nullptr;
+                    llvm::LLVMBasicBlockRef else_block = nullptr;
+                    llvm::LLVMBasicBlockRef merge_block = nullptr;
+                    [[scpp::unsafe]] {
+                        then_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "if.then");
+                        else_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "if.else");
+                        merge_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "if.end");
+                        llvm::LLVMBuildCondBr(builder_, cond, then_block, else_block);
+                        llvm::LLVMPositionBuilderAtEnd(builder_, then_block);
+                    }
 
                     // then/else each get their own scope so a unique_ptr
                     // declared in one branch (with or without braces -- a
                     // bare `if (c) unique_ptr<T> x = ...;` is valid grammar,
                     // same as real C++) is dropped at the end of *that*
                     // branch, not left dangling in the flat locals_ map.
-                    llvm::LLVMPositionBuilderAtEnd(builder_, then_block);
                     push_scope();
                     if (auto r = codegen_stmt(*stmt.then_branch, current_function); !r.has_value()) return std::unexpected(std::move(r).error());
                     pop_scope();
-                    if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) == nullptr) {
-                        llvm::LLVMBuildBr(builder_, merge_block);
+                    [[scpp::unsafe]] {
+                        if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) == nullptr) {
+                            llvm::LLVMBuildBr(builder_, merge_block);
+                        }
+                        llvm::LLVMPositionBuilderAtEnd(builder_, else_block);
                     }
 
-                    llvm::LLVMPositionBuilderAtEnd(builder_, else_block);
                     push_scope();
                     if (stmt.else_branch) {
                         if (auto r = codegen_stmt(*stmt.else_branch, current_function); !r.has_value()) return std::unexpected(std::move(r).error());
                     }
                     pop_scope();
-                    if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) == nullptr) {
-                        llvm::LLVMBuildBr(builder_, merge_block);
+                    [[scpp::unsafe]] {
+                        if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) == nullptr) {
+                            llvm::LLVMBuildBr(builder_, merge_block);
+                        }
+                        llvm::LLVMPositionBuilderAtEnd(builder_, merge_block);
+                        if (llvm::LLVMGetFirstUse(llvm::LLVMBasicBlockAsValue(merge_block)) == nullptr) {
+                            llvm::LLVMBuildUnreachable(builder_);
+                        }
                     }
-
-                    llvm::LLVMPositionBuilderAtEnd(builder_, merge_block);
-                    if (llvm::LLVMGetFirstUse(llvm::LLVMBasicBlockAsValue(merge_block)) != nullptr) {
-                        return {};
-                    }
-                    // Both branches terminated (e.g. returned), so this merge
-                    // point is unreachable; give it a terminator anyway since
-                    // every basic block must end with one, and let the caller
-                    // see the *original* branches' terminators, not this dead
-                    // block, when checking "does this path return?".
-                    llvm::LLVMBuildUnreachable(builder_);
                     return {};
                 }();
 
             case StmtKind::While:
                 return [&, this]() -> std::expected<void, CodegenError> {
-                    llvm::LLVMBasicBlockRef cond_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "while.cond");
-                    llvm::LLVMBasicBlockRef body_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "while.body");
-                    llvm::LLVMBasicBlockRef end_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "while.end");
-
-                    llvm::LLVMBuildBr(builder_, cond_block);
-
-                    llvm::LLVMPositionBuilderAtEnd(builder_, cond_block);
+                    llvm::LLVMBasicBlockRef cond_block = nullptr;
+                    llvm::LLVMBasicBlockRef body_block = nullptr;
+                    llvm::LLVMBasicBlockRef end_block = nullptr;
+                    [[scpp::unsafe]] {
+                        cond_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "while.cond");
+                        body_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "while.body");
+                        end_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "while.end");
+                        llvm::LLVMBuildBr(builder_, cond_block);
+                        llvm::LLVMPositionBuilderAtEnd(builder_, cond_block);
+                    }
                     // A `while (true)` condition -- including `for (;;)`'s
                     // desugared `true` placeholder condition (see
                     // desugar_classic_for) -- is known at parse time to
@@ -835,7 +928,9 @@ namespace scpp {
                     // it (the false positive this whole branch avoids).
                     bool condition_always_true = stmt.condition->kind == ExprKind::BoolLiteral && stmt.condition->bool_value;
                     if (condition_always_true) {
-                        llvm::LLVMBuildBr(builder_, body_block);
+                        [[scpp::unsafe]] {
+                            llvm::LLVMBuildBr(builder_, body_block);
+                        }
                     } else {
                         // Same bool_to_i1 narrowing as the If case above,
                         // and the same per-evaluation full-expression: a
@@ -846,7 +941,9 @@ namespace scpp {
                         if (!cond_result.has_value()) return std::unexpected(std::move(cond_result).error());
                         llvm::LLVMValueRef cond = std::move(cond_result).value();
                         frame.pop();
-                        llvm::LLVMBuildCondBr(builder_, cond, body_block, end_block);
+                        [[scpp::unsafe]] {
+                            llvm::LLVMBuildCondBr(builder_, cond, body_block, end_block);
+                        }
                     }
 
                     // The body's scope is popped (and its unique_ptr locals
@@ -854,19 +951,22 @@ namespace scpp {
                     // jumping back to re-check the condition -- so a
                     // unique_ptr re-declared each iteration doesn't leak the
                     // previous iteration's allocation.
-                    llvm::LLVMPositionBuilderAtEnd(builder_, body_block);
+                    [[scpp::unsafe]] {
+                        llvm::LLVMPositionBuilderAtEnd(builder_, body_block);
+                    }
                     push_scope();
                     control_flow_stack_.push_back(Codegen::ControlFlowFrame{cond_block, end_block, scope_stack_.size()});
                     if (auto r = codegen_stmt(*stmt.then_branch, current_function); !r.has_value()) return std::unexpected(std::move(r).error());
                     pop_scope();
                     control_flow_stack_.pop_back();
-                    if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) == nullptr) {
-                        llvm::LLVMBuildBr(builder_, cond_block);
-                    }
-
-                    llvm::LLVMPositionBuilderAtEnd(builder_, end_block);
-                    if (llvm::LLVMGetFirstUse(llvm::LLVMBasicBlockAsValue(end_block)) == nullptr) {
-                        llvm::LLVMBuildUnreachable(builder_);
+                    [[scpp::unsafe]] {
+                        if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) == nullptr) {
+                            llvm::LLVMBuildBr(builder_, cond_block);
+                        }
+                        llvm::LLVMPositionBuilderAtEnd(builder_, end_block);
+                        if (llvm::LLVMGetFirstUse(llvm::LLVMBasicBlockAsValue(end_block)) == nullptr) {
+                            llvm::LLVMBuildUnreachable(builder_);
+                        }
                     }
                     return {};
                 }();
@@ -881,11 +981,14 @@ namespace scpp {
                         condition = std::move(condition_result).value();
                         frame.pop();
                     }
-                    llvm::LLVMBasicBlockRef end_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "switch.end");
+                    llvm::LLVMBasicBlockRef end_block = nullptr;
                     std::vector<llvm::LLVMBasicBlockRef> case_blocks{};
-                    case_blocks.reserve(stmt.switch_cases.size());
-                    for (std::size_t i = 0; i < stmt.switch_cases.size(); i++) {
-                        case_blocks.push_back(llvm::LLVMAppendBasicBlockInContext(context_, current_function, "switch.case"));
+                    [[scpp::unsafe]] {
+                        end_block = llvm::LLVMAppendBasicBlockInContext(context_, current_function, "switch.end");
+                        case_blocks.reserve(stmt.switch_cases.size());
+                        for (std::size_t i = 0; i < stmt.switch_cases.size(); i++) {
+                            case_blocks.push_back(llvm::LLVMAppendBasicBlockInContext(context_, current_function, "switch.case"));
+                        }
                     }
                     llvm::LLVMBasicBlockRef default_block = end_block;
                     std::vector<std::pair<llvm::LLVMValueRef, llvm::LLVMBasicBlockRef>> value_cases{};
@@ -899,32 +1002,40 @@ namespace scpp {
                         }
                     }
 
-                    llvm::LLVMBasicBlockRef current_test_block = llvm::LLVMGetInsertBlock(builder_);
-                    for (std::size_t i = 0; i < value_cases.size(); i++) {
-                        llvm::LLVMBasicBlockRef false_block =
-                            (i + 1 == value_cases.size()) ? default_block
-                                                          : llvm::LLVMAppendBasicBlockInContext(context_, current_function,
-                                                                                                "switch.test");
-                        llvm::LLVMPositionBuilderAtEnd(builder_, current_test_block);
-                        llvm::LLVMValueRef matches =
-                            llvm::LLVMBuildICmp(builder_, llvm::LLVMIntEQ, condition, value_cases[i].first, "switch.match");
-                        llvm::LLVMBuildCondBr(builder_, matches, value_cases[i].second, false_block);
-                        current_test_block = false_block;
-                    }
-                    if (value_cases.empty()) {
-                        llvm::LLVMBuildBr(builder_, default_block);
-                    } else if (current_test_block == default_block &&
-                               llvm::LLVMGetBasicBlockTerminator(default_block) == nullptr &&
-                               default_block == end_block) {
-                        llvm::LLVMPositionBuilderAtEnd(builder_, default_block);
+                    [[scpp::unsafe]] {
+                        llvm::LLVMBasicBlockRef current_test_block = llvm::LLVMGetInsertBlock(builder_);
+                        for (std::size_t i = 0; i < value_cases.size(); i++) {
+                            llvm::LLVMBasicBlockRef false_block =
+                                (i + 1 == value_cases.size()) ? default_block
+                                                              : llvm::LLVMAppendBasicBlockInContext(context_, current_function,
+                                                                                                    "switch.test");
+                            llvm::LLVMPositionBuilderAtEnd(builder_, current_test_block);
+                            llvm::LLVMValueRef matches =
+                                llvm::LLVMBuildICmp(builder_, llvm::LLVMIntEQ, condition, value_cases[i].first, "switch.match");
+                            llvm::LLVMBuildCondBr(builder_, matches, value_cases[i].second, false_block);
+                            current_test_block = false_block;
+                        }
+                        if (value_cases.empty()) {
+                            llvm::LLVMBuildBr(builder_, default_block);
+                        } else if (current_test_block == default_block &&
+                                   llvm::LLVMGetBasicBlockTerminator(default_block) == nullptr &&
+                                   default_block == end_block) {
+                            llvm::LLVMPositionBuilderAtEnd(builder_, default_block);
+                        }
                     }
 
                     for (std::size_t i = 0; i < stmt.switch_cases.size(); i++) {
-                        llvm::LLVMPositionBuilderAtEnd(builder_, case_blocks[i]);
+                        [[scpp::unsafe]] {
+                            llvm::LLVMPositionBuilderAtEnd(builder_, case_blocks[i]);
+                        }
                         push_scope();
                         control_flow_stack_.push_back(Codegen::ControlFlowFrame{std::nullopt, end_block, scope_stack_.size()});
                         for (const StmtPtr& child : stmt.switch_cases[i].statements) {
-                            if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) != nullptr) break;
+                            bool has_term = false;
+                            [[scpp::unsafe]] {
+                                has_term = llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) != nullptr;
+                            }
+                            if (has_term) break;
                             if (auto r = codegen_stmt(*child, current_function); !r.has_value()) return std::unexpected(std::move(r).error());
                         }
                         bool falls_into_next_case =
@@ -933,14 +1044,18 @@ namespace scpp {
                              stmt.switch_cases[i].statements.back()->kind == StmtKind::Fallthrough);
                         pop_scope();
                         control_flow_stack_.pop_back();
-                        if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) == nullptr) {
-                            llvm::LLVMBasicBlockRef target =
-                                (falls_into_next_case && i + 1 < case_blocks.size()) ? case_blocks[i + 1] : end_block;
-                            llvm::LLVMBuildBr(builder_, target);
+                        [[scpp::unsafe]] {
+                            if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) == nullptr) {
+                                llvm::LLVMBasicBlockRef target =
+                                    (falls_into_next_case && i + 1 < case_blocks.size()) ? case_blocks[i + 1] : end_block;
+                                llvm::LLVMBuildBr(builder_, target);
+                            }
                         }
                     }
 
-                    llvm::LLVMPositionBuilderAtEnd(builder_, end_block);
+                    [[scpp::unsafe]] {
+                        llvm::LLVMPositionBuilderAtEnd(builder_, end_block);
+                    }
                     // Ask LLVM whether anything actually branches here, rather
                     // than trying to predict it from the shape of the source:
                     // a `break;` reaching this block can sit arbitrarily deep
@@ -948,8 +1063,12 @@ namespace scpp {
                     // `if` within the case), so no syntactic peek at a case's
                     // last statement can see all of them. Same idiom as the
                     // `if` merge block and the `while` end block above.
-                    if (llvm::LLVMGetFirstUse(llvm::LLVMBasicBlockAsValue(end_block)) == nullptr) {
-                        llvm::LLVMBuildUnreachable(builder_);
+                    bool has_no_use = false;
+                    [[scpp::unsafe]] {
+                        has_no_use = llvm::LLVMGetFirstUse(llvm::LLVMBasicBlockAsValue(end_block)) == nullptr;
+                        if (has_no_use) {
+                            llvm::LLVMBuildUnreachable(builder_);
+                        }
                     }
                     return {};
                 }();
@@ -957,15 +1076,20 @@ namespace scpp {
             case StmtKind::Break:
                 if (!control_flow_stack_.empty()) {
                     emit_scope_cleanup_to_depth(control_flow_stack_.back().scope_depth);
-                    llvm::LLVMBuildBr(builder_, control_flow_stack_.back().end_block);
+                    [[scpp::unsafe]] {
+                        llvm::LLVMBuildBr(builder_, control_flow_stack_.back().end_block);
+                    }
                 }
                 return {};
 
             case StmtKind::Continue:
-                for (auto it = control_flow_stack_.rbegin(); it != control_flow_stack_.rend(); ++it) {
-                    if (!it->continue_block.has_value()) continue;
-                    emit_scope_cleanup_to_depth(it->scope_depth);
-                    llvm::LLVMBuildBr(builder_, *it->continue_block);
+                for (std::size_t cfs_idx = control_flow_stack_.size(); cfs_idx > 0; --cfs_idx) {
+                    const auto& frame = control_flow_stack_[cfs_idx - 1];
+                    if (!frame.continue_block.has_value()) continue;
+                    emit_scope_cleanup_to_depth(frame.scope_depth);
+                    [[scpp::unsafe]] {
+                        llvm::LLVMBuildBr(builder_, *frame.continue_block);
+                    }
                     return {};
                 }
                 return {};
@@ -994,13 +1118,17 @@ namespace scpp {
         // define_function), so emit_scope_cleanup_to_depth above can't
         // see them; they need this separate pass.
         if (current_function_def_ != nullptr) {
-            const std::vector<Param>& params = current_function_def_->params;
-            for (auto it = params.rbegin(); it != params.rend(); ++it) {
-                if (it->resolved_local == 0) continue;
-                auto slot_it = locals_.find(param_local(*it));
+            std::vector<Param> params{};
+            [[scpp::unsafe]] {
+                params = current_function_def_->params;
+            }
+            for (std::size_t p_idx = params.size(); p_idx > 0; --p_idx) {
+                const auto& param_elem = params[p_idx - 1];
+                if (param_elem.resolved_local == 0) continue;
+                auto slot_it = locals_.find(param_local(param_elem));
                 if (slot_it == locals_.end()) continue;
                 if (slot_it->second.is_static_storage) continue;
-                Place root = whole_local_place(param_local(*it));
+                Place root = whole_local_place(param_local(param_elem));
                 codegen_destroy_storage_unless_moved(slot_it->second.type, slot_it->second.alloca,
                                                      /*moved_flag=*/nullptr, &root);
             }
@@ -1017,11 +1145,20 @@ namespace scpp {
         // pointer to some unknown concrete object, not storage laid out
         // by the interface, and an interface declares no members of its
         // own.
-        if (current_function_def_ != nullptr && is_destructor_function(*current_function_def_) &&
-            !interface_destructor_uses_raw_this(*current_function_def_)) {
+        bool is_dtor = false;
+        bool is_raw_this = false;
+        std::string owner_class{};
+        if (current_function_def_ != nullptr) {
+            [[scpp::unsafe]] {
+                is_dtor = is_destructor_function(*current_function_def_);
+                is_raw_this = interface_destructor_uses_raw_this(*current_function_def_);
+                owner_class = current_function_def_->member_owner_class;
+            }
+        }
+        if (is_dtor && !is_raw_this) {
             auto object_ptr_result = load_this_object_ptr();
             if (!object_ptr_result.has_value()) return std::unexpected(std::move(object_ptr_result).error());
-            if (auto r = emit_class_member_teardown(current_function_def_->member_owner_class,
+            if (auto r = emit_class_member_teardown(owner_class,
                                                     std::move(object_ptr_result).value());
                 !r.has_value()) {
                 return std::unexpected(std::move(r).error());
@@ -1041,7 +1178,9 @@ namespace scpp {
     void Codegen::push_full_expression()
 {
         full_expression_temporaries_.emplace_back();
-        full_expression_start_blocks_.push_back(llvm::LLVMGetInsertBlock(builder_));
+        [[scpp::unsafe]] {
+            full_expression_start_blocks_.push_back(llvm::LLVMGetInsertBlock(builder_));
+        }
     }
 
 
@@ -1057,12 +1196,18 @@ namespace scpp {
         // some branch decided whether it exists at all -- the same
         // "record what actually happened, then consult it at teardown"
         // shape as a moved-out local's flag.
-        if (llvm::LLVMGetInsertBlock(builder_) != full_expression_start_blocks_.back()) {
-            pending.live_flag = create_zeroed_flag_in_entry_block("tmplive");
-            llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 1, /*SignExtend=*/0),
-                                 pending.live_flag);
+        bool different_block = false;
+        [[scpp::unsafe]] {
+            different_block = (llvm::LLVMGetInsertBlock(builder_) != full_expression_start_blocks_.back());
         }
-        full_expression_temporaries_.back().push_back(pending);
+        if (different_block) {
+            pending.live_flag = create_zeroed_flag_in_entry_block("tmplive");
+            [[scpp::unsafe]] {
+                llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(llvm::LLVMInt1TypeInContext(context_), 1, /*SignExtend=*/0),
+                                     pending.live_flag);
+            }
+        }
+        full_expression_temporaries_.back().push_back(std::move(pending));
     }
 
 
@@ -1075,7 +1220,7 @@ namespace scpp {
         pending.type = type;
         pending.ptr = ptr;
         pending.locals_before = scope_stack_.back().size();
-        scope_temporaries_.back().push_back(pending);
+        scope_temporaries_.back().push_back(std::move(pending));
     }
 
 
@@ -1087,9 +1232,13 @@ namespace scpp {
         // A `return` already ran emit_function_exit_cleanup and terminated
         // the block; nothing more may be emitted, and the temporaries of
         // the returning expression were destroyed there.
-        if (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) != nullptr) return;
-        for (auto it = pending.rbegin(); it != pending.rend(); ++it) {
-            emit_pending_temporary_teardown(*it);
+        bool term = false;
+        [[scpp::unsafe]] {
+            term = (llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) != nullptr);
+        }
+        if (term) return;
+        for (std::size_t p_idx = pending.size(); p_idx > 0; --p_idx) {
+            emit_pending_temporary_teardown(pending[p_idx - 1]);
         }
     }
 
@@ -1130,29 +1279,39 @@ namespace scpp {
             emit_storage_destruction(pending.type, pending.ptr, /*place=*/nullptr);
             return;
         }
-        llvm::LLVMTypeRef i1 = llvm::LLVMInt1TypeInContext(context_);
-        llvm::LLVMValueRef live = llvm::LLVMBuildLoad2(builder_, i1, pending.live_flag, "tmpwaslive");
-        llvm::LLVMValueRef current_fn = llvm::LLVMGetBasicBlockParent(llvm::LLVMGetInsertBlock(builder_));
-        llvm::LLVMBasicBlockRef then_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "tmpdtor");
-        llvm::LLVMBasicBlockRef merge_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "tmpdtor.skip");
-        llvm::LLVMBuildCondBr(builder_, live, then_bb, merge_bb);
-        llvm::LLVMPositionBuilderAtEnd(builder_, then_bb);
+        llvm::LLVMTypeRef i1 = nullptr;
+        llvm::LLVMValueRef live = nullptr;
+        llvm::LLVMValueRef current_fn = nullptr;
+        llvm::LLVMBasicBlockRef then_bb = nullptr;
+        llvm::LLVMBasicBlockRef merge_bb = nullptr;
+        [[scpp::unsafe]] {
+            i1 = llvm::LLVMInt1TypeInContext(context_);
+            live = llvm::LLVMBuildLoad2(builder_, i1, pending.live_flag, "tmpwaslive");
+            current_fn = llvm::LLVMGetBasicBlockParent(llvm::LLVMGetInsertBlock(builder_));
+            then_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "tmpdtor");
+            merge_bb = llvm::LLVMAppendBasicBlockInContext(context_, current_fn, "tmpdtor.skip");
+            llvm::LLVMBuildCondBr(builder_, live, then_bb, merge_bb);
+            llvm::LLVMPositionBuilderAtEnd(builder_, then_bb);
+        }
         emit_storage_destruction(pending.type, pending.ptr, /*place=*/nullptr);
         // Cleared again so the next execution of the same full-expression
         // -- the next iteration of an enclosing loop -- starts from "not
         // created", instead of destroying the previous iteration's
         // already-destroyed object.
-        llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(i1, 0, /*SignExtend=*/0), pending.live_flag);
-        llvm::LLVMBuildBr(builder_, merge_bb);
-        llvm::LLVMPositionBuilderAtEnd(builder_, merge_bb);
+        [[scpp::unsafe]] {
+            llvm::LLVMBuildStore(builder_, llvm::LLVMConstInt(i1, 0, /*SignExtend=*/0), pending.live_flag);
+            llvm::LLVMBuildBr(builder_, merge_bb);
+            llvm::LLVMPositionBuilderAtEnd(builder_, merge_bb);
+        }
     }
 
 
     void Codegen::emit_scope_temporaries_teardown(const std::vector<Codegen::PendingTemporary>& pending, std::size_t locals_before)
 {
-        for (auto it = pending.rbegin(); it != pending.rend(); ++it) {
-            if (it->locals_before != locals_before) continue;
-            emit_pending_temporary_teardown(*it);
+        for (std::size_t p_idx = pending.size(); p_idx > 0; --p_idx) {
+            const auto& pt = pending[p_idx - 1];
+            if (pt.locals_before != locals_before) continue;
+            emit_pending_temporary_teardown(pt);
         }
     }
 
@@ -1185,7 +1344,10 @@ namespace scpp {
         std::vector<Codegen::PendingTemporary> temporaries = std::move(scope_temporaries_.back());
         scope_temporaries_.pop_back();
 
-        bool already_terminated = llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) != nullptr;
+        bool already_terminated = false;
+        [[scpp::unsafe]] {
+            already_terminated = llvm::LLVMGetBasicBlockTerminator(llvm::LLVMGetInsertBlock(builder_)) != nullptr;
+        }
         if (!already_terminated) {
             emit_one_scope_cleanup(declared, temporaries);
         }
@@ -1259,13 +1421,20 @@ namespace scpp {
         return std::unexpected(CodegenError(
             describe_constructor_resolution_failure(type.name, ctor_args), current_loc_));
     }
-    if (ctor_def->eval_mode == FunctionEvalMode::Consteval) {
+    bool is_consteval = false;
+    [[scpp::unsafe]] {
+        is_consteval = ctor_def->eval_mode == FunctionEvalMode::Consteval;
+    }
+    if (is_consteval) {
         auto value_result = codegen_constructed_class_value(type.name, ctor_args, ctor_def);
         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
         create_store(std::move(value_result).value(), target.ptr, target.alignment);
         return {};
     }
-    llvm::LLVMValueRef ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(ctor_def).c_str());
+    llvm::LLVMValueRef ctor = nullptr;
+    [[scpp::unsafe]] {
+        ctor = llvm::LLVMGetNamedFunction(module_, overload_names_.at(ctor_def).c_str());
+    }
     if (ctor == nullptr) {
         return std::unexpected(CodegenError("class '" + type.name + "' has no constructor matching this call",
             current_loc_));
@@ -1274,8 +1443,8 @@ namespace scpp {
         emit_constructor_arguments_and_virtual_bases(type.name, ctor_def, ctor_args, target.ptr);
     if (!args_result.has_value()) return std::unexpected(std::move(args_result).error());
     std::vector<llvm::LLVMValueRef> args = std::move(args_result).value();
-    args.insert(args.begin(), target.ptr);
-    build_call(ctor, args);
+    args.insert(args.begin(), std::move(target.ptr));
+    build_call(ctor, std::move(args), "");
     return {};
 }
 

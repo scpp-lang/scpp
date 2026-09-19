@@ -14,7 +14,8 @@ namespace scpp {
 
 [[nodiscard]] const GlobalVar* find_visible_global_for_expr(const Expr& expr, const Body& body) {
     if (body.program == nullptr) {
-        return find_visible_global(OptionalProgramRef{}, body.function_namespace_path, expr.name,
+        OptionalProgramRef none{};
+        return find_visible_global(none, body.function_namespace_path, expr.name,
                                    expr.explicit_global_qualification);
     }
     std::reference_wrapper<const Program> program_ref{*body.program};
@@ -1815,8 +1816,9 @@ void collect_operator_lookup_keys(const std::string& method_name, const std::opt
         visible_global = find_visible_global(OptionalProgramRef{program_ref}, body.function_namespace_path, source->name,
                                              source->explicit_global_qualification);
     } else {
+        OptionalProgramRef none{};
         visible_global =
-            find_visible_global(OptionalProgramRef{}, body.function_namespace_path, source->name,
+            find_visible_global(none, body.function_namespace_path, source->name,
                                 source->explicit_global_qualification);
     }
     if (visible_global != nullptr) {
@@ -3475,9 +3477,14 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             // [conv.lval] would have stripped.
             std::optional<Type> base = infer_expr_lvalue_type(*expr.lhs, body, signatures);
             if (!base) return std::nullopt;
-            const bool base_is_const = base->kind == TypeKind::Reference ? !base->is_mutable_ref : base->is_const_qualified;
+            const bool base_is_const =
+                base->kind == TypeKind::Reference ? !base->is_mutable_ref
+                : (base->kind == TypeKind::Pointer && base->pointee != nullptr) ? !base->is_mutable_pointee
+                : base->is_const_qualified;
             const Type& base_named =
-                base->kind == TypeKind::Reference && base->pointee != nullptr ? *base->pointee : *base;
+                (base->kind == TypeKind::Reference || base->kind == TypeKind::Pointer) && base->pointee != nullptr
+                    ? *base->pointee
+                    : *base;
             if (base_named.kind != TypeKind::Named || body.program == nullptr) return std::nullopt;
             // `program.functions` (`Program`, ast.cppm's own compiler-
             // internal AST root type, is never itself parsed as a scpp

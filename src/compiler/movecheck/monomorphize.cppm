@@ -842,10 +842,6 @@ private:
             for (std::size_t j = 0; j < program_.classes[i].fields.size(); j++) {
                 Type field_type = program_.classes[i].fields[j].type;
                 std::vector<Expr*> exprs = default_initializer_exprs(program_.classes[i].fields[j]);
-                // Not gated on `exprs.empty()`: `T t{};` has a default
-                // member initializer with no arguments at all, and still
-                // constructs.
-                if (!program_.classes[i].fields[j].default_initializer.has_value()) continue;
                 Body body = non_function_body(program_.classes[i].owning_module, program_.classes[i].namespace_path,
                                               program_.classes[i].name);
                 current_walk_return_type_ = initializer_target_type(field_type);
@@ -865,10 +861,6 @@ private:
             for (std::size_t j = 0; j < program_.structs[i].fields.size(); j++) {
                 Type field_type = program_.structs[i].fields[j].type;
                 std::vector<Expr*> exprs = default_initializer_exprs(program_.structs[i].fields[j]);
-                // Not gated on `exprs.empty()`: `T t{};` has a default
-                // member initializer with no arguments at all, and still
-                // constructs.
-                if (!program_.structs[i].fields[j].default_initializer.has_value()) continue;
                 Body body = non_function_body(program_.structs[i].owning_module, program_.structs[i].namespace_path,
                                               program_.structs[i].name);
                 current_walk_return_type_ = initializer_target_type(field_type);
@@ -903,6 +895,31 @@ private:
                 }
             }
         }
+        (void)require_member_definitions_named("operator_convert_bool", true);
+        (void)require_member_definitions_named("operator_assign", true);
+
+        auto require_field_ops = [&, this](const Type& t) {
+            const Type* actual = &t;
+            while (actual->kind == TypeKind::Array && actual->element != nullptr) {
+                actual = actual->element.get();
+            }
+            if (actual->kind != TypeKind::Named) return;
+            std::string class_name = actual->template_args.empty() ? actual->name
+                                                                   : mangle_type_for_clone_name(*actual);
+            (void)require_member_definition_family(class_name + "_new");
+            (void)require_member_definition_family(class_name + "_operator_assign");
+        };
+
+        for (const auto& cls : program_.classes) {
+            for (const auto& f : cls.fields) {
+                require_field_ops(f.type);
+            }
+        }
+        for (const auto& st : program_.structs) {
+            for (const auto& f : st.fields) {
+                require_field_ops(f.type);
+            }
+        }
         return {};
     }
 
@@ -922,8 +939,22 @@ private:
     // the same way ([temp.inst]/4).
     [[nodiscard]] std::expected<void, DataflowError> require_default_initializer_constructor(
         const Type& field_type, const std::optional<Initializer>& initializer, Body& body) {
-        if (field_type.kind != TypeKind::Named || !initializer.has_value()) return {};
-        return require_constructor_definition(field_type.name, initializer->brace_args, body);
+        if (field_type.kind != TypeKind::Named) return {};
+        std::string class_name = field_type.template_args.empty() ? field_type.name
+                                                                  : mangle_type_for_clone_name(field_type);
+        if (!initializer.has_value()) {
+            std::vector<ExprPtr> no_args{};
+            return require_constructor_definition(class_name, no_args, body);
+        }
+        if (initializer->has_brace_args) {
+            return require_constructor_definition(class_name, initializer->brace_args, body);
+        }
+        if (initializer->expr != nullptr) {
+            std::vector<ExprPtr> single_arg{};
+            single_arg.push_back(deep_clone_expr(*initializer->expr));
+            return require_constructor_definition(class_name, single_arg, body);
+        }
+        return {};
     }
 
     void rewrite_implicit_member_field_access(Function& fn) {
@@ -1679,20 +1710,46 @@ private:
         std::size_t function_index = deferred_member_definitions_[slot].function_index;
         if (function_index >= program_.functions.size()) return {};
         if (program_.functions[function_index].name != deferred_member_definitions_[slot].function_name) return {};
+        const std::string& owner_class = program_.functions[function_index].member_owner_class;
+        if (deferred_member_definitions_[slot].function_name.find("__generic_bare_witness") != std::string::npos ||
+            owner_class.find("__generic_bare_witness") != std::string::npos ||
+            owner_class.starts_with("__genchk")) {
+            return {};
+        }
+        if (!owner_class.empty()) {
+            for (const auto& cls : program_.classes) {
+                if (cls.name == owner_class && cls.is_synthetic_check_only) {
+                    return {};
+                }
+            }
+        }
         // Built into a scratch Function rather than in place: the
         // substitution below resolves generic types, which can instantiate
         // a further generic class and push onto program_.functions,
         // reallocating it out from under a held reference.
         Function scratch{};
 
+        std::string fn_name = deferred_member_definitions_[slot].function_name;
         auto build = deferred_member_definitions_[slot].build_definition;
         deferred_member_definitions_[slot].build_definition = nullptr;
         if (build == nullptr) return {};
-        if (auto _r = build(scratch); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        if (auto _r = build(scratch); !_r.has_value()) {
+            deferred_member_definitions_[slot].materialized = false;
+            deferred_member_definitions_[slot].build_definition = build;
+            return std::unexpected(std::move(_r).error());
+        }
         program_.functions[function_index].member_initializers = std::move(scratch.member_initializers);
         program_.functions[function_index].body = std::move(scratch.body);
         program_.functions[function_index].definition_is_deferred = false;
-        return walk_new_concrete_function(function_index);
+        if (auto _r = walk_new_concrete_function(function_index); !_r.has_value()) {
+            program_.functions[function_index].body = nullptr;
+            program_.functions[function_index].member_initializers.clear();
+            program_.functions[function_index].definition_is_deferred = true;
+            deferred_member_definitions_[slot].materialized = false;
+            deferred_member_definitions_[slot].build_definition = build;
+            return std::unexpected(std::move(_r).error());
+        }
+        return {};
     }
 
     // The definition of exactly the member overload resolution selected.
@@ -1742,25 +1799,29 @@ private:
         return {};
     }
 
+    [[nodiscard]] static bool member_name_matches(std::string_view fn_name, std::string_view member_name) {
+        std::string pattern = "_" + std::string(member_name);
+        std::size_t pos = fn_name.rfind(pattern);
+        if (pos == std::string_view::npos) return false;
+        std::size_t after = pos + pattern.size();
+        return after == fn_name.size() || fn_name[after] == '.';
+    }
+
     // The last resort: a use whose receiver type this pass could not name
     // at all, matched on the member name alone (`_m`, `_m.1`) across every
     // instantiation. Same direction of error as the family form above.
-    [[nodiscard]] std::expected<void, DataflowError> require_member_definitions_named(const std::string& member_name) {
+    [[nodiscard]] std::expected<void, DataflowError> require_member_definitions_named(
+        const std::string& member_name, bool ignore_errors = false) {
         if (deferred_member_definitions_.empty() || member_name.empty()) return {};
         std::vector<std::size_t> slots{};
 
         for (const auto& entry : deferred_by_function_name_) {
-            const auto& name = entry.first;
-            const auto& name_slots = entry.second;
-            std::string_view spelled{name};
-            if (std::size_t overload_suffix = spelled.rfind('.'); overload_suffix != std::string_view::npos) {
-                spelled = spelled.substr(0, overload_suffix);
-            }
-            if (!spelled.ends_with("_" + member_name)) continue;
-            slots.insert(slots.end(), name_slots.begin(), name_slots.end());
+            if (!member_name_matches(entry.first, member_name)) continue;
+            slots.insert(slots.end(), entry.second.begin(), entry.second.end());
         }
         for (std::size_t slot : slots) {
-            if (auto _r = materialize_member_definition(slot); !_r.has_value()) {
+            auto _r = materialize_member_definition(slot);
+            if (!_r.has_value() && !ignore_errors) {
                 return std::unexpected(std::move(_r).error());
             }
         }
@@ -2363,8 +2424,13 @@ private:
         if (!matching_specializations.empty()) return matching_specializations.front();
         if (have_primary_definition) return primary_selection;
         if (have_primary_forward_decl) {
-            return std::unexpected(DataflowError("'" + template_name +
-                                    "' has no matching class-template definition for these concrete arguments "
+            std::string arg_desc{};
+            for (const auto& a : concrete_args) {
+                if (!arg_desc.empty()) arg_desc += ", ";
+                arg_desc += describe_type_brief(a);
+            }
+            return std::unexpected(DataflowError("'" + template_name + "<" + arg_desc +
+                                    ">' has no matching class-template definition for these concrete arguments "
                                     "(the primary template is only forward-declared)",
                                 loc));
         }
@@ -7189,6 +7255,12 @@ private:
         // into.
         if (expr.kind == ExprKind::ValueInit) {
             expr.type = current_walk_return_type_;
+            if (expr.type.kind == TypeKind::Named && allow_generic_monomorphization) {
+                std::string class_name = expr.type.template_args.empty() ? expr.type.name
+                                                                          : mangle_type_for_clone_name(expr.type);
+                std::vector<ExprPtr> no_args{};
+                (void)require_constructor_definition(class_name, no_args, body);
+            }
             return {};
         }
 
@@ -7457,6 +7529,29 @@ private:
                     callee_type->kind == TypeKind::Reference && callee_type->pointee ? *callee_type->pointee
                                                                                       : *callee_type;
                 if (underlying.kind == TypeKind::Named) expr.name = "call";
+            }
+        }
+
+        if (expr.kind == ExprKind::Call && expr.name == "$for_range_size" && !expr.args.empty()) {
+            std::optional<Type> range_type = infer_expr_type(*expr.args[0], body, signatures_);
+            if (range_type.has_value()) {
+                const Type& unwrapped = range_type->kind == TypeKind::Reference && range_type->pointee ? *range_type->pointee : *range_type;
+                if (unwrapped.kind == TypeKind::Named &&
+                    (unwrapped.name == "std::vector" || unwrapped.name.starts_with("std::vector."))) {
+                    (void)require_member_definition_family(unwrapped.name + "_size");
+                }
+            }
+        }
+
+        if (expr.kind == ExprKind::Binary && expr.binary_op == BinaryOp::Assign && expr.rhs &&
+            expr.rhs->kind == ExprKind::NullptrLiteral && expr.lhs) {
+            std::optional<Type> lhs_type = infer_expr_type(*expr.lhs, body, signatures_);
+            if (lhs_type.has_value()) {
+                const Type& unwrapped = lhs_type->kind == TypeKind::Reference && lhs_type->pointee ? *lhs_type->pointee : *lhs_type;
+                if (unwrapped.kind == TypeKind::Named &&
+                    (unwrapped.name.starts_with("std::shared_ptr.") || unwrapped.name.starts_with("shared_ptr."))) {
+                    (void)require_member_definition_family(unwrapped.name + "_new");
+                }
             }
         }
 
