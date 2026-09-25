@@ -1,5 +1,18 @@
 cmake_minimum_required(VERSION 3.28)
 
+# Determine bootstrap stage (default: 0)
+# Can be specified via -DSTAGE=<N> or environment variable STAGE=<N>
+if(DEFINED ENV{STAGE})
+    set(STAGE "$ENV{STAGE}")
+elseif(NOT DEFINED STAGE)
+    set(STAGE 0)
+endif()
+
+message(STATUS "Configuring scpp bootstrap STAGE=${STAGE}")
+if(NOT STAGE EQUAL 0 AND NOT STAGE EQUAL 1)
+    message(FATAL_ERROR "Unsupported STAGE: '${STAGE}'. Supported stages are 0 and 1.")
+endif()
+
 # --- C++26 `import std;` setup -----------------------------------------------
 # scpp (the language) has no preprocessor/#include at all, so scpp's own C++
 # implementation is migrating off #include-based standard library usage and
@@ -66,6 +79,8 @@ find_package(Threads REQUIRED)
 list(INSERT CMAKE_FIND_LIBRARY_SUFFIXES 0 ".a")
 find_library(SQLITE3_LIB NAMES sqlite3 REQUIRED)
 find_path(SQLITE3_INCLUDE_DIR NAMES sqlite3.h REQUIRED)
+
+if(STAGE EQUAL 0)
 
 add_library(scpp_lexer)
 target_sources(scpp_lexer
@@ -344,52 +359,172 @@ add_custom_target(scpp_workspace_artifacts ALL
 # scpp_workspace_artifacts.
 add_dependencies(driver_test scpp_workspace_artifacts)
 
-file(GLOB STAGE1_LLVM_STATIC_LIBS "${LLVM_LIBRARY_DIRS}/libLLVM*.a")
+add_subdirectory(applications/httpserver)
 
-# =============================================================================
-# Bootstrap Stage 2: Build Stage-1 scpp using Stage-0 scpp
-# =============================================================================
-# Takes the Stage-0 compiler binary produced by Clang ($<TARGET_FILE:scpp>) and
-# uses it to compile the self-hosted compiler modules/sources into a new
-# standalone executable: ${CMAKE_CURRENT_BINARY_DIR}/scpp_stage1.
-# Smoke tests verify that scpp_stage1 --version succeeds and can compile real
-# scpp source files to object files.
-add_custom_target(scpp_stage1 ALL
-    COMMAND $<TARGET_FILE:scpp> -c "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp"
-        -o "${CMAKE_CURRENT_BINARY_DIR}/main_stage1.o"
-        -I "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-cli/modules"
-        -I "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-compiler/modules"
-        -I "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-driver/modules"
-        -I "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-project/modules"
-        -I "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-codegen/modules"
-        -I "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-movecheck/modules"
-        -I "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/llvm/modules"
-        -I "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/std/modules"
-        -I "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp/modules"
-    COMMAND ${CMAKE_CXX_COMPILER}
-        "${CMAKE_CURRENT_BINARY_DIR}/main_stage1.o"
-        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-cli/archives/libscpp-cli.scppa"
-        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-project/archives/libscpp-project.scppa"
-        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-driver/archives/libscpp-driver.scppa"
-        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-codegen/archives/libscpp-codegen.scppa"
-        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-movecheck/archives/libscpp-movecheck.scppa"
-        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-compiler/archives/libscpp.ast.scppa"
-        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-compiler/archives/libscpp.constexpression.scppa"
-        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-compiler/archives/libscpp.lexer.scppa"
-        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-compiler/archives/libscpp.mir.scppa"
-        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp-compiler/archives/libscpp.parser.scppa"
-        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/llvm/archives/libllvm.scppa"
-        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp/archives/libscpp.scppa"
-        "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/std/archives/libstd.scppa"
-        -Wl,--start-group ${STAGE1_LLVM_STATIC_LIBS} -Wl,--end-group
+# Custom target for building workspace library packages
+add_custom_target(lib
+    DEPENDS scpp_workspace_artifacts
+    COMMENT "Building workspace library packages"
+)
+
+# Custom target for Stage 0 (builds host scpp compiler and workspace artifacts)
+add_custom_target(stage0
+    DEPENDS scpp scpp_workspace_artifacts
+    COMMENT "Stage 0 bootstrap complete"
+)
+
+# Custom target for Stage 1 (drives Stage 1 configure, build, and smoke tests)
+if(NOT STAGE1_BUILD_DIR)
+    set(STAGE1_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/stage1")
+endif()
+
+if(NOT CMAKE_CTEST_COMMAND)
+    find_program(CMAKE_CTEST_COMMAND ctest REQUIRED)
+endif()
+
+set(STAGE1_CMAKE_ARGS
+    -S "${CMAKE_CURRENT_SOURCE_DIR}"
+    -B "${STAGE1_BUILD_DIR}"
+    -G "${CMAKE_GENERATOR}"
+    -DSTAGE=1
+    -DSTAGE0_SCPP=$<TARGET_FILE:scpp>
+)
+if(CMAKE_BUILD_TYPE)
+    list(APPEND STAGE1_CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE})
+endif()
+if(CMAKE_C_COMPILER)
+    list(APPEND STAGE1_CMAKE_ARGS -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER})
+endif()
+if(CMAKE_CXX_COMPILER)
+    list(APPEND STAGE1_CMAKE_ARGS -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER})
+endif()
+if(CMAKE_GENERATOR_PLATFORM)
+    list(APPEND STAGE1_CMAKE_ARGS -A "${CMAKE_GENERATOR_PLATFORM}")
+endif()
+if(CMAKE_GENERATOR_TOOLSET)
+    list(APPEND STAGE1_CMAKE_ARGS -T "${CMAKE_GENERATOR_TOOLSET}")
+endif()
+if(LLVM_DIR)
+    list(APPEND STAGE1_CMAKE_ARGS -DLLVM_DIR=${LLVM_DIR})
+endif()
+
+add_custom_target(stage1
+    COMMAND ${CMAKE_COMMAND} ${STAGE1_CMAKE_ARGS}
+    COMMAND ${CMAKE_COMMAND} --build "${STAGE1_BUILD_DIR}"
+    COMMAND ${CMAKE_CTEST_COMMAND} --test-dir "${STAGE1_BUILD_DIR}" --output-on-failure
+    DEPENDS stage0
+    COMMENT "Configuring, building, and verifying Stage 1 self-hosted compiler"
+    VERBATIM
+)
+
+elseif(STAGE EQUAL 1)
+
+    # =========================================================================
+    # Bootstrap Stage 1: Build Stage-1 scpp using Stage-0 scpp
+    # =========================================================================
+    if(NOT STAGE0_SCPP)
+        if(DEFINED ENV{STAGE0_SCPP})
+            set(STAGE0_SCPP "$ENV{STAGE0_SCPP}")
+        elseif(EXISTS "${CMAKE_CURRENT_BINARY_DIR}/scpp")
+            set(STAGE0_SCPP "${CMAKE_CURRENT_BINARY_DIR}/scpp")
+        elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/build/scpp")
+            set(STAGE0_SCPP "${CMAKE_CURRENT_SOURCE_DIR}/build/scpp")
+        elseif(EXISTS "${CMAKE_CURRENT_BINARY_DIR}/../build/scpp")
+            set(STAGE0_SCPP "${CMAKE_CURRENT_BINARY_DIR}/../build/scpp")
+        elseif(EXISTS "${CMAKE_CURRENT_BINARY_DIR}/../scpp")
+            set(STAGE0_SCPP "${CMAKE_CURRENT_BINARY_DIR}/../scpp")
+        else()
+            find_program(STAGE0_SCPP scpp)
+        endif()
+    endif()
+
+    if(NOT STAGE0_SCPP OR NOT EXISTS "${STAGE0_SCPP}")
+        message(FATAL_ERROR "Stage 0 scpp compiler not found! Please build stage 0 first or specify -DSTAGE0_SCPP=/path/to/scpp")
+    endif()
+    get_filename_component(STAGE0_SCPP "${STAGE0_SCPP}" ABSOLUTE)
+    message(STATUS "Using Stage 0 compiler: ${STAGE0_SCPP}")
+
+    file(GLOB STAGE1_LLVM_STATIC_LIBS "${LLVM_LIBRARY_DIRS}/libLLVM*.a")
+    set(SCPP_BUILD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}")
+    set(STAGE1_MAIN_OBJ "${CMAKE_CURRENT_BINARY_DIR}/main_stage1.o")
+
+    add_custom_command(
+        OUTPUT "${STAGE1_MAIN_OBJ}"
+        COMMAND "${STAGE0_SCPP}" -c "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp"
+            -o "${STAGE1_MAIN_OBJ}"
+            -I "${SCPP_BUILD_DIR}/scpp-cli/modules"
+            -I "${SCPP_BUILD_DIR}/scpp-compiler/modules"
+            -I "${SCPP_BUILD_DIR}/scpp-driver/modules"
+            -I "${SCPP_BUILD_DIR}/scpp-project/modules"
+            -I "${SCPP_BUILD_DIR}/scpp-codegen/modules"
+            -I "${SCPP_BUILD_DIR}/scpp-movecheck/modules"
+            -I "${SCPP_BUILD_DIR}/llvm/modules"
+            -I "${SCPP_BUILD_DIR}/std/modules"
+            -I "${SCPP_BUILD_DIR}/scpp/modules"
+        DEPENDS
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp"
+            "${STAGE0_SCPP}"
+        COMMENT "Compiling main.cpp with Stage-0 scpp"
+        VERBATIM
+    )
+
+    set_source_files_properties("${STAGE1_MAIN_OBJ}" PROPERTIES
+        EXTERNAL_OBJECT TRUE
+        GENERATED TRUE
+    )
+
+    add_executable(scpp_stage1
+        "${STAGE1_MAIN_OBJ}"
+    )
+
+    set_target_properties(scpp_stage1 PROPERTIES
+        LINKER_LANGUAGE CXX
+    )
+
+    set(STAGE1_SCPP_ARCHIVES
+        "${SCPP_BUILD_DIR}/scpp-cli/archives/libscpp-cli.scppa"
+        "${SCPP_BUILD_DIR}/scpp-project/archives/libscpp-project.scppa"
+        "${SCPP_BUILD_DIR}/scpp-driver/archives/libscpp-driver.scppa"
+        "${SCPP_BUILD_DIR}/scpp-codegen/archives/libscpp-codegen.scppa"
+        "${SCPP_BUILD_DIR}/scpp-movecheck/archives/libscpp-movecheck.scppa"
+        "${SCPP_BUILD_DIR}/scpp-compiler/archives/libscpp.ast.scppa"
+        "${SCPP_BUILD_DIR}/scpp-compiler/archives/libscpp.constexpression.scppa"
+        "${SCPP_BUILD_DIR}/scpp-compiler/archives/libscpp.lexer.scppa"
+        "${SCPP_BUILD_DIR}/scpp-compiler/archives/libscpp.mir.scppa"
+        "${SCPP_BUILD_DIR}/scpp-compiler/archives/libscpp.parser.scppa"
+        "${SCPP_BUILD_DIR}/llvm/archives/libllvm.scppa"
+        "${SCPP_BUILD_DIR}/scpp/archives/libscpp.scppa"
+        "${SCPP_BUILD_DIR}/std/archives/libstd.scppa"
+    )
+
+    target_link_libraries(scpp_stage1 PRIVATE
+        ${STAGE1_SCPP_ARCHIVES}
+        "-Wl,--start-group"
+        ${STAGE1_LLVM_STATIC_LIBS}
+        "-Wl,--end-group"
         ${SQLITE3_LIB}
         -lz3 -lz -lzstd -lrt -ldl -lm -lpthread
-        -o "${CMAKE_CURRENT_BINARY_DIR}/scpp_stage1"
-    COMMAND "${CMAKE_CURRENT_BINARY_DIR}/scpp_stage1" --version
-    COMMAND "${CMAKE_CURRENT_BINARY_DIR}/scpp_stage1" -c
-        "${CMAKE_CURRENT_SOURCE_DIR}/tests/codegentest_source/return_constant.scpp"
-        -o "${CMAKE_CURRENT_BINARY_DIR}/stage1_smoke_test.o"
-    DEPENDS scpp scpp_workspace_artifacts
-    VERBATIM)
+    )
 
-add_subdirectory(applications/httpserver)
+    add_custom_command(
+        TARGET scpp_stage1 POST_BUILD
+        COMMAND "$<TARGET_FILE:scpp_stage1>" --version
+        COMMAND "$<TARGET_FILE:scpp_stage1>" -c
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/codegentest_source/return_constant.scpp"
+            -o "${CMAKE_CURRENT_BINARY_DIR}/stage1_smoke_test.o"
+        COMMENT "Running Stage-1 smoke tests"
+        VERBATIM
+    )
+
+    enable_testing()
+    add_test(NAME stage1_version_smoke COMMAND scpp_stage1 --version)
+    add_test(NAME stage1_compile_smoke COMMAND scpp_stage1 -c
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/codegentest_source/return_constant.scpp"
+        -o "${CMAKE_CURRENT_BINARY_DIR}/stage1_smoke_test.o")
+
+    add_custom_target(stage1 DEPENDS scpp_stage1)
+
+    install(TARGETS scpp_stage1
+        RUNTIME DESTINATION bin)
+
+endif()
