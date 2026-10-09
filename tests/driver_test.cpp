@@ -26,6 +26,12 @@ import std;
 #ifndef SCPP_BINARY_PATH
 #error "SCPP_BINARY_PATH must be defined by the build"
 #endif
+#ifndef SCPP_CMAKE_COMMAND
+#error "SCPP_CMAKE_COMMAND must be defined by the build"
+#endif
+#ifndef SCPP_PACKAGES_CMAKE_MODULE_DIR
+#error "SCPP_PACKAGES_CMAKE_MODULE_DIR must be defined by the build"
+#endif
 #ifndef SCPP_STDLIB_STD_MODULE_PATH
 #error "SCPP_STDLIB_STD_MODULE_PATH must be defined by the build"
 #endif
@@ -324,6 +330,76 @@ std::string shell_quote(const std::string& text) {
     }
     quoted.push_back('\'');
     return quoted;
+}
+
+// The tests below that build projects drive them with CMake, the way a real
+// project does (see cmake/ScppPackages.cmake): `root` holds a CMakeLists.txt
+// that includes ScppPackages, configured with the `scpp` under test as the
+// compiler and built in `root/build`.
+std::filesystem::path cmake_build_dir(const std::filesystem::path& root) { return root / "build"; }
+
+void write_cmake_project(const std::filesystem::path& root, std::string_view body,
+                         std::string_view languages = "NONE") {
+    write_text_file(root / "CMakeLists.txt",
+                    "cmake_minimum_required(VERSION 3.25)\n"
+                    "project(test LANGUAGES " + std::string(languages) + ")\n"
+                    "include(ScppPackages)\n\n" + std::string(body));
+}
+
+RunResult cmake_configure(const std::filesystem::path& root) {
+    return run_command_capture(shell_quote(SCPP_CMAKE_COMMAND) + " -S " + shell_quote(root.string()) + " -B " +
+                               shell_quote(cmake_build_dir(root).string()) + " -G Ninja -DCMAKE_MODULE_PATH=" +
+                               shell_quote(SCPP_PACKAGES_CMAKE_MODULE_DIR) + " -DSCPP_PACKAGES_COMPILER=" +
+                               shell_quote(SCPP_BINARY_PATH) + " 2>&1");
+}
+
+// Builds the default targets, or `targets` if given; `ninja_arguments` go to
+// the generator after `--`.
+RunResult cmake_build(const std::filesystem::path& root, const std::vector<std::string>& targets = {},
+                      const std::string& ninja_arguments = {}) {
+    std::string command = shell_quote(SCPP_CMAKE_COMMAND) + " --build " + shell_quote(cmake_build_dir(root).string());
+    if (!targets.empty()) {
+        command += " --target";
+        for (const std::string& target : targets) command += " " + shell_quote(target);
+    }
+    if (!ninja_arguments.empty()) command += " -- " + ninja_arguments;
+    return run_command_capture(command + " 2>&1");
+}
+
+// CMake wraps its diagnostics at a fixed width, so a message is matched with
+// its runs of whitespace folded into single spaces.
+std::string collapse_whitespace(std::string_view text) {
+    std::string collapsed;
+    bool pending_space = false;
+    for (char ch : text) {
+        if (ch == ' ' || ch == '\n' || ch == '\t' || ch == '\r') {
+            pending_space = !collapsed.empty();
+            continue;
+        }
+        if (pending_space) collapsed.push_back(' ');
+        pending_space = false;
+        collapsed.push_back(ch);
+    }
+    return collapsed;
+}
+
+// Configures and builds `root` (the default targets, or `targets`), failing
+// `case_name` if either step does.
+RunResult expect_cmake_build_succeeds(const std::string& case_name, const std::filesystem::path& root,
+                                      const std::vector<std::string>& targets = {}) {
+    RunResult configure_result = cmake_configure(root);
+    expect(configure_result.exit_code == 0,
+           case_name + ": cmake configure should succeed, got '" + configure_result.stdout_text + "'");
+    if (configure_result.exit_code != 0) return configure_result;
+    RunResult build_result = cmake_build(root, targets);
+    expect(build_result.exit_code == 0,
+           case_name + ": cmake build should succeed, got '" + build_result.stdout_text + "'");
+    return build_result;
+}
+
+std::size_t directory_entry_count(const std::filesystem::path& dir) {
+    return static_cast<std::size_t>(std::distance(std::filesystem::directory_iterator(dir),
+                                                  std::filesystem::directory_iterator()));
 }
 
 // Compiles `source` to a temporary executable, runs it, and captures both
@@ -4410,6 +4486,80 @@ void run_cli_extension_tests() {
     }
 
     {
+        // The clang-like pieces a build system composes a package from: `build-module`
+        // for the interface (with an optimization level), `-c` for an
+        // implementation partition against the interfaces it imports, `ar` to
+        // merge the partition object into the module archive, and an ordinary
+        // consumer build that finds the companion archive next to the .scppm.
+        std::string case_name = "cli_implementation_partition_compiles_separately_and_merges_into_module_archive";
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::path module_source = root / "lib.scpp";
+        std::filesystem::path partition_source = root / "lib_impl.scpp";
+        std::filesystem::path interface_path = root / "lib.scppm";
+        std::filesystem::path primary_archive = root / "lib.primary.scppa";
+        std::filesystem::path archive_path = root / "liblib.scppa";
+        std::filesystem::path partition_object = root / "lib.impl.scppo";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module lib;\n"
+                        "namespace lib {\n"
+                        "    extern int answer_impl();\n"
+                        "}\n"
+                        "export namespace lib {\n"
+                        "    int answer() { return answer_impl(); }\n"
+                        "}\n");
+        write_text_file(partition_source,
+                        "module lib:impl;\n"
+                        "namespace lib {\n"
+                        "    int answer_impl() { return 42; }\n"
+                        "}\n");
+        RunResult bad_level_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module -O9 " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                primary_archive.string() + " 2>&1");
+        expect(bad_level_result.exit_code != 0,
+               case_name + ": an unknown -O level should be rejected by build-module");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module -O0 " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                primary_archive.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module -O0 should succeed, got '" + emit_result.stdout_text + "'");
+        RunResult partition_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " -c -O0 " + partition_source.string() + " -o " +
+                                partition_object.string() + " 2>&1");
+        expect(partition_result.exit_code == 0,
+               case_name + ": compiling the implementation partition with -c should succeed, got '" +
+                   partition_result.stdout_text + "'");
+        RunResult archive_result =
+            run_command_capture("cp " + primary_archive.string() + " " + archive_path.string() + " && ar rcs " +
+                                archive_path.string() + " " + partition_object.string() + " 2>&1");
+        expect(archive_result.exit_code == 0,
+               case_name + ": merging the partition object into the module archive should succeed, got '" +
+                   archive_result.stdout_text + "'");
+        write_text_file(consumer_source,
+                        "import lib;\n"
+                        "int main() {\n"
+                        "    return lib::answer() - 42;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import lib=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": consumer build should link the merged companion archive, got '" +
+                   build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected the partition-backed binary to exit 0, got " +
+                   std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
         std::string case_name = "cli_build_module_roundtrips_fixed_width_builtin_keywords";
         std::filesystem::path root = std::filesystem::current_path() / case_name;
         std::filesystem::path module_source = root / "helper.scpp";
@@ -4776,6 +4926,190 @@ void run_cli_extension_tests() {
         expect(run_result.exit_code == 0,
                case_name + ": expected payload-backed generic binary to exit 0, got " +
                    std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        // Regression coverage for a real, previously-shipped compiler bug: the
+        // `.scppm` cross-module binary format only ever serialized a field's
+        // *resolved* `array_size` integer, never its *unresolved*
+        // `array_size_expr` expression tree. `Box<T>`'s `storage` field is
+        // exactly such a field -- still generic (`T` unresolved) inside the
+        // library's own compiled module -- so importing the module and
+        // instantiating `Box<Gadget>` used to freeze `array_size` at 0 (an
+        // undersized LLVM array type). `Gadget` is polymorphic (every scpp
+        // `class` mandates a virtual destructor, ch11 §11.5(1)), matching the
+        // real crash this reproduces (scpp::rand's cross-module
+        // `std::expected<uniform_int_distribution<int>, error>` usage). It
+        // needs a genuine `.scppm` round trip, so it builds the library with
+        // `build-module` and compiles the consumer against that artifact.
+        std::string case_name = "cli_build_module_roundtrips_array_bound_depending_on_unresolved_template_parameter";
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::path module_source = root / "libbox.scpp";
+        std::filesystem::path interface_path = root / "libbox.scppm";
+        std::filesystem::path archive_path = root / "liblibbox.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(module_source,
+                        "export module libbox;\n"
+                        "namespace libbox {\n"
+                        "    export template<typename T>\n"
+                        "    class Box {\n"
+                        "    public:\n"
+                        "        virtual ~Box() { return; }\n"
+                        "        char storage[sizeof(T)];\n"
+                        "\n"
+                        "        int storage_size() const {\n"
+                        "            return static_cast<int>(sizeof(this->storage));\n"
+                        "        }\n"
+                        "    };\n"
+                        "}\n");
+        RunResult emit_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + module_source.string() +
+                                " --interface-out " + interface_path.string() + " --archive-out " +
+                                archive_path.string() + " 2>&1");
+        expect(emit_result.exit_code == 0,
+               case_name + ": build-module should succeed, got '" + emit_result.stdout_text + "'");
+        write_text_file(consumer_source,
+                        "import libbox;\n"
+                        "class Gadget {\n"
+                        "public:\n"
+                        "    virtual ~Gadget() { return; }\n"
+                        "    char tag{};\n"
+                        "    long value{};\n"
+                        "\n"
+                        "    long get() const {\n"
+                        "        return this->value;\n"
+                        "    }\n"
+                        "};\n"
+                        "\n"
+                        "int main() {\n"
+                        "    libbox::Box<Gadget> box{};\n"
+                        "    // vtable(8) + tag(1) + pad(7) + value(8) = 24.\n"
+                        "    if (box.storage_size() != static_cast<int>(sizeof(Gadget))) return 1;\n"
+                        "    if (box.storage_size() != 24) return 2;\n"
+                        "    // Construct a real `Gadget` inside the cross-module-imported generic\n"
+                        "    // storage and use it: if the storage were undersized, this would\n"
+                        "    // corrupt memory rather than merely miscompute a sizeof.\n"
+                        "    [[scpp::unsafe]] {\n"
+                        "        Gadget* p = new ((Gadget*)&box.storage) Gadget();\n"
+                        "        p->value = 42;\n"
+                        "        if (p->get() != 42) return 3;\n"
+                        "        p->~Gadget();\n"
+                        "    }\n"
+                        "    return 0;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import libbox=" + interface_path.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": consumer build should succeed from the .scppm, got '" + build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected exit code 0 (1/2: storage size lost in the round trip, 3: use of the "
+                           "storage), got " + std::to_string(run_result.exit_code));
+        std::filesystem::remove_all(root);
+    }
+
+    {
+        // Two modules built by two separate `build-module` processes, each
+        // specializing the same class template (`std::hash`) for its own
+        // type. A generic template owner id used to be minted from a counter
+        // that restarts in every process, so both modules' specializations
+        // ended up as `std::hash____gtpl1_*` and the second build failed with
+        // "redefinition of 'std::hash____gtpl1_1_delete'" once it imported the
+        // first one's payload. The ids now carry the module they were minted
+        // in.
+        std::string case_name = "cli_build_module_separately_built_modules_specialize_the_same_class_template";
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::path first_source = root / "first.scpp";
+        std::filesystem::path second_source = root / "second.scpp";
+        std::filesystem::path first_interface = root / "first.scppm";
+        std::filesystem::path first_archive = root / "libfirst.scppa";
+        std::filesystem::path second_interface = root / "second.scppm";
+        std::filesystem::path second_archive = root / "libsecond.scppa";
+        std::filesystem::path consumer_source = root / "main.scpp";
+        std::filesystem::path exe_path = root / "app";
+        cases_run++;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        write_text_file(first_source,
+                        "export module first;\n"
+                        "import std;\n"
+                        "namespace first {\n"
+                        "    export struct Key {\n"
+                        "        int value;\n"
+                        "    };\n"
+                        "}\n"
+                        "namespace std {\n"
+                        "    export template<>\n"
+                        "    class hash<first::Key> {\n"
+                        "    public:\n"
+                        "        std::uint64_t call(const first::Key& key) const {\n"
+                        "            return static_cast<std::uint64_t>(key.value) + 1;\n"
+                        "        }\n"
+                        "        virtual ~hash() = default;\n"
+                        "    };\n"
+                        "}\n");
+        write_text_file(second_source,
+                        "export module second;\n"
+                        "import std;\n"
+                        "import first;\n"
+                        "namespace second {\n"
+                        "    export struct Key {\n"
+                        "        int value;\n"
+                        "    };\n"
+                        "}\n"
+                        "namespace std {\n"
+                        "    export template<>\n"
+                        "    class hash<second::Key> {\n"
+                        "    public:\n"
+                        "        std::uint64_t call(const second::Key& key) const {\n"
+                        "            return static_cast<std::uint64_t>(key.value) + 100;\n"
+                        "        }\n"
+                        "        virtual ~hash() = default;\n"
+                        "    };\n"
+                        "}\n");
+        RunResult first_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + first_source.string() +
+                                " --interface-out " + first_interface.string() + " --archive-out " +
+                                first_archive.string() + " 2>&1");
+        expect(first_result.exit_code == 0,
+               case_name + ": first build-module should succeed, got '" + first_result.stdout_text + "'");
+        RunResult second_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + second_source.string() +
+                                " --interface-out " + second_interface.string() + " --archive-out " +
+                                second_archive.string() + " --import first=" + first_interface.string() + " 2>&1");
+        expect(second_result.exit_code == 0,
+               case_name + ": second build-module should succeed against the first's .scppm, got '" +
+                   second_result.stdout_text + "'");
+        write_text_file(consumer_source,
+                        "import std;\n"
+                        "import first;\n"
+                        "import second;\n"
+                        "int main() {\n"
+                        "    std::hash<first::Key> first_hash{};\n"
+                        "    std::hash<second::Key> second_hash{};\n"
+                        "    first::Key a{};\n"
+                        "    a.value = 3;\n"
+                        "    second::Key b{};\n"
+                        "    b.value = 4;\n"
+                        "    if (first_hash.call(a) != 4) return 1;\n"
+                        "    if (second_hash.call(b) != 104) return 2;\n"
+                        "    return 0;\n"
+                        "}\n");
+        RunResult build_result =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + consumer_source.string() + " -o " +
+                                exe_path.string() + " --import first=" + first_interface.string() +
+                                " --import second=" + second_interface.string() + " 2>&1");
+        expect(build_result.exit_code == 0,
+               case_name + ": consumer build should succeed, got '" + build_result.stdout_text + "'");
+        RunResult run_result = run_command_capture(exe_path.string() + " 2>&1");
+        expect(run_result.exit_code == 0,
+               case_name + ": expected exit code 0, got " + std::to_string(run_result.exit_code));
         std::filesystem::remove_all(root);
     }
 
@@ -6263,40 +6597,28 @@ void run_cli_extension_tests() {
         std::string case_name = "cli_project_build_builds_manifest_bin";
         std::filesystem::path root = std::filesystem::current_path() / "cli_project_build_builds_manifest_bin";
         std::filesystem::path src_dir = root / "src";
-        std::filesystem::path exe_path =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "hello" / "hello";
-        std::filesystem::path helper_iface =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "hello" / "modules" / "helper.scppm";
-        std::filesystem::path helper_archive =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "hello" / "archives" / "libhelper.scppa";
+        std::filesystem::path exe_path = cmake_build_dir(root) / "bin" / "hello";
+        std::filesystem::path helper_iface = cmake_build_dir(root) / "scpp-packages" / "hello" / "helper.scppm";
+        std::filesystem::path helper_archive = cmake_build_dir(root) / "scpp-packages" / "hello" / "libhelper.scppa";
         cases_run++;
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(src_dir);
-        write_text_file(root / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[package]\n"
-                        "name = \"hello\"\n"
-                        "\n"
-                        "[[bin]]\n"
-                        "name = \"hello\"\n"
-                        "sources = [\"src/**/*.scpp\"]\n");
+        write_cmake_project(root,
+                            "scpp_add_package(NAME hello SOURCES src/helper.scpp)\n"
+                            "scpp_add_executable(NAME hello SOURCES src/main.scpp DEPENDS hello OUTPUT bin/hello ALL)\n");
         write_text_file(src_dir / "helper.scpp",
                         "export module helper;\n"
                         "namespace helper { export int value() { return 42; } }\n");
         write_text_file(src_dir / "main.scpp",
                         "import helper;\n"
                         "int main() { return helper::value() - 42; }\n");
-        RunResult build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
-                                                     shell_quote(SCPP_BINARY_PATH) + " build 2>&1");
-        expect(build_result.exit_code == 0,
-               case_name + ": scpp build should succeed, got '" + build_result.stdout_text + "'");
-        expect(std::filesystem::exists(exe_path), case_name + ": expected manifest-built executable");
+        expect_cmake_build_succeeds(case_name, root);
+        expect(std::filesystem::exists(exe_path), case_name + ": expected project-built executable");
         expect(std::filesystem::exists(helper_iface), case_name + ": expected helper .scppm output");
         expect(std::filesystem::exists(helper_archive), case_name + ": expected helper .scppa output");
         RunResult run_result = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
         expect(run_result.exit_code == 0,
-               case_name + ": expected manifest-built executable to exit 0, got " +
+               case_name + ": expected project-built executable to exit 0, got " +
                    std::to_string(run_result.exit_code));
         std::filesystem::remove_all(root);
     }
@@ -6306,41 +6628,28 @@ void run_cli_extension_tests() {
         std::filesystem::path root =
             std::filesystem::current_path() / "cli_project_build_builds_manifest_bin_with_cpp_named_sources";
         std::filesystem::path src_dir = root / "src";
-        std::filesystem::path exe_path =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "hello" / "hello";
-        std::filesystem::path helper_iface =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "hello" / "modules" / "helper.scppm";
-        std::filesystem::path helper_archive =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "hello" / "archives" / "libhelper.scppa";
+        std::filesystem::path exe_path = cmake_build_dir(root) / "bin" / "hello";
+        std::filesystem::path helper_iface = cmake_build_dir(root) / "scpp-packages" / "hello" / "helper.scppm";
+        std::filesystem::path helper_archive = cmake_build_dir(root) / "scpp-packages" / "hello" / "libhelper.scppa";
         cases_run++;
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(src_dir);
-        write_text_file(root / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[package]\n"
-                        "name = \"hello\"\n"
-                        "\n"
-                        "[[bin]]\n"
-                        "name = \"hello\"\n"
-                        "sources = [\"src/**/*.cpp\"]\n");
+        write_cmake_project(root,
+                            "scpp_add_package(NAME hello SOURCES src/helper.cpp)\n"
+                            "scpp_add_executable(NAME hello SOURCES src/main.cpp DEPENDS hello OUTPUT bin/hello ALL)\n");
         write_text_file(src_dir / "helper.cpp",
                         "export module helper;\n"
                         "namespace helper { export int value() { return 42; } }\n");
         write_text_file(src_dir / "main.cpp",
                         "import helper;\n"
                         "int main() { return helper::value() - 42; }\n");
-        RunResult build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
-                                                     shell_quote(SCPP_BINARY_PATH) + " build 2>&1");
-        expect(build_result.exit_code == 0,
-               case_name + ": manifest build with .cpp-named sources should succeed, got '" +
-                   build_result.stdout_text + "'");
-        expect(std::filesystem::exists(exe_path), case_name + ": expected manifest-built executable");
+        expect_cmake_build_succeeds(case_name, root);
+        expect(std::filesystem::exists(exe_path), case_name + ": expected project-built executable");
         expect(std::filesystem::exists(helper_iface), case_name + ": expected helper .scppm output");
         expect(std::filesystem::exists(helper_archive), case_name + ": expected helper .scppa output");
         RunResult run_result = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
         expect(run_result.exit_code == 0,
-               case_name + ": expected manifest-built executable to exit 0, got " +
+               case_name + ": expected project-built executable to exit 0, got " +
                    std::to_string(run_result.exit_code));
         std::filesystem::remove_all(root);
     }
@@ -6349,24 +6658,14 @@ void run_cli_extension_tests() {
         std::string case_name = "cli_project_build_lib_with_flat_partition_layout_succeeds";
         std::filesystem::path root =
             std::filesystem::current_path() / "cli_project_build_lib_with_flat_partition_layout_succeeds";
-        std::filesystem::path iface_path =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "demo" / "modules" / "demo.scppm";
-        std::filesystem::path archive_path =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "demo" / "archives" / "libdemo.scppa";
+        std::filesystem::path iface_path = cmake_build_dir(root) / "scpp-packages" / "demo" / "demo.scppm";
+        std::filesystem::path archive_path = cmake_build_dir(root) / "scpp-packages" / "demo" / "libdemo.scppa";
         std::filesystem::path consumer_source = root / "main.scpp";
         std::filesystem::path exe_path = root / "app";
         cases_run++;
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(root);
-        write_text_file(root / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[package]\n"
-                        "name = \"demo\"\n"
-                        "\n"
-                        "[[lib]]\n"
-                        "name = \"demo\"\n"
-                        "sources = [\"**/*.scpp\"]\n");
+        write_cmake_project(root, "scpp_add_package(NAME demo SOURCES demo.scpp part.scpp ALL)\n");
         write_text_file(root / "demo.scpp",
                         "export module demo;\n"
                         "export import :part;\n"
@@ -6378,13 +6677,9 @@ void run_cli_extension_tests() {
                         "namespace demo {\n"
                         "    export int answer() { return 41; }\n"
                         "}\n");
-        RunResult build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
-                                                     shell_quote(SCPP_BINARY_PATH) + " build --lib 2>&1");
-        expect(build_result.exit_code == 0,
-               case_name + ": flat same-directory partition package build should succeed, got '" +
-                   build_result.stdout_text + "'");
-        expect(std::filesystem::exists(iface_path), case_name + ": expected manifest-built demo interface");
-        expect(std::filesystem::exists(archive_path), case_name + ": expected manifest-built demo archive");
+        expect_cmake_build_succeeds(case_name, root);
+        expect(std::filesystem::exists(iface_path), case_name + ": expected built demo interface");
+        expect(std::filesystem::exists(archive_path), case_name + ": expected built demo archive");
         write_text_file(consumer_source,
                         "import demo;\n"
                         "int main() { return demo::primary() + demo::answer() - 83; }\n");
@@ -6402,47 +6697,42 @@ void run_cli_extension_tests() {
     }
 
     {
-        std::string case_name = "cli_project_build_bare_scpp_aliases_build";
-        std::filesystem::path root = std::filesystem::current_path() / "cli_project_build_bare_scpp_aliases_build";
+        // Running `scpp` with no arguments used to build the project in the
+        // working directory. Building projects is CMake's job now: bare `scpp`
+        // only prints its usage and touches nothing.
+        std::string case_name = "cli_bare_scpp_prints_usage_and_does_not_build_the_working_directory_project";
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
         std::filesystem::path src_dir = root / "src";
-        std::filesystem::path exe_path =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "app" / "app";
-        std::filesystem::path lib_iface =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "app" / "modules" / "mylib.scppm";
-        std::filesystem::path lib_archive =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "app" / "archives" / "libmylib.scppa";
+        std::filesystem::path exe_path = cmake_build_dir(root) / "bin" / "app";
+        std::filesystem::path lib_iface = cmake_build_dir(root) / "scpp-packages" / "mylib" / "mylib.scppm";
+        std::filesystem::path lib_archive = cmake_build_dir(root) / "scpp-packages" / "mylib" / "libmylib.scppa";
         cases_run++;
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(src_dir);
-        write_text_file(root / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[package]\n"
-                        "name = \"app\"\n"
-                        "\n"
-                        "[[lib]]\n"
-                        "name = \"mylib\"\n"
-                        "sources = [\"src/**/*.scpp\"]\n"
-                        "\n"
-                        "[[bin]]\n"
-                        "name = \"app\"\n"
-                        "sources = [\"src/**/*.scpp\"]\n");
+        write_cmake_project(root,
+                            "scpp_add_package(NAME mylib SOURCES src/mylib.scpp ALL)\n"
+                            "scpp_add_executable(NAME app SOURCES src/main.scpp DEPENDS mylib OUTPUT bin/app ALL)\n");
         write_text_file(src_dir / "mylib.scpp",
                         "export module mylib;\n"
                         "namespace mylib { export int answer() { return 42; } }\n");
         write_text_file(src_dir / "main.scpp",
                         "import mylib;\n"
                         "int main() { return mylib::answer() - 42; }\n");
-        RunResult build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
-                                                     shell_quote(SCPP_BINARY_PATH) + " 2>&1");
-        expect(build_result.exit_code == 0,
-               case_name + ": bare scpp should build the manifest project, got '" + build_result.stdout_text + "'");
+        RunResult bare_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
+                                                    shell_quote(SCPP_BINARY_PATH) + " 2>&1");
+        expect(bare_result.exit_code == 0,
+               case_name + ": bare scpp should exit 0, got " + std::to_string(bare_result.exit_code));
+        expect(bare_result.stdout_text.find("Usage:") != std::string::npos,
+               case_name + ": bare scpp should print its usage, got '" + bare_result.stdout_text + "'");
+        expect(!std::filesystem::exists(cmake_build_dir(root)) && !std::filesystem::exists(root / ".scpp"),
+               case_name + ": bare scpp should not build anything in the working directory");
+        expect_cmake_build_succeeds(case_name, root);
         expect(std::filesystem::exists(exe_path), case_name + ": expected package executable output");
         expect(std::filesystem::exists(lib_iface), case_name + ": expected library interface output");
         expect(std::filesystem::exists(lib_archive), case_name + ": expected library archive output");
         RunResult run_result = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
         expect(run_result.exit_code == 0,
-               case_name + ": expected bare-scpp project executable to exit 0, got " +
+               case_name + ": expected the project executable to exit 0, got " +
                    std::to_string(run_result.exit_code));
         std::filesystem::remove_all(root);
     }
@@ -6454,95 +6744,59 @@ void run_cli_extension_tests() {
         std::filesystem::path tls_dir = root / "tls";
         std::filesystem::path net_dir = root / "net";
         std::filesystem::path app_dir = root / "app";
-        std::filesystem::path app_exe =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "app" / "app";
-        std::filesystem::path tls_archive =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "tls" / "archives" / "libtls.scppa";
-        std::filesystem::path net_archive =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "net" / "archives" / "libnet.scppa";
+        std::filesystem::path app_exe = cmake_build_dir(root) / "app" / "bin" / "app";
+        std::filesystem::path tls_archive = cmake_build_dir(root) / "scpp-packages" / "tls" / "libtls.scppa";
+        std::filesystem::path net_archive = cmake_build_dir(root) / "scpp-packages" / "net" / "libnet.scppa";
         cases_run++;
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(tls_dir / "src");
         std::filesystem::create_directories(net_dir / "src");
         std::filesystem::create_directories(app_dir / "src");
-        write_text_file(root / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[workspace]\n"
-                        "members = [\"tls\", \"net\", \"app\"]\n"
-                        "default-members = [\"app\"]\n");
-        write_text_file(tls_dir / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[package]\n"
-                        "name = \"tls\"\n"
-                        "\n"
-                        "[[lib]]\n"
-                        "name = \"tls\"\n"
-                        "sources = [\"src/**/*.scpp\"]\n");
+        write_cmake_project(root,
+                            "add_subdirectory(tls)\n"
+                            "add_subdirectory(net)\n"
+                            "add_subdirectory(app)\n");
+        write_text_file(tls_dir / "CMakeLists.txt", "scpp_add_package(NAME tls SOURCES src/tls.scpp)\n");
         write_text_file(tls_dir / "src" / "tls.scpp",
                         "export module tls;\n"
                         "namespace tls { export int seed() { return 40; } }\n");
-        write_text_file(net_dir / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[package]\n"
-                        "name = \"net\"\n"
-                        "\n"
-                        "[[lib]]\n"
-                        "name = \"net\"\n"
-                        "sources = [\"src/**/*.scpp\"]\n"
-                        "\n"
-                        "[dependencies]\n"
-                        "tls = { path = \"../tls\" }\n");
+        write_text_file(net_dir / "CMakeLists.txt", "scpp_add_package(NAME net SOURCES src/net.scpp DEPENDS tls)\n");
         write_text_file(net_dir / "src" / "net.scpp",
                         "export module net;\n"
                         "import tls;\n"
                         "namespace net { export int value() { return tls::seed() + 2; } }\n");
-        write_text_file(app_dir / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[package]\n"
-                        "name = \"app\"\n"
-                        "\n"
-                        "[[bin]]\n"
-                        "name = \"app\"\n"
-                        "sources = [\"src/**/*.scpp\"]\n"
-                        "\n"
-                        "[dependencies]\n"
-                        "net = { path = \"../net\" }\n");
+        write_text_file(app_dir / "CMakeLists.txt",
+                        "scpp_add_executable(NAME app SOURCES src/main.scpp DEPENDS net OUTPUT bin/app ALL)\n");
         write_text_file(app_dir / "src" / "main.scpp",
                         "import net;\n"
                         "int main() { return net::value() - 42; }\n");
-        RunResult build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
-                                                     shell_quote(SCPP_BINARY_PATH) + " build 2>&1");
-        expect(build_result.exit_code == 0,
-               case_name + ": workspace default build should succeed, got '" + build_result.stdout_text + "'");
+        // The default targets: the app, and the packages it links.
+        expect_cmake_build_succeeds(case_name, root);
         expect(std::filesystem::exists(app_exe), case_name + ": expected workspace app executable");
-        expect(std::filesystem::exists(tls_archive), case_name + ": expected tls archive at workspace root output");
-        expect(std::filesystem::exists(net_archive), case_name + ": expected net archive at workspace root output");
-        expect(!std::filesystem::exists(app_dir / ".scpp"),
+        expect(std::filesystem::exists(tls_archive), case_name + ": expected tls archive in the build tree");
+        expect(std::filesystem::exists(net_archive), case_name + ": expected net archive in the build tree");
+        expect(directory_entry_count(app_dir) == 2,
                case_name + ": member packages should not write outputs under their own directories");
         RunResult run_result = run_command_capture(shell_quote(app_exe.string()) + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected app executable exit code 0, got " + std::to_string(run_result.exit_code));
-        RunResult package_build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
-                                                             shell_quote(SCPP_BINARY_PATH) + " build -p net --lib 2>&1");
+        RunResult package_build_result = cmake_build(root, {"scpp_pkg_net"});
         expect(package_build_result.exit_code == 0,
-               case_name + ": package-selected lib build should succeed, got '" + package_build_result.stdout_text + "'");
-        RunResult workspace_build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
-                                                               shell_quote(SCPP_BINARY_PATH) + " build --workspace 2>&1");
+               case_name + ": package-selected build should succeed, got '" + package_build_result.stdout_text + "'");
+        RunResult workspace_build_result = cmake_build(root, {"scpp_pkg_tls", "scpp_pkg_net", "app"});
         expect(workspace_build_result.exit_code == 0,
-               case_name + ": --workspace build should succeed, got '" + workspace_build_result.stdout_text + "'");
+               case_name + ": building every member should succeed, got '" + workspace_build_result.stdout_text + "'");
+        // What a source imports is read when CMake configures, so the check
+        // that it may see the module runs on the next configure.
         write_text_file(app_dir / "src" / "main.scpp",
                         "import tls;\n"
                         "int main() { return tls::seed(); }\n");
-        RunResult direct_visibility_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
-                                                                 shell_quote(SCPP_BINARY_PATH) + " build -p app 2>&1");
+        RunResult direct_visibility_result = cmake_configure(root);
         expect(direct_visibility_result.exit_code != 0,
                case_name + ": importing a transitive-only dependency should fail");
-        expect(direct_visibility_result.stdout_text.find(
-                   "module 'tls' is exported only by transitive dependency package 'tls'") != std::string::npos,
+        expect(collapse_whitespace(direct_visibility_result.stdout_text)
+                       .find("imports module 'tls', which is exported only by package 'tls', not a direct "
+                             "dependency") != std::string::npos,
                case_name + ": expected direct-visibility error, got '" + direct_visibility_result.stdout_text + "'");
         std::filesystem::remove_all(root);
     }
@@ -6552,49 +6806,25 @@ void run_cli_extension_tests() {
         std::filesystem::path root = std::filesystem::current_path() /
                                      "cli_root_package_workspace_builds_root_package_by_default";
         std::filesystem::path dep_dir = root / "libs" / "tls";
-        std::filesystem::path exe_path =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "rootapp" / "rootapp";
+        std::filesystem::path exe_path = cmake_build_dir(root) / "bin" / "rootapp";
         cases_run++;
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(dep_dir / "src");
         std::filesystem::create_directories(root / "src");
-        write_text_file(root / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[workspace]\n"
-                        "members = [\"libs/tls\"]\n"
-                        "\n"
-                        "[package]\n"
-                        "name = \"rootapp\"\n"
-                        "\n"
-                        "[[bin]]\n"
-                        "name = \"rootapp\"\n"
-                                                "sources = [\"src/**/*.scpp\"]\n"
-                        "\n"
-                        "[dependencies]\n"
-                        "tls = { path = \"libs/tls\" }\n");
-        write_text_file(dep_dir / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[package]\n"
-                        "name = \"tls\"\n"
-                        "\n"
-                        "[[lib]]\n"
-                        "name = \"tls\"\n"
-                        "sources = [\"src/**/*.scpp\"]\n");
+        write_cmake_project(root,
+                            "add_subdirectory(libs/tls)\n"
+                            "scpp_add_executable(NAME rootapp SOURCES src/main.scpp DEPENDS tls OUTPUT bin/rootapp ALL)\n");
+        write_text_file(dep_dir / "CMakeLists.txt", "scpp_add_package(NAME tls SOURCES src/tls.scpp)\n");
         write_text_file(dep_dir / "src" / "tls.scpp",
                         "export module tls;\n"
                         "namespace tls { export int seed() { return 5; } }\n");
         write_text_file(root / "src" / "main.scpp",
                         "import tls;\n"
                         "int main() { return tls::seed() - 5; }\n");
-        RunResult build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
-                                                     shell_quote(SCPP_BINARY_PATH) + " build 2>&1");
-        expect(build_result.exit_code == 0,
-               case_name + ": root package workspace build should succeed, got '" + build_result.stdout_text + "'");
-        expect(std::filesystem::exists(exe_path), case_name + ": expected root package executable at workspace root");
-        expect(!std::filesystem::exists(dep_dir / ".scpp"),
-               case_name + ": workspace member outputs should remain under the workspace root");
+        expect_cmake_build_succeeds(case_name, root);
+        expect(std::filesystem::exists(exe_path), case_name + ": expected root package executable in the build tree");
+        expect(directory_entry_count(dep_dir) == 2,
+               case_name + ": workspace member outputs should remain under the build tree");
         RunResult run_result = run_command_capture(shell_quote(exe_path.string()) + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": expected root package executable exit code 0, got " +
@@ -6608,31 +6838,19 @@ void run_cli_extension_tests() {
                                      "cli_incremental_build_skips_recompile_on_impl_change_and_recompiles_on_interface_change";
         std::filesystem::path dep_dir = root / "dep";
         std::filesystem::path app_dir = root / "app";
-        std::filesystem::path build_root = root / ".scpp" / "build" / scpp::host_target_triple();
-        std::filesystem::path dep_archive = build_root / "dep" / "archives" / "libdep.scppa";
-        std::filesystem::path dep_interface = build_root / "dep" / "modules" / "dep.scppm";
-        std::filesystem::path app_object = build_root / "app" / "objects" / "app" / "0_main_scpp.o";
-        std::filesystem::path app_exe = build_root / "app" / "app";
-        std::filesystem::path build_db = root / ".scpp" / "cache" / "build.db";
+        std::filesystem::path build_root = cmake_build_dir(root);
+        std::filesystem::path dep_archive = build_root / "scpp-packages" / "dep" / "libdep.scppa";
+        std::filesystem::path dep_interface = build_root / "scpp-packages" / "dep" / "dep.scppm";
+        std::filesystem::path app_object = build_root / "scpp-packages" / "app.0.o";
+        std::filesystem::path app_exe = build_root / "app" / "bin" / "app";
         cases_run++;
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(dep_dir / "src");
         std::filesystem::create_directories(app_dir / "src");
-        write_text_file(root / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[workspace]\n"
-                        "members = [\"dep\", \"app\"]\n"
-                        "default-members = [\"app\"]\n");
-        write_text_file(dep_dir / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[package]\n"
-                        "name = \"dep\"\n"
-                        "\n"
-                        "[[lib]]\n"
-                        "name = \"dep\"\n"
-                        "sources = [\"src/**/*.scpp\"]\n");
+        write_cmake_project(root,
+                            "add_subdirectory(dep)\n"
+                            "add_subdirectory(app)\n");
+        write_text_file(dep_dir / "CMakeLists.txt", "scpp_add_package(NAME dep SOURCES src/dep.scpp)\n");
         write_text_file(dep_dir / "src" / "dep.scpp",
                         "export module dep;\n"
                         "namespace dep {\n"
@@ -6642,26 +6860,14 @@ void run_cli_extension_tests() {
                         "    }\n"
                         "    export int value() { return internal_value(); }\n"
                         "}\n");
-        write_text_file(app_dir / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[package]\n"
-                        "name = \"app\"\n"
-                        "\n"
-                        "[[bin]]\n"
-                        "name = \"app\"\n"
-                                                "sources = [\"src/**/*.scpp\"]\n"
-                        "\n"
-                        "[dependencies]\n"
-                        "dep = { path = \"../dep\" }\n");
+        write_text_file(app_dir / "CMakeLists.txt",
+                        "scpp_add_executable(NAME app SOURCES src/main.scpp DEPENDS dep OUTPUT bin/app ALL)\n");
         write_text_file(app_dir / "src" / "main.scpp",
                         "import dep;\n"
                         "int main() { return dep::value() - 40; }\n");
-        RunResult first_build = run_command_capture("cd " + shell_quote(root.string()) + " && " +
-                                                    shell_quote(SCPP_BINARY_PATH) + " build 2>&1");
-        expect(first_build.exit_code == 0, case_name + ": initial build should succeed, got '" + first_build.stdout_text + "'");
-        expect(std::filesystem::exists(build_db), case_name + ": expected .scpp/cache/build.db");
+        expect_cmake_build_succeeds(case_name, root);
         auto first_dep_archive_time = std::filesystem::last_write_time(dep_archive);
+        auto first_dep_interface_time = std::filesystem::last_write_time(dep_interface);
         std::string first_dep_interface_text = read_file(dep_interface);
         auto first_app_object_time = std::filesystem::last_write_time(app_object);
         auto first_app_exe_time = std::filesystem::last_write_time(app_exe);
@@ -6675,13 +6881,13 @@ void run_cli_extension_tests() {
                         "    }\n"
                         "    export int value() { return internal_value(); }\n"
                         "}\n");
-        RunResult impl_only_build = run_command_capture("cd " + shell_quote(root.string()) + " && " +
-                                                        shell_quote(SCPP_BINARY_PATH) + " build 2>&1");
+        RunResult impl_only_build = cmake_build(root);
         expect(impl_only_build.exit_code == 0,
                case_name + ": impl-only rebuild should succeed, got '" + impl_only_build.stdout_text + "'");
         expect(std::filesystem::last_write_time(dep_archive) > first_dep_archive_time,
                case_name + ": dependency archive should rebuild after implementation change");
-        expect(read_file(dep_interface) == first_dep_interface_text,
+        expect(read_file(dep_interface) == first_dep_interface_text &&
+                   std::filesystem::last_write_time(dep_interface) == first_dep_interface_time,
                case_name + ": dependency interface should remain unchanged after implementation-only change");
         expect(std::filesystem::last_write_time(app_object) == first_app_object_time,
                case_name + ": downstream object should be reused when dependency interface is unchanged");
@@ -6698,8 +6904,7 @@ void run_cli_extension_tests() {
                         "    }\n"
                         "    export int value() { return internal_value(); }\n"
                         "}\n");
-        RunResult interface_build = run_command_capture("cd " + shell_quote(root.string()) + " && " +
-                                                        shell_quote(SCPP_BINARY_PATH) + " build 2>&1");
+        RunResult interface_build = cmake_build(root);
         expect(interface_build.exit_code == 0,
                case_name + ": interface rebuild should succeed, got '" + interface_build.stdout_text + "'");
         expect(read_file(dep_interface) != first_dep_interface_text,
@@ -6714,33 +6919,22 @@ void run_cli_extension_tests() {
     }
 
     {
-        // Regression test: a primary interface module's build-cache signature
-        // used to hash only the primary source file itself, not any interface
+        // Regression test: a primary interface module's build step used to
+        // depend only on the primary source file itself, not on any interface
         // partitions it re-exports via `export import :part;`. That meant
-        // editing ONLY a partition file left the cached signature unchanged,
-        // so `scpp build` incorrectly treated the module/archive as already
-        // up to date and never recompiled it, silently keeping stale behavior.
+        // editing ONLY a partition file left the module/archive looking up to
+        // date, so it was never rebuilt and silently kept stale behavior.
         std::string case_name = "cli_project_build_lib_rebuilds_when_only_partition_file_changes";
         std::filesystem::path root =
             std::filesystem::current_path() / "cli_project_build_lib_rebuilds_when_only_partition_file_changes";
-        std::filesystem::path iface_path =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "demo" / "modules" / "demo.scppm";
-        std::filesystem::path archive_path =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "demo" / "archives" / "libdemo.scppa";
+        std::filesystem::path iface_path = cmake_build_dir(root) / "scpp-packages" / "demo" / "demo.scppm";
+        std::filesystem::path archive_path = cmake_build_dir(root) / "scpp-packages" / "demo" / "libdemo.scppa";
         std::filesystem::path consumer_source = root / "main.scpp";
         std::filesystem::path exe_path = root / "app";
         cases_run++;
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(root);
-        write_text_file(root / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[package]\n"
-                        "name = \"demo\"\n"
-                        "\n"
-                        "[[lib]]\n"
-                        "name = \"demo\"\n"
-                        "sources = [\"**/*.scpp\"]\n");
+        write_cmake_project(root, "scpp_add_package(NAME demo SOURCES demo.scpp part.scpp ALL)\n");
         write_text_file(root / "demo.scpp",
                         "export module demo;\n"
                         "export import :part;\n"
@@ -6752,10 +6946,7 @@ void run_cli_extension_tests() {
                         "namespace demo {\n"
                         "    export int answer() { return 41; }\n"
                         "}\n");
-        RunResult first_build = run_command_capture("cd " + shell_quote(root.string()) + " && " +
-                                                    shell_quote(SCPP_BINARY_PATH) + " build --lib 2>&1");
-        expect(first_build.exit_code == 0,
-               case_name + ": initial build should succeed, got '" + first_build.stdout_text + "'");
+        expect_cmake_build_succeeds(case_name, root);
         auto first_archive_time = std::filesystem::last_write_time(archive_path);
         write_text_file(consumer_source,
                         "import demo;\n"
@@ -6775,8 +6966,7 @@ void run_cli_extension_tests() {
                         "namespace demo {\n"
                         "    export int answer() { return 42; }\n"
                         "}\n");
-        RunResult second_build = run_command_capture("cd " + shell_quote(root.string()) + " && " +
-                                                     shell_quote(SCPP_BINARY_PATH) + " build --lib 2>&1");
+        RunResult second_build = cmake_build(root);
         expect(second_build.exit_code == 0,
                case_name + ": rebuild after partition-only change should succeed, got '" +
                    second_build.stdout_text + "'");
@@ -6796,36 +6986,24 @@ void run_cli_extension_tests() {
     }
 
     {
-        // Regression test: a [[lib]] target may bundle multiple independent
-        // primary modules (not partitions of one another) into a single
-        // build, each still producing its own interface/archive artifact.
-        // Archive naming falls back to being keyed by module name (rather
-        // than the shared target name) specifically to avoid two modules'
-        // archives colliding on the same path.
+        // Regression test: one package may bundle multiple independent primary
+        // modules (not partitions of one another) into a single declaration,
+        // each still producing its own interface/archive artifact. Archives
+        // are named after their own module, which keeps two modules' archives
+        // from colliding on the same path.
         std::string case_name = "cli_project_build_lib_supports_multiple_independent_primary_modules";
         std::filesystem::path root = std::filesystem::current_path() /
                                      "cli_project_build_lib_supports_multiple_independent_primary_modules";
-        std::filesystem::path modone_iface =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "multilib" / "modules" / "modone.scppm";
-        std::filesystem::path modtwo_iface =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "multilib" / "modules" / "modtwo.scppm";
-        std::filesystem::path modone_archive =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "multilib" / "archives" / "libmodone.scppa";
-        std::filesystem::path modtwo_archive =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "multilib" / "archives" / "libmodtwo.scppa";
+        std::filesystem::path package_dir = cmake_build_dir(root) / "scpp-packages" / "multilib";
+        std::filesystem::path modone_iface = package_dir / "modone.scppm";
+        std::filesystem::path modtwo_iface = package_dir / "modtwo.scppm";
+        std::filesystem::path modone_archive = package_dir / "libmodone.scppa";
+        std::filesystem::path modtwo_archive = package_dir / "libmodtwo.scppa";
         std::filesystem::path exe_path = root / "app";
         cases_run++;
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(root);
-        write_text_file(root / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[package]\n"
-                        "name = \"multilib\"\n"
-                        "\n"
-                        "[[lib]]\n"
-                        "name = \"multilib\"\n"
-                        "sources = [\"*.scpp\"]\n");
+        write_cmake_project(root, "scpp_add_package(NAME multilib SOURCES modone.scpp modtwo.scpp ALL)\n");
         write_text_file(root / "modone.scpp",
                         "export module modone;\n"
                         "namespace modone {\n"
@@ -6836,17 +7014,13 @@ void run_cli_extension_tests() {
                         "namespace modtwo {\n"
                         "    export int value_two() { return 20; }\n"
                         "}\n");
-        RunResult build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
-                                                     shell_quote(SCPP_BINARY_PATH) + " build --lib 2>&1");
-        expect(build_result.exit_code == 0,
-               case_name + ": build of a [[lib]] target with two independent primary modules should succeed, got '" +
-                   build_result.stdout_text + "'");
+        expect_cmake_build_succeeds(case_name, root);
         expect(std::filesystem::exists(modone_iface), case_name + ": expected modone interface artifact");
         expect(std::filesystem::exists(modtwo_iface), case_name + ": expected modtwo interface artifact");
         expect(std::filesystem::exists(modone_archive),
-               case_name + ": expected modone archive named after its own module, not the shared target");
+               case_name + ": expected modone archive named after its own module, not the shared package");
         expect(std::filesystem::exists(modtwo_archive),
-               case_name + ": expected modtwo archive named after its own module, not the shared target");
+               case_name + ": expected modtwo archive named after its own module, not the shared package");
         write_text_file(root / "main.scpp",
                         "import modone;\n"
                         "import modtwo;\n"
@@ -6867,10 +7041,9 @@ void run_cli_extension_tests() {
 
     {
         // Regression test: the exactly-one-primary-module restriction is
-        // still enforced when a [[lib]] target also has additional_objs
-        // configured, since build_library_target's native-object merge has
-        // to pick a single archive to merge into and can't do so
-        // unambiguously when the target builds more than one module.
+        // still enforced when a package also has NATIVE_OBJECTS, since merging
+        // them has to pick a single archive to merge into and can't do so
+        // unambiguously when the package builds more than one module.
         std::string case_name =
             "cli_project_build_lib_rejects_multiple_primary_modules_with_additional_objs";
         std::filesystem::path root =
@@ -6879,23 +7052,10 @@ void run_cli_extension_tests() {
         cases_run++;
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(root);
-        write_text_file(root / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[package]\n"
-                        "name = \"multilib\"\n"
-                        "\n"
-                        "[[lib]]\n"
-                        "name = \"multilib\"\n"
-                        "sources = [\"*.scpp\"]\n"
-                        "additional_objs = \"custom\"\n"
-                        "\n"
-                        "[additional_objs.custom]\n"
-                        "input = [\"native.cpp\"]\n"
-                        "output = [\"native.o\"]\n"
-                        "command = \"\"\"\\\n"
-                        "${CXX:-c++} -std=c++26 -O2 -c native.cpp\n"
-                        "\"\"\"\n");
+        write_cmake_project(root,
+                            "add_library(custom OBJECT native.cpp)\n"
+                            "scpp_add_package(NAME multilib SOURCES modone.scpp modtwo.scpp NATIVE_OBJECTS custom)\n",
+                            "CXX");
         write_text_file(root / "native.cpp", "int scpp_multilib_native_marker() { return 7; }\n");
         write_text_file(root / "modone.scpp",
                         "export module modone;\n"
@@ -6907,14 +7067,13 @@ void run_cli_extension_tests() {
                         "namespace modtwo {\n"
                         "    export int value_two() { return 20; }\n"
                         "}\n");
-        RunResult build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
-                                                     shell_quote(SCPP_BINARY_PATH) + " build --lib 2>&1");
-        expect(build_result.exit_code != 0,
-               case_name + ": expected a [[lib]] target with two primary modules and additional_objs to be rejected");
-        expect(build_result.stdout_text.find(
-                   "must contain exactly one primary interface module when using additional_objs") !=
+        RunResult configure_result = cmake_configure(root);
+        expect(configure_result.exit_code != 0,
+               case_name + ": expected a package with two primary modules and NATIVE_OBJECTS to be rejected");
+        expect(collapse_whitespace(configure_result.stdout_text)
+                       .find("NATIVE_OBJECTS need exactly one primary module to be merged into") !=
                    std::string::npos,
-               case_name + ": expected the additional_objs-specific error, got '" + build_result.stdout_text + "'");
+               case_name + ": expected the NATIVE_OBJECTS-specific error, got '" + configure_result.stdout_text + "'");
         std::filesystem::remove_all(root);
     }
 
@@ -6924,31 +7083,18 @@ void run_cli_extension_tests() {
         std::filesystem::path trig_dir = root / "trig";
         std::filesystem::path net_dir = root / "net";
         std::filesystem::path app_dir = root / "app";
-        std::filesystem::path app_exe =
-            root / ".scpp" / "build" / scpp::host_target_triple() / "app" / "app";
+        std::filesystem::path app_exe = cmake_build_dir(root) / "app" / "bin" / "app";
         cases_run++;
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(trig_dir / "src");
         std::filesystem::create_directories(net_dir / "src");
         std::filesystem::create_directories(app_dir / "src");
-        write_text_file(root / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[workspace]\n"
-                        "members = [\"trig\", \"net\", \"app\"]\n"
-                        "default-members = [\"app\"]\n");
-        write_text_file(trig_dir / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[package]\n"
-                        "name = \"trig\"\n"
-                        "\n"
-                        "[[lib]]\n"
-                        "name = \"trig\"\n"
-                        "sources = [\"src/**/*.scpp\"]\n"
-                        "\n"
-                        "[native]\n"
-                        "links = [\"m\"]\n");
+        write_cmake_project(root,
+                            "add_subdirectory(trig)\n"
+                            "add_subdirectory(net)\n"
+                            "add_subdirectory(app)\n");
+        write_text_file(trig_dir / "CMakeLists.txt",
+                        "scpp_add_package(NAME trig SOURCES src/trig.scpp LINK_LIBRARIES -lm)\n");
         write_text_file(trig_dir / "src" / "trig.scpp",
                         "export module trig;\n"
                         "extern \"C\" double cos(double x);\n"
@@ -6957,41 +7103,21 @@ void run_cli_extension_tests() {
                         "        [[scpp::unsafe]] { return (int)cos(0.0); }\n"
                         "    }\n"
                         "}\n");
-        write_text_file(net_dir / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[package]\n"
-                        "name = \"net\"\n"
-                        "\n"
-                        "[[lib]]\n"
-                        "name = \"net\"\n"
-                        "sources = [\"src/**/*.scpp\"]\n"
-                        "\n"
-                        "[dependencies]\n"
-                        "trig = { path = \"../trig\" }\n");
+        write_text_file(net_dir / "CMakeLists.txt", "scpp_add_package(NAME net SOURCES src/net.scpp DEPENDS trig)\n");
         write_text_file(net_dir / "src" / "net.scpp",
                         "export module net;\n"
                         "import trig;\n"
                         "namespace net { export int forward() { return trig::one(); } }\n");
-        write_text_file(app_dir / "scpp.toml",
-                        "manifest-version = 1\n"
-                        "\n"
-                        "[package]\n"
-                        "name = \"app\"\n"
-                        "\n"
-                        "[[bin]]\n"
-                        "name = \"app\"\n"
-                        "sources = [\"src/**/*.scpp\"]\n"
-                        "\n"
-                        "[dependencies]\n"
-                        "net = { path = \"../net\" }\n");
+        write_text_file(app_dir / "CMakeLists.txt",
+                        "scpp_add_executable(NAME app SOURCES src/main.scpp DEPENDS net OUTPUT bin/app ALL)\n");
         write_text_file(app_dir / "src" / "main.scpp",
                         "import net;\n"
                         "int main() { return net::forward() - 1; }\n");
-        RunResult build_result = run_command_capture("cd " + shell_quote(root.string()) + " && " +
-                                                     shell_quote(SCPP_BINARY_PATH) + " build 2>&1");
-        expect(build_result.exit_code == 0,
-               case_name + ": transitive native-link build should succeed, got '" + build_result.stdout_text + "'");
+        expect_cmake_build_succeeds(case_name, root);
+        RunResult commands_result = cmake_build(root, {"app"}, "-t commands");
+        expect(commands_result.stdout_text.find("--link -lm") != std::string::npos,
+               case_name + ": expected the app's link command to carry trig's native link, got '" +
+                   commands_result.stdout_text + "'");
         RunResult run_result = run_command_capture(shell_quote(app_exe.string()) + " 2>&1");
         expect(run_result.exit_code == 0,
                case_name + ": executable should run successfully with propagated native links, got " +

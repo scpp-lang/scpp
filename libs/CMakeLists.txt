@@ -1,12 +1,13 @@
 # scpp (the language) is designed so that every valid `.scpp` source file
 # is also valid, compilable real C++ -- the same principle already
 # enforced for src/*.cppm (dual-compiled: real C++ via this bootstrap
-# clang++ toolchain, and self-hosting via `scpp build` -- see
-# scpp_workspace_artifacts in the top-level CMakeLists.txt), now extended to
-# the stdlib itself. libs/std/**/*.scpp and libs/scpp/**/*.scpp are, until
-# now, only ever compiled by the `scpp` compiler (via scpp_workspace_artifacts's
-# `scpp build`); they had never been independently checked against a real
-# C++ compiler before this target. This target is that check.
+# clang++ toolchain, and self-hosting via the scpp-compiled packages -- see
+# scpp_packages in the top-level CMakeLists.txt), now extended to the
+# stdlib itself. libs/std/**/*.scpp and libs/scpp/**/*.scpp are, until
+# now, only ever compiled by the `scpp` compiler (via the std and scpp
+# packages in the top-level CMakeLists.txt); they had never been
+# independently checked against a real C++ compiler before this target.
+# This target is that check.
 #
 # This is compile-only, invariant validation, not a real, used library:
 # the resulting object code is never linked into anything (see OBJECT
@@ -20,17 +21,13 @@
 # Re-validating it here would just be duplicate compilation of files that
 # already prove their own C++-validity by being part of the real build.
 #
-# Unlike scpp_workspace_artifacts's own "no file list at all, always rerun
-# and trust scpp build's own incremental cache" approach elsewhere in this
-# repo, a file(GLOB_RECURSE ...) source list is the right, non-redundant
-# tool for *this* target specifically: this is a genuine, CMake-native
-# OBJECT library compiled directly by this project's own clang++
-# toolchain, so CMake itself genuinely needs an accurate source list to
-# generate correct build rules -- no other system (unlike scpp's own
-# BuildDatabase for scpp_workspace_artifacts) independently tracks these
-# files' C++-compilability. CONFIGURE_DEPENDS makes CMake re-glob (and
-# thus notice newly-added/removed stdlib files) on the next build, so
-# nobody has to remember to keep an explicit file list in sync by hand.
+# A file(GLOB_RECURSE ...) source list is the right tool for this target:
+# it is a genuine, CMake-native library compiled directly by this
+# project's own clang++ toolchain, so CMake itself needs an accurate source
+# list to generate correct build rules. CONFIGURE_DEPENDS makes CMake
+# re-glob (and thus notice newly-added/removed stdlib files) on the next
+# build, so nobody has to remember to keep an explicit file list in sync by
+# hand.
 find_package(Threads REQUIRED)
 
 file(GLOB_RECURSE SCPP_STDLIB_SOURCES CONFIGURE_DEPENDS

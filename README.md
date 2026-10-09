@@ -70,24 +70,22 @@ published only in English and Simplified Chinese today.
 ## Building
 
 Requires Clang with C++26 modules support, CMake 3.28+, Ninja, an LLVM
-development package, SQLite development headers/libs, and a `g++` install (for
-its `libstdc++` development files -- see below). On Debian/Ubuntu:
+development package, and a `g++` install (for its `libstdc++` development
+files -- see below). On Debian/Ubuntu:
 
 ```sh
-sudo apt install clang cmake ninja-build llvm-22-dev libzstd-dev libsqlite3-dev g++
+sudo apt install clang cmake ninja-build llvm-22-dev libzstd-dev g++
 ```
 
 (`libzstd-dev` is needed because LLVM's CMake config links against it;
 without it, `find_package(LLVM)` fails with a missing `zstd::libzstd_shared`
-target. `libsqlite3-dev` provides the `sqlite3.h` header and static/shared
-SQLite library that SCPP now links during full source builds. `g++` is not
-used as the compiler -- that's still Clang -- but its `libstdc++-*-dev`
-package provides the `bits/std.cc` module interface unit Clang's `import
-std;` builds against; SCPP's own C++ implementation uses `import std;`
-everywhere instead of `#include`-ing standard library headers, and
-deliberately targets libstdc++ rather than libc++ so it stays ABI-compatible
-with the prebuilt LLVM libraries above, which are themselves built against
-libstdc++.)
+target. `g++` is not used as the compiler -- that's still Clang -- but its
+`libstdc++-*-dev` package provides the `bits/std.cc` module interface unit
+Clang's `import std;` builds against; SCPP's own C++ implementation uses
+`import std;` everywhere instead of `#include`-ing standard library headers,
+and deliberately targets libstdc++ rather than libc++ so it stays
+ABI-compatible with the prebuilt LLVM libraries above, which are themselves
+built against libstdc++.)
 
 ```sh
 cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH=<path to LLVM's lib/cmake/llvm>
@@ -118,7 +116,7 @@ The `scpp` CLI supports:
 ```sh
 scpp lex <file>              # dump the token stream
 scpp parse <file>            # dump the AST
-scpp build <file> [-o <out>] # compile to a native executable via LLVM
+scpp <file> [-o <out>]       # compile to a native executable via LLVM
 ```
 
 ## License

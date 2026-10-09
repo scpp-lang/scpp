@@ -48,14 +48,13 @@ runs:
         # `ldd build/driver_test` resolves libz3.so.4 / libzstd.so.1 /
         # libz.so.1 (from llvm-22-dev and libzstd-dev) and libstdc++.so.6,
         # and `scpp` itself shells out to a real compiler driver to link --
-        # `cc -static ... -lstdc++ -lm` in driver.cppm's link_executable,
-        # and one of `clang++`/`clang++-22`/`g++`/`c++` in project.cppm.
+        # `cc -static ... -lstdc++ -lm` in driver.cppm's link_executable.
         # A test job without these does not fail to start; it fails deep
         # inside a test case, which is much harder to read.
         #
         # `cmake` is deliberately NOT installed here -- see the "Install
         # pinned CMake" step below for why.
-        sudo apt-get install -y ca-certificates curl ninja-build libzstd-dev libsqlite3-dev clang-22 llvm-22-dev g++
+        sudo apt-get install -y ca-certificates curl ninja-build libzstd-dev clang-22 llvm-22-dev g++
 
     - name: Install pinned CMake
       shell: bash

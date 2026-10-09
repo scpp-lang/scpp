@@ -16,75 +16,53 @@ The project convention is:
 
 | Path | Role |
 |---|---|
-| `std/scpp.toml` | `std` package manifest: `[[lib]]` source set plus `[additional_objs.std-native]` wrapper-object build step |
 | `std/std.scpp` | Primary interface unit of module `std`; re-exports its partitions with `export import :...;` |
 | `std/` | Real-C++-mirroring library partitions and native wrappers for module `std` |
-| `scpp/scpp.toml` | `scpp` package manifest with a path dependency on `../std` |
 | `scpp/scpp.scpp` | Primary interface unit of module `scpp`; re-exports scpp-specific partitions |
 | `scpp/rand/` | `scpp:rand` partition with `scpp::rand::uniform_int_distribution<int>` |
-| `llvm/llvm.cpp` | Primary interface unit of module `llvm`; re-exports its six partitions with `export import :...;` -- plain clang++-compiled, not a workspace member |
-| `llvm/types.cpp` | Partition `llvm:types`: hand-written opaque handle struct tags/aliases mirroring the `llvm-c/Types.h` subset `llvm:core`, `llvm:debug_info`, and `src/compiler/codegen/api.cppm` use -- plain clang++-compiled, not a workspace member |
-| `llvm/core.cpp` | Partition `llvm:core`: hand-written `extern "C"` mirror of the `llvm-c/Core.h` subset this compiler's own codegen uses, depending on `llvm:types` for its opaque handle types -- plain clang++-compiled, not a workspace member |
-| `llvm/debug_info.cpp` | Partition `llvm:debug_info`: hand-written `extern "C"` mirror of the `llvm-c/DebugInfo.h` subset this compiler's own codegen uses, depending on `llvm:types` for its opaque handle types -- plain clang++-compiled, not a workspace member |
-| `llvm/target.cpp` | Partition `llvm:target`: hand-written `extern "C"` mirror of the `llvm-c/Target.h` subset this compiler's own driver/codegen uses, depending on `llvm:types` for its opaque handle types -- plain clang++-compiled, not a workspace member |
-| `llvm/target_machine.cpp` | Partition `llvm:target_machine`: hand-written `extern "C"` mirror of the `llvm-c/TargetMachine.h` subset this compiler's own driver uses, depending on `llvm:types` and `llvm:target` for its opaque handle types -- plain clang++-compiled, not a workspace member |
-| `llvm/analysis.cpp` | Partition `llvm:analysis`: hand-written `extern "C"` mirror of the `llvm-c/Analysis.h` subset this compiler's own codegen uses, depending on `llvm:types` for its opaque handle types -- plain clang++-compiled, not a workspace member |
-| `llvm/native_target_init.cpp` | Plain, never-`import`ed native-init shim bridging the one confirmed ABI gap in `llvm-c/Target.h` (`LLVMInitializeNativeTarget`/`LLVMInitializeNativeAsmPrinter` have no real exported symbol -- see `llvm:target`'s own section below) -- compiled into its own small static library, not a workspace member |
+| `llvm/llvm.cpp` | Primary interface unit of module `llvm`; re-exports its six partitions with `export import :...;` -- plain clang++-compiled |
+| `llvm/types.cpp` | Partition `llvm:types`: hand-written opaque handle struct tags/aliases mirroring the `llvm-c/Types.h` subset `llvm:core`, `llvm:debug_info`, and `src/compiler/codegen/api.cppm` use -- plain clang++-compiled |
+| `llvm/core.cpp` | Partition `llvm:core`: hand-written `extern "C"` mirror of the `llvm-c/Core.h` subset this compiler's own codegen uses, depending on `llvm:types` for its opaque handle types -- plain clang++-compiled |
+| `llvm/debug_info.cpp` | Partition `llvm:debug_info`: hand-written `extern "C"` mirror of the `llvm-c/DebugInfo.h` subset this compiler's own codegen uses, depending on `llvm:types` for its opaque handle types -- plain clang++-compiled |
+| `llvm/target.cpp` | Partition `llvm:target`: hand-written `extern "C"` mirror of the `llvm-c/Target.h` subset this compiler's own driver/codegen uses, depending on `llvm:types` for its opaque handle types -- plain clang++-compiled |
+| `llvm/target_machine.cpp` | Partition `llvm:target_machine`: hand-written `extern "C"` mirror of the `llvm-c/TargetMachine.h` subset this compiler's own driver uses, depending on `llvm:types` and `llvm:target` for its opaque handle types -- plain clang++-compiled |
+| `llvm/analysis.cpp` | Partition `llvm:analysis`: hand-written `extern "C"` mirror of the `llvm-c/Analysis.h` subset this compiler's own codegen uses, depending on `llvm:types` for its opaque handle types -- plain clang++-compiled |
+| `llvm/native_target_init.cpp` | Plain, never-`import`ed native-init shim bridging the one confirmed ABI gap in `llvm-c/Target.h` (`LLVMInitializeNativeTarget`/`LLVMInitializeNativeAsmPrinter` have no real exported symbol -- see `llvm:target`'s own section below) -- compiled into its own small static library |
 
-## Manifest workspace
+## How the packages are built
 
-`libs/` dogfoods the same manifest-based flow the book teaches, as two members of
-the repository's top-level workspace manifest (`../scpp.toml`, moved up from
-`libs/scpp.toml` so it can also cover `src/` and `applications/httpserver/`
--- see `../src/scpp.toml` and `../applications/httpserver/scpp.toml`):
+`libs/std`, `libs/scpp` and `libs/llvm` are scpp packages, built like the
+self-hosted compiler is: the top-level `../CMakeLists.txt` declares them with
+`scpp_add_package` (see `../cmake/ScppPackages.cmake`), and the just-built
+`scpp` compiles them through its clang-like command line (`scpp build-module`,
+`scpp -c`). Every module interface, implementation partition, native object
+and archive is its own build edge, so a build is parallel, prints per-file
+progress and rebuilds only what a change affects.
 
-- the root `scpp.toml` workspace declares
-  `members = ["libs/std", "libs/scpp", "src", "applications/httpserver"]`
-  with no `default-members`, so a plain `scpp build` (no `-p`/`--workspace`) from
-  the repo root -- and the top-level `CMakeLists.txt`'s custom command
-  described below -- builds all four member packages, including `src`'s
-  `ast.cppm` self-hosting target and `applications/httpserver`'s `[[bin]]`
-- `libs/std/scpp.toml` defines the `std` library package
-- `libs/scpp/scpp.toml` defines the `scpp` library package and depends on `std`
-
-`libs/` also keeps wrapper compilation inside the manifest build itself:
-
-- `[[lib]]` declares the scpp module source set
-- `[additional_objs.std-native]` / `[additional_objs.scpp-native]` each run one `${CXX:-c++} -c ...`
-  command that produces native `.o` files
-- `additional_objs = "..."` attaches those outputs to the final `libstd.scppa`
-  / `libscpp.scppa` archives
-
-The non-manifest piece left is the `add_custom_target(scpp_workspace_artifacts
-...)` in the top-level `../CMakeLists.txt` that runs the just-built `scpp`
-compiler against the real repo-root `scpp.toml` (`cd` to `${CMAKE_SOURCE_DIR}`,
-then plain `scpp build`, no `--lib`) and copies the resulting `std`/`scpp`
-artifacts to the stable paths the rest of the top-level build already
-consumes -- exactly the same command a human contributor would run by hand
-from the repo root. `.scpp/build/` (already gitignored) is written directly
-into the source tree and is a single cache shared by every CMake binary
-directory built from the same checkout -- an explicitly accepted trade-off in
-exchange for this step matching a human contributor's own workflow exactly.
-Since the workspace has no `default-members`, this `scpp build` step compiles
-`src`'s `ast.cppm` and `applications/httpserver`'s `[[bin]]` too, the same way
-it always has for `std`/`scpp` -- so a self-hosting regression in `ast.cppm`,
-or a build failure in `httpserver`, now fails this CMake step (and therefore
-the whole `cmake --build`) exactly like a real stdlib build failure always
-has -- intentional, so both are continuously enforced rather than separately-run
-checks. `src`'s own build products (`scpp.ast.scppm`/`libscpp-compiler.scppa`)
-aren't copied out to a stable path the way `std`/`scpp`'s are, since nothing
-else in this build consumes them yet; `applications/httpserver`'s built binary
-*is* copied to a stable path (`build/applications/httpserver/httpserver_app_bin`)
-by its own `httpserver_app_artifact` target -- see
-`../applications/httpserver/CMakeLists.txt`.
+- `libs/std/**/*.scpp` and `libs/scpp/**/*.scpp` are the module sources; which
+  file is a primary interface unit, an interface partition or an
+  implementation partition is read from its own `module` declaration
+- the native wrappers (`*_wrapper.cpp`, and `llvm/native_target_init.scpp`)
+  are compiled by CMake (the `scpp_std_native`, `scpp_scpp_native` and
+  `scpp_llvm_native` object libraries) and merged into the module's archive
+  next to the scpp-compiled object, giving `libstd.scppa` / `libscpp.scppa` /
+  `libllvm.scppa`
+- `std` and `scpp` land at the stable paths the rest of the top-level build
+  consumes (`build/libs/std.scppm`, `build/libs/libstd.scppa`,
+  `build/libs/scpp.scppm`, `build/libs/libscpp.scppa`); target `scpp_pkg_<name>`
+  builds one package, `scpp_packages` all of them
+- the self-hosted compiler packages are declared next to them, so a
+  self-hosting regression in `src/` fails the build exactly like a stdlib
+  build failure does; `applications/httpserver`'s binary is built straight to a
+  stable path (`build/applications/httpserver/httpserver_app_bin`) by its own
+  `httpserver_app_artifact` target -- see `../applications/httpserver/CMakeLists.txt`
 
 `libs/CMakeLists.txt` exists again, but for an unrelated purpose: it declares
 an opt-in (`EXCLUDE_FROM_ALL`) `scpp_stdlib_cxx_validation` target that
 compiles every `libs/std/**/*.scpp` + `libs/scpp/**/*.scpp` file as real C++,
 validating the "every valid scpp file is also valid C++" language invariant --
 see that file's own header comment for the full rationale and current
-findings. It has no relationship to the manifest/workspace build described
-above.
+findings. It has no relationship to the package build described above.
 
 ## Consuming `std`
 
@@ -131,7 +109,7 @@ Notes:
 ## The `llvm` module (partitions `:core`, `:types`, `:debug_info`, `:target`, `:target_machine`, `:analysis`)
 
 `libs/llvm/` is a distinct category from `std`/`scpp` above
-(scpp-buildable workspace members): it is a single, plain, ordinary C++20
+(scpp-buildable packages): it is a single, plain, ordinary C++20
 module, `llvm`, split into a primary module interface unit plus six
 partitions, compiled directly by real clang++ via one dedicated CMake
 target (`llvm`, see `libs/llvm/CMakeLists.txt`, wired into the root via

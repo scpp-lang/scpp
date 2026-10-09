@@ -34,8 +34,8 @@ export namespace scpp {
 
 // Distinguishes which underlying stage produced a DriverError. This
 // exists purely so that callers reached only through DriverError's
-// std::expected channel -- cli.cppm, project.cppm, and tests/driver_test.cpp,
-// as of batch 5 (#411) -- can still tell a movecheck failure apart from a
+// std::expected channel -- cli.cppm and tests/driver_test.cpp, as of
+// batch 5 (#411) -- can still tell a movecheck failure apart from a
 // codegen failure the same way distinguishing DataflowError/CodegenError
 // by C++ exception type used to allow, now that this file no longer
 // re-throws either of them (see emit_object_file_for_program below).
@@ -3595,73 +3595,13 @@ public:
     // each cached module's Program is only ever handed to that one
     // separate-compilation call, never read again afterward.
     [[nodiscard]] Program& program_for(const std::string& module_name) { return cache_.at(module_name); }
-    [[nodiscard]] static std::string unescape_json_string(std::string_view text) {
-        std::string out{};
-        out.reserve(text.size());
-        for (std::size_t i = 0; i < text.size(); i++) {
-            char ch = text.at(i);
-            if (ch == '\\' && i + 1 < text.size()) {
-                i++;
-                char next = text.at(i);
-                switch (next) {
-                    case '\\': out.push_back('\\'); break;
-                    case '"': out.push_back('"'); break;
-                    case 'n': out.push_back('\n'); break;
-                    case 'r': out.push_back('\r'); break;
-                    case 't': out.push_back('\t'); break;
-                    default: out.push_back(next); break;
-                }
-            } else {
-                out.push_back(ch);
-            }
-        }
-        return out;
-    }
-    [[nodiscard]] static std::optional<std::string> archive_from_metadata(const std::string& metadata_path,
-                                                                           const std::string& module_name) {
-        if (!path_exists(metadata_path)) return std::nullopt;
-        auto bytes_r = read_file_bytes(metadata_path);
-        if (!bytes_r.has_value()) return std::nullopt;
-        const std::string& content = bytes_r.value();
-        std::string line{};
-        const std::string name_needle = "\"name\": \"" + module_name + "\"";
-        const std::string archive_needle = "\"archive\": \"";
-        std::size_t line_start = 0;
-        while (line_start < content.size()) {
-            std::size_t line_end = content.find('\n', line_start);
-            if (line_end == std::string::npos) line_end = content.size();
-            line = content.substr(line_start, line_end - line_start);
-            line_start = line_end + 1;
-            if (line.find(name_needle.c_str()) == std::string::npos) continue;
-            std::size_t archive_pos = line.find(archive_needle.c_str());
-            if (archive_pos == std::string::npos) continue;
-            archive_pos += archive_needle.size();
-            std::size_t archive_end = line.find('"', archive_pos);
-            if (archive_end == std::string::npos) continue;
-            return unescape_json_string(std::string_view(line).substr(archive_pos, archive_end - archive_pos));
-        }
-        return std::nullopt;
-    }
     [[nodiscard]] std::optional<std::string> archive_for(const std::string& module_name) const {
         auto path_it = resolved_paths_.find(module_name);
         if (path_it == resolved_paths_.end()) return std::nullopt;
         const std::string& interface_path = path_it->second;
         if (!path_ends_with(interface_path, ".scppm")) return std::nullopt;
-        std::string parent = path_parent(interface_path);
-        std::vector<std::string> candidates{};
-        candidates.push_back(path_join(parent, "lib" + module_name + ".scppa"));
-        if (path_filename(parent) == "modules") {
-            std::string grand_parent = path_parent(parent);
-            candidates.push_back(path_join(path_join(grand_parent, "archives"), "lib" + module_name + ".scppa"));
-            std::optional<std::string> metadata_archive =
-                archive_from_metadata(path_join(grand_parent, "package-metadata.json"), module_name);
-            if (metadata_archive.has_value()) {
-                candidates.push_back(*metadata_archive);
-            }
-        }
-        for (const std::string& archive_path : candidates) {
-            if (path_exists(archive_path)) return archive_path;
-        }
+        std::string archive_path = path_join(path_parent(interface_path), "lib" + module_name + ".scppa");
+        if (path_exists(archive_path)) return archive_path;
         return std::nullopt;
     }
 
@@ -3730,7 +3670,6 @@ private:
             bool is_dir = (st.st_mode & 0170000) == 0040000;
             bool is_reg = (st.st_mode & 0170000) == 0100000;
             if (is_dir) {
-                if (name == ".scpp") continue;
                 if (auto r = scan_source_root_dir(full_path); !r.has_value()) {
                     [[scpp::unsafe]] {
                         closedir(dir);
@@ -4194,7 +4133,7 @@ llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
     // std::expected<void, DataflowError> as of the batch-1 conversion, and
     // codegen.generate() below returns std::expected<LLVMModuleRef,
     // CodegenError> (batch 2, #408). Callers throughout this codebase --
-    // cli.cppm, project.cppm, and tests/driver_test.cpp -- used to
+    // cli.cppm and tests/driver_test.cpp -- used to
     // deliberately `catch (const scpp::DataflowError&)`/`catch (const
     // scpp::CodegenError&)` this function's failures as their own
     // distinct C++ type (movecheck_test.cpp and codegen_test.cpp still do,
@@ -4375,18 +4314,6 @@ llvm::LLVMCodeGenOptLevel codegen_opt_level_for(int opt_level) {
 
 export namespace scpp {
 
-std::string host_target_triple() {
-    std::string triple{};
-    [[scpp::unsafe]] {
-        char* triple_c = llvm::LLVMGetDefaultTargetTriple();
-        triple = std::string{triple_c};
-        llvm::LLVMDisposeMessage(triple_c);
-    }
-    return triple;
-}
-
-std::vector<std::string> project_default_stdlib_link_inputs() { return default_stdlib_link_inputs(); }
-
 std::optional<std::string> driver_runtime_current_executable_path() { return current_executable_path(); }
 
 std::optional<std::string> driver_runtime_default_prebuilt_stdlib_dir() {
@@ -4470,29 +4397,20 @@ std::optional<std::string> driver_runtime_default_source_stdlib_dir() {
     return emit_module_archive_for_program(program, archive_path, opt_level);
 }
 
-[[nodiscard]] std::expected<void, DriverError> archive_objects(const std::vector<std::string>& object_paths, const std::string& archive_path) {
-    return create_archive(object_paths, archive_path);
-}
-
 // Links a native object file into an executable using the system compiler
 // driver (clang/cc); this keeps us out of the business of re-implementing a
 // platform linker for M1. `extra_link_inputs` is appended verbatim after the
-// scpp object file -- additional .o/.a paths (e.g. manifest-built native
-// helper objects/archives, see libs/README.md, or another module's own
+// scpp object file -- additional .o/.a paths (e.g. native helper
+// objects/archives, see libs/README.md, or another module's own
 // compiled object file, see compile_to_executable below) or
 // `-lname`/`-Lpath` flags a caller wants forwarded straight to the linker;
 // empty by default (an ordinary, no-C++-interop build needs none of this).
 //
-// Static linking is unconditional here now, mirroring Cargo's own
-// static-by-default posture for its targets: scpp's manifest-driven
-// `[profile.*]` system (the only mechanism that could ever have asked for
-// a *dynamic* link from this function) was removed as underdesigned, so
-// there is no longer any supported way to opt out. The `static_link`
-// parameter is kept, but unnamed, purely so `compile_to_executable`'s own
-// long-standing, unrelated single-file `--static` CLI flag (see
-// cli.cppm) keeps a value to forward positionally without having to
-// change that independent call site's signature; the value itself is now
-// ignored.
+// Static linking is unconditional here. The `static_link` parameter is
+// kept, but unnamed, purely so `compile_to_executable`'s own long-standing
+// single-file `--static` CLI flag (see cli.cppm) keeps a value to forward
+// positionally without having to change that call site's signature; the
+// value itself is ignored.
 [[nodiscard]] std::expected<void, DriverError> link_executable(const std::vector<std::string>& link_inputs, const std::string& executable_path,
                      bool static_link [[maybe_unused]] = false) {
     if (link_inputs.empty()) {

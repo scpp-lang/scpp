@@ -1,3 +1,2 @@
-.scpp/build/*/minlib/modules/minlib.scppm
-.scpp/build/*/minlib/archives/libminlib.scppa
-.scpp/build/*/minlib/package-metadata.json
+build/scpp-packages/minlib/minlib.scppm
+build/scpp-packages/minlib/libminlib.scppa

@@ -81,7 +81,17 @@ scpp's internal compiler modules.
     `main.imports`; never scanned as their own standalone case.
   - if `main.argv` is present, the entire case directory is copied into the
     temp workspace before invoking `scpp`, so project-build fixtures can
-    safely include `scpp.toml`, subpackages, and nested source trees.
+    safely include `CMakeLists.txt`, subpackages, and nested source trees.
+  - if the directory has a `CMakeLists.txt` next to `main.scpp`, the case
+    is a *CMake project case* instead of one `scpp` call: the directory is
+    copied to the temp workspace, configured with Ninja
+    (`-DCMAKE_MODULE_PATH` pointing at `../cmake`, so the project can
+    `include(ScppPackages)`, and `-DSCPP_PACKAGES_COMPILER` set to the
+    `scpp` under test) and built with `cmake --build build`; `main.argv`
+    then lists extra `cmake --build` arguments such as `--target <name>`.
+    The sidecars above apply to that command, with the combined log of
+    both steps standing in for its stderr; output and artifact paths are
+    relative to the copied directory, so they sit under `build/`.
 
 The runner itself (`run_tests.cpp`) is a small, dependency-free C++
 program -- POSIX `fork`/`exec` + `<filesystem>` only, no third-party
@@ -130,7 +140,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `14_classes` | constructors/destructors, default member initializers and constructor member-initializer lists, private access control, compiler-provided/user-defined copy construction and assignment, compiler-only move construction and assignment, method borrow checking, `this` |
 | `15_function_overloading` | exact-type-match resolution, by-value/by-reference axis, const/non-const methods |
 | `16_namespaces` | basic `namespace` declaration, qualified calls, nesting, same-namespace unqualified class lookup, and leading `::` global-scope lookup; `using namespace` rejected |
-| `17_modules` | `export module`/`import`, exported type aliases, `export namespace { ... }` blocks, relaxed exported-namespace placement, cross-module import/export/re-export, bare `extern`, partitions, and a workspace/path-dependency build whose cross-module `.scppm` binary artifact must correctly round-trip a still-generic exported class's template-parameter-dependent array bound |
+| `17_modules` | `export module`/`import`, exported type aliases, `export namespace { ... }` blocks, relaxed exported-namespace placement, cross-module import/export/re-export, bare `extern`, partitions, and a CMake-driven multi-package build whose cross-module `.scppm` binary artifact must correctly round-trip a still-generic exported class's template-parameter-dependent array bound |
 | `18_closures` | lambda expressions (ch05 §5.12): by-value/by-reference/init capture, blanket/mixed captures, lifetime-tracking of reference-capturing closures, explicit `this`/`*this` capture, `mutable`, trailing return types, generic lambdas |
 | `19_scalar_types` | the full scalar family beyond `bool`/`int`/`char` (ch06), explicit scalar-to-scalar casts, comparison rules for same-type vs mixed-type scalars, and `?:`'s matching arm-typing rules (literal/wider-scalar-lvalue acceptance, distinct-scalar-type rejection) |
 | `20_generic_functions` | ch05 §5.11 revisions: full header form (bare/concept-constrained/multi-param/return-type-only), abbreviated bare `auto`, concept-constrained parameter packs |
@@ -142,7 +152,7 @@ Pass `--scpp-bin <path>` to point at a different build.
 | `26_threads` | `std::thread` / `std::jthread`: thread-movable constructor constraint, join/detach/joinable transitions, `jthread` destructor auto-join |
 | `27_unions_packed_layout` | union member unsafe-gating and `[[scpp::packed]]` layout/FFI behavior, including the Linux `epoll_event` / `epoll_data_t` pattern |
 | `28_cli_invocation` | CLI surface: direct `scpp file.scpp` builds, default/custom output names, removed `build` keyword, and surviving `lex`/`parse`/`build-module` subcommands |
-| `29_project_build` | manifest-based project builds: single-package `build`, workspace/path dependencies, direct-dependency visibility, package selection, and rejection of deferred manifest features |
+| `29_project_build` | CMake-driven project builds (`CMakeLists.txt` + `cmake/ScppPackages.cmake`): single-package executables and libraries, multi-package projects, direct-dependency visibility, target selection, native objects, and linker errors |
 | `30_constant_evaluation` | formal-spec-driven `constexpr`/`consteval` coverage: required constant evaluation, `if consteval` / `if !consteval`, unsupported v1 operations, and the later-pack-to-earlier-parameter deduction rule |
 | `30_constexpr` | immediate (`consteval`) invocation coverage driven by ch09 §9.1 and ch06 §7.2: the callee kinds §9.1(5) permits (free function, static member, non-static member, constructor, overloaded operator, conversion function) crossed with the positions an immediate call can appear in (block scope, namespace-scope initializer, default argument, default member initializer, mem-initializer, array bound, template argument, inside another `consteval` function, inside a `constexpr` function) and the receiver forms (named object, temporary, `this`, a reference); plus the §9.1(5) destructor prohibition, the reason-pinned §9.1(4) rejections for a non-constant argument and a non-constant receiver, and the address-of-an-immediate-function rejection; also `std::format` compile-time format-string checking |
 | `31_enum_class` | scoped enumerations: `enum class` declaration, scoped enumerator access, enum-type separation, explicit casts, and explicit underlying types/values |
@@ -228,15 +238,15 @@ Pass `--scpp-bin <path>` to point at a different build.
   primary-interface-unit-aggregates-partitions mechanism itself isn't
   exercised.
 - **One `17_modules` case genuinely does compile a module to `.scppm`
-  first**: a workspace/path-dependency build (`scpp build --workspace`,
-  `main.argv` invoking it rather than `main.imports`) is the *only*
-  mechanism in this suite that produces and imports a real `.scppm`
-  binary artifact -- `src/project.cppm`'s manifest-build pipeline writes
-  one to disk for each path dependency and points the importing package's
-  module resolution at that compiled file, not at raw source. This is
-  what's needed to exercise cross-module binary (de)serialization bugs at
-  all (verified: an ordinary `--import name=path` case, per the note
-  above, never round-trips through `.scppm`).
+  first**: a CMake project case (`CMakeLists.txt` building two packages
+  with `cmake/ScppPackages.cmake`, rather than `main.imports`) is the
+  *only* mechanism in this suite that produces and imports a real `.scppm`
+  binary artifact -- the build writes one to disk for the library package
+  and points the importing executable's compile at that compiled file,
+  not at raw source. This is what's needed to exercise cross-module binary
+  (de)serialization bugs at all (verified: an ordinary
+  `--import name=path` case, per the note above, never round-trips
+  through `.scppm`).
 - **A module file can't also be the runnable program**: a file containing
   `export module name;` does not get its `main()` linked as the process
   entry point (discovered empirically via an "undefined reference to
@@ -388,11 +398,11 @@ re-run via `./build/run_tests`:
   bare `scpp file.scpp`, `-o custom_name`, rejection of the removed
   `build` keyword, and spot-checks that `lex`, `parse`, and
   `build-module` still work explicitly
-- **Manifest-based project builds now have direct black-box coverage too**:
-  single-package lib/bin builds, workspace/path-dependency builds,
-  `-p` package selection, direct-only compile-time visibility, and
-  rejection of still-deferred manifest features like registry deps,
-  `[workspace.dependencies]`, and `[native]`
+- **CMake-driven project builds now have direct black-box coverage too**:
+  single-package executable and library builds, multi-package projects,
+  `--target` selection, direct-only compile-time visibility, native
+  objects merged into a module archive, and the linker errors for a
+  missing or duplicated `main`
 - **Array bound constant-expressions (ch05 §9.4) now have dedicated
   black-box coverage**: literal/`sizeof`/`alignof`/arithmetic/global-named-
   constant bounds accepted uniformly across local-variable, struct/class-

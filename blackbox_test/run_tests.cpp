@@ -67,9 +67,19 @@
 //   - any other `.scpp` files in the directory -- the modules referenced
 //     by `main.imports`; never scanned as their own standalone case.
 //   - when `main.argv` is present, the whole case directory is copied into
-//     the temp workspace before invoking `scpp`, so manifest/project-mode
-//     cases can safely include `scpp.toml`, subpackages, and nested sources
+//     the temp workspace before invoking `scpp`, so project-mode cases can
+//     safely include `CMakeLists.txt`, subpackages, and nested sources
 //     without polluting the checked-in fixtures.
+//   - CMake project cases: when the directory also has a `CMakeLists.txt`,
+//     the case is not one `scpp` call. The directory is copied to the temp
+//     workspace, configured there with Ninja (`-DCMAKE_MODULE_PATH` pointing
+//     at ../cmake, so the project can `include(ScppPackages)`, and
+//     `-DSCPP_PACKAGES_COMPILER` set to the `scpp` under test) and built
+//     with `cmake --build build`. `main.argv`, if present, lists extra
+//     `cmake --build` arguments (e.g. `--target <name>`). The sidecars above
+//     then apply to that command as usual, with the combined log of both
+//     steps standing in for its stderr and its stdout empty; the artifact and
+//     output paths are relative to the copied directory (so under `build/`).
 // **Verified**: `--import name=path`'s `path` does point directly at that
 // module's raw `.scpp` interface source, compiled on the fly -- there is
 // no separate "compile a module to `.scppm` first" step. Confirmed
@@ -114,6 +124,12 @@
 #endif
 #ifndef SCPP_STDLIB_STD_THREAD_MODULE_PATH
 #error "SCPP_STDLIB_STD_THREAD_MODULE_PATH must be defined by the build"
+#endif
+#ifndef SCPP_PACKAGES_CMAKE_MODULE_DIR
+#error "SCPP_PACKAGES_CMAKE_MODULE_DIR must be defined by the build"
+#endif
+#ifndef SCPP_BLACKBOX_CMAKE_COMMAND
+#error "SCPP_BLACKBOX_CMAKE_COMMAND must be defined by the build"
 #endif
 #include <algorithm>
 #include <chrono>
@@ -163,9 +179,12 @@ struct RunResult {
 // Runs `argv` as a child process in `cwd`, redirecting its stdout/stderr to temp
 // files under `temp_dir` -- reading them back only after the child exits
 // avoids the pipe-buffer deadlock risk that concurrently reading two live
-// pipes would carry -- and waits up to `timeout` before killing it.
+// pipes would carry -- and waits up to `timeout` before killing it. With
+// `merge_output`, stderr goes to the same file as stdout (so the log keeps the
+// order a terminal would show) and only `out` is filled in.
 RunResult run_process(const std::vector<std::string>& argv, const fs::path& temp_dir,
-                       std::chrono::seconds timeout, const fs::path& cwd = fs::current_path()) {
+                       std::chrono::seconds timeout, const fs::path& cwd = fs::current_path(),
+                       bool merge_output = false) {
     fs::path out_path = temp_dir / "stdout.txt";
     fs::path err_path = temp_dir / "stderr.txt";
     RunResult result;
@@ -183,7 +202,7 @@ RunResult run_process(const std::vector<std::string>& argv, const fs::path& temp
         }
         // Child: redirect stdout/stderr to the temp files, then exec.
         int out_fd = open(out_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
-        int err_fd = open(err_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        int err_fd = merge_output ? out_fd : open(err_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (out_fd >= 0) {
             dup2(out_fd, STDOUT_FILENO);
         }
@@ -545,6 +564,40 @@ std::vector<std::string> parse_imports_file(const fs::path& dir) {
     return args;
 }
 
+// A module-test directory with a CMakeLists.txt next to its main.scpp is a
+// CMake project case: its build is driven by CMake, not by one `scpp` call.
+bool is_cmake_project_case(const fs::path& entry_file) {
+    return entry_file.filename() == "main.scpp" && fs::exists(entry_file.parent_path() / "CMakeLists.txt");
+}
+
+// Configures the copy of a CMake project case in `project_dir` (Ninja, with
+// `scpp_bin` as the compiler cmake/ScppPackages.cmake drives) and builds it,
+// passing `build_args` on to `cmake --build`. The log of both steps -- stdout
+// and stderr interleaved, as a terminal shows it -- is returned as the
+// command's `err` (its `out` stays empty); the exit status is that of the
+// step that failed, if one did.
+RunResult run_cmake_project(const fs::path& scpp_bin, const fs::path& project_dir,
+                            const std::vector<std::string>& build_args) {
+    const std::chrono::seconds timeout(kTimeoutSeconds);
+    std::vector<std::string> configure = {SCPP_BLACKBOX_CMAKE_COMMAND,
+                                          "-S", ".",
+                                          "-B", "build",
+                                          "-G", "Ninja",
+                                          std::string("-DCMAKE_MODULE_PATH=") + SCPP_PACKAGES_CMAKE_MODULE_DIR,
+                                          "-DSCPP_PACKAGES_COMPILER=" + fs::absolute(scpp_bin).string()};
+    RunResult result = run_process(configure, project_dir, timeout, project_dir, /*merge_output=*/true);
+    std::string log = std::move(result.out);
+    if (!result.timed_out && result.exited_normally && result.exit_code == 0) {
+        std::vector<std::string> build = {SCPP_BLACKBOX_CMAKE_COMMAND, "--build", "build"};
+        build.insert(build.end(), build_args.begin(), build_args.end());
+        result = run_process(build, project_dir, timeout, project_dir, /*merge_output=*/true);
+        log += result.out;
+    }
+    result.out.clear();
+    result.err = std::move(log);
+    return result;
+}
+
 Outcome run_one_case(const fs::path& scpp_bin, const fs::path& scpp_path, const fs::path& expected_path,
                       const fs::path& temp_dir, const std::vector<std::string>& extra_build_args,
                       const InvocationSpec& invocation) {
@@ -562,7 +615,13 @@ Outcome run_one_case(const fs::path& scpp_bin, const fs::path& scpp_path, const 
     }
 
     std::vector<std::string> build_argv;
-    if (invocation.argv_tokens.empty()) {
+    const bool cmake_project = is_cmake_project_case(scpp_path);
+    if (cmake_project) {
+        copy_tree_contents(scpp_path.parent_path(), case_temp_dir);
+        // `main.argv` holds extra `cmake --build` arguments (e.g. `--target <name>`).
+        build_argv = resolve_invocation_tokens(invocation.argv_tokens, scpp_path, case_temp_dir / "main.scpp",
+                                               out_binary, case_temp_dir);
+    } else if (invocation.argv_tokens.empty()) {
         build_argv = {scpp_bin.string(), scpp_path.string(), "-o", out_binary.string()};
         std::vector<std::string> default_build_args = default_std_build_args();
         build_argv.insert(build_argv.end(), default_build_args.begin(), default_build_args.end());
@@ -580,7 +639,8 @@ Outcome run_one_case(const fs::path& scpp_bin, const fs::path& scpp_path, const 
         build_argv.insert(build_argv.end(), resolved.begin(), resolved.end());
     }
     RunResult compile_result =
-        run_process(build_argv, case_temp_dir, std::chrono::seconds(kTimeoutSeconds), compile_cwd);
+        cmake_project ? run_cmake_project(scpp_bin, case_temp_dir, build_argv)
+                      : run_process(build_argv, case_temp_dir, std::chrono::seconds(kTimeoutSeconds), compile_cwd);
 
     if (compile_result.timed_out) {
         return {false, "scpp invocation timed out"};

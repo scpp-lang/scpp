@@ -1,1 +1,2 @@
-.scpp/build/*/multibin/package-metadata.json
+build/scpp-packages/multibin/helper.scppm
+build/scpp-packages/multibin/libhelper.scppa

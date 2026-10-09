@@ -1,5 +1,5 @@
-.scpp/build/*/buildalllibs/modules/alpha.scppm
-.scpp/build/*/buildalllibs/archives/libalpha.scppa
-.scpp/build/*/buildalllibs/modules/beta.scppm
-.scpp/build/*/buildalllibs/archives/libbeta.scppa
-!.scpp/build/*/buildalllibs/buildalllibs
+build/scpp-packages/buildalllibs/alpha.scppm
+build/scpp-packages/buildalllibs/libalpha.scppa
+build/scpp-packages/buildalllibs/beta.scppm
+build/scpp-packages/buildalllibs/libbeta.scppa
+!build/bin/buildalllibs

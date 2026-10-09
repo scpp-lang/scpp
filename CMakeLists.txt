@@ -76,10 +76,6 @@ llvm_map_components_to_libnames(LLVM_LIBS core support target native)
 
 find_package(Threads REQUIRED)
 
-list(INSERT CMAKE_FIND_LIBRARY_SUFFIXES 0 ".a")
-find_library(SQLITE3_LIB NAMES sqlite3 REQUIRED)
-find_path(SQLITE3_INCLUDE_DIR NAMES sqlite3.h REQUIRED)
-
 if(STAGE EQUAL 0)
 
 add_library(scpp_lexer)
@@ -166,17 +162,6 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 target_link_libraries(scpp_driver PUBLIC scpp_ast scpp_parser scpp_codegen scpp_movecheck scpp_constexpr llvm ${LLVM_LIBS})
 
-add_library(scpp_project)
-target_sources(scpp_project
-    PUBLIC
-        FILE_SET cxx_modules TYPE CXX_MODULES FILES
-            src/project/project.cppm)
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    target_compile_options(scpp_project PRIVATE -Wno-error=unknown-attributes)
-endif()
-target_include_directories(scpp_project PRIVATE ${SQLITE3_INCLUDE_DIR})
-target_link_libraries(scpp_project PUBLIC scpp_lexer scpp_driver ${SQLITE3_LIB})
-
 add_executable(scpp)
 
 target_sources(scpp
@@ -188,7 +173,7 @@ target_sources(scpp
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(scpp PRIVATE -Wno-error=unknown-attributes)
 endif()
-target_link_libraries(scpp PRIVATE scpp_lexer scpp_ast scpp_parser scpp_codegen scpp_movecheck scpp_driver scpp_project)
+target_link_libraries(scpp PRIVATE scpp_lexer scpp_ast scpp_parser scpp_codegen scpp_movecheck scpp_driver)
 
 target_compile_definitions(scpp PRIVATE
     SCPP_VERSION="${PROJECT_VERSION}")
@@ -249,6 +234,8 @@ target_compile_definitions(driver_test PRIVATE
     SCPP_BINARY_PATH="$<TARGET_FILE:scpp>"
     SCPP_DRIVER_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/driver_test_source"
     SCPP_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/test_source"
+    SCPP_CMAKE_COMMAND="${CMAKE_COMMAND}"
+    SCPP_PACKAGES_CMAKE_MODULE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/cmake"
     SCPP_STDLIB_STD_MODULE_PATH="${SCPP_STDLIB_STD_MODULE_PATH}"
     SCPP_STDLIB_STD_INTERFACE_PATH="${SCPP_STDLIB_STD_INTERFACE_PATH}"
     SCPP_STDLIB_SCPP_MODULE_PATH="${SCPP_STDLIB_SCPP_MODULE_PATH}"
@@ -256,122 +243,164 @@ target_compile_definitions(driver_test PRIVATE
 
 add_test(NAME driver_test COMMAND driver_test)
 
-# Builds the shipped workspace (root scpp.toml + libs/std/scpp.toml,
-# libs/scpp/scpp.toml, src/scpp.toml, applications/httpserver/scpp.toml)
-# via scpp's own package manager, and copies the resulting std/scpp
-# artifacts into build/libs. Library *behavior* itself is covered by
-# tests/, not demos. (Named scpp_workspace_artifacts, not
-# scpp_stdlib_artifacts: it covers the whole workspace now, not just the
-# two stdlib packages -- src's ast.cppm and applications/httpserver's
-# [[bin]] both build here too, see below.)
-#
-# Deliberately always-run (no file(GLOB_RECURSE ...)/CONFIGURE_DEPENDS
-# tracking of scpp.toml or *.scpp/*.cpp sources, unlike earlier
-# revisions of this target): `scpp build` already has a real,
-# content-hash-based incremental build cache of its own (BuildDatabase,
-# a SQLite db at .scpp/cache/build.db -- see src/project.cppm, keyed by
-# a signature over each module's source digest, manifest digest,
-# compiler-binary digest, target triple, and dependency digests).
-# Maintaining a second, independent "which files matter" list here
-# purely to decide whether to invoke `scpp build` at all would just be
-# drift-prone duplication of information scpp's own cache already
-# tracks more precisely -- e.g. it also reacts correctly to a rebuilt
-# compiler or a changed target triple, which a plain CMake file glob
-# never would have. So this target's COMMAND runs unconditionally on
-# every `cmake --build`, trusting `scpp build` to make that a fast
-# cache-hit no-op whenever nothing relevant actually changed (measured:
-# roughly 1-3 seconds of overhead for the whole chdir+build+copy recipe
-# on a fully cached, nothing-changed rebuild -- see the PR description
-# for exact numbers).
-#
-# No `--lib`: this workspace now genuinely has a [[bin]] target
-# (applications/httpserver), so omitting `--lib` (build_lib_only in
-# src/project.cppm) is what makes that binary actually get built here,
-# not a no-op left over from clarity/dead-ceremony cleanup like before --
-# `libs/std`/`libs/scpp`/`src` still declare [[lib]] only, so this is
-# purely additive for them.
-#
-# The artifact paths under .scpp/build/ contain only the LLVM
-# target-triple as a path component now (.scpp/build/<triple>/
-# <package>/...) -- scpp's manifest-driven `[profile.*]` build-profile
-# system (dev/release/custom profiles) was removed as underdesigned, so
-# there is no longer a profile path segment to account for here; static
-# linking is unconditional and opt-level/debug are fixed constants (see
-# kManifestBuildOptLevel/kManifestBuildEmitDebugInfo in project.cppm)
-# rather than per-profile settings. The triple is `${LLVM_HOST_TRIPLE}`,
-# a normal CMake variable already set by `find_package(LLVM REQUIRED
-# CONFIG)` above in this same file/scope -- confirmed to match scpp's
-# own host_target_triple() exactly on every platform this project
-# targets, since both ultimately describe the same LLVM host. Using it
-# directly means no `find`-based path search or `llvm-config` shell-out
-# is needed to locate these files: plain, direct `${CMAKE_COMMAND} -E
-# copy` commands suffice, consistent with this file's usual style.
-#
-# DEPENDS only the `scpp` target itself, purely for build ordering (the
-# compiler binary must exist before this can shell out to it) -- not for
-# staleness tracking, since a plain add_custom_target's COMMAND always
-# reruns regardless of its DEPENDS. BYPRODUCTS declares the 4 real files
-# this recipe still produces on disk, so Ninja correctly cleans them and
-# so other targets that DEPENDS on this target *by name* (e.g.
-# applications/httpserver's httpserver_app_artifact, below) get correct
-# ordering even though this target has no file-level OUTPUT to track --
-# the same established pattern httpserver_app_artifact itself uses for
-# its own always-run copy of the workspace-built httpserver binary.
-add_custom_target(scpp_workspace_artifacts ALL
-    COMMAND ${CMAKE_COMMAND} -E chdir "${CMAKE_SOURCE_DIR}" $<TARGET_FILE:scpp> build
-    COMMAND ${CMAKE_COMMAND} -E copy
-        "${CMAKE_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/std/modules/std.scppm"
-        "${SCPP_STDLIB_STD_INTERFACE_PATH}"
-    COMMAND ${CMAKE_COMMAND} -E copy
-        "${CMAKE_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/std/archives/libstd.scppa"
-        "${SCPP_STDLIB_STD_ARCHIVE_PATH}"
-    COMMAND ${CMAKE_COMMAND} -E copy
-        "${CMAKE_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp/modules/scpp.scppm"
-        "${SCPP_STDLIB_SCPP_INTERFACE_PATH}"
-    COMMAND ${CMAKE_COMMAND} -E copy
-        "${CMAKE_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}/scpp/archives/libscpp.scppa"
-        "${SCPP_STDLIB_SCPP_ARCHIVE_PATH}"
-    BYPRODUCTS
-        "${SCPP_STDLIB_STD_INTERFACE_PATH}"
-        "${SCPP_STDLIB_STD_ARCHIVE_PATH}"
-        "${SCPP_STDLIB_SCPP_INTERFACE_PATH}"
-        "${SCPP_STDLIB_SCPP_ARCHIVE_PATH}"
-    DEPENDS scpp
-    VERBATIM)
+# --- Packages written in scpp --------------------------------------------------
+# The stdlib (`std`, `scpp`), the `llvm` binding module and the self-hosted
+# compiler are compiled by the `scpp` built above, through its clang-like
+# command line (`scpp build-module`, `scpp -c`) -- see
+# cmake/ScppPackages.cmake. Every module interface, every implementation
+# partition (e.g. the movecheck and codegen ones), every native object and
+# every archive is its own build edge, so a build is parallel, shows
+# per-file progress and rebuilds only what a change affects. A package's
+# DEPENDS lists the packages whose modules it may import. Library
+# *behavior* itself is covered by tests/, not demos.
+include(cmake/ScppPackages.cmake)
+set(SCPP_PACKAGES_COMPILER scpp)
+
+# The C++ halves of the stdlib and of the `llvm` module: compiled by CMake
+# and merged into the module's archive next to the scpp-compiled object.
+function(scpp_add_native_objects target)
+    add_library(${target} OBJECT ${ARGN})
+    set_target_properties(${target} PROPERTIES CXX_MODULE_STD 0 CXX_SCAN_FOR_MODULES OFF)
+    target_compile_options(${target} PRIVATE -O2)
+endfunction()
+
+scpp_add_native_objects(scpp_std_native
+    libs/std/string/scpp_string_wrapper.cpp
+    libs/std/charconv/scpp_charconv_wrapper.cpp
+    libs/std/memory/scpp_shared_ptr_wrapper.cpp
+    libs/std/thread/scpp_thread_wrapper.cpp
+    libs/std/print/scpp_print_wrapper.cpp
+    libs/std/random/scpp_random_wrapper.cpp
+    libs/std/vector/scpp_vector_wrapper.cpp)
+
+scpp_add_native_objects(scpp_scpp_native libs/scpp/io/scpp_io_wrapper.cpp)
+
+# `.scpp` isn't a CMake-recognized extension; this one is plain C++ (see
+# libs/llvm/native_target_init.scpp).
+set_source_files_properties(libs/llvm/native_target_init.scpp PROPERTIES LANGUAGE CXX)
+scpp_add_native_objects(scpp_llvm_native libs/llvm/native_target_init.scpp)
+target_include_directories(scpp_llvm_native SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+target_compile_definitions(scpp_llvm_native PRIVATE ${LLVM_DEFINITIONS_LIST})
+
+# std and scpp land in build/libs: that is where the compiler looks for a
+# prebuilt stdlib next to itself, and where SCPP_STDLIB_*_PATH point.
+file(GLOB_RECURSE SCPP_STD_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/libs/std/*.scpp")
+file(GLOB_RECURSE SCPP_SCPP_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/libs/scpp/*.scpp")
+
+scpp_add_package(NAME std
+    OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/libs"
+    SOURCES ${SCPP_STD_SOURCES}
+    NATIVE_OBJECTS scpp_std_native)
+
+scpp_add_package(NAME scpp
+    OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/libs"
+    SOURCES ${SCPP_SCPP_SOURCES}
+    DEPENDS std
+    NATIVE_OBJECTS scpp_scpp_native)
+
+scpp_add_package(NAME llvm
+    SOURCES
+        libs/llvm/llvm.scpp
+        libs/llvm/types.scpp
+        libs/llvm/core.scpp
+        libs/llvm/debug_info.scpp
+        libs/llvm/target.scpp
+        libs/llvm/target_machine.scpp
+        libs/llvm/analysis.scpp
+    DEPENDS std
+    NATIVE_OBJECTS scpp_llvm_native)
+
+scpp_add_package(NAME scpp-compiler
+    SOURCES
+        src/compiler/ast.cppm
+        src/compiler/lexer.cppm
+        src/compiler/parser.cppm
+        src/compiler/constexpression.cppm
+        src/mir.cppm
+    DEPENDS std)
+
+scpp_add_package(NAME scpp-movecheck
+    SOURCES
+        src/compiler/movecheck/movecheck.cppm
+        src/compiler/movecheck/errors.cppm
+        src/compiler/movecheck/state.cppm
+        src/compiler/movecheck/types.cppm
+        src/compiler/movecheck/signatures.cppm
+        src/compiler/movecheck/generics_support.cppm
+        src/compiler/movecheck/calls.cppm
+        src/compiler/movecheck/threadsafety.cppm
+        src/compiler/movecheck/interfaces.cppm
+        src/compiler/movecheck/borrows.cppm
+        src/compiler/movecheck/lambdas.cppm
+        src/compiler/movecheck/dataflow.cppm
+        src/compiler/movecheck/monomorphize.cppm
+    DEPENDS std scpp-compiler)
+
+scpp_add_package(NAME scpp-codegen
+    SOURCES
+        src/compiler/codegen/codegen.cppm
+        src/compiler/codegen/errors.cppm
+        src/compiler/codegen/api.cppm
+        src/compiler/codegen/debug.cppm
+        src/compiler/codegen/functions.cppm
+        src/compiler/codegen/layout.cppm
+        src/compiler/codegen/lifetime.cppm
+        src/compiler/codegen/object_model.cppm
+        src/compiler/codegen/orchestration.cppm
+        src/compiler/codegen/statements.cppm
+        src/compiler/codegen/semantics.cppm
+        src/compiler/codegen/expressions.cppm
+    DEPENDS std scpp-compiler llvm)
+
+scpp_add_package(NAME scpp-driver SOURCES src/driver/driver.cppm
+    DEPENDS std scpp-compiler scpp-movecheck scpp-codegen llvm)
+
+scpp_add_package(NAME scpp-cli SOURCES src/cli/cli.cppm
+    DEPENDS std scpp-compiler scpp-movecheck scpp-codegen scpp-driver llvm)
+
+# Everything above: what `lib` and `stage0` stand for, and part of ALL.
+get_property(SCPP_PACKAGE_TARGET_LIST GLOBAL PROPERTY SCPP_PACKAGE_TARGETS)
+add_custom_target(scpp_packages ALL)
+add_dependencies(scpp_packages ${SCPP_PACKAGE_TARGET_LIST})
 
 # driver_test compiles real programs against the *built* stdlib artifacts
 # (SCPP_STDLIB_STD_INTERFACE_PATH / SCPP_STDLIB_SCPP_INTERFACE_PATH above,
-# i.e. build/libs/*.scppm), so it needs them current -- but nothing said
-# so, and `cmake --build build --target driver_test` therefore skipped
-# scpp_workspace_artifacts entirely and left whatever artifacts the
-# previous compiler had produced. A `.scppm` written by an older compiler
-# is now rejected outright by its own format-version guard, which turns
-# that into a loud failure rather than a silent one; the missing edge is
-# the actual defect and this is it.
-#
-# add_dependencies, not a file-level DEPENDS: scpp_workspace_artifacts is
-# deliberately an always-run target with no OUTPUT to track (see its own
-# comment above), because `scpp build` has its own content-hash cache.
-# This adds ordering only and leaves that design untouched -- the whole
-# ALL build already ran it; only targeted builds were missing it.
-# httpserver_test needs no equivalent edge: it consumes the httpserver
-# binary through httpserver_app_artifact, which already DEPENDS on
-# scpp_workspace_artifacts.
-add_dependencies(driver_test scpp_workspace_artifacts)
+# i.e. build/libs/*.scppm), so it needs them current: without this edge
+# `cmake --build build --target driver_test` would leave whatever artifacts
+# the previous compiler had produced. A `.scppm` written by an older
+# compiler is rejected outright by its own format-version guard, which turns
+# that into a loud failure rather than a silent one.
+add_dependencies(driver_test scpp_pkg_std scpp_pkg_scpp)
 
 add_subdirectory(applications/httpserver)
 
-# Custom target for building workspace library packages
+# Custom target for building the library packages
 add_custom_target(lib
-    DEPENDS scpp_workspace_artifacts
-    COMMENT "Building workspace library packages"
+    DEPENDS scpp_packages
+    COMMENT "Building scpp library packages"
 )
 
-# Custom target for Stage 0 (builds host scpp compiler and workspace artifacts)
+# Custom target for Stage 0 (builds host scpp compiler and the packages it compiles)
 add_custom_target(stage0
-    DEPENDS scpp scpp_workspace_artifacts
+    DEPENDS scpp scpp_packages
     COMMENT "Stage 0 bootstrap complete"
 )
+
+# What the Stage 1 tree takes from this one: the archives the stage-1 compiler
+# links, in link order (importers before the modules they import; the stdlib
+# `scpp` rides along as it always has), and the interfaces its main.cpp is
+# compiled against.
+scpp_module_closure(SCPP_STAGE1_LINK_MODULES scpp scpp.cli)
+scpp_module_archives(SCPP_STAGE1_ARCHIVES ${SCPP_STAGE1_LINK_MODULES})
+scpp_source_imports("${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp" SCPP_STAGE1_MAIN_IMPORTS)
+scpp_module_closure(SCPP_STAGE1_MAIN_MODULES ${SCPP_STAGE1_MAIN_IMPORTS})
+scpp_module_import_arguments(SCPP_STAGE1_MAIN_IMPORT_ARGUMENTS SCPP_STAGE1_MAIN_INTERFACES
+    ${SCPP_STAGE1_MAIN_MODULES})
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/stage1-inputs.cmake"
+    "# Written by the Stage 0 configure step, read by the Stage 1 tree.\n"
+    "set(SCPP_STAGE1_ARCHIVES \"${SCPP_STAGE1_ARCHIVES}\")\n"
+    "set(SCPP_STAGE1_MAIN_IMPORT_ARGUMENTS \"${SCPP_STAGE1_MAIN_IMPORT_ARGUMENTS}\")\n"
+    "set(SCPP_STAGE1_MAIN_INTERFACES \"${SCPP_STAGE1_MAIN_INTERFACES}\")\n")
 
 # Custom target for Stage 1 (drives Stage 1 configure, build, and smoke tests)
 if(NOT STAGE1_BUILD_DIR)
@@ -388,6 +417,7 @@ set(STAGE1_CMAKE_ARGS
     -G "${CMAKE_GENERATOR}"
     -DSTAGE=1
     -DSTAGE0_SCPP=$<TARGET_FILE:scpp>
+    -DSTAGE0_BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}
 )
 if(CMAKE_BUILD_TYPE)
     list(APPEND STAGE1_CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE})
@@ -444,26 +474,33 @@ elseif(STAGE EQUAL 1)
     get_filename_component(STAGE0_SCPP "${STAGE0_SCPP}" ABSOLUTE)
     message(STATUS "Using Stage 0 compiler: ${STAGE0_SCPP}")
 
+    # The packages the stage-1 compiler is made of were compiled by the Stage 0
+    # build tree (see cmake/ScppPackages.cmake); it records what Stage 1 needs.
+    if(NOT STAGE0_BUILD_DIR)
+        get_filename_component(STAGE0_BUILD_DIR "${STAGE0_SCPP}" DIRECTORY)
+    endif()
+    if(NOT EXISTS "${STAGE0_BUILD_DIR}/stage1-inputs.cmake")
+        message(FATAL_ERROR "No Stage 0 build tree in '${STAGE0_BUILD_DIR}'! Please build stage 0 first or specify -DSTAGE0_BUILD_DIR=/path/to/stage0/build")
+    endif()
+    include("${STAGE0_BUILD_DIR}/stage1-inputs.cmake")
+    foreach(archive IN LISTS SCPP_STAGE1_ARCHIVES)
+        if(NOT EXISTS "${archive}")
+            message(FATAL_ERROR "Stage 0 package archive '${archive}' not found! Please build stage 0 first (cmake --build ${STAGE0_BUILD_DIR} --target stage0)")
+        endif()
+    endforeach()
+
     file(GLOB STAGE1_LLVM_STATIC_LIBS "${LLVM_LIBRARY_DIRS}/libLLVM*.a")
-    set(SCPP_BUILD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.scpp/build/${LLVM_HOST_TRIPLE}")
     set(STAGE1_MAIN_OBJ "${CMAKE_CURRENT_BINARY_DIR}/main_stage1.o")
 
     add_custom_command(
         OUTPUT "${STAGE1_MAIN_OBJ}"
         COMMAND "${STAGE0_SCPP}" -c "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp"
             -o "${STAGE1_MAIN_OBJ}"
-            -I "${SCPP_BUILD_DIR}/scpp-cli/modules"
-            -I "${SCPP_BUILD_DIR}/scpp-compiler/modules"
-            -I "${SCPP_BUILD_DIR}/scpp-driver/modules"
-            -I "${SCPP_BUILD_DIR}/scpp-project/modules"
-            -I "${SCPP_BUILD_DIR}/scpp-codegen/modules"
-            -I "${SCPP_BUILD_DIR}/scpp-movecheck/modules"
-            -I "${SCPP_BUILD_DIR}/llvm/modules"
-            -I "${SCPP_BUILD_DIR}/std/modules"
-            -I "${SCPP_BUILD_DIR}/scpp/modules"
+            ${SCPP_STAGE1_MAIN_IMPORT_ARGUMENTS}
         DEPENDS
             "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp"
             "${STAGE0_SCPP}"
+            ${SCPP_STAGE1_MAIN_INTERFACES}
         COMMENT "Compiling main.cpp with Stage-0 scpp"
         VERBATIM
     )
@@ -481,28 +518,11 @@ elseif(STAGE EQUAL 1)
         LINKER_LANGUAGE CXX
     )
 
-    set(STAGE1_SCPP_ARCHIVES
-        "${SCPP_BUILD_DIR}/scpp-cli/archives/libscpp-cli.scppa"
-        "${SCPP_BUILD_DIR}/scpp-project/archives/libscpp-project.scppa"
-        "${SCPP_BUILD_DIR}/scpp-driver/archives/libscpp-driver.scppa"
-        "${SCPP_BUILD_DIR}/scpp-codegen/archives/libscpp-codegen.scppa"
-        "${SCPP_BUILD_DIR}/scpp-movecheck/archives/libscpp-movecheck.scppa"
-        "${SCPP_BUILD_DIR}/scpp-compiler/archives/libscpp.ast.scppa"
-        "${SCPP_BUILD_DIR}/scpp-compiler/archives/libscpp.constexpression.scppa"
-        "${SCPP_BUILD_DIR}/scpp-compiler/archives/libscpp.lexer.scppa"
-        "${SCPP_BUILD_DIR}/scpp-compiler/archives/libscpp.mir.scppa"
-        "${SCPP_BUILD_DIR}/scpp-compiler/archives/libscpp.parser.scppa"
-        "${SCPP_BUILD_DIR}/llvm/archives/libllvm.scppa"
-        "${SCPP_BUILD_DIR}/scpp/archives/libscpp.scppa"
-        "${SCPP_BUILD_DIR}/std/archives/libstd.scppa"
-    )
-
     target_link_libraries(scpp_stage1 PRIVATE
-        ${STAGE1_SCPP_ARCHIVES}
+        ${SCPP_STAGE1_ARCHIVES}
         "-Wl,--start-group"
         ${STAGE1_LLVM_STATIC_LIBS}
         "-Wl,--end-group"
-        ${SQLITE3_LIB}
         -lz3 -lz -lzstd -lrt -ldl -lm -lpthread
     )
 

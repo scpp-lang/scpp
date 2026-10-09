@@ -30,4 +30,8 @@ target_compile_definitions(run_tests PRIVATE
     SCPP_STDLIB_STD_STRING_MODULE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../libs/std/string/std_string.scpp"
     SCPP_STDLIB_STD_MEMORY_MODULE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../libs/std/memory/std_memory.scpp"
     SCPP_STDLIB_STD_FUNCTIONAL_MODULE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../libs/std/functional/std_functional.scpp"
-    SCPP_STDLIB_STD_THREAD_MODULE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../libs/std/thread/std_thread.scpp")
+    SCPP_STDLIB_STD_THREAD_MODULE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../libs/std/thread/std_thread.scpp"
+    # For cases that are CMake projects (see run_tests.cpp): the cmake that
+    # configures them and the directory holding cmake/ScppPackages.cmake.
+    SCPP_BLACKBOX_CMAKE_COMMAND="${CMAKE_COMMAND}"
+    SCPP_PACKAGES_CMAKE_MODULE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../cmake")

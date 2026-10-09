@@ -1,1 +1,1 @@
-error: duplicate [[lib]] target name 'shared'
+REGEX:^[\s\S]*scpp\s+package\s+shared\s+is\s+declared\s+twice[\s\S]*$
