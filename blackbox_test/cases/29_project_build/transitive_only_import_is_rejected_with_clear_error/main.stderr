@@ -1,1 +1,1 @@
-error: module 'libmath' is exported only by transitive dependency package 'libmath'; add it as a direct dependency to import it
+REGEX:^[\s\S]*imports\s+module\s+'libmath',\s+which\s+is\s+exported\s+only\s+by\s+package\s+'libmath',\s+not\s+a\s+direct\s+dependency;\s+add\s+it\s+to\s+DEPENDS\s+to\s+import\s+it[\s\S]*$

@@ -1,9 +1,0 @@
-manifest-version = 1
-
-[package]
-name = "member"
-version = "0.1.0"
-
-[[bin]]
-name = "member"
-sources = ["src/**/*.scpp"]

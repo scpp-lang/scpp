@@ -1,3 +1,2 @@
-.scpp/build/*/libbox/modules/libbox.scppm
-.scpp/build/*/libbox/archives/liblibbox.scppa
-.scpp/build/*/app/package-metadata.json
+build/scpp-packages/libbox/libbox.scppm
+build/scpp-packages/libbox/liblibbox.scppa

@@ -19,9 +19,8 @@ import libbox;
 // all -- an ordinary `main.imports`-style `--import name=path.scpp`
 // mapping compiles the imported module's *source* on the fly, with no
 // serialization step at all (see this suite's own run_tests.cpp header
-// comment), so it cannot reach this code path. A workspace path-dependency
-// build (`scpp build --workspace`, following the pattern in
-// cases/29_project_build/workspace_build_workspace_builds_path_dependencies_end_to_end/)
+// comment), so it cannot reach this code path. A CMake build of two packages
+// (see cases/29_project_build/workspace_build_workspace_builds_path_dependencies_end_to_end/)
 // does: it compiles `libbox` to a real `libbox.scppm` interface first, then
 // compiles `app` importing that already-compiled artifact -- exactly like
 // a real multi-package project, and the only way within this suite's

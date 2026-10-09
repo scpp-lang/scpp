@@ -1,2 +1,2 @@
-build
---lib
+--target
+scpp_pkg_buildalllibs

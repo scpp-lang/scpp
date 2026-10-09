@@ -4196,9 +4196,10 @@ struct TargetLayoutInfo {
 
 // 2**exponent, for 0 <= exponent <= 62. Written as a doubling loop
 // rather than `1 << exponent` because this file is self-hosted -- it is
-// compiled by scpp as well as by clang++ (see src/scpp.toml), and scpp
-// has no shift operator. Every caller below bounds `exponent` at 63
-// before calling, so the result always fits an std::int64_t.
+// compiled by scpp as well as by clang++ (see the scpp-compiler package in
+// the top-level CMakeLists.txt), and scpp has no shift operator. Every
+// caller below bounds `exponent` at 63 before calling, so the result always
+// fits an std::int64_t.
 [[nodiscard]] inline std::int64_t two_to_the(int exponent) {
     std::int64_t result = 1;
     for (int i = 0; i < exponent; i = i + 1) {

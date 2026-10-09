@@ -7,14 +7,12 @@ import scpp.ast;
 import scpp.lexer;
 import scpp.parser;
 import scpp.driver;
-import scpp.project;
 
 extern "C" {
     int open(const char* pathname, int flags, ...);
     int close(int fd);
     long read(int fd, void* buf, unsigned long count);
     long write(int fd, const void* buf, unsigned long count);
-    char* getcwd(char* buf, unsigned long size);
     int snprintf(char* str, unsigned long size, const char* format, ...);
 }
 
@@ -73,14 +71,21 @@ inline std::size_t find_char(std::string_view s, char c) {
     return std::string_view::npos;
 }
 
-inline std::string path_current() {
-    char buf[4096] = {};
-    char* res = nullptr;
-    [[scpp::unsafe]] {
-        res = getcwd(buf, 4096);
+// Maps a clang-style `-O` flag to the codegen optimization level. Returns
+// false, leaving `opt_level` untouched, when `arg` is not such a flag.
+bool parse_opt_level_flag(std::string_view arg, int& opt_level) {
+    if (arg == "-O0") {
+        opt_level = 0;
+    } else if (arg == "-O1") {
+        opt_level = 1;
+    } else if (arg == "-O2" || arg == "-O" || arg == "-Os" || arg == "-Oz" || arg == "-Og") {
+        opt_level = 2;
+    } else if (arg == "-O3" || arg == "-Ofast") {
+        opt_level = 3;
+    } else {
+        return false;
     }
-    if (res == nullptr) return std::string{"."};
-    return std::string{buf};
+    return true;
 }
 
 inline const char* get_arg(char** argv, int index) {
@@ -884,7 +889,7 @@ int run_build(std::string_view input_path, std::string_view output_path,
 
 int run_build_module(std::string_view input_path, std::string_view interface_path, std::string_view archive_path,
                      const std::unordered_map<std::string, std::string>& import_paths,
-                     const std::vector<std::string>& import_search_dirs) {
+                     const std::vector<std::string>& import_search_dirs, int opt_level) {
     if (!ends_with(interface_path, ".scppm")) {
         eprint("error: module interface output must use the .scppm extension, got '");
         eprint(interface_path);
@@ -906,7 +911,7 @@ int run_build_module(std::string_view input_path, std::string_view interface_pat
     const std::string& source = source_result.value();
 
     auto result = scpp::emit_module_artifacts(source, string_from_view(interface_path), string_from_view(archive_path), import_paths,
-                                import_search_dirs, string_from_view(input_path));
+                                import_search_dirs, string_from_view(input_path), opt_level);
     if (!result.has_value()) {
         print_diagnostic(input_path, source, result.error().loc, result.error().what());
         return 1;
@@ -973,11 +978,14 @@ export int run(int argc, char** argv) {
         std::unordered_map<std::string, std::string> import_paths{};
         std::vector<ImportEntry> import_entries{};
         std::vector<std::string> import_search_dirs{};
+        int opt_level = 2;
         for (int i = 2; i < argc; i++) {
             std::string_view arg{get_arg(argv, i)};
             if (arg == "-I" && i + 1 < argc) {
                 i++;
                 import_search_dirs.push_back(std::string{get_arg(argv, i)});
+            } else if (parse_opt_level_flag(arg, opt_level)) {
+                // opt_level updated in place
             } else if (arg == "--interface-out" && i + 1 < argc) {
                 i++;
                 interface_path = std::string_view{get_arg(argv, i)};
@@ -1024,37 +1032,8 @@ export int run(int argc, char** argv) {
         }
         if (!validate_import_paths(import_entries)) return 1;
         if (!append_explicit_source_imports(source_paths, import_paths)) return 1;
-        return run_build_module(source_paths.front(), interface_path, archive_path, import_paths, import_search_dirs);
-    }
-    if (argc >= 2 && std::string_view{get_arg(argv, 1)} == "build") {
-        scpp::ProjectBuildOptions options{};
-        for (int i = 2; i < argc; i++) {
-            std::string_view arg{get_arg(argv, i)};
-            if (arg == "--lib") {
-                options.build_lib_only = true;
-                if (i + 1 < argc) {
-                    std::string_view next{get_arg(argv, i + 1)};
-                    if (!next.empty() && next.at(0) != '-') {
-                        i++;
-                        options.selected_lib = string_from_view(std::string_view{get_arg(argv, i)});
-                    }
-                }
-            } else if (arg == "--bin" && i + 1 < argc) {
-                i++;
-                options.selected_bin = string_from_view(std::string_view{get_arg(argv, i)});
-            } else if ((arg == "-p" || arg == "--package") && i + 1 < argc) {
-                i++;
-                options.selected_package = string_from_view(std::string_view{get_arg(argv, i)});
-            } else if (arg == "--workspace") {
-                options.build_workspace = true;
-            } else {
-                eprint("error: unknown build option '");
-                eprint(arg);
-                eprintln("'");
-                return 1;
-            }
-        }
-        return scpp::build_manifest_project(path_current(), options);
+        return run_build_module(source_paths.front(), interface_path, archive_path, import_paths, import_search_dirs,
+                                opt_level);
     }
     if (argc >= 2) {
         std::string_view explicit_output_path{};
@@ -1093,20 +1072,8 @@ export int run(int argc, char** argv) {
                 emit_debug_info = false;
             } else if (starts_with(arg, "-g")) {
                 emit_debug_info = true;
-            } else if (arg == "-O0") {
-                opt_level = 0;
-            } else if (arg == "-O1") {
-                opt_level = 1;
-            } else if (arg == "-O2") {
-                opt_level = 2;
-            } else if (arg == "-O3") {
-                opt_level = 3;
-            } else if (arg == "-Os" || arg == "-Oz" || arg == "-Og") {
-                opt_level = 2;
-            } else if (arg == "-Ofast") {
-                opt_level = 3;
-            } else if (arg == "-O") {
-                opt_level = 2;
+            } else if (parse_opt_level_flag(arg, opt_level)) {
+                // opt_level updated in place
             } else if (arg == "--static") {
                 static_link = true;
             } else if (arg == "--link" && i + 1 < argc) {
@@ -1204,19 +1171,13 @@ export int run(int argc, char** argv) {
                          emit_debug_info, compile_only, opt_level);
     }
 
-    if (scpp::find_project_manifest(path_current()).has_value()) {
-        return scpp::build_manifest_project(path_current(), scpp::ProjectBuildOptions{});
-    }
-
     oprintln("Hello from " + string_from_view(name) + " " + string_from_view(version) + "!");
     oprintln("Usage: " + string_from_view(name) + " lex <file.scpp>|--source <file>");
     oprintln("       " + string_from_view(name) + " parse <file.scpp>|--source <file>");
     oprintln("       " + string_from_view(name) +
              " <file.scpp> [<more.scpp>...] [--source <file>]... [-c] [-o <output>] [-I <dir>]... [-g] [--static] [--link <path>]... [--import name=path]...");
     oprintln("       " + string_from_view(name) +
-             " build [--workspace] [-p <package>] [--lib [<name>]] [--bin <name>]");
-    oprintln("       " + string_from_view(name) +
-             " build-module <file.scpp> [<more.scpp>...] [--source <file>]... --interface-out <file.scppm> --archive-out <file.scppa> [-I <dir>]... [--import name=path]...");
+             " build-module <file.scpp> [<more.scpp>...] [--source <file>]... --interface-out <file.scppm> --archive-out <file.scppa> [-O<level>] [-I <dir>]... [--import name=path]...");
     return 0;
 }
 

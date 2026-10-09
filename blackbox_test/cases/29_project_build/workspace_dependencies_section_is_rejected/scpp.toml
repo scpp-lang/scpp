@@ -1,7 +1,0 @@
-manifest-version = 1
-
-[workspace]
-members = ["member"]
-
-[workspace.dependencies]
-net = { path = "libs/net" }

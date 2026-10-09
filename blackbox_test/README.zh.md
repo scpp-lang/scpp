@@ -52,8 +52,16 @@
   - 目录里其它的 `.scpp` 文件——就是 `main.imports` 里引用的那些模块，不会
     被当成独立的用例扫描。
   - 若存在 `main.argv`，运行器会先把整个用例目录复制到临时工作区，再在那里
-    调用 `scpp`；因此 project-build 类夹具可以安全地包含 `scpp.toml`、
+    调用 `scpp`；因此 project-build 类夹具可以安全地包含 `CMakeLists.txt`、
     子包和嵌套源码树，而不会污染仓库里的已提交 fixture。
+  - 若目录里 `main.scpp` 旁边还有 `CMakeLists.txt`，该用例就是一个 *CMake
+    项目用例*，而不是一次 `scpp` 调用：运行器把目录复制到临时工作区，用
+    Ninja 配置它（`-DCMAKE_MODULE_PATH` 指向 `../cmake`，让项目能
+    `include(ScppPackages)`；`-DSCPP_PACKAGES_COMPILER` 设为被测的 `scpp`），
+    再执行 `cmake --build build`；此时 `main.argv` 列出额外的
+    `cmake --build` 参数（例如 `--target <name>`）。上面的各个 sidecar
+    作用于这条命令，两个步骤合并后的日志充当它的 stderr；output 与
+    artifact 路径相对于复制后的目录，因此位于 `build/` 之下。
 
 测试运行器本身（`run_tests.cpp`）是一个小巧、无外部依赖的 C++ 程序——只用了
 POSIX `fork`/`exec` + `<filesystem>`，没有第三方库，也没有链接任何 scpp 模块。
@@ -100,7 +108,7 @@ cmake --build build
 | `14_classes` | 构造/析构函数、默认成员初始化器与构造成员初始化列表、私有成员访问控制、编译器提供/用户自定义的拷贝构造与拷贝赋值、只能由编译器提供的移动构造与移动赋值、方法调用的借用检查、`this` |
 | `15_function_overloading` | 按精确类型匹配解析重载、by-value/by-reference 独立轴、const/非-const 方法 |
 | `16_namespaces` | 基本的 `namespace` 声明、限定调用、嵌套、同一命名空间内类名的非限定查找，以及前缀 `::` 的全局作用域查找；`using namespace` 被拒绝 |
-| `17_modules` | `export module`/`import`、命名空间与模块名匹配（ch11 §11.6）、跨模块 import/export/重新导出、裸 `extern`、partition，以及一个 workspace/path-dependency 构建——其跨模块 `.scppm` 二进制产物必须正确往返一个仍是泛型的导出类、依赖模板参数的数组边界 |
+| `17_modules` | `export module`/`import`、命名空间与模块名匹配（ch11 §11.6）、跨模块 import/export/重新导出、裸 `extern`、partition，以及一个由 CMake 驱动的多包构建——其跨模块 `.scppm` 二进制产物必须正确往返一个仍是泛型的导出类、依赖模板参数的数组边界 |
 | `18_closures` | lambda 表达式（ch05 §5.12）：按值/按引用/初始化捕获、笼统/混合捕获、引用捕获闭包的生命周期跟踪、显式 `this`/`*this` 捕获、`mutable`、尾置返回类型、泛型 lambda |
 | `19_scalar_types` | `bool`/`int`/`char` 之外的完整标量家族（ch06）、标量间的显式转换，以及同类型/混合类型标量比较规则 |
 | `20_generic_functions` | ch05 §5.11 的修订：完整 header 形式（裸/概念约束/多参数/仅返回类型）、缩写形式的裸 `auto`、概念约束的参数包 |
@@ -112,7 +120,7 @@ cmake --build build
 | `26_threads` | `std::thread` / `std::jthread`：thread-movable 构造约束、join/detach/joinable 状态变化、`jthread` 析构时自动 join |
 | `27_unions_packed_layout` | union 成员的 unsafe 门控，以及 `[[scpp::packed]]` 的布局/FFI 行为，包括 Linux `epoll_event` / `epoll_data_t` 形态 |
 | `28_cli_invocation` | CLI 表面：直接 `scpp file.scpp` 构建、默认/自定义输出名、移除的 `build` 关键字，以及仍保留的 `lex`/`parse`/`build-module` 子命令 |
-| `29_project_build` | manifest 驱动的项目构建：单包 `build`、workspace/path dependency、直接依赖可见性、`-p` 选包，以及对尚未实现 manifest 特性的拒绝路径 |
+| `29_project_build` | 由 CMake 驱动的项目构建（`CMakeLists.txt` + `cmake/ScppPackages.cmake`）：单包可执行文件与库、多包项目、直接依赖可见性、目标选择、native 对象，以及链接错误 |
 | `30_constant_evaluation` | 形式化规范驱动的 `constexpr`/`consteval` 覆盖：required constant evaluation、`if consteval` / `if !consteval`、v1 暂不支持的操作，以及“后面的参数先推导包，再回填前面依赖参数类型”的规则 |
 | `31_enum_class` | scoped enumeration：`enum class` 声明、带作用域的枚举项访问、不同枚举类型分离、显式 cast，以及显式底层类型/枚举值 |
 | `32_sizeof_storage_lifetime` | `sizeof(type)` / `sizeof(expr)`、用于最大尺寸/对齐存储的 `alignas` 限定裸 `char` 数组写法（取代已移除的 `std::storage_for<T, ...>` 内建）、placement-new、显式析构调用语法，以及多态类的 `sizeof`/`alignof` 正确计入隐式 vtable 指针 |
@@ -163,13 +171,12 @@ cmake --build build
   不能直接 import 一个 partition"这条限制，没有覆盖"主接口单元汇聚
   partition"这个机制本身。
 - **`17_modules` 里有一个用例确实会先把模块编译成 `.scppm`**：一个
-  workspace/path-dependency 构建（`scpp build --workspace`，用
-  `main.argv` 调用而不是 `main.imports`）是这套件里唯一会真正产出并导入
-  一个 `.scppm` 二进制产物的机制——`src/project.cppm` 的 manifest 构建
-  流水线会为每个 path dependency 把它写到磁盘上，并让依赖方包的模块解析
-  指向这个已编译好的文件，而不是原始源码。这正是用来验证跨模块二进制
-  （反）序列化 bug 所必需的（已验证：按上面那条笔记，普通的
-  `--import name=path` 用例从不会经过 `.scppm` 往返）。
+  CMake 项目用例（`CMakeLists.txt` 用 `cmake/ScppPackages.cmake` 构建两个
+  包，而不是 `main.imports`）是这套件里唯一会真正产出并导入
+  一个 `.scppm` 二进制产物的机制——构建会把库包的 `.scppm` 写到磁盘上，并让
+  依赖它的可执行文件的编译指向这个已编译好的文件，而不是原始源码。这正是
+  用来验证跨模块二进制（反）序列化 bug 所必需的（已验证：按上面那条笔记，
+  普通的 `--import name=path` 用例从不会经过 `.scppm` 往返）。
 - **一个模块文件不能同时是可运行的程序**：一个包含 `export module name;`
   的文件，它的 `main()` 不会被链接成进程入口（通过一次"undefined
   reference to `main`"的链接错误实证发现的）。因此 `17_modules` 下每个
@@ -257,10 +264,10 @@ cmake --build build
 - **CLI 调用方式现在也有直接黑盒覆盖**：
   裸 `scpp file.scpp`、`-o custom_name`、被移除的 `build` 关键字拒绝路径，
   以及 `lex`、`parse`、`build-module` 子命令仍然可用
-- **manifest 项目构建现在也有直接黑盒覆盖**：
-  单包 lib/bin 构建、workspace/path dependency 构建、`-p` 选包、
-  仅直接依赖可见的编译期规则，以及对 registry 依赖、
-  `[workspace.dependencies]`、`[native]` 等延期特性的拒绝路径
+- **由 CMake 驱动的项目构建现在也有直接黑盒覆盖**：
+  单包可执行文件与库构建、多包项目、`--target` 选择、
+  仅直接依赖可见的编译期规则、合并进模块归档的 native 对象，
+  以及缺失或重复 `main` 的链接错误
 - **数组边界常量表达式（ch05 §9.4）现在也有专门的黑盒覆盖**：
   字面量 / `sizeof` / `alignof` / 算术组合 / 全局命名常量边界在局部变量、
   struct/class 字段、函数参数三种声明位置上一致地被接受；非常量（不是

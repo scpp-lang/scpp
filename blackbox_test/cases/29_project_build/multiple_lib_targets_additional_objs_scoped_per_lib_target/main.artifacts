@@ -1,3 +1,2 @@
-.scpp/build/*/multiobjs/package-metadata.json
-.scpp/build/*/multiobjs/archives/libnativea.scppa
-.scpp/build/*/multiobjs/archives/libnativeb.scppa
+build/scpp-packages/nativea/libnativea.scppa
+build/scpp-packages/nativeb/libnativeb.scppa

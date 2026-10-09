@@ -202,6 +202,34 @@ using PartitionResolver = std::function<std::expected<Program, ParseError>(const
     return ++counter;
 }
 
+// A short tag that depends only on which module unit a file is, never on
+// what else this process has parsed (FNV-1a over `module:partition`). It
+// goes into every generic template owner id (see
+// Parser::next_generic_template_owner_id) so ids minted by separate
+// compilations of different modules cannot collide in an importer.
+[[nodiscard]] std::string module_unit_tag(const std::string& module_name, const std::string& partition_name) {
+    std::string key = module_name;
+    key += ":";
+    key += partition_name;
+    unsigned long hash = 14695981039346656037ull;
+    // The multiply is meant to wrap; scpp's arithmetic checks only allow
+    // that inside an unsafe block.
+    [[scpp::unsafe]] {
+        for (std::size_t i = 0; i < key.size(); i++) {
+            hash ^= static_cast<unsigned long>(static_cast<std::uint8_t>(key.at(i)));
+            hash *= 1099511628211ull;
+        }
+    }
+    const char hex_chars[17] = "0123456789abcdef";
+    char buf[17] = {};
+    for (std::size_t i = 0; i < 16; i++) {
+        buf[15 - i] = hex_chars[hash & 0x0f];
+        hash >>= 4;
+    }
+    buf[16] = '\0';
+    return std::string{buf};
+}
+
 [[nodiscard]] std::string_view builtin_scalar_keyword_type_name(TokenKind kind) {
     switch (kind) {
         case TokenKind::KwInt: return "int";
@@ -634,6 +662,9 @@ private:
     std::vector<GenericTypeParam> current_class_template_params_{};
     std::size_t generic_template_owner_counter_ = 0;
     std::size_t parser_instance_id_ = 0;
+    // module_unit_tag() of the module unit being parsed; empty for a file
+    // with no module declaration.
+    std::string module_unit_tag_{};
     std::size_t synthesized_for_temp_counter_ = 0;
     int loop_depth_ = 0;
     int switch_depth_ = 0;
@@ -4591,6 +4622,7 @@ private:
         }
         if (auto _r = expect(TokenKind::Semicolon, "';'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
         program.module_name = dotted;
+        module_unit_tag_ = module_unit_tag(program.module_name, program.partition_name);
         program.is_module_interface = leading_export;
         program.is_module_impl = !leading_export;
         return {};
@@ -4811,6 +4843,11 @@ private:
     [[nodiscard]] std::string next_generic_template_owner_id() {
         {
             std::string _msg_3762{"__gtpl"};
+            if (!module_unit_tag_.empty()) {
+                _msg_3762 += "_";
+                _msg_3762 += module_unit_tag_;
+                _msg_3762 += "_";
+            }
             _msg_3762 += std::to_string(parser_instance_id_);
             _msg_3762 += "_";
             _msg_3762 += std::to_string(++generic_template_owner_counter_);

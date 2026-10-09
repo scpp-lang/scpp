@@ -1,1 +1,1 @@
-error: unknown build option 'legacy_build_keyword_is_rejected.scpp'
+error: unrecognized positional input file 'build'; positional source inputs must use a supported source extension (.scpp, .cppm, .cpp, .cc, .cxx), otherwise pass --source <path>

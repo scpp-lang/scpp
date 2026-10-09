@@ -2866,10 +2866,9 @@ private:
     // the exact same "this witness doesn't work for this particular
     // nested shape" situation, so both (and, defensively, any other
     // compiler-diagnostic exception -- every one of ParseError/
-    // DataflowError/CodegenError/ConstexprError/ManifestError/
-    // BuildError/DriverError derives from std::runtime_error, per a
-    // repo-wide grep) are caught here via that common base rather than
-    // naming each concrete type. Silently falling back to the pre-
+    // DataflowError/CodegenError/ConstexprError/DriverError derives from
+    // std::runtime_error, per a repo-wide grep) are caught here via that
+    // common base rather than naming each concrete type. Silently falling back to the pre-
     // resolution (substituted-but-uninstantiated) type here --
     // mirroring maybe_instantiate_generic_constructor_overloads' own
     // identical "speculative, tolerate a thrown compiler error" idiom

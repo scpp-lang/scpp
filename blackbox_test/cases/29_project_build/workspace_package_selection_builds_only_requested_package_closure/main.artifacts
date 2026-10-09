@@ -1,5 +1,4 @@
-.scpp/build/*/libmath/modules/libmath.scppm
-.scpp/build/*/libutil/modules/libutil.scppm
-.scpp/build/*/app/package-metadata.json
-!.scpp/build/*/tool/tool
-!.scpp/build/*/tool/package-metadata.json
+build/scpp-packages/libmath/libmath.scppm
+build/scpp-packages/libutil/libutil.scppm
+!build/tool/bin/tool
+!build/scpp-packages/tool.0.o

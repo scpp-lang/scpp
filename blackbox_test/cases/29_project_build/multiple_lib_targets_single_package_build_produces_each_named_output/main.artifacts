@@ -1,5 +1,4 @@
-.scpp/build/*/multilib/modules/mathlib.scppm
-.scpp/build/*/multilib/archives/libmathlib.scppa
-.scpp/build/*/multilib/modules/textlib.scppm
-.scpp/build/*/multilib/archives/libtextlib.scppa
-.scpp/build/*/multilib/package-metadata.json
+build/scpp-packages/multilib/mathlib.scppm
+build/scpp-packages/multilib/libmathlib.scppa
+build/scpp-packages/multilib/textlib.scppm
+build/scpp-packages/multilib/libtextlib.scppa
