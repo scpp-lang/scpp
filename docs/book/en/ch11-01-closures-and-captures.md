@@ -158,8 +158,9 @@ So far, the practical rules are:
 - inside methods, `this` must be captured explicitly.
 
 That is enough to write ordinary callback-style code with today's scpp. The next
-section can stay in the same area and add generic lambdas.
+section stays in the same callable-code area, but moves to named functions and
+function pointers.
 
 ---
 
-[← Previous: Validating References with Lifetimes](ch10-03-validating-references-with-lifetimes.md) · [Table of Contents](README.md)
+[← Previous: Validating References with Lifetimes](ch10-03-validating-references-with-lifetimes.md) · [Table of Contents](README.md) · [Next: Function Pointers →](ch11-02-function-pointers.md)

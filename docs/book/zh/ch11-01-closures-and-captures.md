@@ -152,9 +152,9 @@ int main() {
 - 把闭包传给另一个函数时，通常走的是一个由 concept 约束的普通泛型参数；
 - 在方法内部，`this` 必须显式捕获。
 
-这已经足够写出今天 scpp 里的普通 callback 风格代码了。下一节可以继续留在这个主题
-里，再加入泛型 lambda。
+这已经足够写出今天 scpp 里的普通 callback 风格代码了。下一节会继续留在“可调用代码”
+这个主题里，但会转去讲具名函数与函数指针。
 
 ---
 
-[← 上一章：用生命周期验证引用](ch10-03-validating-references-with-lifetimes.md) · [目录](README.md)
+[← 上一章：用生命周期验证引用](ch10-03-validating-references-with-lifetimes.md) · [目录](README.md) · [下一章：函数指针 →](ch11-02-function-pointers.md)
