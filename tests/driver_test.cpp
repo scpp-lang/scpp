@@ -6063,6 +6063,55 @@ void run_cli_extension_tests() {
     }
 
     {
+        std::string case_name = "cli_cmake_cxx_modules_library_and_executable";
+        cases_run++;
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+
+        write_text_file(root / "CMakeLists.txt",
+                        "cmake_minimum_required(VERSION 3.28)\n"
+                        "project(calc LANGUAGES CXX)\n"
+                        "set(CMAKE_CXX_STANDARD 26)\n"
+                        "add_library(mathlib STATIC)\n"
+                        "target_sources(mathlib PUBLIC FILE_SET CXX_MODULES FILES math.cppm math_ops.cppm)\n"
+                        "add_executable(calc main.cpp)\n"
+                        "target_link_libraries(calc PRIVATE mathlib)\n");
+        write_text_file(root / "math_ops.cppm",
+                        "export module math:ops;\n"
+                        "namespace math {\n"
+                        "export int add(int a, int b) { return a + b; }\n"
+                        "export int mul(int a, int b) { return a * b; }\n"
+                        "}\n");
+        write_text_file(root / "math.cppm",
+                        "export module math;\n"
+                        "export import :ops;\n");
+        write_text_file(root / "main.cpp",
+                        "import std;\n"
+                        "import math;\n"
+                        "int main() {\n"
+                        "    std::println(\"sum = {}, product = {}\", math::add(20, 22), math::mul(6, 7));\n"
+                        "    return 0;\n"
+                        "}\n");
+
+        std::filesystem::path build_dir = root / "build";
+        RunResult cfg = run_command_capture(
+            shell_quote(SCPP_CMAKE_COMMAND) + " -S " + shell_quote(root.string()) + " -B " +
+            shell_quote(build_dir.string()) + " -G Ninja -DCMAKE_CXX_COMPILER=" + shell_quote(SCPP_BINARY_PATH) +
+            " 2>&1");
+        expect(cfg.exit_code == 0,
+               case_name + ": cmake configure failed: " + cfg.stdout_text);
+        RunResult bld = run_command_capture(
+            shell_quote(SCPP_CMAKE_COMMAND) + " --build " + shell_quote(build_dir.string()) + " 2>&1");
+        expect(bld.exit_code == 0,
+               case_name + ": cmake build failed: " + bld.stdout_text);
+        RunResult run_calc = run_command_capture(shell_quote((build_dir / "calc").string()) + " 2>&1");
+        expect(run_calc.exit_code == 0 && run_calc.stdout_text == "sum = 42, product = 42\n",
+               case_name + ": expected 'sum = 42, product = 42\\n', got '" + run_calc.stdout_text + "'");
+        std::filesystem::remove_all(root);
+    }
+
+    {
         std::string case_name = "cli_source_flag_builds_cpp_input";
         std::filesystem::path source_path = std::filesystem::current_path() / "cli_source_flag_builds_cpp_input.cpp";
         std::filesystem::path exe_path = std::filesystem::current_path() / "cli_source_flag_builds_cpp_input_exe";

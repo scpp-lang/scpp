@@ -2822,8 +2822,9 @@ private:
     }
 
     [[nodiscard]] bool parsing_compiled_module_interface() const {
-        return source_path_ != nullptr && source_path_->size() >= 6 &&
-               source_path_->substr(source_path_->size() - 6) == ".scppm";
+        return source_path_ != nullptr &&
+               ((source_path_->size() >= 6 && source_path_->substr(source_path_->size() - 6) == ".scppm") ||
+                (source_path_->size() >= 4 && source_path_->substr(source_path_->size() - 4) == ".gcm"));
     }
 
     [[nodiscard]] bool is_bodyless_free_function_forward_decl(const Function& fn) const {
