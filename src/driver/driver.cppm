@@ -2613,7 +2613,9 @@ export extern "C" {
         return std::unexpected(DriverError("cannot open imported module source '" + path + "'"));
     }
     const std::string& bytes = bytes_r.value();
-    if (!path.ends_with(".scppm")) {
+    bool is_gcm_scppm = path.ends_with(".gcm") && bytes.size() >= 8 && bytes.at(0) == 'S' && bytes.at(1) == 'C' &&
+                        bytes.at(2) == 'P' && bytes.at(3) == 'P' && bytes.at(4) == 'M';
+    if (!path.ends_with(".scppm") && !is_gcm_scppm) {
         loaded.interface_source = bytes;
         std::expected<LoadedModuleFile, DriverError> ret{std::move(loaded)};
         return ret;
@@ -4340,12 +4342,37 @@ std::optional<std::string> driver_runtime_default_source_stdlib_dir() {
                        const std::vector<std::string>& import_search_dirs = {},
                        bool emit_debug_info = false,
                        const std::string& source_path = {},
-                       int opt_level = 2) {
-    ModuleCache cache{import_paths, import_search_dirs};
+                       int opt_level = 2,
+                       const std::string& bmi_output_path = {}) {
+    std::unordered_map<std::string, std::string> effective_import_paths = import_paths;
+    if (!source_path.empty()) {
+        if (std::optional<std::string> module_name = declared_module_name_from_source(source); module_name.has_value()) {
+            effective_import_paths.emplace(*module_name, absolute_source_path(source_path));
+        }
+    }
+    ModuleCache cache{std::move(effective_import_paths), import_search_dirs};
     auto program_result = parse_source_with_module_cache(source, cache, source_path);
     if (!program_result.has_value()) return std::unexpected(std::move(program_result).error());
     Program program = std::move(program_result.value());
     program.source_path = source_path.empty() ? std::string() : absolute_source_path(source_path);
+    if (!bmi_output_path.empty()) {
+        reject_not_yet_lowerable_constexpr_surface(program);
+        if (!program.partition_name.empty()) {
+            auto write_r = write_file_bytes(bmi_output_path, source);
+            if (!write_r.has_value()) return std::unexpected(std::move(write_r).error());
+            if (program.is_module_interface) {
+                Program empty_program{};
+                empty_program.source_path = program.source_path;
+                return emit_object_file_for_program(empty_program, object_path, emit_debug_info, opt_level);
+            }
+        } else if (program.is_module_interface) {
+            auto merged_interface_source_r =
+                build_merged_interface_source(program, cache, absolute_source_path(source_path), /*keep_concrete_bodies=*/false);
+            if (!merged_interface_source_r.has_value()) return std::unexpected(std::move(merged_interface_source_r).error());
+            auto write_r = write_scppm_file(program, merged_interface_source_r.value(), bmi_output_path);
+            if (!write_r.has_value()) return std::unexpected(std::move(write_r).error());
+        }
+    }
     return emit_object_file_for_program(program, object_path, emit_debug_info, opt_level);
 }
 
@@ -4355,8 +4382,9 @@ std::optional<std::string> driver_runtime_default_source_stdlib_dir() {
                        const std::vector<std::string>& import_search_dirs = {},
                        bool emit_debug_info = false,
                        const std::string& source_path = {},
-                       int opt_level = 2) {
-    return emit_object_file(source, object_path, import_paths, import_search_dirs, emit_debug_info, source_path, opt_level);
+                       int opt_level = 2,
+                       const std::string& bmi_output_path = {}) {
+    return emit_object_file(source, object_path, import_paths, import_search_dirs, emit_debug_info, source_path, opt_level, bmi_output_path);
 }
 
 [[nodiscard]] inline std::string derive_object_path(std::string_view source_path) {
