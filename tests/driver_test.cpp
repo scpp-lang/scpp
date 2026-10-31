@@ -6014,6 +6014,55 @@ void run_cli_extension_tests() {
     }
 
     {
+        std::string case_name = "cli_depfile_flags_and_cmake_add_executable_hello_world";
+        cases_run++;
+        std::filesystem::path root = std::filesystem::current_path() / case_name;
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+
+        std::filesystem::path src_path = root / "hello_world.cpp";
+        std::filesystem::path obj_path = root / "hello_world.o";
+        std::filesystem::path dep_path = root / "hello_world.o.d";
+        write_text_file(src_path,
+                        "import std;\n"
+                        "int main() {\n"
+                        "    std::println(\"Hello, World!\");\n"
+                        "    return 0;\n"
+                        "}\n");
+
+        RunResult dep_compile = run_command_capture(
+            shell_quote(SCPP_BINARY_PATH) + " -MD -MT target/hello_world.o -MF " + shell_quote(dep_path.string()) +
+            " -c " + shell_quote(src_path.string()) + " -o " + shell_quote(obj_path.string()) + " 2>&1");
+        expect(dep_compile.exit_code == 0,
+               case_name + ": -MD -MT -MF compile should succeed, got '" + dep_compile.stdout_text + "'");
+        expect(std::filesystem::exists(dep_path), case_name + ": expected depfile to exist");
+        std::ifstream dep_in(dep_path);
+        std::string dep_content((std::istreambuf_iterator<char>(dep_in)), std::istreambuf_iterator<char>());
+        expect(dep_content == "target/hello_world.o: " + src_path.string() + "\n",
+               case_name + ": unexpected depfile content '" + dep_content + "'");
+
+        write_text_file(root / "CMakeLists.txt",
+                        "cmake_minimum_required(VERSION 3.28)\n"
+                        "project(hello_world LANGUAGES CXX)\n"
+                        "add_executable(hello_world hello_world.cpp)\n");
+        std::filesystem::path build_dir = root / "build";
+        RunResult cfg = run_command_capture(
+            shell_quote(SCPP_CMAKE_COMMAND) + " -S " + shell_quote(root.string()) + " -B " +
+            shell_quote(build_dir.string()) + " -G Ninja -DCMAKE_CXX_COMPILER=" + shell_quote(SCPP_BINARY_PATH) +
+            " 2>&1");
+        expect(cfg.exit_code == 0,
+               case_name + ": cmake configure with CMAKE_CXX_COMPILER=scpp failed: " + cfg.stdout_text);
+        RunResult bld = run_command_capture(
+            shell_quote(SCPP_CMAKE_COMMAND) + " --build " + shell_quote(build_dir.string()) + " 2>&1");
+        expect(bld.exit_code == 0,
+               case_name + ": cmake build with CMAKE_CXX_COMPILER=scpp failed: " + bld.stdout_text);
+        RunResult run_hw = run_command_capture(shell_quote((build_dir / "hello_world").string()) + " 2>&1");
+        expect(run_hw.exit_code == 0 && run_hw.stdout_text == "Hello, World!\n",
+               case_name + ": expected 'Hello, World!\\n', got '" + run_hw.stdout_text + "'");
+        std::filesystem::remove_all(root);
+    }
+
+    {
         std::string case_name = "cli_source_flag_builds_cpp_input";
         std::filesystem::path source_path = std::filesystem::current_path() / "cli_source_flag_builds_cpp_input.cpp";
         std::filesystem::path exe_path = std::filesystem::current_path() / "cli_source_flag_builds_cpp_input_exe";

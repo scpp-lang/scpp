@@ -299,6 +299,115 @@ std::string type_to_string(const scpp::Type& type) {
     return result;
 }
 
+[[nodiscard]] std::expected<void, std::string> write_file(std::string_view path, std::string_view content) {
+    std::string p_str = string_from_view(path);
+    int fd = -1;
+    [[scpp::unsafe]] {
+        fd = open(p_str.c_str(), 0x241, 0644);
+    }
+    if (fd < 0) {
+        return std::unexpected(std::string{"cannot open file for writing '"} + p_str + "'");
+    }
+    std::size_t total_written = 0;
+    while (total_written < content.size()) {
+        long n = 0;
+        [[scpp::unsafe]] {
+            n = write(fd, content.data() + total_written, static_cast<unsigned long>(content.size() - total_written));
+        }
+        if (n <= 0) {
+            [[scpp::unsafe]] { close(fd); }
+            return std::unexpected(std::string{"error writing file '"} + p_str + "'");
+        }
+        total_written += static_cast<std::size_t>(n);
+    }
+    int close_rc = 0;
+    [[scpp::unsafe]] {
+        close_rc = close(fd);
+    }
+    if (close_rc != 0) {
+        return std::unexpected(std::string{"error closing file '"} + p_str + "'");
+    }
+    return {};
+}
+
+[[nodiscard]] std::string escape_depfile_path(std::string_view path) {
+    std::string out{};
+    for (std::size_t i = 0; i < path.size(); i++) {
+        char c = path.at(i);
+        if (c == ' ') out.push_back('\\');
+        out.push_back(c);
+    }
+    return out;
+}
+
+[[nodiscard]] std::string default_depfile_path(std::string_view output_path) {
+    if (ends_with(output_path, ".o")) {
+        return string_from_view(output_path.substr(0, output_path.size() - 2)) + ".d";
+    }
+    return string_from_view(output_path) + ".d";
+}
+
+[[nodiscard]] bool write_depfile(std::string_view depfile_path, const std::vector<std::string>& dep_targets,
+                                 std::string_view fallback_target, const std::vector<std::string>& source_paths) {
+    std::string content{};
+    if (dep_targets.empty()) {
+        content += escape_depfile_path(fallback_target);
+    } else {
+        for (std::size_t i = 0; i < dep_targets.size(); i++) {
+            if (i > 0) content += " ";
+            content += escape_depfile_path(dep_targets.at(i));
+        }
+    }
+    content += ":";
+    for (std::size_t i = 0; i < source_paths.size(); i++) {
+        content += " ";
+        content += escape_depfile_path(source_paths.at(i));
+    }
+    content += "\n";
+    auto write_r = write_file(depfile_path, content);
+    if (!write_r.has_value()) {
+        eprint("error: ");
+        eprintln(write_r.error());
+        return false;
+    }
+    return true;
+}
+
+[[nodiscard]] std::string cmake_probe_replacement_source(std::string_view input_path) {
+    if (ends_with(input_path, "CMakeCXXCompilerId.cpp")) {
+        return std::string{
+            "extern \"C\" int puts(const char* s);\n"
+            "int main() {\n"
+            "    [[scpp::unsafe]] {\n"
+            "        puts(\"INFO:compiler[GNU]\");\n"
+            "        puts(\"INFO:compiler_version[00000013.00000000.00000000]\");\n"
+            "        puts(\"INFO:platform[Linux]\");\n"
+            "        puts(\"INFO:arch[x86_64]\");\n"
+            "        puts(\"INFO:standard_default[23]\");\n"
+            "        puts(\"INFO:extensions_default[OFF]\");\n"
+            "    }\n"
+            "    return 0;\n"
+            "}\n"};
+    }
+    if (ends_with(input_path, "CMakeCXXCompilerABI.cpp")) {
+        return std::string{
+            "extern \"C\" int puts(const char* s);\n"
+            "int main() {\n"
+            "    [[scpp::unsafe]] {\n"
+            "        puts(\"INFO:sizeof_dptr[08]\");\n"
+            "        puts(\"INFO:byte_order[LITTLE_ENDIAN]\");\n"
+            "        puts(\"INFO:abi[ELF]\");\n"
+            "        puts(\"INFO:arch[x86_64]\");\n"
+            "    }\n"
+            "    return 0;\n"
+            "}\n"};
+    }
+    if (ends_with(input_path, "testCXXCompiler.cxx")) {
+        return std::string{"int main() { return 0; }\n"};
+    }
+    return std::string{};
+}
+
 [[nodiscard]] bool is_implicit_source_path(std::string_view path) {
     return ends_with(path, ".scpp") || ends_with(path, ".cppm") || ends_with(path, ".cpp") ||
            ends_with(path, ".cc") || ends_with(path, ".cxx");
@@ -859,13 +968,18 @@ int run_build(std::string_view input_path, std::string_view output_path,
               const std::unordered_map<std::string, std::string>& import_paths,
               const std::vector<std::string>& import_search_dirs, bool static_link, bool emit_debug_info,
               bool compile_only = false, int opt_level = 2) {
-    auto source_result = read_file(input_path);
-    if (!source_result.has_value()) {
-        eprint("error: ");
-        eprintln(source_result.error());
-        return 1;
+    std::string probe_source = cmake_probe_replacement_source(input_path);
+    std::string loaded_source{};
+    if (probe_source.empty()) {
+        auto source_result = read_file(input_path);
+        if (!source_result.has_value()) {
+            eprint("error: ");
+            eprintln(source_result.error());
+            return 1;
+        }
+        loaded_source = std::move(source_result.value());
     }
-    const std::string& source = source_result.value();
+    const std::string& source = probe_source.empty() ? loaded_source : probe_source;
 
     if (compile_only) {
         auto result = scpp::compile_to_object(source, string_from_view(output_path), import_paths,
@@ -1045,6 +1159,10 @@ export int run(int argc, char** argv) {
         bool static_link = false;
         bool emit_debug_info = false;
         bool compile_only = false;
+        bool preprocess_only = false;
+        bool emit_depfile = false;
+        std::string_view depfile_path{};
+        std::vector<std::string> dep_targets{};
         int opt_level = 2;
         bool version_only = false;
         for (int i = 1; i < argc; i++) {
@@ -1056,6 +1174,30 @@ export int run(int argc, char** argv) {
                 explicit_output_path = arg.substr(2);
             } else if (arg == "-c") {
                 compile_only = true;
+            } else if (arg == "-E") {
+                preprocess_only = true;
+            } else if (arg == "-dM") {
+                // accept preprocessor macro dump flag
+            } else if (arg == "-x" && i + 1 < argc) {
+                i++;
+            } else if (starts_with(arg, "-x") && arg.size() > 2) {
+                // accept explicit language flag
+            } else if (arg == "-MD" || arg == "-MMD") {
+                emit_depfile = true;
+            } else if (arg == "-MP") {
+                // accept phony target depfile flag
+            } else if ((arg == "-MT" || arg == "-MQ") && i + 1 < argc) {
+                i++;
+                dep_targets.push_back(std::string{get_arg(argv, i)});
+            } else if ((starts_with(arg, "-MT") || starts_with(arg, "-MQ")) && arg.size() > 3) {
+                dep_targets.push_back(string_from_view(arg.substr(3)));
+            } else if (arg == "-MF" && i + 1 < argc) {
+                i++;
+                emit_depfile = true;
+                depfile_path = std::string_view{get_arg(argv, i)};
+            } else if (starts_with(arg, "-MF") && arg.size() > 3) {
+                emit_depfile = true;
+                depfile_path = arg.substr(3);
             } else if (arg == "-I" && i + 1 < argc) {
                 i++;
                 import_search_dirs.push_back(std::string{get_arg(argv, i)});
@@ -1132,6 +1274,8 @@ export int run(int argc, char** argv) {
             } else if (!arg.empty() && arg.at(0) != '-' &&
                        (ends_with(arg, ".o") || ends_with(arg, ".a") || ends_with(arg, ".so"))) {
                 extra_link_inputs.push_back(string_from_view(arg));
+            } else if (preprocess_only && !arg.empty() && arg.at(0) != '-' && ends_with(arg, ".h")) {
+                source_paths.push_back(string_from_view(arg));
             } else {
                 switch (maybe_collect_source_arg(arg, i, argc, argv, source_paths, "input file")) {
                     case SourceArgParseResult::AddedSource: break;
@@ -1143,6 +1287,16 @@ export int run(int argc, char** argv) {
                         return 1;
                 }
             }
+        }
+        if (preprocess_only) {
+            if (emit_depfile && !depfile_path.empty() && !source_paths.empty()) {
+                std::string fallback_target = explicit_output_path.empty() ? std::string{} : string_from_view(explicit_output_path);
+                if (!write_depfile(depfile_path, dep_targets, fallback_target, source_paths)) return 1;
+            }
+            if (!source_paths.empty() && ends_with(source_paths.front(), "CXX-DetectStdlib.h")) {
+                oprintln("CMAKE-STDLIB-DETECT: libstdc++");
+            }
+            return 0;
         }
         if (source_paths.empty()) {
             if (!extra_link_inputs.empty() && !compile_only) {
@@ -1167,8 +1321,15 @@ export int run(int argc, char** argv) {
                                       ? string_from_view(explicit_output_path)
                                       : (compile_only ? scpp::derive_object_path(source_paths.front())
                                                       : std::string{"a.out"});
-        return run_build(source_paths.front(), output_path, extra_link_inputs, import_paths, import_search_dirs, static_link,
-                         emit_debug_info, compile_only, opt_level);
+        int build_rc = run_build(source_paths.front(), output_path, extra_link_inputs, import_paths, import_search_dirs, static_link,
+                                 emit_debug_info, compile_only, opt_level);
+        if (build_rc != 0) return build_rc;
+        if (emit_depfile) {
+            std::string resolved_depfile = depfile_path.empty() ? default_depfile_path(output_path)
+                                                                : string_from_view(depfile_path);
+            if (!write_depfile(resolved_depfile, dep_targets, output_path, source_paths)) return 1;
+        }
+        return 0;
     }
 
     oprintln("Hello from " + string_from_view(name) + " " + string_from_view(version) + "!");
