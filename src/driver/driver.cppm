@@ -2869,8 +2869,8 @@ inline void path_remove(const std::string& path) {
     candidate_dirs.push_back(runtime_installed_stdlib_dir());
     for (const std::optional<std::string>& lib_dir : candidate_dirs) {
         if (!lib_dir.has_value()) continue;
-        append_if_exists(path_join(*lib_dir, "libstd.scppa"));
         append_if_exists(path_join(*lib_dir, "libscpp.scppa"));
+        append_if_exists(path_join(*lib_dir, "libstd.scppa"));
     }
     return result;
 }
@@ -4419,6 +4419,18 @@ std::optional<std::string> driver_runtime_default_source_stdlib_dir() {
     std::string command = "cc -static";
     for (const std::string& input : link_inputs) {
         command += " \"" + input + "\"";
+    }
+    for (const std::string& stdlib_input : default_stdlib_link_inputs()) {
+        bool already_present = false;
+        for (const std::string& existing : link_inputs) {
+            if (existing == stdlib_input) {
+                already_present = true;
+                break;
+            }
+        }
+        if (!already_present) {
+            command += " \"" + stdlib_input + "\"";
+        }
     }
     // A wrapper library that itself calls into real C++ (e.g. std::string)
     // needs libstdc++'s runtime linked in too; `cc` alone (plain C mode)
