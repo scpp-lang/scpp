@@ -380,10 +380,10 @@ std::string type_to_string(const scpp::Type& type) {
             "int main() {\n"
             "    [[scpp::unsafe]] {\n"
             "        puts(\"INFO:compiler[GNU]\");\n"
-            "        puts(\"INFO:compiler_version[00000013.00000000.00000000]\");\n"
+            "        puts(\"INFO:compiler_version[00000016.00000000.00000000]\");\n"
             "        puts(\"INFO:platform[Linux]\");\n"
             "        puts(\"INFO:arch[x86_64]\");\n"
-            "        puts(\"INFO:standard_default[23]\");\n"
+            "        puts(\"INFO:standard_default[26]\");\n"
             "        puts(\"INFO:extensions_default[OFF]\");\n"
             "    }\n"
             "    return 0;\n"
@@ -430,10 +430,12 @@ public:
     ScannedModuleDecl(const ScannedModuleDecl& other) = default;
     void operator=(const ScannedModuleDecl& other) {
         this->has_value = other.has_value;
+        this->is_interface = other.is_interface;
         this->module_name = other.module_name;
         this->partition_name = other.partition_name;
     }
     bool has_value{false};
+    bool is_interface{false};
     std::string module_name{};
     std::string partition_name{};
 };
@@ -445,8 +447,12 @@ ScannedModuleDecl scan_declared_module_from_source(const std::string& source) {
         tokens.at(i + 1).kind == scpp::TokenKind::Semicolon) {
         i += 2;
     }
+    bool is_exported = false;
     if (i < tokens.size() && tokens.at(i).kind == scpp::TokenKind::KwExport) {
-        if (i + 1 < tokens.size() && tokens.at(i + 1).kind == scpp::TokenKind::KwModule) i++;
+        if (i + 1 < tokens.size() && tokens.at(i + 1).kind == scpp::TokenKind::KwModule) {
+            is_exported = true;
+            i++;
+        }
     }
     ScannedModuleDecl empty_decl{};
     if (i >= tokens.size() || tokens.at(i).kind != scpp::TokenKind::KwModule) return empty_decl;
@@ -455,6 +461,7 @@ ScannedModuleDecl scan_declared_module_from_source(const std::string& source) {
 
     ScannedModuleDecl decl{};
     decl.has_value = true;
+    decl.is_interface = is_exported;
     decl.module_name = string_from_view(tokens.at(i).text);
     i++;
     while (i + 1 < tokens.size() && tokens.at(i).kind == scpp::TokenKind::Dot &&
@@ -472,6 +479,109 @@ ScannedModuleDecl scan_declared_module_from_source(const std::string& source) {
         decl.partition_name = string_from_view(tokens.at(i).text);
     }
     return decl;
+}
+
+std::vector<std::string> scan_imported_modules_from_source(const std::string& source,
+                                                           const std::string& current_module_name) {
+    std::vector<scpp::Token> tokens = scpp::tokenize(source);
+    std::vector<std::string> imports{};
+    for (std::size_t i = 0; i < tokens.size(); i++) {
+        if (tokens.at(i).kind != scpp::TokenKind::KwImport) continue;
+        std::size_t j = i + 1;
+        if (j >= tokens.size()) break;
+        std::string mod_name{};
+        if (tokens.at(j).kind == scpp::TokenKind::Colon) {
+            j++;
+            if (j < tokens.size() && tokens.at(j).kind == scpp::TokenKind::Identifier && !current_module_name.empty()) {
+                mod_name = current_module_name + ":" + string_from_view(tokens.at(j).text);
+            }
+        } else if (tokens.at(j).kind == scpp::TokenKind::Identifier) {
+            mod_name = string_from_view(tokens.at(j).text);
+            j++;
+            while (j + 1 < tokens.size() && tokens.at(j).kind == scpp::TokenKind::Dot &&
+                   tokens.at(j + 1).kind == scpp::TokenKind::Identifier) {
+                mod_name += ".";
+                mod_name += string_from_view(tokens.at(j + 1).text);
+                j += 2;
+            }
+            if (j + 1 < tokens.size() && tokens.at(j).kind == scpp::TokenKind::Colon &&
+                tokens.at(j + 1).kind == scpp::TokenKind::Identifier) {
+                mod_name += ":";
+                mod_name += string_from_view(tokens.at(j + 1).text);
+            }
+        }
+        if (!mod_name.empty()) {
+            bool exists = false;
+            for (std::size_t k = 0; k < imports.size(); k++) {
+                if (imports.at(k) == mod_name) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) imports.push_back(mod_name);
+        }
+    }
+    return imports;
+}
+
+[[nodiscard]] std::string escape_json_string(std::string_view s) {
+    std::string out{};
+    for (std::size_t i = 0; i < s.size(); i++) {
+        char c = s.at(i);
+        if (c == '\\' || c == '"') out.push_back('\\');
+        out.push_back(c);
+    }
+    return out;
+}
+
+[[nodiscard]] bool write_p1689_deps_file(std::string_view deps_file_path, std::string_view primary_output,
+                                         std::string_view input_path) {
+    std::string probe_source = cmake_probe_replacement_source(input_path);
+    std::string loaded_source{};
+    if (probe_source.empty()) {
+        auto source_r = read_file(input_path);
+        if (!source_r.has_value()) {
+            eprint("error: ");
+            eprintln(source_r.error());
+            return false;
+        }
+        loaded_source = std::move(source_r.value());
+    }
+    const std::string& source = probe_source.empty() ? loaded_source : probe_source;
+    ScannedModuleDecl decl = scan_declared_module_from_source(source);
+    std::vector<std::string> requires_list = scan_imported_modules_from_source(source, decl.module_name);
+
+    std::string json = "{\n\"rules\": [\n{\n\"primary-output\": \"";
+    json += escape_json_string(primary_output);
+    json += "\"";
+    if (decl.has_value && (decl.is_interface || !decl.partition_name.empty())) {
+        std::string logical_name = decl.module_name;
+        if (!decl.partition_name.empty()) {
+            logical_name += ":";
+            logical_name += decl.partition_name;
+        }
+        json += ",\n\"provides\": [\n{\n\"logical-name\": \"";
+        json += escape_json_string(logical_name);
+        json += "\",\n\"is-interface\": ";
+        json += (decl.is_interface ? "true" : "false");
+        json += "\n}\n]";
+    }
+    json += ",\n\"requires\": [\n";
+    for (std::size_t i = 0; i < requires_list.size(); i++) {
+        if (i > 0) json += ",\n";
+        json += "{\n\"logical-name\": \"";
+        json += escape_json_string(requires_list.at(i));
+        json += "\"\n}";
+    }
+    json += "\n]\n}\n],\n\"version\": 0,\n\"revision\": 0\n}\n";
+
+    auto write_r = write_file(deps_file_path, json);
+    if (!write_r.has_value()) {
+        eprint("error: ");
+        eprintln(write_r.error());
+        return false;
+    }
+    return true;
 }
 
 class ImportEntry {
@@ -967,7 +1077,8 @@ int run_build(std::string_view input_path, std::string_view output_path,
               const std::vector<std::string>& extra_link_inputs,
               const std::unordered_map<std::string, std::string>& import_paths,
               const std::vector<std::string>& import_search_dirs, bool static_link, bool emit_debug_info,
-              bool compile_only = false, int opt_level = 2) {
+              bool compile_only = false, int opt_level = 2,
+              std::string_view module_mapper_path = {}) {
     std::string probe_source = cmake_probe_replacement_source(input_path);
     std::string loaded_source{};
     if (probe_source.empty()) {
@@ -981,10 +1092,61 @@ int run_build(std::string_view input_path, std::string_view output_path,
     }
     const std::string& source = probe_source.empty() ? loaded_source : probe_source;
 
+    std::unordered_map<std::string, std::string> effective_import_paths = import_paths;
+    std::string bmi_output_path{};
+    if (!module_mapper_path.empty()) {
+        auto mapper_r = read_file(module_mapper_path);
+        if (!mapper_r.has_value()) {
+            eprint("error: ");
+            eprintln(mapper_r.error());
+            return 1;
+        }
+        const std::string& mapper_text = mapper_r.value();
+        ScannedModuleDecl decl = scan_declared_module_from_source(source);
+        std::string declared_key{};
+        if (decl.has_value) {
+            declared_key = decl.partition_name.empty() ? decl.module_name : (decl.module_name + ":" + decl.partition_name);
+        }
+        std::size_t pos = 0;
+        while (pos < mapper_text.size()) {
+            std::size_t end = mapper_text.find('\n', pos);
+            std::string_view line = (end == std::string::npos)
+                                        ? std::string_view{mapper_text}.substr(pos)
+                                        : std::string_view{mapper_text}.substr(pos, end - pos);
+            if (!line.empty() && line.at(line.size() - 1) == '\r') {
+                line = line.substr(0, line.size() - 1);
+            }
+            while (!line.empty() && (line.at(0) == ' ' || line.at(0) == '\t')) {
+                line = line.substr(1);
+            }
+            if (!line.empty() && line.at(0) != '#' && line.at(0) != '$') {
+                std::size_t sp = find_char(line, ' ');
+                if (sp == std::string_view::npos) sp = find_char(line, '\t');
+                if (sp != std::string_view::npos && sp > 0) {
+                    std::string mod_name = string_from_view(line.substr(0, sp));
+                    std::string_view rest = line.substr(sp + 1);
+                    while (!rest.empty() && (rest.at(0) == ' ' || rest.at(0) == '\t')) {
+                        rest = rest.substr(1);
+                    }
+                    if (!rest.empty()) {
+                        std::string mapped_path = string_from_view(rest);
+                        if (!declared_key.empty() && mod_name == declared_key) {
+                            bmi_output_path = mapped_path;
+                        } else {
+                            effective_import_paths.emplace(mod_name, mapped_path);
+                        }
+                    }
+                }
+            }
+            if (end == std::string::npos) break;
+            pos = end + 1;
+        }
+    }
+
     if (compile_only) {
-        auto result = scpp::compile_to_object(source, string_from_view(output_path), import_paths,
+        auto result = scpp::compile_to_object(source, string_from_view(output_path), effective_import_paths,
                                               import_search_dirs, emit_debug_info, string_from_view(input_path),
-                                              opt_level);
+                                              opt_level, bmi_output_path);
         if (!result.has_value()) {
             print_diagnostic(input_path, source, result.error().loc, result.error().what());
             return 1;
@@ -992,7 +1154,7 @@ int run_build(std::string_view input_path, std::string_view output_path,
         return 0;
     }
 
-    auto result = scpp::compile_to_executable(source, string_from_view(output_path), extra_link_inputs, import_paths, static_link,
+    auto result = scpp::compile_to_executable(source, string_from_view(output_path), extra_link_inputs, effective_import_paths, static_link,
                                 import_search_dirs, emit_debug_info, string_from_view(input_path), opt_level);
     if (!result.has_value()) {
         print_diagnostic(input_path, source, result.error().loc, result.error().what());
@@ -1163,6 +1325,9 @@ export int run(int argc, char** argv) {
         bool emit_depfile = false;
         std::string_view depfile_path{};
         std::vector<std::string> dep_targets{};
+        std::string_view fdeps_file_path{};
+        std::string_view fdeps_target_path{};
+        std::string_view module_mapper_path{};
         int opt_level = 2;
         bool version_only = false;
         for (int i = 1; i < argc; i++) {
@@ -1249,6 +1414,12 @@ export int run(int argc, char** argv) {
                 extra_link_inputs.push_back(string_from_view(arg));
             } else if (starts_with(arg, "-W") || arg == "-w") {
                 // accept warning flags
+            } else if (starts_with(arg, "-fdeps-file=")) {
+                fdeps_file_path = arg.substr(12);
+            } else if (starts_with(arg, "-fdeps-target=")) {
+                fdeps_target_path = arg.substr(14);
+            } else if (starts_with(arg, "-fmodule-mapper=")) {
+                module_mapper_path = arg.substr(16);
             } else if (starts_with(arg, "-f")) {
                 // accept compiler feature flags
             } else if (starts_with(arg, "-m")) {
@@ -1289,6 +1460,18 @@ export int run(int argc, char** argv) {
             }
         }
         if (preprocess_only) {
+            if (!fdeps_file_path.empty() && !source_paths.empty()) {
+                std::string_view primary_out = !fdeps_target_path.empty() ? fdeps_target_path : explicit_output_path;
+                if (!write_p1689_deps_file(fdeps_file_path, primary_out, source_paths.front())) return 1;
+            }
+            if (!explicit_output_path.empty() && explicit_output_path != "-") {
+                auto pre_write_r = write_file(explicit_output_path, "");
+                if (!pre_write_r.has_value()) {
+                    eprint("error: ");
+                    eprintln(pre_write_r.error());
+                    return 1;
+                }
+            }
             if (emit_depfile && !depfile_path.empty() && !source_paths.empty()) {
                 std::string fallback_target = explicit_output_path.empty() ? std::string{} : string_from_view(explicit_output_path);
                 if (!write_depfile(depfile_path, dep_targets, fallback_target, source_paths)) return 1;
@@ -1322,7 +1505,7 @@ export int run(int argc, char** argv) {
                                       : (compile_only ? scpp::derive_object_path(source_paths.front())
                                                       : std::string{"a.out"});
         int build_rc = run_build(source_paths.front(), output_path, extra_link_inputs, import_paths, import_search_dirs, static_link,
-                                 emit_debug_info, compile_only, opt_level);
+                                 emit_debug_info, compile_only, opt_level, module_mapper_path);
         if (build_rc != 0) return build_rc;
         if (emit_depfile) {
             std::string resolved_depfile = depfile_path.empty() ? default_depfile_path(output_path)
