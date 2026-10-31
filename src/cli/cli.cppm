@@ -18,7 +18,7 @@ extern "C" {
 
 namespace scpp {
 
-export constexpr std::string_view version = "26.0.0";
+export constexpr std::string_view version = "0.0.1";
 
 inline void oprint(std::string_view s) {
     if (s.empty()) return;

@@ -46,7 +46,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 project(scpp
-    VERSION 26.0.0
+    VERSION 0.0.1
     DESCRIPTION "A compiler frontend for a C++-looking language with safe regions"
     LANGUAGES C CXX)
 
