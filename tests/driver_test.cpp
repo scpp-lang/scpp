@@ -6069,23 +6069,33 @@ void run_cli_extension_tests() {
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(root);
 
+        std::filesystem::create_directories(root / "api");
+        std::filesystem::create_directories(root / "ops");
+
         write_text_file(root / "CMakeLists.txt",
                         "cmake_minimum_required(VERSION 3.28)\n"
                         "project(calc LANGUAGES CXX)\n"
                         "set(CMAKE_CXX_STANDARD 26)\n"
                         "add_library(mathlib STATIC)\n"
-                        "target_sources(mathlib PUBLIC FILE_SET CXX_MODULES FILES math.cppm math_ops.cppm)\n"
+                        "target_sources(mathlib PUBLIC FILE_SET CXX_MODULES FILES math.cppm api/math_api.cppm ops/math_ops.cppm)\n"
                         "add_executable(calc main.cpp)\n"
                         "target_link_libraries(calc PRIVATE mathlib)\n");
-        write_text_file(root / "math_ops.cppm",
+        write_text_file(root / "ops" / "math_ops.cppm",
                         "export module math:ops;\n"
                         "namespace math {\n"
-                        "export int add(int a, int b) { return a + b; }\n"
-                        "export int mul(int a, int b) { return a * b; }\n"
+                        "export int raw_add(int a, int b) { return a + b; }\n"
+                        "export int raw_mul(int a, int b) { return a * b; }\n"
+                        "}\n");
+        write_text_file(root / "api" / "math_api.cppm",
+                        "export module math:api;\n"
+                        "import :ops;\n"
+                        "namespace math {\n"
+                        "export int add(int a, int b) { return raw_add(a, b); }\n"
+                        "export int mul(int a, int b) { return raw_mul(a, b); }\n"
                         "}\n");
         write_text_file(root / "math.cppm",
                         "export module math;\n"
-                        "export import :ops;\n");
+                        "export import :api;\n");
         write_text_file(root / "main.cpp",
                         "import std;\n"
                         "import math;\n"

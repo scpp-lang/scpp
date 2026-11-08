@@ -1,237 +1,295 @@
-// None of these have an `import std;` module form: `arpa/inet.h`,
-// `netinet/in.h`, `sys/socket.h`, `sys/types.h`, and `sys/wait.h` are
-// POSIX networking/process headers, not part of ISO C++'s standard
-// library; `<csignal>` stays too because this file calls the POSIX
-// `kill()` function (declared alongside `SIGTERM` on this platform but,
-// unlike `SIGTERM`/`raise()` themselves, not part of ISO C++).
-#include <arpa/inet.h>
-#include <csignal>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <unistd.h>
-
 import std;
+import httpserver;
 
-#ifndef SCPP_BINARY_PATH
-#error "SCPP_BINARY_PATH must be defined"
-#endif
-#ifndef SCPP_HTTPSERVER_MODULE_PATH
-#error "SCPP_HTTPSERVER_MODULE_PATH must be defined"
-#endif
-#ifndef SCPP_HTTPSERVER_TESTDATA_DIR
-#error "SCPP_HTTPSERVER_TESTDATA_DIR must be defined"
-#endif
-#ifndef SCPP_HTTPSERVER_WORK_DIR
-#error "SCPP_HTTPSERVER_WORK_DIR must be defined"
-#endif
+extern "C" {
+    struct in_addr {
+        uint32_t s_addr;
+    };
 
-namespace {
-int failures = 0;
+    struct sockaddr {
+        uint16_t sa_family;
+        char sa_data[14];
+    };
 
-void expect(bool condition, const std::string& message) {
+    struct sockaddr_in {
+        uint16_t sin_family;
+        uint16_t sin_port;
+        in_addr sin_addr;
+        char sin_zero[8];
+    };
+
+    int socket(int domain, int type, int protocol);
+    uint32_t htonl(uint32_t hostlong);
+    uint16_t htons(uint16_t hostshort);
+    uint16_t ntohs(uint16_t netshort);
+    int bind(int socket_fd, sockaddr* address, unsigned int address_len);
+    int getsockname(int socket_fd, sockaddr* address, unsigned int* address_len);
+    int connect(int socket_fd, sockaddr* address, unsigned int address_len);
+    long send(int socket_fd, const char* buffer, unsigned long length, int flags);
+    long recv(int socket_fd, char* buffer, unsigned long length, int flags);
+    int close(int fd);
+
+    int fork();
+    void _exit(int status);
+    int kill(int pid, int sig);
+    int waitpid(int pid, int* status, int options);
+    int usleep(unsigned int usec);
+    int getpid();
+    int access(const char* pathname, int mode);
+    int symlink(const char* target, const char* linkpath);
+    int system(const char* command);
+}
+
+void expect(bool condition, const char* message, int& failures) {
     if (!condition) {
-        std::cerr << "FAILED: " << message << "\n";
-        ++failures;
+        std::println("FAILED: {}", message);
+        failures = failures + 1;
     }
+    return;
 }
 
 int reserve_port() {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    int fd = -1;
+    [[scpp::unsafe]] { fd = socket(2, 1, 0); }
+    if (fd < 0) return 19080;
     sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = 0;
-    if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) return 19080;
-    socklen_t len = sizeof(addr);
-    if (getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
-        close(fd);
+    addr.sin_family = static_cast<uint16_t>(2);
+    [[scpp::unsafe]] {
+        addr.sin_addr.s_addr = htonl(static_cast<uint32_t>(2130706433));
+    }
+    addr.sin_port = static_cast<uint16_t>(0);
+    int i = 0;
+    while (i < 8) {
+        addr.sin_zero[i] = '\0';
+        i = i + 1;
+    }
+    int bind_rc = -1;
+    [[scpp::unsafe]] {
+        bind_rc = bind(fd, static_cast<sockaddr*>(static_cast<void*>(&addr)), static_cast<unsigned int>(16));
+    }
+    if (bind_rc != 0) {
+        [[scpp::unsafe]] { close(fd); }
         return 19080;
     }
-    int port = ntohs(addr.sin_port);
-    close(fd);
-    return port;
-}
-
-std::string escape_c_string(const std::string& s) {
-    std::string out;
-    for (char c : s) {
-        if (c == '\\' || c == '"') out.push_back('\\');
-        out.push_back(c);
+    unsigned int len = static_cast<unsigned int>(16);
+    int name_rc = -1;
+    [[scpp::unsafe]] {
+        name_rc = getsockname(fd, static_cast<sockaddr*>(static_cast<void*>(&addr)), &len);
     }
-    return out;
+    if (name_rc != 0) {
+        [[scpp::unsafe]] { close(fd); }
+        return 19080;
+    }
+    uint16_t net_port = addr.sin_port;
+    uint16_t host_port = 0;
+    [[scpp::unsafe]] {
+        host_port = ntohs(net_port);
+        close(fd);
+    }
+    return static_cast<int>(host_port);
 }
 
-std::filesystem::path prepare_docroot() {
-    std::filesystem::path work(SCPP_HTTPSERVER_WORK_DIR);
-    std::filesystem::remove_all(work);
-    std::filesystem::create_directories(work);
-    std::filesystem::copy(SCPP_HTTPSERVER_TESTDATA_DIR, work / "docroot",
-                          std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing);
-    std::ofstream(work / "docroot" / "secret.txt") << "secret\n";
-    std::error_code ec;
-    std::filesystem::create_symlink(work / "docroot" / "hello.txt", work / "docroot" / "link.txt", ec);
-    return work / "docroot";
+std::string find_testdata_dir() {
+    int ok = -1;
+    [[scpp::unsafe]] { ok = access("testdata/index.html", 0); }
+    if (ok == 0) return std::string{"testdata"};
+    [[scpp::unsafe]] { ok = access("../testdata/index.html", 0); }
+    if (ok == 0) return std::string{"../testdata"};
+    [[scpp::unsafe]] { ok = access("applications/httpserver/testdata/index.html", 0); }
+    if (ok == 0) return std::string{"applications/httpserver/testdata"};
+    return std::string{"../../applications/httpserver/testdata"};
 }
 
-std::filesystem::path build_server_binary(const std::filesystem::path& root, int port) {
-    std::filesystem::path work(SCPP_HTTPSERVER_WORK_DIR);
-    std::filesystem::create_directories(work);
-    std::filesystem::path source = work / "generated_main.scpp";
-    std::filesystem::path binary = work / "httpserver_test_bin";
-    std::ofstream out(source);
-    out << "import httpserver;\n\n"
-        << "int main() {\n"
-        << "    httpserver::ServerBuilder builder{};\n"
-        << "    builder.mount(\"/\", \"" << escape_c_string(root.string()) << "\");\n"
-        << "    builder.set_port(" << port << ");\n"
-        << "    builder.set_max_connections(32);\n"
-        << "    builder.set_worker_count(2);\n"
-        << "    builder.allow_index_html(true);\n"
-        << "    builder.deny_hidden_files(true);\n"
-        << "    return builder.serve();\n"
-        << "}\n";
-    out.close();
-
-    std::ostringstream cmd;
-    cmd << SCPP_BINARY_PATH << " " << source.string()
-        << " -o " << binary.string()
-        << " --import httpserver=" << SCPP_HTTPSERVER_MODULE_PATH;
-    int rc = std::system(cmd.str().c_str());
-    expect(rc == 0, "generated httpserver app compiles");
-    return binary;
+std::string prepare_docroot(const std::string& work_dir) {
+    std::string testdata_dir = find_testdata_dir();
+    std::string docroot = work_dir + "/docroot";
+    std::string cmd = "rm -rf \"" + work_dir + "\" && mkdir -p \"" + work_dir + "\" && cp -r \"" +
+                      testdata_dir + "\" \"" + docroot + "\" && printf 'secret\\n' > \"" + work_dir +
+                      "/secret.txt\"";
+    std::string link_path = docroot + "/link.txt";
+    [[scpp::unsafe]] {
+        system(cmd.c_str());
+        symlink("hello.txt", link_path.c_str());
+    }
+    return docroot;
 }
 
-pid_t start_server(const std::filesystem::path& binary) {
-    pid_t pid = fork();
+int start_server(const std::string& root, int port) {
+    int pid = -1;
+    [[scpp::unsafe]] { pid = fork(); }
     if (pid != 0) return pid;
-    execl(binary.c_str(), binary.c_str(), nullptr);
-    _exit(127);
+    httpserver::ServerBuilder builder{};
+    builder.mount("/", root.c_str());
+    builder.set_port(port);
+    builder.set_max_connections(32);
+    builder.set_worker_count(2);
+    builder.allow_index_html(true);
+    builder.deny_hidden_files(true);
+    int rc = builder.serve();
+    [[scpp::unsafe]] { _exit(rc); }
+    return 0;
 }
 
 bool wait_for_server(int port) {
-    for (int i = 0; i < 50; ++i) {
-        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        addr.sin_port = htons(static_cast<std::uint16_t>(port));
-        if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
-            close(fd);
-            return true;
+    int attempt = 0;
+    while (attempt < 50) {
+        int fd = -1;
+        [[scpp::unsafe]] { fd = socket(2, 1, 0); }
+        if (fd >= 0) {
+            sockaddr_in addr{};
+            addr.sin_family = static_cast<uint16_t>(2);
+            [[scpp::unsafe]] {
+                addr.sin_addr.s_addr = htonl(static_cast<uint32_t>(2130706433));
+                addr.sin_port = htons(static_cast<uint16_t>(port));
+            }
+            int i = 0;
+            while (i < 8) {
+                addr.sin_zero[i] = '\0';
+                i = i + 1;
+            }
+            int rc = -1;
+            [[scpp::unsafe]] {
+                rc = connect(fd, static_cast<sockaddr*>(static_cast<void*>(&addr)), static_cast<unsigned int>(16));
+                close(fd);
+            }
+            if (rc == 0) return true;
         }
-        close(fd);
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        [[scpp::unsafe]] { usleep(static_cast<unsigned int>(50000)); }
+        attempt = attempt + 1;
     }
     return false;
 }
 
-std::string send_request(int port, const std::string& request) {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+std::string send_request(int port, const char* request_cstr) {
+    std::string request{request_cstr};
+    int fd = -1;
+    [[scpp::unsafe]] { fd = socket(2, 1, 0); }
+    if (fd < 0) return std::string{};
     sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(static_cast<std::uint16_t>(port));
-    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        close(fd);
-        return {};
+    addr.sin_family = static_cast<uint16_t>(2);
+    [[scpp::unsafe]] {
+        addr.sin_addr.s_addr = htonl(static_cast<uint32_t>(2130706433));
+        addr.sin_port = htons(static_cast<uint16_t>(port));
     }
-    std::size_t sent = 0;
+    int i = 0;
+    while (i < 8) {
+        addr.sin_zero[i] = '\0';
+        i = i + 1;
+    }
+    int connect_rc = -1;
+    [[scpp::unsafe]] {
+        connect_rc = connect(fd, static_cast<sockaddr*>(static_cast<void*>(&addr)), static_cast<unsigned int>(16));
+    }
+    if (connect_rc != 0) {
+        [[scpp::unsafe]] { close(fd); }
+        return std::string{};
+    }
+    size_t sent = 0;
+    const char* req_ptr = request.c_str();
     while (sent < request.size()) {
-        ssize_t n = ::send(fd, request.data() + sent, request.size() - sent, 0);
+        long n = 0;
+        [[scpp::unsafe]] {
+            n = send(fd, &req_ptr[sent], static_cast<unsigned long>(request.size() - sent), 0);
+        }
         if (n <= 0) break;
-        sent += static_cast<std::size_t>(n);
+        sent = sent + static_cast<size_t>(n);
     }
-    std::string response;
+    std::string response{};
     char buffer[4096];
     while (true) {
-        ssize_t n = ::recv(fd, buffer, sizeof(buffer), 0);
+        long n = 0;
+        [[scpp::unsafe]] {
+            n = recv(fd, &buffer[0], static_cast<unsigned long>(4096), 0);
+        }
         if (n <= 0) break;
-        response.append(buffer, static_cast<std::size_t>(n));
+        std::string chunk{&buffer[0], static_cast<size_t>(n)};
+        response.append(chunk);
     }
-    close(fd);
+    [[scpp::unsafe]] { close(fd); }
     return response;
 }
 
-void run_integration_test() {
-#ifdef SCPP_HTTPSERVER_EXECUTABLE_PATH
-    expect(std::filesystem::exists(SCPP_HTTPSERVER_EXECUTABLE_PATH), "httpserver executable exists");
-#endif
-    const auto root = prepare_docroot();
-    const int port = reserve_port();
-    const auto binary = build_server_binary(root, port);
-    pid_t pid = start_server(binary);
-    expect(pid > 0, "server process spawned");
-    expect(wait_for_server(port), "server became reachable");
+void run_integration_test(int& failures) {
+    int self_pid = 0;
+    [[scpp::unsafe]] { self_pid = getpid(); }
+    std::string work_dir = "/tmp/scpp_httpserver_test_" + std::to_string(static_cast<int64_t>(self_pid));
+    std::string root = prepare_docroot(work_dir);
+    int port = reserve_port();
+    int pid = start_server(root, port);
+    expect(pid > 0, "server process spawned", failures);
+    expect(wait_for_server(port), "server became reachable", failures);
 
     std::string get_root = send_request(port, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    expect(get_root.find("HTTP/1.1 200 OK") == 0, "GET / returns 200");
-    expect(get_root.find("index from scpp httpserver\n") != std::string::npos, "GET / returns index body");
+    expect(get_root.starts_with("HTTP/1.1 200 OK"), "GET / returns 200", failures);
+    expect(get_root.contains("index from scpp httpserver\n"), "GET / returns index body", failures);
 
     std::string get_file = send_request(port, "GET /hello.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    expect(get_file.find("Content-Type: text/plain") != std::string::npos, "GET /hello.txt has text/plain");
-    expect(get_file.find("hello from file\n") != std::string::npos, "GET /hello.txt returns body");
+    expect(get_file.contains("Content-Type: text/plain"), "GET /hello.txt has text/plain", failures);
+    expect(get_file.contains("hello from file\n"), "GET /hello.txt returns body", failures);
 
     std::string get_css = send_request(port, "GET /assets/site.css HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    expect(get_css.find("HTTP/1.1 200 OK") == 0, "GET /assets/site.css returns 200");
-    expect(get_css.find("Content-Type: text/css") != std::string::npos, "GET /assets/site.css has text/css");
-    expect(get_css.find("font-family: sans-serif;") != std::string::npos, "GET /assets/site.css returns CSS body");
+    expect(get_css.starts_with("HTTP/1.1 200 OK"), "GET /assets/site.css returns 200", failures);
+    expect(get_css.contains("Content-Type: text/css"), "GET /assets/site.css has text/css", failures);
+    expect(get_css.contains("font-family: sans-serif;"), "GET /assets/site.css returns CSS body", failures);
 
     std::string get_svg = send_request(port, "GET /assets/logo.svg HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    expect(get_svg.find("HTTP/1.1 200 OK") == 0, "GET /assets/logo.svg returns 200");
-    expect(get_svg.find("Content-Type: image/svg+xml") != std::string::npos, "GET /assets/logo.svg has image/svg+xml");
-    expect(get_svg.find("<svg") != std::string::npos, "GET /assets/logo.svg returns SVG body");
+    expect(get_svg.starts_with("HTTP/1.1 200 OK"), "GET /assets/logo.svg returns 200", failures);
+    expect(get_svg.contains("Content-Type: image/svg+xml"), "GET /assets/logo.svg has image/svg+xml", failures);
+    expect(get_svg.contains("<svg"), "GET /assets/logo.svg returns SVG body", failures);
 
     std::string get_sitemap = send_request(port, "GET /sitemap.xml HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    expect(get_sitemap.find("HTTP/1.1 200 OK") == 0, "GET /sitemap.xml returns 200");
-    expect(get_sitemap.find("Content-Type: application/xml") != std::string::npos,
-           "GET /sitemap.xml has application/xml");
-    expect(get_sitemap.find("<urlset") != std::string::npos, "GET /sitemap.xml returns XML body");
+    expect(get_sitemap.starts_with("HTTP/1.1 200 OK"), "GET /sitemap.xml returns 200", failures);
+    expect(get_sitemap.contains("Content-Type: application/xml"), "GET /sitemap.xml has application/xml", failures);
+    expect(get_sitemap.contains("<urlset"), "GET /sitemap.xml returns XML body", failures);
 
     std::string nested_index = send_request(port, "GET /book/en/ HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    expect(nested_index.find("HTTP/1.1 200 OK") == 0, "GET /book/en/ returns 200");
-    expect(nested_index.find("Content-Type: text/html") != std::string::npos, "GET /book/en/ has text/html");
-    expect(nested_index.find("<title>SCPP book EN</title>") != std::string::npos, "GET /book/en/ serves nested index");
+    expect(nested_index.starts_with("HTTP/1.1 200 OK"), "GET /book/en/ returns 200", failures);
+    expect(nested_index.contains("Content-Type: text/html"), "GET /book/en/ has text/html", failures);
+    expect(nested_index.contains("<title>SCPP book EN</title>"), "GET /book/en/ serves nested index", failures);
 
     std::string nested_index_without_slash = send_request(port, "GET /book/en HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    expect(nested_index_without_slash.find("HTTP/1.1 200 OK") == 0, "GET /book/en returns 200");
-    expect(nested_index_without_slash.find("<h1>English book landing</h1>") != std::string::npos,
-           "GET /book/en serves directory index without trailing slash");
+    expect(nested_index_without_slash.starts_with("HTTP/1.1 200 OK"), "GET /book/en returns 200", failures);
+    expect(nested_index_without_slash.contains("<h1>English book landing</h1>"),
+           "GET /book/en serves directory index without trailing slash", failures);
 
     std::string nested_page = send_request(port, "GET /book/en/getting-started.html HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    expect(nested_page.find("HTTP/1.1 200 OK") == 0, "GET nested html page returns 200");
-    expect(nested_page.find("Content-Type: text/html") != std::string::npos, "GET nested html page has text/html");
-    expect(nested_page.find("Getting started from generated site") != std::string::npos,
-           "GET nested html page returns nested body");
+    expect(nested_page.starts_with("HTTP/1.1 200 OK"), "GET nested html page returns 200", failures);
+    expect(nested_page.contains("Content-Type: text/html"), "GET nested html page has text/html", failures);
+    expect(nested_page.contains("Getting started from generated site"),
+           "GET nested html page returns nested body", failures);
 
     std::string head_file = send_request(port, "HEAD /hello.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    expect(head_file.find("HTTP/1.1 200 OK") == 0, "HEAD /hello.txt returns 200");
-    expect(head_file.find("hello from file\n") == std::string::npos, "HEAD omits body");
+    expect(head_file.starts_with("HTTP/1.1 200 OK"), "HEAD /hello.txt returns 200", failures);
+    expect(!head_file.contains("hello from file\n"), "HEAD omits body", failures);
 
     std::string missing = send_request(port, "GET /missing.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    expect(missing.find("HTTP/1.1 404 Not Found") == 0, "missing file returns 404");
+    expect(missing.starts_with("HTTP/1.1 404 Not Found"), "missing file returns 404", failures);
 
     std::string traversal = send_request(port, "GET /../secret.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    expect(traversal.find("HTTP/1.1 400 Bad Request") == 0, "traversal returns 400");
+    expect(traversal.starts_with("HTTP/1.1 400 Bad Request"), "traversal returns 400", failures);
 
     std::string encoded_slash = send_request(port, "GET /nested%2fchild.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    expect(encoded_slash.find("HTTP/1.1 400 Bad Request") == 0, "encoded slash returns 400");
+    expect(encoded_slash.starts_with("HTTP/1.1 400 Bad Request"), "encoded slash returns 400", failures);
 
-    std::string symlink = send_request(port, "GET /link.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    expect(symlink.find("HTTP/1.1 403 Forbidden") == 0 || symlink.find("HTTP/1.1 404 Not Found") == 0,
-           "symlink leaf is denied");
+    std::string symlink_resp = send_request(port, "GET /link.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(symlink_resp.starts_with("HTTP/1.1 403 Forbidden") || symlink_resp.starts_with("HTTP/1.1 404 Not Found"),
+           "symlink leaf is denied", failures);
 
-    kill(pid, SIGTERM);
     int status = 0;
-    waitpid(pid, &status, 0);
+    std::string cleanup_cmd = "rm -rf \"" + work_dir + "\"";
+    [[scpp::unsafe]] {
+        kill(pid, 15);
+        waitpid(pid, &status, 0);
+        system(cleanup_cmd.c_str());
+    }
+    return;
 }
-} // namespace
 
 int main() {
-    run_integration_test();
+    int failures = 0;
+    run_integration_test(failures);
     if (failures != 0) {
-        std::cerr << failures << " httpserver test(s) failed.\n";
+        std::println("{} httpserver test(s) failed.", failures);
         return 1;
     }
     return 0;
