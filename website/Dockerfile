@@ -16,9 +16,12 @@ RUN set -eux; \
 COPY . .
 
 RUN cmake -S . -B build -G Ninja \
-    -DCMAKE_PREFIX_PATH="${LLVM_CMAKE_DIR}" \
-    -DSCPP_HTTPSERVER_BUILD_STATIC=ON && \
-    cmake --build build -j2
+    -DCMAKE_PREFIX_PATH="${LLVM_CMAKE_DIR}" && \
+    cmake --build build -j2 && \
+    cmake -S applications/httpserver -B build/applications/httpserver -G Ninja \
+    -DCMAKE_CXX_COMPILER=/work/build/scpp && \
+    cmake --build build/applications/httpserver -j2 && \
+    ctest --test-dir build/applications/httpserver --output-on-failure
 
 ARG DOCS_BUILD_SCRIPT=docs/site/build.sh
 ARG DOCS_BUILD_OUTPUT_DIR=docs/site/dist
@@ -32,7 +35,7 @@ RUN SITE_OUTPUT_DIR=/work/site-dist \
 FROM scratch AS runtime
 
 WORKDIR /srv/scpp-site
-COPY --from=build --chown=65532:65532 /work/build/applications/httpserver/httpserver_app_bin /scpp-httpserver
+COPY --from=build --chown=65532:65532 /work/build/applications/httpserver/httpserver /scpp-httpserver
 COPY --from=build --chown=65532:65532 /work/site-dist/ /srv/scpp-site/
 
 USER 65532:65532

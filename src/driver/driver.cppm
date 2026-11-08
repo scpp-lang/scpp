@@ -3756,6 +3756,13 @@ private:
         std::size_t colon = key.find(':');
         if (colon == std::string::npos) return std::nullopt;
         std::string module_name = key.substr(0, colon);
+        std::string partition_name = key.substr(colon + 1);
+        std::string gcm_filename = module_name + "-" + partition_name + ".gcm";
+        for (const auto& entry : import_paths_) {
+            if (!path_ends_with(entry.second, ".gcm")) continue;
+            std::string candidate = path_join(path_parent(entry.second), gcm_filename);
+            if (path_exists(candidate)) return candidate;
+        }
         if (auto scan_r = ensure_module_source_root_scanned(module_name); !scan_r.has_value()) {
             return std::unexpected(std::move(scan_r).error());
         }

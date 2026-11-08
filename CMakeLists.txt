@@ -372,8 +372,6 @@ add_dependencies(scpp_packages ${SCPP_PACKAGE_TARGET_LIST})
 # that into a loud failure rather than a silent one.
 add_dependencies(driver_test scpp_pkg_std scpp_pkg_scpp)
 
-add_subdirectory(applications/httpserver)
-
 # Custom target for building the library packages
 add_custom_target(lib
     DEPENDS scpp_packages
