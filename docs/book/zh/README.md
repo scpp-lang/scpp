@@ -56,8 +56,8 @@
 
 - 闭包与可调用代码
   - [闭包与捕获](ch11-01-closures-and-captures.md)
-  - 泛型 lambda
-  - 选择可调用表示形式
+  - [函数指针](ch11-02-function-pointers.md)
+  - 拥有型可调用包装器
 
 - 一个 I/O 项目：构建命令行程序
   - 接收命令行参数
