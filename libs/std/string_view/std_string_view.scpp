@@ -5,7 +5,7 @@ import :string;
 
 namespace std {
 
-[[nodiscard]] size_t __string_view_strlen(const char* s) {
+[[nodiscard]] size_t __string_view_strlen(const char* s [[scpp::null_terminated]]) {
     const char* empty{};
     if (s == empty) return 0;
     size_t len = 0;
@@ -49,7 +49,7 @@ private:
 public:
     string_view() { return; }
 
-    string_view(const char* s) {
+    string_view(const char* s [[scpp::null_terminated]]) {
         this->data_ = s;
         this->size_ = std::__string_view_strlen(s);
         return;
@@ -100,7 +100,7 @@ public:
         return true;
     }
 
-    bool starts_with(const char* prefix) const {
+    bool starts_with(const char* prefix [[scpp::null_terminated]]) const {
         std::string_view prefix_view{prefix};
         return this->starts_with(prefix_view);
     }
@@ -148,7 +148,7 @@ public:
         return std::string_view::npos;
     }
 
-    size_t find(const char* needle) const {
+    size_t find(const char* needle [[scpp::null_terminated]]) const {
         std::string_view needle_view{needle};
         return this->find(needle_view);
     }
@@ -173,7 +173,7 @@ public:
         return std::string_view::npos;
     }
 
-    size_t rfind(const char* needle) const {
+    size_t rfind(const char* needle [[scpp::null_terminated]]) const {
         std::string_view needle_view{needle};
         return this->rfind(needle_view);
     }

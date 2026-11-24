@@ -1,5 +1,6 @@
 export module httpserver:api;
 
+import std;
 import :runtime;
 
 namespace httpserver {
@@ -8,7 +9,7 @@ export class ServerBuilder {
     public:
         virtual ~ServerBuilder() { return; }
 private:
-    char root_[512];
+    std::string root_{};
     int port_{};
     int max_connections_{};
     int worker_count_{};
@@ -16,26 +17,17 @@ private:
     bool deny_hidden_files_{};
     bool has_error_{};
 
-    bool assign_root(const char* filesystem_root) {
-        // spec §5.1(5.1): raw pointer indexing.
-        [[scpp::unsafe]] {
-            int i = 0;
-            while (filesystem_root[i] != '\0') {
-                if (i >= 511) {
-                    return false;
-                }
-                this->root_[i] = filesystem_root[i];
-                i = i + 1;
-            }
-            this->root_[i] = '\0';
-            return true;
+    bool assign_root(std::string filesystem_root) {
+        if (filesystem_root.empty()) {
+            return false;
         }
+        this->root_ = std::move(filesystem_root);
+        return true;
     }
 
 public:
     ServerBuilder() {
-        this->root_[0] = '.';
-        this->root_[1] = '\0';
+        this->root_ = std::string{"."};
         this->port_ = 18080;
         this->max_connections_ = 32;
         this->worker_count_ = 1;
@@ -72,17 +64,12 @@ public:
         return;
     }
 
-    void mount(const char* url_prefix, const char* filesystem_root) {
-        bool prefix_is_root = false;
-        // spec §5.1(5.1): raw pointer indexing.
-        [[scpp::unsafe]] {
-            prefix_is_root = url_prefix[0] == '/' && url_prefix[1] == '\0';
-        }
-        if (!prefix_is_root) {
+    void mount(std::string url_prefix, std::string filesystem_root) {
+        if (url_prefix != "/") {
             this->has_error_ = true;
             return;
         }
-        if (!this->assign_root(filesystem_root)) {
+        if (!this->assign_root(std::move(filesystem_root))) {
             this->has_error_ = true;
         }
         return;
@@ -102,7 +89,7 @@ public:
         if (this->has_error_) {
             return 1;
         }
-        if (this->root_[0] == '\0') {
+        if (this->root_.empty()) {
             return 1;
         }
         if (this->port_ <= 0) {

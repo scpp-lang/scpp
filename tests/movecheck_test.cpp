@@ -3113,6 +3113,213 @@ void test_auto_reference_cannot_outlive_or_escape_its_lender() {
                moved_message.value_or(""));
 }
 
+void test_null_terminated_accepts_proven_sources_and_gates_unverified_pointers() {
+    cases_run++;
+    std::optional<std::string> safe_ok = move_error_message(R"(
+import std;
+constexpr const char* kPrefix = "pre";
+void take_by_value(std::string_view v) { return; }
+void take_by_cref(const std::string_view& v) { return; }
+std::string_view forward_nt(const char* s [[scpp::null_terminated]], bool pick) {
+    const char* a = "lit";
+    const char* b{"brace"};
+    std::string owned{"owned"};
+    std::runtime_error err{owned};
+    std::string_view v1{"hello"};
+    std::string_view v2{owned.c_str()};
+    std::string_view v3{err.what()};
+    std::string_view v4{s};
+    std::string_view v5{a};
+    std::string_view v6{b};
+    std::string_view v7{kPrefix};
+    std::string_view v8{pick ? "left" : owned.c_str()};
+    take_by_value("hello");
+    take_by_value(owned.c_str());
+    take_by_cref("hello");
+    take_by_cref(s);
+    if (v1 == "hello" && v1.starts_with(kPrefix) && v1.find(s) != std::string_view::npos &&
+        v1.rfind(owned.c_str()) != std::string_view::npos) {
+        return v4;
+    }
+    return "fallback";
+}
+int main() {
+    std::string_view r = forward_nt("ok", true);
+    return static_cast<int>(r.size());
+}
+)");
+    expect(!safe_ok.has_value(),
+           "null_terminated_proven_sources: expected acceptance, got '" + safe_ok.value_or("") + "'");
+
+    const char* unverified_cases[] = {
+        "import std;\nint f(const char* raw) { std::string_view v{raw}; return static_cast<int>(v.size()); }\n",
+        "import std;\nvoid take(std::string_view v) { return; }\nint f(const char* raw) { take(raw); return 0; }\n",
+        "import std;\nint f(const char* raw) { std::string_view v = raw; return static_cast<int>(v.size()); }\n",
+        "import std;\nstd::string_view f(const char* raw) { return raw; }\n",
+        "import std;\nint f(const char* raw) { std::string_view v{\"a\"}; return v == raw ? 1 : 0; }\n",
+        "import std;\nvoid take_ref(const std::string_view& v) { return; }\nint f(const char* raw) { take_ref(raw); return 0; }\n",
+        "import std;\nint f(const char* raw) { const std::string_view& v = raw; return static_cast<int>(v.size()); }\n",
+        "import std;\nint f(const char* raw, bool b) { std::string_view v{\"a\"}; std::string_view r = b ? v : raw; return static_cast<int>(r.size()); }\n",
+        "import std;\nint f(const char* raw) { std::string_view v{\"a\"}; return v.starts_with(raw) ? 1 : 0; }\n",
+        "import std;\nint f(const char* raw) { std::string_view v{\"a\"}; return static_cast<int>(v.find(raw)); }\n",
+        "import std;\nint f(const char* raw) { std::string_view v{\"a\"}; return static_cast<int>(v.rfind(raw)); }\n",
+        "import std;\nint main() { static const char c{'x'}; std::string_view v{&c}; return static_cast<int>(v.size()); }\n",
+        "import std;\nint main() { char buf[3]{'a', 'b', 'c'}; std::string_view v{buf}; return static_cast<int>(v.size()); }\n",
+        "void need_nt(const char* s [[scpp::null_terminated]]) { return; }\nint main() { need_nt(nullptr); return 0; }\n",
+        "import std;\nint main() { const char* empty{}; std::string_view v{empty}; return static_cast<int>(v.size()); }\n",
+    };
+    for (const char* source : unverified_cases) {
+        cases_run++;
+        std::optional<std::string> err = move_error_message(source);
+        expect(err.has_value() && err->find("null_terminated") != std::string::npos,
+               std::string("null_terminated_unverified_rejected: expected null_terminated error, got '") +
+                   err.value_or("<accepted>") + "' for:\n" + source);
+    }
+
+    cases_run++;
+    std::optional<std::string> unsafe_ok = move_error_message(R"(
+import std;
+void take(std::string_view v) { return; }
+void take_ref(const std::string_view& v) { return; }
+int run(const char* raw) {
+    [[scpp::unsafe]] {
+        std::string_view v{raw};
+        take(raw);
+        take_ref(raw);
+        if (v == raw && v.starts_with(raw) && v.find(raw) == 0 && v.rfind(raw) == 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+int main() { return run("ok"); }
+)");
+    expect(!unsafe_ok.has_value(),
+           "null_terminated_unsafe_gate_allows_raw: expected acceptance inside [[scpp::unsafe]], got '" +
+               unsafe_ok.value_or("") + "'");
+}
+
+void test_null_terminated_invalidates_after_reassignment_or_mutable_aliasing() {
+    const char* invalidated_cases[] = {
+        R"(import std;
+int f(const char* raw, bool b) {
+    const char* p = "ok";
+    if (b) { p = raw; }
+    std::string_view v{p};
+    return static_cast<int>(v.size());
+}
+)",
+        R"(import std;
+int f(const char* s [[scpp::null_terminated]], const char* raw) {
+    s = raw;
+    std::string_view v{s};
+    return static_cast<int>(v.size());
+}
+)",
+        R"(import std;
+int main() {
+    const char* p = "ok";
+    const char** pp = &p;
+    std::string_view v{p};
+    return pp == nullptr ? 0 : static_cast<int>(v.size());
+}
+)",
+        R"(import std;
+using CStr = const char*;
+void clobber(CStr& p, const char* raw) { p = raw; return; }
+int f(const char* raw) {
+    CStr p = "ok";
+    clobber(p, raw);
+    std::string_view v{p};
+    return static_cast<int>(v.size());
+}
+)",
+    };
+    for (const char* source : invalidated_cases) {
+        cases_run++;
+        std::optional<std::string> err = move_error_message(source);
+        expect(err.has_value() && err->find("null_terminated") != std::string::npos,
+               std::string("null_terminated_invalidated: expected rejection, got '") +
+                   err.value_or("<accepted>") + "'");
+    }
+
+    cases_run++;
+    std::optional<std::string> loop_preserved = move_error_message(R"(
+import std;
+int f(const char* s [[scpp::null_terminated]]) {
+    int i = 0;
+    int total = 0;
+    while (i < 3) {
+        std::string_view v{s};
+        total = total + static_cast<int>(v.size());
+        i = i + 1;
+    }
+    return total;
+}
+int main() { return f("ab") - 6; }
+)");
+    expect(!loop_preserved.has_value(),
+           "null_terminated_loop_preserved: expected parameter to stay null_terminated across loop, got '" +
+               loop_preserved.value_or("") + "'");
+}
+
+void test_null_terminated_return_placement_override_and_function_pointer_rules() {
+    cases_run++;
+    std::optional<std::string> bad_ret = move_error_message(
+        "const char* launder(const char* raw) [[scpp::null_terminated]] { return raw; }\n"
+        "int main() { return 0; }\n");
+    expect(bad_ret.has_value() && bad_ret->find("null_terminated") != std::string::npos,
+           "null_terminated_bad_return: expected unverified return rejection, got '" +
+               bad_ret.value_or("<accepted>") + "'");
+
+    cases_run++;
+    std::optional<std::string> bad_null_ret = move_error_message(
+        "const char* null_ret() [[scpp::null_terminated]] { return nullptr; }\n"
+        "int main() { return 0; }\n");
+    expect(bad_null_ret.has_value() && bad_null_ret->find("null_terminated") != std::string::npos,
+           "null_terminated_nullptr_return: expected nullptr return rejection, got '" +
+               bad_null_ret.value_or("<accepted>") + "'");
+
+    const char* bad_type_cases[] = {
+        R"(void f(int* p [[scpp::null_terminated]]) { return; }
+int main() { return 0; }
+)",
+        R"(void f(const char** p [[scpp::null_terminated]]) { return; }
+int main() { return 0; }
+)",
+        R"(int f() [[scpp::null_terminated]] { return 0; }
+int main() { return 0; }
+)",
+        R"(class C { public: virtual ~C() = default; C(const char* s) [[scpp::null_terminated]] { return; } };
+int main() { return 0; }
+)",
+        R"(class Base { public: virtual ~Base() = default; virtual void take(const char* s) { return; } };
+class Derived : public Base { public: virtual ~Derived() override = default; void take(const char* s [[scpp::null_terminated]]) override { return; } };
+int main() { return 0; }
+)",
+        R"(int len(const char* s [[scpp::null_terminated]]) { return 0; }
+int main() { int (*fp)(const char*) = &len; return fp(nullptr); }
+)",
+    };
+    for (const char* source : bad_type_cases) {
+        cases_run++;
+        std::optional<std::string> err = move_error_message(source);
+        expect(err.has_value(),
+               std::string("null_terminated_type_or_fnptr_rule: expected rejection, got acceptance for:\n") + source);
+    }
+
+    cases_run++;
+    std::optional<std::string> unsafe_fp_ok = move_error_message(
+        "int len(const char* s [[scpp::null_terminated]]) { return 0; }\n"
+        "int main() {\n"
+        "    int (* [[scpp::unsafe]] fp)(const char*) = &len;\n"
+        "    [[scpp::unsafe]] { return fp(\"hi\"); }\n"
+        "}\n");
+    expect(!unsafe_fp_ok.has_value(),
+           "null_terminated_unsafe_fnptr: expected unsafe function pointer to accept &len, got '" +
+               unsafe_fp_ok.value_or("") + "'");
+}
+
 // [lex.string]/1 makes a string literal an array of `const char`. Giving it
 // that type must not open a const hole: `char* p` must still be unable to
 // point at a literal's bytes. The check that refuses this
@@ -3521,6 +3728,9 @@ int main() {
     test_const_auto_reference_rejects_a_write();
     test_auto_reference_to_a_read_only_source_matches_the_written_out_form();
     test_auto_reference_cannot_outlive_or_escape_its_lender();
+    test_null_terminated_accepts_proven_sources_and_gates_unverified_pointers();
+    test_null_terminated_invalidates_after_reassignment_or_mutable_aliasing();
+    test_null_terminated_return_placement_override_and_function_pointer_rules();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed.\n";

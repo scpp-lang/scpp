@@ -182,7 +182,7 @@ namespace scpp {
     [[scpp::unsafe]] {
         std::reference_wrapper<const Program> program_ref{*body.program};
         ret = find_visible_global(OptionalProgramRef{program_ref}, body.function_namespace_path, name,
-                                   explicit_global_qualification);
+                                   explicit_global_qualification, body.function_visibility_module);
     }
     return ret;
 }
@@ -1560,6 +1560,95 @@ inline bool path_less(const std::vector<Projection>& a, const std::vector<Projec
     return {};
 }
 
+[[nodiscard]] bool expr_is_statically_null_terminated(const Expr& expr, const DataflowState& state, const Body& body,
+                                                      const Signatures& signatures) {
+    switch (expr.kind) {
+        case ExprKind::StringLiteral:
+            return true;
+        case ExprKind::Identifier: {
+            if (std::optional<LocalId> local = body.local_of(expr); local.has_value()) {
+                auto it = state.null_terminated_locals.find(*local);
+                return it != state.null_terminated_locals.end() && it->second == NullTerminatedState::Guaranteed;
+            }
+            const GlobalVar* visible_global = find_visible_global_for_expr(expr, body);
+            bool global_nt = false;
+            [[scpp::unsafe]] {
+                if (visible_global != nullptr && visible_global->decl != nullptr &&
+                    (visible_global->decl->is_const || visible_global->decl->is_constexpr)) {
+                    if (visible_global->decl->init != nullptr &&
+                        visible_global->decl->init->kind == ExprKind::StringLiteral) {
+                        global_nt = true;
+                    } else if (visible_global->decl->has_ctor_args && visible_global->decl->ctor_args.size() == 1 &&
+                               visible_global->decl->ctor_args[0] != nullptr &&
+                               visible_global->decl->ctor_args[0]->kind == ExprKind::StringLiteral) {
+                        global_nt = true;
+                    }
+                }
+            }
+            return global_nt;
+        }
+        case ExprKind::Call: {
+            CalleeSignature callee = resolve_callee_signature(expr, body, signatures, state.class_field_types);
+            const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
+            bool ret_nt = false;
+            [[scpp::unsafe]] {
+                ret_nt = sig != nullptr && sig->return_is_null_terminated;
+            }
+            return ret_nt;
+        }
+        case ExprKind::Conditional:
+            return expr.rhs != nullptr && expr.third != nullptr &&
+                   expr_is_statically_null_terminated(*expr.rhs, state, body, signatures) &&
+                   expr_is_statically_null_terminated(*expr.third, state, body, signatures);
+        case ExprKind::Cast:
+            return is_char_pointer_type(expr.type) && expr.lhs != nullptr &&
+                   expr_is_statically_null_terminated(*expr.lhs, state, body, signatures);
+        default:
+            return false;
+    }
+}
+
+[[nodiscard]] std::expected<void, DataflowError> check_null_terminated_argument(
+    const Expr& arg, const std::string& target_description, const DataflowState& state, const Body& body,
+    const Signatures& signatures, bool report_errors) {
+    if (!report_errors || state.unsafe_depth > 0) return {};
+    if (expr_is_statically_null_terminated(arg, state, body, signatures)) return {};
+    return std::unexpected(DataflowError(
+        "cannot pass an unverified pointer to '[[scpp::null_terminated]]' " + target_description +
+            " outside '[[scpp::unsafe]] { }': only a string literal or another '[[scpp::null_terminated]]' pointer is proven null-terminated in safe code",
+        state.current_loc));
+}
+
+[[nodiscard]] std::expected<void, DataflowError> check_materialized_temporary_converting_constructor(
+    const Expr& arg, const Type& param_type, const DataflowState& state, const Body& body,
+    const Signatures& signatures, bool report_errors) {
+    if (!report_errors || param_type.pointee == nullptr) return {};
+    const Type& target = get_pointee_type_ref(param_type);
+    if (produces_rvalue_of_type(arg, target, body, signatures)) return {};
+    if (!is_named_record_type(target, body)) return {};
+    const FunctionSignature* ctor = find_single_argument_converting_constructor_signature(target, arg, body, signatures);
+    if (ctor == nullptr) return {};
+    bool ctor_is_unsafe = false;
+    bool ctor_param_is_nt = false;
+    [[scpp::unsafe]] {
+        ctor_is_unsafe = ctor->is_unsafe;
+        ctor_param_is_nt = 1 < ctor->param_is_null_terminated.size() && ctor->param_is_null_terminated[1];
+    }
+    if (ctor_is_unsafe && state.unsafe_depth == 0) {
+        return std::unexpected(DataflowError(
+            "cannot use '" + target.name +
+                "'s converting constructor outside '[[scpp::unsafe]] { }': its own declaration is marked "
+                "'[[scpp::unsafe]]', so its soundness depends on a precondition only the caller can guarantee "
+                "(spec §5.1(1.2), §5.1(5.7), §5.1(6))",
+            state.current_loc));
+    }
+    if (ctor_param_is_nt) {
+        return check_null_terminated_argument(arg, "parameter of '" + target.name + "'s converting constructor",
+                                              state, body, signatures, report_errors);
+    }
+    return {};
+}
+
 // Resolves `name` to the root place its borrow-tracking should apply to.
 // If `name` is itself a currently-bound reference, `ref_targets` already
 // stores *its* fully-resolved root directly (every entry is written
@@ -1589,6 +1678,11 @@ inline bool path_less(const std::vector<Projection>& a, const std::vector<Projec
     // resolve_borrow_source_root/every borrow-conflict check below
     // entirely (there is no "root" at all for a temporary).
     if (const_reference_binds_materialized_temporary(arg, param_type, body, signatures)) {
+        if (auto _r = check_materialized_temporary_converting_constructor(arg, param_type, state, body, signatures,
+                                                                          report_errors);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
         return apply_expr(arg, /*is_move_target_context=*/arg.kind == ExprKind::Move, state, body, signatures, report_errors);
     }
 
@@ -1602,6 +1696,13 @@ inline bool path_less(const std::vector<Projection>& a, const std::vector<Projec
     auto roots_result = resolve_borrow_source_root(arg, state, body, signatures, report_errors);
     if (!roots_result.has_value()) return std::unexpected(std::move(roots_result).error());
     RootSet roots = std::move(roots_result).value();
+    if (param_type.is_mutable_ref && !param_type.is_rvalue_ref) {
+        for (LocalId root : roots) {
+            if (!is_program_lifetime_root(root) && is_char_pointer_type(body.type_of(root))) {
+                state.null_terminated_locals[root] = NullTerminatedState::Unknown;
+            }
+        }
+    }
     if (!report_errors) return {};
 
     if (body.program != nullptr && param_type.pointee != nullptr && get_pointee_type_ref(param_type).kind == TypeKind::Named) {
@@ -1866,11 +1967,13 @@ public:
     if (binding.ctor == nullptr) return binding;
     bool ctor_is_unsafe = false;
     bool ctor_is_generic = false;
+    bool ctor_param_is_nt = false;
     Type ctor_p1{};
     [[scpp::unsafe]] {
         ctor_is_unsafe = binding.ctor->is_unsafe;
         ctor_is_generic = binding.ctor->is_generic_template;
         ctor_p1 = binding.ctor->param_types[1];
+        ctor_param_is_nt = 1 < binding.ctor->param_is_null_terminated.size() && binding.ctor->param_is_null_terminated[1];
     }
     if (report_errors && ctor_is_unsafe && state.unsafe_depth == 0) {
         return std::unexpected(DataflowError("cannot use '" + destination_type.name +
@@ -1878,6 +1981,14 @@ public:
                              "marked '[[scpp::unsafe]]', so its soundness depends on a precondition only the "
                              "caller can guarantee (spec §5.1(1.2), §5.1(5.7), §5.1(6))",
             state.current_loc));
+    }
+    if (ctor_param_is_nt) {
+        if (auto _r = check_null_terminated_argument(
+                source, "parameter of '" + destination_type.name + "'s converting constructor",
+                state, body, signatures, report_errors);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
     }
     binding.effective_param_type = std::move(ctor_p1);
     if (!ctor_is_generic && is_reference(binding.effective_param_type) &&
@@ -1976,6 +2087,7 @@ public:
     bool have_param_type = false;
     std::string current_param_name{};
     bool is_fwd_ref = false;
+    bool param_is_nt = false;
     [[scpp::unsafe]] {
         if (sig != nullptr && param_index < sig->param_types.size()) {
             current_param_type = sig->param_types[param_index];
@@ -1986,6 +2098,18 @@ public:
             if (param_index < sig->param_is_forwarding_reference.size()) {
                 is_fwd_ref = sig->param_is_forwarding_reference[param_index];
             }
+            if (param_index < sig->param_is_null_terminated.size()) {
+                param_is_nt = sig->param_is_null_terminated[param_index];
+            }
+        }
+    }
+    if (param_is_nt) {
+        std::string target_desc{"parameter"};
+        if (!current_param_name.empty()) target_desc += " '" + current_param_name + "'";
+        target_desc += " of '" + callee_display + "'";
+        if (auto _r = check_null_terminated_argument(arg, target_desc, state, body, signatures, report_errors);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
         }
     }
     Type effective_param_type{};
@@ -2178,7 +2302,7 @@ public:
 }
 
 [[nodiscard]] std::expected<void, DataflowError> check_call_arguments(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
-                           bool report_errors) {
+                           bool report_errors, bool allow_reachable_modules) {
     // A method call's receiver (`obj.method(...)`/`this->method(...)`,
     // stored in `expr.lhs`, never part of `expr.args` -- see
     // CalleeSignature's own comment) is an ordinary read of `obj` and was
@@ -2223,7 +2347,8 @@ public:
     }
     CalleeSignature callee = resolve_callee_signature(expr, body, signatures, state.class_field_types);
     auto name_it = signatures.find(callee.key);
-    const FunctionSignature* sig = resolve_overload(expr, callee, body, signatures);
+    const FunctionSignature* sig =
+        resolve_overload(expr, callee, body, signatures, nullptr, allow_reachable_modules);
     if (expr.lhs) {
         [[maybe_unused]] bool receiver_is_reference = false;
         [[scpp::unsafe]] {
@@ -2265,9 +2390,18 @@ public:
                                     "' through a read-only (const) receiver",
                 state.current_loc));
         }
-        return std::unexpected(DataflowError(
-            describe_overload_failure(expr, callee, callee_display, name_it->second, body, signatures),
-            state.current_loc));
+        std::vector<FunctionSignature> visible_candidates{};
+        for (const FunctionSignature& cand : name_it->second) {
+            bool visible = (callee.param_offset != 0 || allow_reachable_modules) ||
+                           module_name_visible_in_body(cand, body);
+            if (visible) visible_candidates.push_back(cand);
+        }
+        if (!visible_candidates.empty()) {
+            return std::unexpected(DataflowError(
+                describe_overload_failure(expr, callee, callee_display, visible_candidates, body, signatures,
+                                          allow_reachable_modules),
+                state.current_loc));
+        }
     }
     bool sig_is_deleted = false;
     SourceLocation sig_loc{};
@@ -2380,6 +2514,8 @@ public:
     Type effective_param_type{};
     bool have_effective_param_type = false;
     const Type* destination_type = &constructed_type;
+    bool param_is_nt = false;
+    std::string param_name{};
     [[scpp::unsafe]] {
         if (sig != nullptr && param_index < sig->param_types.size()) {
             effective_param_type = sig->param_types[param_index];
@@ -2391,6 +2527,21 @@ public:
             }
             have_effective_param_type = true;
             destination_type = &sig->param_types[param_index];
+            if (param_index < sig->param_is_null_terminated.size()) {
+                param_is_nt = sig->param_is_null_terminated[param_index];
+            }
+            if (param_index < sig->param_names.size()) {
+                param_name = sig->param_names[param_index];
+            }
+        }
+    }
+    if (param_is_nt) {
+        std::string target_desc{"parameter"};
+        if (!param_name.empty()) target_desc += " '" + param_name + "'";
+        target_desc += " of '" + class_name + "'s constructor";
+        if (auto _r = check_null_terminated_argument(arg, target_desc, state, body, signatures, report_errors);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
         }
     }
     if (constructed_state_can_carry_lifetimes) {
@@ -2422,6 +2573,11 @@ public:
             return std::unexpected(std::move(_r).error());
         }
     } else if (param_is_reference && allow_temporary_reference_binding) {
+        if (auto _r = check_materialized_temporary_converting_constructor(arg, effective_param_type, state, body,
+                                                                          signatures, report_errors);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
         if (auto _r = apply_expr(arg, /*is_move_target_context=*/arg.kind == ExprKind::Move, state, body, signatures, report_errors); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
         }
@@ -2812,7 +2968,7 @@ public:
     SelectedOperator selected =
         resolve_conversion_function_call(expr, operand_type, destination, allow_explicit, body, signatures);
     if (selected.signature == nullptr) return false;
-    if (auto _r = check_call_arguments(*selected.call, state, body, signatures, report_errors); !_r.has_value()) {
+    if (auto _r = check_call_arguments(*selected.call, state, body, signatures, report_errors, false); !_r.has_value()) {
         return std::unexpected(std::move(_r).error());
     }
     return true;
@@ -3259,7 +3415,7 @@ public:
                         !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
-                    return check_call_arguments(*selected.call, state, body, signatures, report_errors);
+                    return check_call_arguments(*selected.call, state, body, signatures, report_errors, false);
                 }
                 if (report_errors && operand_type.has_value() &&
                     operand_type_needs_an_operator_function(*operand_type, body) &&
@@ -3474,12 +3630,19 @@ public:
                 std::optional<Type> then_type = infer_expr_type(*expr.rhs, body, signatures);
                 std::optional<Type> else_type = infer_expr_type(*expr.third, body, signatures);
                 if (then_type.has_value() && else_type.has_value() &&
-                    !conditional_arm_types_agree(*expr.rhs, *then_type, *expr.third, *else_type) &&
-                    conditional_composite_by_conversion(*expr.rhs, *then_type, *expr.third, *else_type, body,
-                                                        signatures)
-                            .constructor == nullptr) {
-                    return std::unexpected(DataflowError("conditional operator requires both arms to have the same type",
-                                        state.current_loc));
+                    !conditional_arm_types_agree(*expr.rhs, *then_type, *expr.third, *else_type)) {
+                    ConditionalComposite composite =
+                        conditional_composite_by_conversion(*expr.rhs, *then_type, *expr.third, *else_type, body,
+                                                            signatures);
+                    if (composite.constructor == nullptr) {
+                        return std::unexpected(DataflowError("conditional operator requires both arms to have the same type",
+                                            state.current_loc));
+                    }
+                    const Expr& converted_arm =
+                        types_equal(*then_type, composite.type) ? *expr.third : *expr.rhs;
+                    auto binding = resolve_converting_constructor_binding(composite.type, converted_arm, state, body,
+                                                                         signatures, report_errors);
+                    if (!binding.has_value()) return std::unexpected(std::move(binding).error());
                 }
             }
             return {};
@@ -3693,7 +3856,8 @@ public:
                 SelectedOperator operator_call =
                     resolve_binary_operator_call(expr, lhs_type, rhs_type, body, signatures);
                 if (operator_call.signature != nullptr) {
-                    if (auto _r = check_call_arguments(*operator_call.call, state, body, signatures, report_errors);
+                    if (auto _r = check_call_arguments(*operator_call.call, state, body, signatures, report_errors,
+                                                       operator_call.param_offset == 0);
                         !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
@@ -3778,7 +3942,7 @@ public:
             if (is_for_range_size_builtin(expr)) {
                 return apply_expr(*expr.args[0], false, state, body, signatures, report_errors);
             }
-            return check_call_arguments(expr, state, body, signatures, report_errors);
+            return check_call_arguments(expr, state, body, signatures, report_errors, false);
 
         case ExprKind::Member: {
             // spec §6.2(5)/(6): reading a member is a use of *that*
@@ -3870,7 +4034,7 @@ public:
                         !_r.has_value()) {
                         return std::unexpected(std::move(_r).error());
                     }
-                    return check_call_arguments(*selected.call, state, body, signatures, report_errors);
+                    return check_call_arguments(*selected.call, state, body, signatures, report_errors, false);
                 }
             }
             if (report_errors) {
@@ -4000,6 +4164,11 @@ public:
         is_move_init = init_expr.kind == ExprKind::Move;
     }
     if (const_reference_binds_materialized_temporary(init_expr, stmt.type, body, signatures)) {
+        if (auto _r = check_materialized_temporary_converting_constructor(init_expr, stmt.type, state, body, signatures,
+                                                                          report_errors);
+            !_r.has_value()) {
+            return std::unexpected(std::move(_r).error());
+        }
         if (auto _r = apply_expr(init_expr, /*is_move_target_context=*/is_move_init, state, body, signatures,
                    report_errors); !_r.has_value()) {
             return std::unexpected(std::move(_r).error());
@@ -4127,6 +4296,13 @@ public:
     }
 
     bool is_mutable = stmt.type.is_mutable_ref;
+    if (is_mutable) {
+        for (LocalId root : roots) {
+            if (!is_program_lifetime_root(root) && is_char_pointer_type(body.type_of(root))) {
+                state.null_terminated_locals[root] = NullTerminatedState::Unknown;
+            }
+        }
+    }
     std::optional<LocalId> lender = resolve_reborrow_lender(init_expr, body, signatures);
     bool uses_lender_suspension = reborrow_is_tracked_against_lender(lender, body);
     if (uses_lender_suspension) {
@@ -4474,6 +4650,17 @@ public:
             } else if (stmt.type.kind == TypeKind::Pointer) {
                 RootSet empty_roots{};
                 state.local_lifetime_sources[stmt.local] = std::move(empty_roots);
+                if (is_char_pointer_type(stmt.type)) {
+                    bool init_is_nt = false;
+                    [[scpp::unsafe]] {
+                        if (stmt.ctor_args != nullptr && stmt.ctor_args->size() == 1 &&
+                            (*stmt.ctor_args)[0] != nullptr) {
+                            init_is_nt = expr_is_statically_null_terminated(*(*stmt.ctor_args)[0], state, body, signatures);
+                        }
+                    }
+                    state.null_terminated_locals[stmt.local] =
+                        init_is_nt ? NullTerminatedState::Guaranteed : NullTerminatedState::Unknown;
+                }
             } else if (is_lifetime_eligible_type(stmt.type)) {
                 state.local_lifetime_sources.erase(stmt.local);
             }
@@ -5055,6 +5242,12 @@ public:
                     if (true) {
                         state.local_lifetime_sources[stmt.local] =
                             resolve_lifetime_source_roots(assign_expr, state, body, signatures, report_errors);
+                        if (is_char_pointer_type(cur_local_type)) {
+                            state.null_terminated_locals[stmt.local] =
+                                expr_is_statically_null_terminated(assign_expr, state, body, signatures)
+                                    ? NullTerminatedState::Guaranteed
+                                    : NullTerminatedState::Unknown;
+                        }
                     }
                 }
             }
@@ -5154,6 +5347,7 @@ public:
             // analysis no longer cares about.
             forget_place_tree(state.locals, whole_local_place(stmt.local));
             state.local_lifetime_sources.erase(stmt.local);
+            state.null_terminated_locals.erase(stmt.local);
             return {};
         }
 
@@ -5295,6 +5489,13 @@ public:
                 message += fn.name;
                 message += "': the returned place is only reachable through a read-only ('const') binding";
                 return std::unexpected(DataflowError(message, term.loc));
+            }
+            if (fn.return_is_null_terminated && state.unsafe_depth == 0 &&
+                !expr_is_statically_null_terminated(ret_val, state, body, signatures)) {
+                return std::unexpected(DataflowError(
+                    "cannot return an unverified pointer from '[[scpp::null_terminated]]' function '" + fn.name +
+                        "' outside '[[scpp::unsafe]] { }'",
+                    term.loc));
             }
             if (is_pointer_return_lifetime_source_type(fn.return_type)) {
                 bool null_pointer_return =
@@ -5618,7 +5819,7 @@ struct SwitchCaseKey {
         std::int64_t variant_value = 0;
         [[scpp::unsafe]] {
             if (expr.kind == ExprKind::Identifier) {
-                variant = find_enum_variant(body.program, expr.name, &owning_enum);
+                variant = find_enum_variant(body.program, expr.name, &owning_enum, body.function_visibility_module);
                 if (variant != nullptr && owning_enum != nullptr && owning_enum->name == operand_type.name) {
                     valid_variant = true;
                     variant_value = variant->value;
@@ -5885,6 +6086,10 @@ struct SwitchCaseKey {
         if (param.lifetime.present()) entry_state.parameter_lifetimes[param.name] = param.lifetime;
         if (is_pointer_return_lifetime_source_type(param.type) || is_reference(param.type)) {
             entry_state.local_lifetime_sources[param_local] = single_root(param_local);
+        }
+        if (is_char_pointer_type(param.type)) {
+            entry_state.null_terminated_locals[param_local] =
+                param.is_null_terminated ? NullTerminatedState::Guaranteed : NullTerminatedState::Unknown;
         }
     }
 

@@ -9,6 +9,7 @@ import scpp.mir;
 namespace scpp {
 
 enum class LocalState { Bottom, Initialized, MovedOut, Conflict };
+enum class NullTerminatedState { Bottom, Guaranteed, Unknown };
 
 // Every one of these maps is keyed by *declaration* (LocalId), not by
 // name. Two same-named locals in sibling scopes are two different keys,
@@ -126,6 +127,7 @@ struct ReborrowSuspension {
 
 using ReborrowSuspensionMap = std::unordered_map<LocalId, ReborrowSuspension>;
 using LocalLifetimeSourceMap = std::unordered_map<LocalId, RootSet>;
+using NullTerminatedMap = std::unordered_map<LocalId, NullTerminatedState>;
 using ParameterLifetimeMap = std::unordered_map<std::string, LifetimeAnnotation>;
 // A root that outlives every local: the storage behind a `static` local
 // or a string literal. It is deliberately *not* an index into
@@ -179,13 +181,15 @@ class DataflowState {
     DataflowState& operator=(DataflowState&&) = default;
 
     DataflowState(StateMap l, BorrowMap b, RefTargetMap rt, LocalLifetimeSourceMap lls,
+                  NullTerminatedMap ntl,
                   ParameterLifetimeMap pl, ReborrowSuspensionMap sr, ClosureCaptureBorrowMap ccb,
                   int ud, std::string cc, std::string lacc, const std::string* w,
                   const std::unordered_set<std::string>* cn, const ClassFieldTypes* cft,
                   const ClassFieldAccess* cfa, const std::unordered_set<std::string>* cwc,
                   const std::unordered_set<std::string>* cwa, SourceLocation cl)
         : locals{std::move(l)}, borrows{std::move(b)}, ref_targets{std::move(rt)},
-          local_lifetime_sources{std::move(lls)}, parameter_lifetimes{std::move(pl)},
+          local_lifetime_sources{std::move(lls)}, null_terminated_locals{std::move(ntl)},
+          parameter_lifetimes{std::move(pl)},
           suspended_reborrows{std::move(sr)}, closure_capture_borrows{std::move(ccb)},
           unsafe_depth{ud}, current_class{std::move(cc)}, lexical_access_context_class{std::move(lacc)},
           witness_check_owner_class{w}, class_names{cn}, class_field_types{cft},
@@ -196,6 +200,7 @@ class DataflowState {
     BorrowMap borrows{};
     RefTargetMap ref_targets{};
     LocalLifetimeSourceMap local_lifetime_sources{};
+    NullTerminatedMap null_terminated_locals{};
     ParameterLifetimeMap parameter_lifetimes{};
     ReborrowSuspensionMap suspended_reborrows{};
     ClosureCaptureBorrowMap closure_capture_borrows{};
@@ -236,6 +241,8 @@ BorrowMap join_borrow_maps(const BorrowMap& a, const BorrowMap& b);
 RefTargetMap join_ref_targets(const RefTargetMap& a, const RefTargetMap& b);
 LocalLifetimeSourceMap join_local_lifetime_sources(const LocalLifetimeSourceMap& a,
                                                    const LocalLifetimeSourceMap& b);
+NullTerminatedState join_null_terminated(NullTerminatedState a, NullTerminatedState b);
+NullTerminatedMap join_null_terminated_maps(const NullTerminatedMap& a, const NullTerminatedMap& b);
 ReborrowSuspensionMap join_suspended_reborrows(const ReborrowSuspensionMap& a,
                                                const ReborrowSuspensionMap& b);
 ClosureCaptureBorrowMap join_closure_capture_borrows(const ClosureCaptureBorrowMap& a,
@@ -274,6 +281,7 @@ bool DataflowState::operator==(const DataflowState& other) const {
     if (parameter_lifetimes != other.parameter_lifetimes) return false;
     return locals == other.locals && borrows == other.borrows && ref_targets == other.ref_targets &&
            local_lifetime_sources == other.local_lifetime_sources &&
+           null_terminated_locals == other.null_terminated_locals &&
            suspended_reborrows == other.suspended_reborrows &&
            closure_capture_borrows == other.closure_capture_borrows &&
            unsafe_depth == other.unsafe_depth && current_class == other.current_class &&
@@ -371,6 +379,22 @@ LocalLifetimeSourceMap join_local_lifetime_sources(const LocalLifetimeSourceMap&
     return result;
 }
 
+NullTerminatedState join_null_terminated(NullTerminatedState a, NullTerminatedState b) {
+    if (a == b) return a;
+    if (a == NullTerminatedState::Bottom) return b;
+    if (b == NullTerminatedState::Bottom) return a;
+    return NullTerminatedState::Unknown;
+}
+
+NullTerminatedMap join_null_terminated_maps(const NullTerminatedMap& a, const NullTerminatedMap& b) {
+    NullTerminatedMap result = a;
+    for (const auto& entry : b) {
+        auto it = result.find(entry.first);
+        result[entry.first] = it == result.end() ? entry.second : join_null_terminated(it->second, entry.second);
+    }
+    return result;
+}
+
 ReborrowSuspensionMap join_suspended_reborrows(const ReborrowSuspensionMap& a, const ReborrowSuspensionMap& b) {
     ReborrowSuspensionMap result = a;
     for (const auto& entry : b) {
@@ -403,6 +427,7 @@ DataflowState join_states(const DataflowState& a, const DataflowState& b) {
         join_borrow_maps(a.borrows, b.borrows),
         join_ref_targets(a.ref_targets, b.ref_targets),
         join_local_lifetime_sources(a.local_lifetime_sources, b.local_lifetime_sources),
+        join_null_terminated_maps(a.null_terminated_locals, b.null_terminated_locals),
         a.parameter_lifetimes,
         join_suspended_reborrows(a.suspended_reborrows, b.suspended_reborrows),
         join_closure_capture_borrows(a.closure_capture_borrows, b.closure_capture_borrows),

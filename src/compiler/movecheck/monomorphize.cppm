@@ -1030,7 +1030,7 @@ private:
                 // appends to program_.functions.
                 std::shared_ptr<Expr> default_expr = program_.functions[i].params[j].default_expr;
                 if (default_expr == nullptr) continue;
-                Body body = non_function_body(program_.functions[i].owning_module,
+                Body body = non_function_body(effective_function_owning_module(program_.functions[i]),
                                               program_.functions[i].namespace_path,
                                               program_.functions[i].member_owner_class);
                 current_walk_return_type_ = initializer_target_type(program_.functions[i].params[j].type);
@@ -2282,6 +2282,7 @@ private:
                 clone.return_type = std::move(resolved).value();
             }
             clone.return_lifetime = method_tmpl.return_lifetime;
+            clone.return_is_null_terminated = method_tmpl.return_is_null_terminated;
             std::unordered_map<std::string, std::vector<std::string>> pack_param_names{};
 
             clone.params.reserve(method_tmpl.params.size());
@@ -2750,6 +2751,7 @@ private:
             std::string derived_name = program_.classes[i].name;
             std::vector<std::string> namespace_path_copy = program_.classes[i].namespace_path;
             bool is_exported_copy = program_.classes[i].is_exported;
+            std::string owning_module_copy = program_.classes[i].owning_module;
             for (const BaseSpecifier& base : program_.classes[i].base_specifiers) {
                 std::string base_name = base.base_type.name;
                 std::vector<Function> base_methods = methods_of_type_name(base_name);
@@ -2780,8 +2782,10 @@ private:
                     forward.name = derived_method_name;
                     forward.loc = base_method.loc;
                     forward.return_type = base_method.return_type;
+                    forward.return_is_null_terminated = base_method.return_is_null_terminated;
                     forward.namespace_path = namespace_path_copy;
                     forward.is_exported = is_exported_copy;
+                    forward.owning_module = owning_module_copy;
                     forward.member_owner_class = derived_name;
                     forward.receiver_ref_qualifier = base_method.receiver_ref_qualifier;
                     forward.access = base_method.access;
@@ -2946,6 +2950,8 @@ private:
             std::vector<ClassField> fields_copy = program_.classes[i].fields;
             std::string class_name_copy = program_.classes[i].name;
             std::string owner_id_copy = program_.classes[i].template_owner_id;
+            std::vector<std::string> class_namespace_path_copy = program_.classes[i].namespace_path;
+            std::string class_owning_module_copy = program_.classes[i].owning_module;
             std::vector<Function> methods = method_templates_of_owner(owner_id_copy);
             for (const Function& method_tmpl : methods) {
                 if (!method_tmpl.template_params.empty()) continue;
@@ -2997,6 +3003,8 @@ private:
                 ClassDef check_class{};
 
                 check_class.name = check_class_name;
+                check_class.namespace_path = class_namespace_path_copy;
+                check_class.owning_module = class_owning_module_copy;
                 check_class.is_synthetic_check_only = true;
                 check_class.thread_movable_override = program_.classes[i].thread_movable_override;
                 check_class.thread_shareable_override = program_.classes[i].thread_shareable_override;
@@ -3065,6 +3073,8 @@ private:
                 // memberName's own established scheme.
                 check_fn.name = check_class_name + method_suffix_after_owner_prefix(method_tmpl, class_name_copy, owner_id_copy);
                 check_fn.loc = method_tmpl.loc;
+                check_fn.namespace_path = method_tmpl.namespace_path;
+                check_fn.visibility_module = effective_function_owning_module(method_tmpl);
                 check_fn.is_generic_template = true;
                 // is_operator_arrow_function/resolve_returned_lifetime_param_indices
                 // (signatures.cppm) key their "this"-derived-return
@@ -3097,12 +3107,14 @@ private:
                 // returns an untracked raw pointer/reference with no
                 // eligible source parameter at all.
                 check_fn.return_lifetime = method_tmpl.return_lifetime;
+                check_fn.return_is_null_terminated = method_tmpl.return_is_null_terminated;
                 check_fn.params.reserve(method_tmpl.params.size());
                 for (const Param& p : method_tmpl.params) {
                     Param np{};
 
                     np.name = p.name;
                     np.lifetime = p.lifetime;
+                    np.is_null_terminated = p.is_null_terminated;
                     if (p.name == "this") {
                         Type this_type{};
 
@@ -4291,6 +4303,7 @@ private:
                     clone.return_type = std::move(_resolved).value();
                 }
                 clone.return_lifetime = method_tmpl.return_lifetime;
+                clone.return_is_null_terminated = method_tmpl.return_is_null_terminated;
                 std::unordered_map<std::string, std::vector<std::string>> pack_param_names{};
 
                 clone.params.reserve(method_tmpl.params.size());
@@ -4528,6 +4541,7 @@ private:
                 clone.access = method_tmpl.access;
                 clone.return_type = method_tmpl.return_type;
                 clone.return_lifetime = method_tmpl.return_lifetime;
+                clone.return_is_null_terminated = method_tmpl.return_is_null_terminated;
                 clone.params.reserve(method_tmpl.params.size());
                 for (const Param& param : method_tmpl.params) {
                     Param new_param = param;
@@ -6066,6 +6080,7 @@ public:
                 clone.access = tmpl.access;
                 clone.return_type = tmpl.return_type;
                 clone.return_lifetime = tmpl.return_lifetime;
+                clone.return_is_null_terminated = tmpl.return_is_null_terminated;
                 for (const auto& entry : type_bindings) {
                     const auto& name = entry.first;
                     const auto& replacement = entry.second;
@@ -6216,6 +6231,7 @@ public:
         if (!_clone_return_type.has_value()) return std::unexpected(std::move(_clone_return_type).error());
         clone.return_type = std::move(_clone_return_type).value();
         clone.return_lifetime = tmpl.return_lifetime;
+        clone.return_is_null_terminated = tmpl.return_is_null_terminated;
         clone.params.reserve(tmpl.params.size());
         std::unordered_map<std::string, std::vector<std::string>> pack_param_names{};
 
@@ -6371,6 +6387,35 @@ public:
         if (!fn.is_compile_time_dependency) return true;
         if (!fn.owning_module.empty() && fn.owning_module == body.function_visibility_module) return true;
         return !body.function_source_path.empty() && body.function_source_path == fn.loc.source_path_text();
+    }
+
+    [[nodiscard]] bool direct_function_name_visible(const Function& fn, const Body& body) const {
+        if (!compile_time_dependency_visible(fn, body)) return false;
+        if (fn.is_extern_c && fn.body == nullptr) return true;
+        return program_module_is_name_visible_from(program_, body.function_visibility_module,
+                                                   effective_function_owning_module(fn));
+    }
+
+    [[nodiscard]] bool generic_type_template_name_visible(const std::string& name, const Body& body) const {
+        for (const ClassDef& def : program_.classes) {
+            if (def.name != name) continue;
+            if (!def.template_params.empty() || def.is_variadic_primary_template || def.is_partial_specialization) {
+                if (program_record_is_name_visible_from(program_, body.function_visibility_module, def.owning_module,
+                                                        def.is_compile_time_dependency)) {
+                    return true;
+                }
+            }
+        }
+        for (const StructDef& def : program_.structs) {
+            if (def.name != name) continue;
+            if (!def.template_params.empty()) {
+                if (program_record_is_name_visible_from(program_, body.function_visibility_module, def.owning_module,
+                                                        def.is_compile_time_dependency)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     class FullHeaderGenericCallResolution {
@@ -6803,6 +6848,11 @@ public:
 
     [[nodiscard]] std::expected<bool, DataflowError> maybe_resolve_generic_type_constructor_call(Expr& expr, Body& body) {
         if (expr.kind != ExprKind::Call || expr.lhs != nullptr || !generic_type_template_names_.contains(expr.name)) {
+            return false;
+        }
+        bool rewritten_from_visible_alias =
+            expr.type.kind == TypeKind::Named && !expr.type.name.empty() && expr.type.name == expr.name;
+        if (!rewritten_from_visible_alias && !generic_type_template_name_visible(expr.name, body)) {
             return false;
         }
         if (!expr.explicit_template_args.empty()) {
@@ -8090,7 +8140,7 @@ public:
             std::vector<std::size_t> matching_candidates{};
             for (std::size_t candidate_index : template_it->second) {
                 const Function& tmpl = program_.functions[candidate_index];
-                if (!compile_time_dependency_visible(tmpl, body)) continue;
+                if (!direct_function_name_visible(tmpl, body)) continue;
                 if (tmpl.template_params.empty()) continue;
                 ExprPtr expr_copy = deep_clone_expr(expr);
                 std::unordered_map<std::string, Type> type_bindings{};
@@ -8138,20 +8188,24 @@ public:
             param_offset = 1;
             cloned_method_suffix_prefix = receiver_named.name + "_";
         }
-        auto template_it = generic_template_indices_.find(generic_template_name);
-        if (template_it == generic_template_indices_.end()) return {};
+        if (!generic_template_indices_.contains(generic_template_name)) return {};
+        std::vector<std::size_t> candidate_indices = generic_template_indices_.at(generic_template_name);
         bool ordinary_overload_exists = false;
         for (const Function& fn : program_.functions) {
-            if (fn.name == generic_template_name && !fn.is_generic_template &&
-                compile_time_dependency_visible(fn, body)) {
+            bool fn_visible = param_offset == 0 ? direct_function_name_visible(fn, body)
+                                                : compile_time_dependency_visible(fn, body);
+            if (fn.name == generic_template_name && !fn.is_generic_template && fn_visible) {
                 ordinary_overload_exists = true;
                 break;
             }
         }
         std::vector<std::size_t> visible_template_candidates{};
 
-        for (std::size_t candidate_index : template_it->second) {
-            if (compile_time_dependency_visible(program_.functions[candidate_index], body)) {
+        for (std::size_t candidate_index : candidate_indices) {
+            const Function& cand = program_.functions[candidate_index];
+            bool cand_visible = param_offset == 0 ? direct_function_name_visible(cand, body)
+                                                  : compile_time_dependency_visible(cand, body);
+            if (cand_visible) {
                 visible_template_candidates.push_back(candidate_index);
             }
         }
@@ -8514,6 +8568,7 @@ public:
         // constructor call) doesn't currently exercise the gap in
         // practice.
         lambda_ctor.namespace_path = enclosing_body.function_namespace_path;
+        lambda_ctor.visibility_module = enclosing_body.function_visibility_module;
         Param ctor_this{};
 
         ctor_this.name = "this";
@@ -8572,6 +8627,7 @@ public:
         // as a generic-type CTAD failure for whichever outer call
         // (e.g. std::unexpected(...)) wraps it.
         call_method.namespace_path = enclosing_body.function_namespace_path;
+        call_method.visibility_module = enclosing_body.function_visibility_module;
         // ch04 §4.2/[expr.prim.lambda]: a lambda's closure type has the
         // same access rights as if its body appeared directly at the
         // lambda-expression's own lexical position -- so this
@@ -9475,6 +9531,7 @@ public:
 
         clone.return_type = tmpl.return_type;
         clone.return_lifetime = tmpl.return_lifetime;
+        clone.return_is_null_terminated = tmpl.return_is_null_terminated;
         clone.name = cache_key;
         clone.loc = tmpl.loc;
         clone.namespace_path = tmpl.namespace_path;

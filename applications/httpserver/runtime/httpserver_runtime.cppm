@@ -9,14 +9,13 @@ class [[scpp::thread_movable]] WorkerConfig {
     public:
         virtual ~WorkerConfig() { return; }
 public:
-    char root_[512];
+    std::string root_{};
     int port_{};
     int max_connections_{};
     bool allow_index_html_{};
     bool deny_hidden_files_{};
 
     WorkerConfig() {
-        this->root_[0] = '\0';
         this->port_ = 0;
         this->max_connections_ = 0;
         this->allow_index_html_ = false;
@@ -25,11 +24,7 @@ public:
     }
 
     WorkerConfig(const WorkerConfig& other) {
-        int i = 0;
-        while (i < 512) {
-            this->root_[i] = other.root_[i];
-            i = i + 1;
-        }
+        this->root_ = other.root_;
         this->port_ = other.port_;
         this->max_connections_ = other.max_connections_;
         this->allow_index_html_ = other.allow_index_html_;
@@ -37,20 +32,6 @@ public:
         return;
     }
 };
-
-bool assign_worker_root(WorkerConfig& config, const char* root) {
-    // spec §5.1(5.1): raw pointer indexing.
-    [[scpp::unsafe]] {
-        int i = 0;
-        while (root[i] != '\0') {
-            if (i >= 511) return false;
-            config.root_[i] = root[i];
-            i = i + 1;
-        }
-        config.root_[i] = '\0';
-        return true;
-    }
-}
 
 void build_empty_response(Connection& conn, const char* status_line) {
     conn.response_len_ = 0;
@@ -107,12 +88,12 @@ bool open_index_from_directory(int dir_fd, int& out_file_fd, int& out_size, int&
     return true;
 }
 
-bool open_resolved_file(const char* root, bool allow_index_html, bool deny_hidden_files, const char* relative_path,
+bool open_resolved_file(const std::string& root, bool allow_index_html, bool deny_hidden_files, const char* relative_path,
                         int& out_file_fd, int& out_size, int& out_status_code, bool& out_served_directory_index) {
     // spec §5.1(5.1): walks the raw `relative_path`/request buffers by index.
     [[scpp::unsafe]] {
         int root_fd{};
-        [[scpp::unsafe]] { root_fd = scpp_httpserver_open_root_directory(root); }
+        [[scpp::unsafe]] { root_fd = scpp_httpserver_open_root_directory(root.c_str()); }
         if (root_fd < 0) {
             out_status_code = 403;
             return false;
@@ -256,7 +237,7 @@ bool open_resolved_file(const char* root, bool allow_index_html, bool deny_hidde
     }
 }
 
-bool parse_request(Connection& conn, const char* root, bool allow_index_html, bool deny_hidden_files) {
+bool parse_request(Connection& conn, const std::string& root, bool allow_index_html, bool deny_hidden_files) {
     // spec §5.1(5.1): walks the raw `relative_path`/request buffers by index.
     [[scpp::unsafe]] {
         int header_end = header_end_index(conn.request_, conn.request_len_);
@@ -361,7 +342,7 @@ void accept_ready_connections(int epoll_fd, int listener_fd, Connection connecti
     }
 }
 
-void handle_readable(int epoll_fd, Connection connections[64], int slot, const char* root, bool allow_index_html,
+void handle_readable(int epoll_fd, Connection connections[64], int slot, const std::string& root, bool allow_index_html,
                      bool deny_hidden_files) {
     // spec §5.1(5.1): a `Connection[64]` *parameter* decays to a raw
     // `Connection*`, so indexing it is raw pointer indexing (unlike the
@@ -485,7 +466,7 @@ void handle_writable(int epoll_fd, Connection connections[64], int slot) {
     }
 }
 
-int run_worker_loop(const char* root, int port, int max_connections, bool allow_index_html, bool deny_hidden_files) {
+int run_worker_loop(const std::string& root, int port, int max_connections, bool allow_index_html, bool deny_hidden_files) {
     PlatformEvent events[64];
     Connection connections[64];
     if (max_connections > 64) max_connections = 64;
@@ -539,7 +520,7 @@ int run_worker_loop(const char* root, int port, int max_connections, bool allow_
     return 0;
 }
 
-export int run_server(const char* root, int port, int max_connections, bool allow_index_html, bool deny_hidden_files,
+export int run_server(const std::string& root, int port, int max_connections, bool allow_index_html, bool deny_hidden_files,
                       int worker_count) {
     if (worker_count <= 1) {
         return run_worker_loop(root, port, max_connections, allow_index_html, deny_hidden_files);
@@ -549,7 +530,7 @@ export int run_server(const char* root, int port, int max_connections, bool allo
     WorkerConfig worker_configs[8];
     int worker_i = 0;
     while (worker_i < worker_count) {
-        if (!assign_worker_root(worker_configs[worker_i], root)) return 1;
+        worker_configs[worker_i].root_ = root;
         worker_configs[worker_i].port_ = port;
         worker_configs[worker_i].max_connections_ = max_connections;
         worker_configs[worker_i].allow_index_html_ = allow_index_html;

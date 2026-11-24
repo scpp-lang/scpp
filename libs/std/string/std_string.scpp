@@ -139,7 +139,7 @@ public:
     // call to append() on this same string (matches
     // std::string::c_str()'s own invalidation rule -- see
     // scpp_string_wrapper.h).
-    const char* c_str() const {
+    const char* c_str() const [[scpp::null_terminated]] {
         [[scpp::unsafe]] {
             return scpp_string_c_str(this->handle);
         }

@@ -70,7 +70,7 @@ public:
     DriverErrorKind kind{DriverErrorKind::Driver};
 };
 
-constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 11;
+constexpr std::uint32_t SCPPM_COMPILE_TIME_AST_VERSION = 12;
 constexpr std::string_view SCPPM_COMPILE_TIME_AST_MAGIC = "SAST";
 
 class CompileTimePayloadPlan {
@@ -980,6 +980,7 @@ inline void write_param(ByteWriter& out, const Param& param) {
     write_string(out, param.generic_concept);
     write_u8(out, param.require_thread_movable ? 1u : 0u);
     write_u8(out, param.require_thread_shareable ? 1u : 0u);
+    write_u8(out, param.is_null_terminated ? 1u : 0u);
     write_u8(out, param.is_parameter_pack ? 1u : 0u);
     write_u8(out, param.is_const ? 1u : 0u);
     write_source_location(out, param.loc);
@@ -1015,6 +1016,9 @@ inline void write_param(ByteWriter& out, const Param& param) {
     auto thread_shareable_r = read_u8(in, context + " thread_shareable");
     if (!thread_shareable_r.has_value()) return std::unexpected(std::move(thread_shareable_r).error());
     param.require_thread_shareable = thread_shareable_r.value() != 0u;
+    auto null_terminated_r = read_u8(in, context + " null_terminated");
+    if (!null_terminated_r.has_value()) return std::unexpected(std::move(null_terminated_r).error());
+    param.is_null_terminated = null_terminated_r.value() != 0u;
     auto pack_r = read_u8(in, context + " parameter pack");
     if (!pack_r.has_value()) return std::unexpected(std::move(pack_r).error());
     param.is_parameter_pack = pack_r.value() != 0u;
@@ -2032,6 +2036,7 @@ inline void write_function(ByteWriter& out, const Function& fn) {
     write_u32_le(out, static_cast<std::uint32_t>(fn.params.size()));
     for (const Param& param : fn.params) write_param(out, param);
     write_string(out, fn.return_lifetime.name);
+    write_u8(out, fn.return_is_null_terminated ? 1u : 0u);
     write_u8(out, fn.body ? 1u : 0u);
     if (fn.body) write_stmt(out, *fn.body);
     write_u8(out, fn.is_extern_c ? 1u : 0u);
@@ -2090,6 +2095,9 @@ inline void write_function(ByteWriter& out, const Function& fn) {
     auto return_lifetime_r = read_string(in, context + " return lifetime");
     if (!return_lifetime_r.has_value()) return std::unexpected(std::move(return_lifetime_r).error());
     fn.return_lifetime.name = std::move(return_lifetime_r).value();
+    auto return_null_terminated_r = read_u8(in, context + " return null_terminated");
+    if (!return_null_terminated_r.has_value()) return std::unexpected(std::move(return_null_terminated_r).error());
+    fn.return_is_null_terminated = return_null_terminated_r.value() != 0u;
     auto body_present_r = read_u8(in, context + " body present");
     if (!body_present_r.has_value()) return std::unexpected(std::move(body_present_r).error());
     if (body_present_r.value() != 0u) {
@@ -2213,6 +2221,7 @@ inline void write_function(ByteWriter& out, const Function& fn) {
         if (a[i].name != b[i].name || a[i].generic_concept != b[i].generic_concept ||
             a[i].require_thread_movable != b[i].require_thread_movable ||
             a[i].require_thread_shareable != b[i].require_thread_shareable ||
+            a[i].is_null_terminated != b[i].is_null_terminated ||
             a[i].is_parameter_pack != b[i].is_parameter_pack ||
             !types_equal(a[i].type, b[i].type)) {
             return false;

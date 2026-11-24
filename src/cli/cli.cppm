@@ -88,7 +88,7 @@ bool parse_opt_level_flag(std::string_view arg, int& opt_level) {
     return true;
 }
 
-inline const char* get_arg(char** argv, int index) {
+inline const char* get_arg(char** argv, int index) [[scpp::null_terminated]] {
     [[scpp::unsafe]] {
         return argv[index];
     }

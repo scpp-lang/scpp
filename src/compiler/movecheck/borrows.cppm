@@ -743,7 +743,7 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
 // Call case below (a call to a reference-returning function used
 // itself as a further reference-binding source).
 [[nodiscard]] extern std::expected<void, DataflowError> check_call_arguments(const Expr& expr, DataflowState& state, const Body& body, const Signatures& signatures,
-                           bool report_errors);
+                           bool report_errors, bool allow_reachable_modules);
 
 // Resolves the root place that `expr` would be borrowing from if used as
 // a reference-binding (`T& r = expr;`) or reference-argument (`f(expr)`
@@ -935,12 +935,12 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
                 // invalid call (wrong callee, bad arguments) is still
                 // reported through the ordinary path once report_errors
                 // is true; harmless to also run silently here.
-                if (auto _r = check_call_arguments(expr, state, body, signatures, report_errors); !_r.has_value()) {
+                if (auto _r = check_call_arguments(expr, state, body, signatures, report_errors, false); !_r.has_value()) {
                     return std::unexpected(std::move(_r).error());
                 }
                 return {};
             }
-            if (auto _r = check_call_arguments(expr, state, body, signatures, report_errors); !_r.has_value()) {
+            if (auto _r = check_call_arguments(expr, state, body, signatures, report_errors, false); !_r.has_value()) {
                 return std::unexpected(std::move(_r).error());
             }
             RootSet roots{};
@@ -1040,13 +1040,14 @@ void release_dead_references(DataflowState& state, const Body& body, const LiveS
                 [[scpp::unsafe]] {
                     std::reference_wrapper<const Program> program_ref{*body.program};
                     visible_global = find_visible_global(OptionalProgramRef{program_ref}, body.function_namespace_path,
-                                                         expr.name, expr.explicit_global_qualification);
+                                                         expr.name, expr.explicit_global_qualification,
+                                                         body.function_visibility_module);
                 }
             } else {
                 OptionalProgramRef none{};
                 visible_global =
                     find_visible_global(none, body.function_namespace_path, expr.name,
-                                        expr.explicit_global_qualification);
+                                        expr.explicit_global_qualification, body.function_visibility_module);
             }
             if (visible_global != nullptr) {
                 return program_lifetime_root();
@@ -1242,6 +1243,11 @@ std::expected<void, DataflowError> apply_address_of(const Expr& expr, DataflowSt
     auto roots_result = resolve_borrow_source_root(*expr.lhs, state, body, signatures, report_errors);
     if (!roots_result.has_value()) return std::unexpected(std::move(roots_result).error());
     RootSet roots = std::move(roots_result).value();
+    for (LocalId root : roots) {
+        if (!is_program_lifetime_root(root) && is_char_pointer_type(body.type_of(root))) {
+            state.null_terminated_locals[root] = NullTerminatedState::Unknown;
+        }
+    }
     if (!report_errors || roots.empty()) return {};
     if (std::optional<Type> operand_type = infer_expr_type(*expr.lhs, body, signatures);
         operand_type.has_value() && operand_type->kind == TypeKind::Reference) {

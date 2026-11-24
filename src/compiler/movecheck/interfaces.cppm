@@ -605,8 +605,28 @@ private:
                 if (base_slot_it != base_virtual_candidates.end()) {
                     for (const Provider& provider : base_slot_it->second) {
                         bool prov_deleted = false;
+                        bool null_terminated_mismatch = false;
                         [[scpp::unsafe]] {
-                            if (provider.fn != nullptr) prov_deleted = provider.fn->is_deleted;
+                            if (provider.fn != nullptr) {
+                                prov_deleted = provider.fn->is_deleted;
+                                if (provider.fn->return_is_null_terminated != fn->return_is_null_terminated ||
+                                    provider.fn->params.size() != fn->params.size()) {
+                                    null_terminated_mismatch = true;
+                                } else {
+                                    for (std::size_t p_i = 1; p_i < fn->params.size(); p_i++) {
+                                        if (provider.fn->params[p_i].is_null_terminated != fn->params[p_i].is_null_terminated) {
+                                            null_terminated_mismatch = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (provider.fn != nullptr && null_terminated_mismatch) {
+                            return std::unexpected(DataflowError(
+                                "member '" + name + "' of class '" + dname +
+                                    "' has '[[scpp::null_terminated]]' annotations that do not match the base virtual member it overrides",
+                                fn_loc));
                         }
                         if (provider.fn == nullptr || prov_deleted == is_deleted) continue;
                         return std::unexpected(DataflowError(

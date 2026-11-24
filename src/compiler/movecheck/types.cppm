@@ -12,6 +12,7 @@ namespace scpp {
 [[nodiscard]] bool is_reference(const Type& type);
 [[nodiscard]] bool is_span(const Type& type);
 [[nodiscard]] bool is_pointer(const Type& type);
+[[nodiscard]] bool is_char_pointer_type(const Type& type);
 [[nodiscard]] bool is_lifetime_eligible_type(const Type& type);
 [[nodiscard]] bool is_pointer_return_lifetime_source_type(const Type& type);
 [[nodiscard]] bool is_function_pointer(const Type& type);
@@ -35,7 +36,8 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred);
 [[nodiscard]] bool is_integral_scalar_type_name(const std::string& name);
 [[nodiscard]] const EnumDef* find_enum_def(const Program* program [[scpp::lifetime(p)]], const std::string& name) [[scpp::lifetime(p)]];
 [[nodiscard]] const EnumVariant* find_enum_variant(const Program* program [[scpp::lifetime(p)]], const std::string& name,
-                                                  const EnumDef** owning_enum = nullptr) [[scpp::lifetime(p)]];
+                                                  const EnumDef** owning_enum = nullptr,
+                                                  std::string_view viewer_module = {}) [[scpp::lifetime(p)]];
 [[nodiscard]] bool is_enum_type(const Type& type, const Program* program);
 [[nodiscard]] const Type* enum_underlying_type(const Type& type, const Program* program [[scpp::lifetime(p)]]) [[scpp::lifetime(p)]];
 
@@ -71,6 +73,10 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred);
 [[nodiscard]] bool is_reference(const Type& type) { return type.kind == TypeKind::Reference; }
 [[nodiscard]] bool is_span(const Type& type) { return type.kind == TypeKind::Span; }
 [[nodiscard]] bool is_pointer(const Type& type) { return type.kind == TypeKind::Pointer; }
+[[nodiscard]] bool is_char_pointer_type(const Type& type) {
+    return type.kind == TypeKind::Pointer && type.pointee != nullptr &&
+           type.pointee->kind == TypeKind::Named && type.pointee->name == "char";
+}
 [[nodiscard]] bool is_lifetime_eligible_type(const Type& type) {
     return is_reference(type) || is_pointer(type) || is_span(type);
 }
@@ -209,11 +215,12 @@ void refine_declared_type(const Stmt& stmt, Body& body, const Type& inferred) {
 // Forwards to scpp::find_enum_variant_index (scpp.ast), the one
 // enumerator-by-name lookup.
 [[nodiscard]] const EnumVariant* find_enum_variant(const Program* program [[scpp::lifetime(p)]], const std::string& name,
-                                                   const EnumDef** owning_enum) [[scpp::lifetime(p)]] {
+                                                   const EnumDef** owning_enum,
+                                                   std::string_view viewer_module) [[scpp::lifetime(p)]] {
     if (program == nullptr) return nullptr;
     std::optional<EnumVariantIndex> found{};
     [[scpp::unsafe]] {
-        found = scpp::find_enum_variant_index(*program, name);
+        found = scpp::find_enum_variant_index(*program, name, viewer_module);
         if (!found.has_value()) return nullptr;
         const EnumDef& def = program->enums[found->enum_index];
         if (owning_enum != nullptr) *owning_enum = &def;

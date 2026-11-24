@@ -172,8 +172,10 @@ namespace scpp {
                 }
                 if (const EnumDef* def = [&, this]() {
                         const EnumDef* enum_def = nullptr;
+                        std::string viewer = current_visibility_module();
                         [[scpp::unsafe]] {
-                            [[maybe_unused]] const EnumVariant* variant = find_enum_variant(program_, expr.name, &enum_def);
+                            [[maybe_unused]] const EnumVariant* variant =
+                                find_enum_variant(program_, expr.name, &enum_def, viewer);
                         }
                         return enum_def;
                     }(); def != nullptr) {
@@ -1131,104 +1133,115 @@ namespace scpp {
     // rule than the resolver used is exactly how the misleading "call to
     // unknown function" message survived this long.
     std::vector<const Function*> Codegen::collect_call_candidates(const std::string& callee_name,
-                                                                  std::size_t param_offset, const Expr* receiver_expr)
+                                                                  std::size_t param_offset, const Expr* receiver_expr,
+                                                                  bool allow_reachable_modules)
 {
         bool has_receiver = (receiver_expr != nullptr && param_offset == 1);
-        {
-            const auto& cache = has_receiver ? call_candidates_cache_with_receiver_ : call_candidates_cache_no_receiver_;
-            if (auto it = cache.find(callee_name); it != cache.end()) {
-                std::vector<const Function*> res{};
-                for (const Function* fn : it->second) res.push_back(fn);
-                return res;
-            }
-        }
-
         bool callee_is_ctor = callee_name.ends_with("_new");
-        std::string ctor_prefix = callee_is_ctor ? callee_name + "." : "";
-        std::size_t sep = callee_name.rfind('_');
-        std::string owner = sep != std::string::npos ? callee_name.substr(0, sep) : "";
-        std::string member = sep != std::string::npos ? callee_name.substr(sep + 1) : "";
-        std::string owner_dot_callee = sep != std::string::npos ? owner + "." + callee_name : "";
-        std::string owner_dot_member = sep != std::string::npos ? owner + "." + member : "";
-        bool owner_has_dot = owner.find('.') != std::string::npos;
+        bool cached = has_receiver ? call_candidates_cache_with_receiver_.contains(callee_name)
+                                   : call_candidates_cache_no_receiver_.contains(callee_name);
+        if (!cached) {
+            std::string ctor_prefix = callee_is_ctor ? callee_name + "." : "";
+            std::size_t sep = callee_name.rfind('_');
+            std::string owner = sep != std::string::npos ? callee_name.substr(0, sep) : "";
+            std::string member = sep != std::string::npos ? callee_name.substr(sep + 1) : "";
+            std::string owner_dot_callee = sep != std::string::npos ? owner + "." + callee_name : "";
+            std::string owner_dot_member = sep != std::string::npos ? owner + "." + member : "";
+            bool owner_has_dot = owner.find('.') != std::string::npos;
 
-        std::vector<const Function*> candidates{};
-        {
-            auto add_candidate = [&](const Function* new_fn) {
-                [[scpp::unsafe]] {
-                    for (std::size_t i = 0; i < candidates.size(); ++i) {
-                        const Function* existing = candidates[i];
-                        if (existing->name != new_fn->name) continue;
-                        if (existing->is_generic_template != new_fn->is_generic_template) continue;
-                        if (existing->params.size() != new_fn->params.size()) continue;
-                        bool same_params = true;
-                        for (std::size_t p = 0; p < existing->params.size(); ++p) {
-                            if (!types_equal(existing->params[p].type, new_fn->params[p].type)) {
-                                same_params = false;
-                                break;
+            std::vector<const Function*> candidates{};
+            {
+                auto add_candidate = [&](const Function* new_fn) {
+                    [[scpp::unsafe]] {
+                        for (std::size_t i = 0; i < candidates.size(); ++i) {
+                            const Function* existing = candidates[i];
+                            if (existing->name != new_fn->name) continue;
+                            if (existing->is_generic_template != new_fn->is_generic_template) continue;
+                            if (existing->params.size() != new_fn->params.size()) continue;
+                            bool same_params = true;
+                            for (std::size_t p = 0; p < existing->params.size(); ++p) {
+                                if (!types_equal(existing->params[p].type, new_fn->params[p].type)) {
+                                    same_params = false;
+                                    break;
+                                }
+                            }
+                            if (same_params && existing->receiver_ref_qualifier == new_fn->receiver_ref_qualifier) {
+                                if (existing->body == nullptr && new_fn->body != nullptr) {
+                                    candidates[i] = new_fn;
+                                }
+                                return;
                             }
                         }
-                        if (same_params && existing->receiver_ref_qualifier == new_fn->receiver_ref_qualifier) {
-                            if (existing->body == nullptr && new_fn->body != nullptr) {
-                                candidates[i] = new_fn;
-                            }
-                            return;
-                        }
+                        candidates.push_back(new_fn);
                     }
-                    candidates.push_back(new_fn);
-                }
-            };
-            if (program_ != nullptr) {
-                [[scpp::unsafe]] {
-                    for (std::size_t k = 0; k < program_->functions.size(); ++k) {
-                        const Function* fn = &program_->functions[k];
-                        if (fn->name == callee_name) {
-                            add_candidate(fn);
-                            continue;
-                        }
-                        if (fn->is_extern_c && !fn->namespace_path.empty()) {
-                            std::string qualified{};
-                            for (std::size_t i = 0; i < fn->namespace_path.size(); ++i) {
-                                if (i != 0) qualified += "::";
-                                qualified += fn->namespace_path[i];
-                            }
-                            qualified += "::" + fn->name;
-                            if (qualified == callee_name) {
+                };
+                if (program_ != nullptr) {
+                    [[scpp::unsafe]] {
+                        for (std::size_t k = 0; k < program_->functions.size(); ++k) {
+                            const Function* fn = &program_->functions[k];
+                            if (fn->name == callee_name) {
                                 add_candidate(fn);
                                 continue;
                             }
-                        }
-                        if (callee_is_ctor && fn->name.starts_with(ctor_prefix)) {
-                            if (!has_receiver || (!owner.empty() && !fn->member_owner_class.empty() && fn->member_owner_class == owner)) {
-                                add_candidate(fn);
-                                continue;
-                            }
-                        }
-                        if (fn->name.size() > callee_name.size() + 1 && fn->name.ends_with(callee_name)) {
-                            std::size_t separator = fn->name.size() - callee_name.size() - 1;
-                            if (fn->name[separator] == '.' && fn->name.substr(0, separator) == fn->member_owner_class) {
-                                if (!has_receiver || (!owner.empty() && !fn->member_owner_class.empty() && fn->member_owner_class == owner &&
-                                    (fn->name == owner_dot_callee || fn->name == owner_dot_member))) {
+                            if (fn->is_extern_c && !fn->namespace_path.empty()) {
+                                std::string qualified{};
+                                for (std::size_t i = 0; i < fn->namespace_path.size(); ++i) {
+                                    if (i != 0) qualified += "::";
+                                    qualified += fn->namespace_path[i];
+                                }
+                                qualified += "::" + fn->name;
+                                if (qualified == callee_name) {
                                     add_candidate(fn);
                                     continue;
                                 }
                             }
-                        }
-                        if (has_receiver && owner_has_dot && !fn->member_owner_class.empty() && fn->member_owner_class == owner &&
-                            fn->name == member) {
-                            add_candidate(fn);
-                            continue;
+                            if (callee_is_ctor && fn->name.starts_with(ctor_prefix)) {
+                                if (!has_receiver || (!owner.empty() && !fn->member_owner_class.empty() && fn->member_owner_class == owner)) {
+                                    add_candidate(fn);
+                                    continue;
+                                }
+                            }
+                            if (fn->name.size() > callee_name.size() + 1 && fn->name.ends_with(callee_name)) {
+                                std::size_t separator = fn->name.size() - callee_name.size() - 1;
+                                if (fn->name[separator] == '.' && fn->name.substr(0, separator) == fn->member_owner_class) {
+                                    if (!has_receiver || (!owner.empty() && !fn->member_owner_class.empty() && fn->member_owner_class == owner &&
+                                        (fn->name == owner_dot_callee || fn->name == owner_dot_member))) {
+                                        add_candidate(fn);
+                                        continue;
+                                    }
+                                }
+                            }
+                            if (has_receiver && owner_has_dot && !fn->member_owner_class.empty() && fn->member_owner_class == owner &&
+                                fn->name == member) {
+                                add_candidate(fn);
+                                continue;
+                            }
                         }
                     }
                 }
             }
+            if (has_receiver) {
+                call_candidates_cache_with_receiver_.emplace(callee_name, std::move(candidates));
+            } else {
+                call_candidates_cache_no_receiver_.emplace(callee_name, std::move(candidates));
+            }
         }
-        if (has_receiver) {
-            call_candidates_cache_with_receiver_.emplace(callee_name, candidates);
-        } else {
-            call_candidates_cache_no_receiver_.emplace(callee_name, candidates);
+        const std::vector<const Function*>& raw =
+            has_receiver ? call_candidates_cache_with_receiver_.at(callee_name)
+                         : call_candidates_cache_no_receiver_.at(callee_name);
+        std::vector<const Function*> res{};
+        res.reserve(raw.size());
+        for (const Function* fn : raw) {
+            if (fn != nullptr && param_offset == 0 && !callee_is_ctor && !allow_reachable_modules) {
+                bool visible = false;
+                [[scpp::unsafe]] {
+                    visible = is_direct_function_name_visible_in_current_context(*fn);
+                }
+                if (!visible) continue;
+            }
+            res.push_back(fn);
         }
-        return candidates;
+        return res;
     }
 
 
@@ -1514,7 +1527,8 @@ namespace scpp {
     const Function* Codegen::resolve_overload_by_type(const std::string& callee_name, const std::vector<ExprPtr>& args,
                                               std::size_t param_offset, bool receiver_is_mutable ,
                                               const Expr* receiver_expr,
-                                              std::vector<const Function*>* out_ambiguous)
+                                              std::vector<const Function*>* out_ambiguous,
+                                              bool allow_reachable_modules)
 {
         // Reported rather than resolved. Every "pick the first one"
         // below used to hide a real ambiguity: two candidates the
@@ -1533,7 +1547,8 @@ namespace scpp {
                 out_ambiguous->clear();
             }
         }
-        std::vector<const Function*> candidates = collect_call_candidates(callee_name, param_offset, receiver_expr);
+        std::vector<const Function*> candidates =
+            collect_call_candidates(callee_name, param_offset, receiver_expr, allow_reachable_modules);
         if (candidates.empty()) return nullptr;
         bool single_cand_is_generic = false;
         [[scpp::unsafe]] {
