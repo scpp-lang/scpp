@@ -25,10 +25,19 @@ public:
     std::vector<std::shared_ptr<Expr>> param_default_exprs;
     std::vector<bool> param_require_thread_movable;
     std::vector<bool> param_require_thread_shareable;
+    std::vector<bool> param_is_null_terminated;
     std::vector<LifetimeAnnotation> param_lifetimes;
     Type return_type;
     LifetimeAnnotation return_lifetime;
+    bool return_is_null_terminated = false;
     std::vector<std::size_t> returned_lifetime_param_indices;
+
+    [[nodiscard]] bool has_any_null_terminated_param() const {
+        for (bool flag : param_is_null_terminated) {
+            if (flag) return true;
+        }
+        return false;
+    }
     std::optional<std::size_t> elided_param_index;
     bool is_extern_c_declaration_only = false;
     bool is_unsafe = false;
@@ -161,6 +170,7 @@ void collect_virtual_interface_bases_in_construction_order(const Program& progra
 [[nodiscard]] std::vector<std::size_t> infer_pointer_return_source_param_indices(const Function& fn);
 [[nodiscard]] bool param_can_outlive_call_for_lifetime_return(const Param& param);
 [[nodiscard]] std::expected<void, DataflowError> validate_lifetime_annotation_placement(const Function& fn);
+[[nodiscard]] std::expected<void, DataflowError> validate_null_terminated_annotation_placement(const Function& fn);
 [[nodiscard]] std::expected<std::vector<std::size_t>, DataflowError> resolve_returned_lifetime_param_indices(const Function& fn);
 [[nodiscard]] std::vector<const FunctionSignature*> constructor_overloads_of(const std::string& class_name,
                                                                             const Signatures& signatures);
@@ -1600,6 +1610,23 @@ struct ConstructedOwner {
     return {};
 }
 
+[[nodiscard]] std::expected<void, DataflowError> validate_null_terminated_annotation_placement(const Function& fn) {
+    for (const Param& param : fn.params) {
+        if (!param.is_null_terminated) continue;
+        if (!is_char_pointer_type(param.type)) {
+            return std::unexpected(DataflowError("parameter '" + param.name +
+                                    "' bears '[[scpp::null_terminated]]' but its type is not 'char*' or 'const char*'",
+                                fn.loc));
+        }
+    }
+    if (fn.return_is_null_terminated && !is_char_pointer_type(fn.return_type)) {
+        return std::unexpected(DataflowError("function '" + fn.name +
+                                "' bears '[[scpp::null_terminated]]' on its declarator, but its return type is not 'char*' or 'const char*'",
+                            fn.loc));
+    }
+    return {};
+}
+
 [[nodiscard]] bool is_operator_arrow_function(const Function& fn) {
     return !fn.member_owner_class.empty() && fn.name.ends_with("_operator_arrow") && !fn.params.empty() &&
            fn.params[0].name == "this";
@@ -1749,6 +1776,10 @@ std::uint64_t g_signatures_version = 1;
     sig.param_default_exprs.reserve(fn.params.size());
     sig.param_require_thread_movable.reserve(fn.params.size());
     sig.param_require_thread_shareable.reserve(fn.params.size());
+    sig.param_is_null_terminated.reserve(fn.params.size());
+    if (auto _r = validate_null_terminated_annotation_placement(fn); !_r.has_value()) {
+        return std::unexpected(std::move(_r).error());
+    }
     for (const Param& param : fn.params) {
         sig.param_types.push_back(param.type);
         sig.param_is_forwarding_reference.push_back(is_forwarding_reference_param(fn, param));
@@ -1756,10 +1787,12 @@ std::uint64_t g_signatures_version = 1;
         sig.param_default_exprs.push_back(param.default_expr);
         sig.param_require_thread_movable.push_back(param.require_thread_movable);
         sig.param_require_thread_shareable.push_back(param.require_thread_shareable);
+        sig.param_is_null_terminated.push_back(param.is_null_terminated);
         sig.param_lifetimes.push_back(param.lifetime);
     }
     sig.return_type = fn.return_type;
     sig.return_lifetime = fn.return_lifetime;
+    sig.return_is_null_terminated = fn.return_is_null_terminated;
     auto returned_lifetime_result = resolve_returned_lifetime_param_indices(fn);
     if (!returned_lifetime_result.has_value()) return std::unexpected(std::move(returned_lifetime_result).error());
     sig.returned_lifetime_param_indices = std::move(returned_lifetime_result).value();
@@ -1805,6 +1838,12 @@ std::uint64_t g_signatures_version = 1;
             same_params = types_equal(existing.param_types[i], sig.param_types[i]);
         }
         if (same_params && existing.receiver_ref_qualifier == sig.receiver_ref_qualifier) {
+            if (existing.return_is_null_terminated != sig.return_is_null_terminated ||
+                existing.param_is_null_terminated != sig.param_is_null_terminated) {
+                return std::unexpected(DataflowError("conflicting '[[scpp::null_terminated]]' annotations across declarations of '" +
+                                     fn.name + "'",
+                    fn.loc));
+            }
             if (existing.has_definition && sig.has_definition) {
                 return std::unexpected(DataflowError("redefinition of '" + fn.name +
                                      "': a previous declaration with an identical parameter list already "

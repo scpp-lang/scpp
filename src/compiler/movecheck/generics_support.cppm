@@ -27,6 +27,7 @@ namespace scpp {
     Function clone{};
     clone.return_type = fn.return_type;
     clone.return_lifetime = fn.return_lifetime;
+    clone.return_is_null_terminated = fn.return_is_null_terminated;
     clone.name = fn.name;
     clone.loc = fn.loc;
     for (const Param& param : fn.params) clone.params.push_back(deep_clone_param(param));

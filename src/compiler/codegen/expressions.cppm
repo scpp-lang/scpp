@@ -245,7 +245,8 @@ inline unsigned int scalar_bit_width(llvm::LLVMTypeRef ty)
     }
 
 
-    [[nodiscard]] std::expected<Codegen::CallResult, CodegenError> Codegen::codegen_call(const Expr& expr)
+    [[nodiscard]] std::expected<Codegen::CallResult, CodegenError> Codegen::codegen_call(const Expr& expr,
+                                                                                         bool allow_reachable_modules)
 {
         if (expr.lhs != nullptr && !expr.name.empty() && expr.lhs->kind != ExprKind::Lambda) {
             std::optional<Type> receiver_type = infer_type(*expr.lhs);
@@ -477,7 +478,8 @@ inline unsigned int scalar_bit_width(llvm::LLVMTypeRef ty)
                     return codegen_enum_cast_store_builtin(expr, *builtin_callee);
                 }
             }
-            if (find_class_def(expr.name) != nullptr) {
+            if (find_class_def(expr.name) != nullptr &&
+                is_direct_record_name_visible_in_current_context(expr.name, expr)) {
                 // `ClassName{args...}` / `ClassName(args...)` used as an
                 // expression selects a constructor by exactly the same
                 // rule as every other spelling of "construct a
@@ -534,7 +536,8 @@ inline unsigned int scalar_bit_width(llvm::LLVMTypeRef ty)
             // Routed through the same one routine rather than a second
             // copy of the decision: the temporary is materialized here,
             // constructed there.
-            if (find_struct_def(expr.name) != nullptr) {
+            if (find_struct_def(expr.name) != nullptr &&
+                is_direct_record_name_visible_in_current_context(expr.name, expr)) {
                 Type struct_type = named_type(expr.name);
                 auto struct_llvm_type_result = to_llvm_type(struct_type);
                 if (!struct_llvm_type_result.has_value()) return std::unexpected(std::move(struct_llvm_type_result).error());
@@ -640,7 +643,8 @@ inline unsigned int scalar_bit_width(llvm::LLVMTypeRef ty)
         // `callee_def` already in hand to decide value-vs-address per
         // parameter.
         const Function* callee_def =
-            resolve_overload_by_type(callee_name, expr.args, param_offset, receiver_is_mutable, expr.lhs.get());
+            resolve_overload_by_type(callee_name, expr.args, param_offset, receiver_is_mutable, expr.lhs.get(),
+                                     /*out_ambiguous=*/nullptr, allow_reachable_modules);
         if (callee_def == nullptr && expr.lhs != nullptr && program_ != nullptr) {
             const Program* prog = program_;
             [[scpp::unsafe]] {
@@ -3049,7 +3053,8 @@ inline unsigned int scalar_bit_width(llvm::LLVMTypeRef ty)
                             return load_value(std::move(lv_result).value());
                         }
                         const EnumDef* enum_def = nullptr;
-                        const EnumVariant* enum_variant = find_enum_variant(program_, expr.name, &enum_def);
+                        const EnumVariant* enum_variant =
+                            find_enum_variant(program_, expr.name, &enum_def, current_visibility_module());
                         if (enum_variant != nullptr && enum_def != nullptr) {
                             std::string def_name{};
                             std::int64_t val = 0;
@@ -5015,7 +5020,11 @@ auto base_llvm_type_result = to_llvm_type(base.type);
             std::vector<ExprPtr> free_args{};
             free_args.push_back(deep_clone_expr_with_loc(*expr.lhs, expr.loc));
             free_args.push_back(deep_clone_expr_with_loc(*expr.rhs, expr.loc));
-            if (const Function* free_fn = resolve_overload_by_type(key, free_args, /*param_offset=*/0);
+            if (const Function* free_fn = resolve_overload_by_type(key, free_args, /*param_offset=*/0,
+                                                                   /*receiver_is_mutable=*/true,
+                                                                   /*receiver_expr=*/nullptr,
+                                                                   /*out_ambiguous=*/nullptr,
+                                                                   /*allow_reachable_modules=*/true);
                 free_fn != nullptr) {
                 [[scpp::unsafe]] {
                     if (out_key != nullptr) *out_key = key;
@@ -5113,7 +5122,7 @@ auto base_llvm_type_result = to_llvm_type(base.type);
             operator_call->args.push_back(deep_clone_expr_with_loc(*expr.lhs, expr.loc));
             operator_call->args.push_back(deep_clone_expr_with_loc(*expr.rhs, expr.loc));
         }
-        auto call_result = codegen_call(*operator_call);
+        auto call_result = codegen_call(*operator_call, param_offset == 0);
         if (!call_result.has_value()) return std::unexpected(std::move(call_result).error());
         Codegen::CallResult cr = std::move(call_result).value();
         return std::optional<llvm::LLVMValueRef>{cr.value};

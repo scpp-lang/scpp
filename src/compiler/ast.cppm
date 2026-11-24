@@ -167,6 +167,7 @@ class Type {
 
     TypeKind kind = TypeKind::Named;
     LifetimeAnnotation lifetime;
+    bool is_null_terminated = false;
 
     // Named
     std::string name;
@@ -588,6 +589,7 @@ class Param {
     // Monomorphizer's own check_thread_safety_constraint.
     bool require_thread_movable = false;
     bool require_thread_shareable = false;
+    bool is_null_terminated = false;
     // ch05 §5.11: true only for the trailing abbreviated generic pack form
     // (`Concept auto&... args`). Supported only on a free function's own
     // parameter list, never on a method/lambda in this version.
@@ -1485,6 +1487,7 @@ inline Param::Param(const Param& other)
       generic_concept{other.generic_concept},
       require_thread_movable{other.require_thread_movable},
       require_thread_shareable{other.require_thread_shareable},
+      is_null_terminated{other.is_null_terminated},
       is_parameter_pack{other.is_parameter_pack},
       is_const{other.is_const},
       loc{other.loc} {
@@ -1713,6 +1716,7 @@ class MemberInitializer {
 inline Type::Type(const Type& other)
     : kind{other.kind},
       lifetime{other.lifetime},
+      is_null_terminated{other.is_null_terminated},
       name{other.name},
       pointee{},
       element{},
@@ -1964,6 +1968,7 @@ class Function {
     SourceLocation loc;
     std::vector<Param> params;
     LifetimeAnnotation return_lifetime;
+    bool return_is_null_terminated = false;
     // Null for a bodyless `extern "C"` declaration (ch02 §2.1) or a bare
     // `extern` module-linkage declaration (ch11 §11.6) -- defined
     // elsewhere, linked in externally -- and, since [temp.inst]/4
@@ -3506,6 +3511,7 @@ inline Function::Function(const Function& other)
       loc{other.loc},
       params{other.params},
       return_lifetime{other.return_lifetime},
+      return_is_null_terminated{other.return_is_null_terminated},
       body{},
       definition_is_deferred{other.definition_is_deferred},
       is_extern_c{other.is_extern_c},
@@ -3866,9 +3872,48 @@ class Program {
     // compiled and linked in, and by the export/namespace validation
     // pass for re-export bookkeeping.
     std::vector<ImportDecl> imports;
+    // Per-module set of imported module names whose exported declarations are
+    // name-visible ([module.import], [basic.lookup]) inside bodies owned by
+    // that module (keyed by owning module name, "" for the root non-module TU).
+    // Declarations from transitively imported modules stay in Program as
+    // semantically reachable ([module.reach]) without becoming name-visible.
+    std::unordered_map<std::string, std::unordered_set<std::string>> visible_imported_modules{};
+    std::unordered_set<std::string> reexported_modules{};
 };
 
 using OptionalProgramRef = std::optional<std::reference_wrapper<const Program>>;
+
+[[nodiscard]] inline std::string effective_function_owning_module(const Function& fn) {
+    if (!fn.visibility_module.empty()) return std::string(fn.visibility_module);
+    return std::string(fn.owning_module);
+}
+
+[[nodiscard]] inline bool program_module_is_name_visible_from(const Program& program,
+                                                              std::string_view viewer_module,
+                                                              std::string_view decl_owning_module) {
+    if (decl_owning_module.empty()) return true;
+    std::string_view effective_viewer =
+        viewer_module.empty() ? std::string_view{program.module_name} : viewer_module;
+    if (decl_owning_module == effective_viewer) return true;
+    auto it = program.visible_imported_modules.find(
+        std::string{effective_viewer.data(), effective_viewer.size()});
+    if (it == program.visible_imported_modules.end()) return false;
+    return it->second.contains(
+        std::string{decl_owning_module.data(), decl_owning_module.size()});
+}
+
+[[nodiscard]] inline bool program_record_is_name_visible_from(const Program& program,
+                                                              std::string_view viewer_module,
+                                                              std::string_view decl_owning_module,
+                                                              bool is_compile_time_dependency) {
+    if (is_compile_time_dependency) {
+        std::string_view effective_viewer =
+            viewer_module.empty() ? std::string_view{program.module_name} : viewer_module;
+        if (decl_owning_module.empty()) return effective_viewer == std::string_view{program.module_name};
+        return decl_owning_module == effective_viewer;
+    }
+    return program_module_is_name_visible_from(program, viewer_module, decl_owning_module);
+}
 
 // The destructor declared for `record_name` itself, as an index into
 // `program.functions`. The one AST-level answer to "does this record
@@ -3951,10 +3996,12 @@ using OptionalProgramRef = std::optional<std::reference_wrapper<const Program>>;
 // §1.3) reach the global through `program.globals[index]`.
 [[nodiscard]] inline std::optional<std::size_t>
 find_visible_global_index(const Program& program, const std::vector<std::string>& namespace_path,
-                          const std::string& name, bool explicit_global_qualification = false) {
+                          const std::string& name, bool explicit_global_qualification = false,
+                          std::string_view viewer_module = {}) {
     auto matches_name = [&](std::size_t index, std::string_view candidate) {
         const GlobalVar& global = program.globals[index];
         if (global.decl.get() == nullptr) return false;
+        if (!program_module_is_name_visible_from(program, viewer_module, global.owning_module)) return false;
         std::string_view global_name{global.decl->var_name};
         return global_name == candidate;
     };
@@ -3981,10 +4028,11 @@ find_visible_global_index(const Program& program, const std::vector<std::string>
 [[nodiscard]] inline const GlobalVar*
 find_visible_global(std::optional<std::reference_wrapper<const Program [[scpp::lifetime(program)]]>> program,
                     const std::vector<std::string>& namespace_path,
-                    const std::string& name, bool explicit_global_qualification = false) [[scpp::lifetime(program)]] {
+                    const std::string& name, bool explicit_global_qualification = false,
+                    std::string_view viewer_module = {}) [[scpp::lifetime(program)]] {
     if (!program.has_value()) return nullptr;
     std::optional<std::size_t> index =
-        find_visible_global_index(program->get(), namespace_path, name, explicit_global_qualification);
+        find_visible_global_index(program->get(), namespace_path, name, explicit_global_qualification, viewer_module);
     if (!index.has_value()) return nullptr;
     return &program->get().globals[*index];
 }
@@ -4955,9 +5003,15 @@ struct EnumVariantIndex {
     std::size_t variant_index = 0;
 };
 
-[[nodiscard]] inline std::optional<EnumVariantIndex> find_enum_variant_index(const Program& program, const std::string& variant_name) {
+[[nodiscard]] inline std::optional<EnumVariantIndex> find_enum_variant_index(const Program& program,
+                                                                             const std::string& variant_name,
+                                                                             std::string_view viewer_module = {}) {
     for (std::size_t enum_index = 0; enum_index < program.enums.size(); enum_index++) {
         const EnumDef& def = program.enums[enum_index];
+        if (!program_record_is_name_visible_from(program, viewer_module, def.owning_module,
+                                                 def.is_compile_time_dependency)) {
+            continue;
+        }
         for (std::size_t variant_index = 0; variant_index < def.variants.size(); variant_index++) {
             if (def.variants[variant_index].name == variant_name) {
                 EnumVariantIndex found{enum_index, variant_index};

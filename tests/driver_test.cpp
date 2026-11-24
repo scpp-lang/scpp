@@ -1214,6 +1214,181 @@ void run_module_system_tests() {
         std::filesystem::remove(b_path);
     }
 
+    // C++26 [module.reach] vs [basic.lookup]: a plain `import a;` inside `b`
+    // (including inside a re-exported interface partition `b:api`) makes `a`'s
+    // exported entities semantically reachable in an importer of `b` without
+    // making `a`'s names directly visible to name lookup.
+    {
+        std::string case_name = "cpp26_module_reachability_without_direct_name_visibility";
+        std::filesystem::path a_path = write_temp_file(case_name, "a",
+            "export module a;\n"
+            "namespace a {\n"
+            "export enum class Color { red = 1, blue = 2 };\n"
+            "export constexpr int kSecret = 99;\n"
+            "export int hidden_from_unimported_lookup() { return 7; }\n"
+            "export class Str {\n"
+            "    int first_ = 0;\n"
+            "public:\n"
+            "    Str(const char* s) {\n"
+            "        [[scpp::unsafe]] {\n"
+            "            if (s != nullptr) this->first_ = static_cast<int>(s[0]);\n"
+            "        }\n"
+            "    }\n"
+            "    virtual ~Str() {}\n"
+            "    int first() const { return this->first_; }\n"
+            "};\n"
+            "export class Widget {\n"
+            "    int v_ = 0;\n"
+            "public:\n"
+            "    virtual ~Widget() = default;\n"
+            "    constexpr Widget(int v) : v_{v} {}\n"
+            "    constexpr int get() const { return this->v_; }\n"
+            "};\n"
+            "export Widget operator+(const Widget& l, const Widget& r) {\n"
+            "    return Widget(l.get() + r.get());\n"
+            "}\n"
+            "export template<typename T>\n"
+            "class Box {\n"
+            "    T v_;\n"
+            "public:\n"
+            "    virtual ~Box() = default;\n"
+            "    Box(T v) : v_{v} {}\n"
+            "    T get() const { return this->v_; }\n"
+            "};\n"
+            "}\n");
+        std::filesystem::path b_api_path = write_temp_file(case_name, "b_api",
+            "export module b:api;\n"
+            "import a;\n"
+            "namespace b {\n"
+            "export using Handle = a::Widget;\n"
+            "export class Builder {\n"
+            "    int acc_ = 0;\n"
+            "public:\n"
+            "    virtual ~Builder() = default;\n"
+            "    Builder() = default;\n"
+            "    void mount(a::Str prefix, a::Str root) {\n"
+            "        this->acc_ = prefix.first() + root.first();\n"
+            "    }\n"
+            "    int acc() const { return this->acc_; }\n"
+            "};\n"
+            "export a::Widget make_widget(int v) { return a::Widget(v); }\n"
+            "export a::Box<int> make_box(int v) { return a::Box<int>(v); }\n"
+            "}\n");
+        std::filesystem::path b_path = write_temp_file(case_name, "b",
+            "export module b;\n"
+            "export import :api;\n");
+
+        std::unordered_map<std::string, std::string> imports = {
+            {"a", a_path.string()},
+            {"b", b_path.string()},
+            {"b:api", b_api_path.string()},
+        };
+
+        // Positive reachability: converting constructors on parameters,
+        // destructors, member calls on `auto`-deduced values, ADL `operator+`,
+        // generic class instantiations, and visible `using` type aliases all
+        // work without `import a;`.
+        {
+            cases_run++;
+            std::string main_source =
+                "import b;\n"
+                "int main() {\n"
+                "    b::Builder builder{};\n"
+                "    builder.mount(\"/\", \".\");\n"
+                "    auto w1 = b::make_widget(20);\n"
+                "    constexpr b::Handle h_const{10};\n"
+                "    auto w2 = b::Handle(12);\n"
+                "    auto w3 = w1 + w2;\n"
+                "    auto box = b::make_box(5);\n"
+                "    int expected_mount = static_cast<int>('/') + static_cast<int>('.');\n"
+                "    if (builder.acc() != expected_mount) return 1;\n"
+                "    if (h_const.get() != 10) return 2;\n"
+                "    if (w3.get() != 32) return 3;\n"
+                "    if (box.get() != 5) return 4;\n"
+                "    return 0;\n"
+                "}\n";
+            std::filesystem::path exe_path = std::filesystem::temp_directory_path() /
+                                             ("scpp_driver_test_" + case_name + "_pos_exe");
+            auto res = scpp::compile_to_executable(main_source, exe_path.string(), /*extra_link_inputs=*/{}, imports);
+            if (!res.has_value()) {
+                expect(false, case_name + " (positive): failed to compile: " + std::string(res.error().what()));
+            } else {
+                RunResult run_res = run_command_capture(exe_path.string() + " 2>&1");
+                std::filesystem::remove(exe_path);
+                expect(run_res.exit_code == 0,
+                       case_name + " (positive): expected exit code 0, got " + std::to_string(run_res.exit_code));
+            }
+        }
+
+        // Prebuilt `.scppm` / `.scppa` CLI flow preserves reachability too.
+        {
+            cases_run++;
+            std::filesystem::path prebuilt_dir =
+                std::filesystem::temp_directory_path() / ("scpp_driver_test_" + case_name + "_prebuilt");
+            std::filesystem::remove_all(prebuilt_dir);
+            std::filesystem::create_directories(prebuilt_dir);
+            std::filesystem::path a_scppm = prebuilt_dir / "a.scppm";
+            std::filesystem::path a_scppa = prebuilt_dir / "liba.scppa";
+            std::filesystem::path b_scppm = prebuilt_dir / "b.scppm";
+            std::filesystem::path b_scppa = prebuilt_dir / "libb.scppa";
+            std::filesystem::path main_scpp = prebuilt_dir / "main.scpp";
+            std::filesystem::path app_exe = prebuilt_dir / "app";
+            write_text_file(main_scpp,
+                "import b;\n"
+                "int main() {\n"
+                "    b::Builder builder{};\n"
+                "    builder.mount(\"/\", \".\");\n"
+                "    auto w = b::make_widget(40) + b::Handle(2);\n"
+                "    return w.get() == 42 ? 0 : 1;\n"
+                "}\n");
+            RunResult build_a = run_command_capture(
+                std::string(SCPP_BINARY_PATH) + " build-module " + a_path.string() +
+                " --interface-out " + a_scppm.string() + " --archive-out " + a_scppa.string() + " 2>&1");
+            expect(build_a.exit_code == 0, case_name + " (prebuilt a): " + build_a.stdout_text);
+            RunResult build_b = run_command_capture(
+                std::string(SCPP_BINARY_PATH) + " build-module " + b_path.string() +
+                " --import a=" + a_scppm.string() + " --import b:api=" + b_api_path.string() +
+                " --interface-out " + b_scppm.string() + " --archive-out " + b_scppa.string() + " 2>&1");
+            expect(build_b.exit_code == 0, case_name + " (prebuilt b): " + build_b.stdout_text);
+            RunResult build_app = run_command_capture(
+                std::string(SCPP_BINARY_PATH) + " " + main_scpp.string() + " -o " + app_exe.string() +
+                " --import b=" + b_scppm.string() + " --import a=" + a_scppm.string() + " 2>&1");
+            expect(build_app.exit_code == 0, case_name + " (prebuilt app): " + build_app.stdout_text);
+            if (build_app.exit_code == 0) {
+                RunResult run_app = run_command_capture(app_exe.string() + " 2>&1");
+                expect(run_app.exit_code == 0,
+                       case_name + " (prebuilt run): expected 0, got " + std::to_string(run_app.exit_code));
+            }
+            std::filesystem::remove_all(prebuilt_dir);
+        }
+
+        // Negative name-visibility checks: spelling `a::*` directly without
+        // `import a;` must remain ill-formed across types, constructors,
+        // generic templates, functions, globals, and enumerators.
+        const std::vector<std::pair<std::string, std::string>> negative_cases = {
+            {"direct_type_decl", "import b;\nint main() { a::Widget w{1}; return w.get(); }\n"},
+            {"direct_ctor_expr", "import b;\nint main() { return a::Widget(1).get(); }\n"},
+            {"direct_generic_ctor", "import b;\nint main() { auto x = a::Box<int>(1); return x.get(); }\n"},
+            {"direct_fn_call", "import b;\nint main() { return a::hidden_from_unimported_lookup(); }\n"},
+            {"direct_global", "import b;\nint main() { return a::kSecret; }\n"},
+            {"direct_constexpr_global", "import b;\nint main() { constexpr int x = a::kSecret; return x; }\n"},
+            {"direct_enum_variant", "import b;\nint main() { if (true) { (void)a::Color::red; } return 0; }\n"},
+        };
+        for (const auto& [sub_name, bad_source] : negative_cases) {
+            cases_run++;
+            std::filesystem::path exe_path = std::filesystem::temp_directory_path() /
+                                             ("scpp_driver_test_" + case_name + "_" + sub_name + "_exe");
+            auto res = scpp::compile_to_executable(bad_source, exe_path.string(), /*extra_link_inputs=*/{}, imports);
+            if (res.has_value()) std::filesystem::remove(exe_path);
+            expect(!res.has_value(),
+                   case_name + " (" + sub_name + "): expected direct lookup into unimported module 'a' to fail");
+        }
+
+        std::filesystem::remove(a_path);
+        std::filesystem::remove(b_api_path);
+        std::filesystem::remove(b_path);
+    }
+
     // Regression test for a real compiler bug in movecheck's
     // validate_constructor_member_initialization (compiler/movecheck/
     // signatures.cppm): a non-template class's constructor recovered
@@ -8312,6 +8487,89 @@ int main() {
 )SCPP",
             case_name);
         expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+    }
+
+    {
+        std::string case_name = "std_string_view_null_terminated_safe_and_unsafe_paths_work";
+        cases_run++;
+        RunResult result = compile_and_run(
+            R"SCPP(import std;
+int check(const char* raw) {
+    std::string owned{"abc"};
+    std::string_view a{"abc"};
+    std::string_view b{owned.c_str()};
+    if (a != b) return 1;
+    std::string_view c{};
+    [[scpp::unsafe]] {
+        c = std::string_view{raw};
+    }
+    return c == "abc" ? 0 : 2;
+}
+int main() {
+    return check("abc");
+}
+)SCPP",
+            case_name);
+        expect(result.exit_code == 0, case_name + ": expected exit code 0, got " + std::to_string(result.exit_code));
+
+        cases_run++;
+        expect(full_pipeline_fails_with_std_imports(
+                   R"SCPP(import std;
+int bad(const char* raw) {
+    std::string_view v{raw};
+    return static_cast<int>(v.size());
+}
+int main() { return bad("abc"); }
+)SCPP"),
+               case_name + ": expected unverified const char* outside [[scpp::unsafe]] to be rejected");
+
+        cases_run++;
+        std::filesystem::path root =
+            std::filesystem::temp_directory_path() / ("scpp_nt_payload_" + std::to_string(::getpid()));
+        std::filesystem::remove_all(root);
+        std::filesystem::create_directories(root);
+        std::filesystem::path mod_src = root / "ntmod.scpp";
+        std::filesystem::path mod_ifc = root / "ntmod.scppm";
+        std::filesystem::path mod_arc = root / "libntmod.scppa";
+        std::filesystem::path app_src = root / "app.scpp";
+        std::filesystem::path app_exe = root / "app";
+        write_text_file(mod_src,
+                        "export module ntmod;\n"
+                        "namespace ntmod {\n"
+                        "    export template<typename T>\n"
+                        "    const char* passthrough(T tag, const char* s [[scpp::null_terminated]]) [[scpp::null_terminated]] {\n"
+                        "        return s;\n"
+                        "    }\n"
+                        "}\n");
+        RunResult emit_res =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " build-module " + mod_src.string() +
+                                " --interface-out " + mod_ifc.string() + " --archive-out " + mod_arc.string() + " 2>&1");
+        expect(emit_res.exit_code == 0, case_name + ": build-module ntmod failed: " + emit_res.stdout_text);
+        std::filesystem::remove(mod_src);
+        write_text_file(app_src,
+                        "import std;\n"
+                        "import ntmod;\n"
+                        "int main() {\n"
+                        "    std::string_view v{ntmod::passthrough(1, \"ok\")};\n"
+                        "    return v == \"ok\" ? 0 : 1;\n"
+                        "}\n");
+        RunResult ok_build =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + app_src.string() + " -o " + app_exe.string() +
+                                " --import ntmod=" + mod_ifc.string() + " 2>&1");
+        expect(ok_build.exit_code == 0, case_name + ": safe ntmod consumer should build: " + ok_build.stdout_text);
+        write_text_file(app_src,
+                        "import ntmod;\n"
+                        "int bad(const char* raw) {\n"
+                        "    const char* r = ntmod::passthrough(1, raw);\n"
+                        "    return r == nullptr ? 1 : 0;\n"
+                        "}\n"
+                        "int main() { return bad(\"ok\"); }\n");
+        RunResult bad_build =
+            run_command_capture(std::string(SCPP_BINARY_PATH) + " " + app_src.string() + " -o " + app_exe.string() +
+                                " --import ntmod=" + mod_ifc.string() + " 2>&1");
+        expect(bad_build.exit_code != 0 && bad_build.stdout_text.find("null_terminated") != std::string::npos,
+               case_name + ": unverified ntmod consumer should fail with null_terminated, got: " + bad_build.stdout_text);
+        std::filesystem::remove_all(root);
     }
 }
 

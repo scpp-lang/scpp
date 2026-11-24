@@ -1219,6 +1219,64 @@ private:
         return {};
     }
 
+    [[nodiscard]] std::expected<void, ParseError> merge_null_terminated_attribute(bool& dst, bool src, const Token& tok,
+                                                                                  const char* where) {
+        if (!src) return {};
+        if (dst) {
+            std::string msg{where};
+            msg += " may bear at most one '[[scpp::null_terminated]]' attribute";
+            return std::unexpected(ParseError(tok.line, tok.column, msg));
+        }
+        dst = true;
+        return {};
+    }
+
+    [[nodiscard]] bool nested_type_has_null_terminated_annotation(const Type& type) const {
+        if (type.pointee != nullptr &&
+            (type.pointee->is_null_terminated || nested_type_has_null_terminated_annotation(*type.pointee))) {
+            return true;
+        }
+        if (type.element != nullptr &&
+            (type.element->is_null_terminated || nested_type_has_null_terminated_annotation(*type.element))) {
+            return true;
+        }
+        if (type.function_return != nullptr &&
+            (type.function_return->is_null_terminated || nested_type_has_null_terminated_annotation(*type.function_return))) {
+            return true;
+        }
+        for (const Type& param : type.function_params) {
+            if (param.is_null_terminated || nested_type_has_null_terminated_annotation(param)) return true;
+        }
+        for (const Type& arg : type.template_args) {
+            if (arg.is_null_terminated || nested_type_has_null_terminated_annotation(arg)) return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool any_type_has_lifetime_or_null_terminated_annotation(const Type& type) const {
+        int lifetime_count = 0;
+        LifetimeAnnotation unused_first{};
+        collect_type_lifetime_annotations(type, lifetime_count, unused_first);
+        return lifetime_count > 0 || type.is_null_terminated || nested_type_has_null_terminated_annotation(type);
+    }
+
+    [[nodiscard]] std::expected<void, ParseError> hoist_type_null_terminated_annotation(Type& type, bool& dst,
+                                                                                        const Token& tok,
+                                                                                        const char* where) {
+        if (nested_type_has_null_terminated_annotation(type)) {
+            return std::unexpected(ParseError(
+                tok.line, tok.column,
+                "'[[scpp::null_terminated]]' may only appertain to the top-level pointer of a parameter or return type"));
+        }
+        if (type.is_null_terminated) {
+            if (auto _rv = merge_null_terminated_attribute(dst, true, tok, where); !_rv.has_value()) {
+                return std::unexpected(std::move(_rv).error());
+            }
+            type.is_null_terminated = false;
+        }
+        return {};
+    }
+
     // These two helpers replace what was originally a single generic
     // pass-through wrapper (`template<typename Fn> auto with_type_lifetime_
     // attributes_enabled(Fn&& fn)`, calling a caller-supplied lambda) --
@@ -1327,6 +1385,10 @@ private:
                             }
                             auto rparen_result = expect(TokenKind::RParen, "')'");
                             if (!rparen_result.has_value()) return std::unexpected(std::move(rparen_result).error());
+                        } else if (ns == "scpp" && token == "null_terminated") {
+                            const Token& tok = peek();
+                            return std::unexpected(ParseError(tok.line, tok.column,
+                                             "'[[scpp::null_terminated]]' does not take arguments"));
                         } else {
                             auto skip_result = skip_attribute_arguments();
                             if (!skip_result.has_value()) return std::unexpected(std::move(skip_result).error());
@@ -1355,6 +1417,14 @@ private:
             return std::unexpected(ParseError(attr_start_tok.line, attr_start_tok.column,
                          _msg_950));
         }
+    }
+
+    [[nodiscard]] std::expected<void, ParseError> reject_null_terminated_attribute(const ParsedAttributes& attrs, const Token& attr_start_tok, const char* what) {
+        if (!attrs.has("null_terminated")) return {};
+        std::string msg{"'[[scpp::null_terminated]]' cannot appertain to "};
+        msg += std::string(what);
+        msg += " -- only to a 'char*' or 'const char*' parameter declaration or function declarator";
+        return std::unexpected(ParseError(attr_start_tok.line, attr_start_tok.column, msg));
     }
 
     [[nodiscard]] std::expected<void, ParseError> reject_alignment_specifiers(const std::vector<AlignmentSpecifier>& specs, const char* what) {
@@ -2183,11 +2253,17 @@ private:
 
     [[nodiscard]] bool is_exported_generic_type_template(const Program& program, const std::string& name) const {
         for (const StructDef& def : program.structs) {
-            if (!def.is_exported || def.name != name) continue;
+            bool reachable_from_import = !def.owning_module.empty() && def.owning_module != program.module_name;
+            if ((!def.is_exported && !def.is_compile_time_dependency && !reachable_from_import) || def.name != name) {
+                continue;
+            }
             if (!def.template_params.empty()) return true;
         }
         for (const ClassDef& def : program.classes) {
-            if (!def.is_exported || def.name != name) continue;
+            bool reachable_from_import = !def.owning_module.empty() && def.owning_module != program.module_name;
+            if ((!def.is_exported && !def.is_compile_time_dependency && !reachable_from_import) || def.name != name) {
+                continue;
+            }
             if (!def.template_params.empty() || def.is_variadic_primary_template || def.is_partial_specialization) return true;
         }
         return false;
@@ -2516,6 +2592,7 @@ private:
                 a[i].is_parameter_pack != b[i].is_parameter_pack ||
                 a[i].require_thread_movable != b[i].require_thread_movable ||
                 a[i].require_thread_shareable != b[i].require_thread_shareable ||
+                a[i].is_null_terminated != b[i].is_null_terminated ||
                 !types_equal(a[i].type, b[i].type)) {
                 return false;
             }
@@ -2551,6 +2628,7 @@ private:
     [[nodiscard]] bool same_function_signature(const Function& a, const Function& b) const {
         return a.name == b.name && types_equal(a.return_type, b.return_type) && params_equal(a.params, b.params) &&
                lifetime_annotations_equivalent(a, b) &&
+               a.return_is_null_terminated == b.return_is_null_terminated &&
                a.has_varargs == b.has_varargs && a.is_extern_c == b.is_extern_c &&
                a.is_module_extern == b.is_module_extern && a.is_unsafe == b.is_unsafe &&
                a.eval_mode == b.eval_mode && a.receiver_ref_qualifier == b.receiver_ref_qualifier &&
@@ -2562,6 +2640,7 @@ private:
     [[nodiscard]] bool same_function_signature_ignoring_module_extern(const Function& a, const Function& b) const {
         return a.name == b.name && types_equal(a.return_type, b.return_type) && params_equal(a.params, b.params) &&
                lifetime_annotations_equivalent(a, b) &&
+               a.return_is_null_terminated == b.return_is_null_terminated &&
                a.has_varargs == b.has_varargs && a.is_extern_c == b.is_extern_c &&
                a.is_unsafe == b.is_unsafe &&
                a.eval_mode == b.eval_mode && a.receiver_ref_qualifier == b.receiver_ref_qualifier &&
@@ -2980,6 +3059,7 @@ private:
         comparable.eval_mode = parsed.fn.eval_mode;
         comparable.receiver_ref_qualifier = parsed.fn.receiver_ref_qualifier;
         comparable.return_lifetime = parsed.fn.return_lifetime;
+        comparable.return_is_null_terminated = parsed.fn.return_is_null_terminated;
         comparable.is_defaulted = parsed.fn.is_defaulted;
         comparable.is_deleted = parsed.fn.is_deleted;
         comparable.is_explicit = parsed.fn.is_explicit;
@@ -3003,6 +3083,7 @@ private:
         if (comparable.method_requires_concept.empty()) comparable.method_requires_concept = declared.method_requires_concept;
         if (comparable.method_requires_param.empty()) comparable.method_requires_param = declared.method_requires_param;
         if (!comparable.return_lifetime.present()) comparable.return_lifetime = declared.return_lifetime;
+        if (!comparable.return_is_null_terminated) comparable.return_is_null_terminated = declared.return_is_null_terminated;
         comparable.namespace_path = declared.namespace_path;
         comparable.is_exported = declared.is_exported;
         comparable.generic_method_owner_id = declared.generic_method_owner_id;
@@ -3024,6 +3105,7 @@ private:
                 if (!user.lifetime.present()) user.lifetime = declared_param.lifetime;
                 if (!user.require_thread_movable) user.require_thread_movable = declared_param.require_thread_movable;
                 if (!user.require_thread_shareable) user.require_thread_shareable = declared_param.require_thread_shareable;
+                if (!user.is_null_terminated) user.is_null_terminated = declared_param.is_null_terminated;
             }
             comparable.params.push_back(std::move(user));
         }
@@ -3352,6 +3434,8 @@ private:
             if (!trailing_return_result.has_value()) return std::unexpected(std::move(trailing_return_result).error());
             parsed.fn.return_type = std::move(trailing_return_result).value();
         }
+        auto trailing_attrs_result3 = parse_function_trailing_attributes(parsed.fn, "a member function declarator");
+        if (!trailing_attrs_result3.has_value()) return std::unexpected(std::move(trailing_attrs_result3).error());
         auto body_result2 = parse_out_of_line_member_body_or_default(parsed.fn, "an out-of-line member definition");
         if (!body_result2.has_value()) return std::unexpected(std::move(body_result2).error());
         return finish_out_of_line_member_definition(program, std::move(parsed));
@@ -3571,23 +3655,39 @@ private:
     }
 
     void qualify_same_namespace_function_calls(Program& program) {
-        std::unordered_set<std::string> known_function_names{};
-
-        for (const Function& fn : program.functions) known_function_names.insert(fn.name);
-        // `TypeName{args}`/`TypeName{}` used as a value (not a VarDecl
-        // initializer) parses as an ordinary Call node whose name is the
-        // bare type name (see parse_return's Identifier+LBrace rewrite,
-        // and ExprKind::ValueInit's own comment) -- exactly as call-able,
-        // from a same-namespace context, as a sibling free function is.
-        // Class/struct names are namespace-qualified at declaration parse
-        // time just like function names are (see qualify_name's callers),
-        // so a same-namespace `TypeName{args}` call site needs the exact
-        // same reconciliation below, or it can never resolve against the
-        // qualified name codegen actually registered it under.
-        for (const ClassDef& def : program.classes) known_function_names.insert(def.name);
-        for (const StructDef& def : program.structs) known_function_names.insert(def.name);
+        std::unordered_map<std::string, std::unordered_set<std::string>> known_names_by_viewer{};
         for (Function& fn : program.functions) {
             if (fn.body == nullptr || fn.namespace_path.empty()) continue;
+            std::string viewer_module = effective_function_owning_module(fn);
+            if (!known_names_by_viewer.contains(viewer_module)) {
+                std::unordered_set<std::string> names{};
+                for (const Function& cand : program.functions) {
+                    std::string cand_owner = effective_function_owning_module(cand);
+                    if (!cand.is_extern_c &&
+                        !program_record_is_name_visible_from(program, viewer_module, cand_owner,
+                                                             cand.is_compile_time_dependency)) {
+                        continue;
+                    }
+                    names.insert(cand.name);
+                }
+                for (const ClassDef& def : program.classes) {
+                    if (!program_record_is_name_visible_from(program, viewer_module, def.owning_module,
+                                                             def.is_compile_time_dependency)) {
+                        continue;
+                    }
+                    names.insert(def.name);
+                }
+                for (const StructDef& def : program.structs) {
+                    if (!program_record_is_name_visible_from(program, viewer_module, def.owning_module,
+                                                             def.is_compile_time_dependency)) {
+                        continue;
+                    }
+                    names.insert(def.name);
+                }
+                known_names_by_viewer[viewer_module] = std::move(names);
+            }
+            const std::unordered_set<std::string>& known_function_names =
+                known_names_by_viewer.at(viewer_module);
             std::vector<std::unordered_set<std::string>> scopes{};
             scopes.emplace_back();
             for (const Param& param : fn.params) scopes.back().insert(param.name);
@@ -3798,6 +3898,41 @@ private:
         if (match(TokenKind::KwConst)) type.is_const_qualified = true;
         while (match(TokenKind::Star)) {
             type = pointer_to(std::move(type));
+            if (check(TokenKind::LBracket) && peek_at(1).kind == TokenKind::LBracket) {
+                const Token& ptr_attr_tok = peek();
+                auto ptr_attrs_result = parse_attribute_specifier_seq();
+                if (!ptr_attrs_result.has_value()) return std::unexpected(std::move(ptr_attrs_result).error());
+                ParsedAttributes ptr_attrs = std::move(ptr_attrs_result).value();
+                if (auto _rv = reject_packed_attribute(ptr_attrs, ptr_attr_tok, "a pointer type"); !_rv.has_value()) {
+                    return std::unexpected(std::move(_rv).error());
+                }
+                if (ptr_attrs.has("unsafe")) {
+                    return std::unexpected(ParseError(ptr_attr_tok.line, ptr_attr_tok.column,
+                                     "'[[scpp::unsafe]]' cannot appertain to an object pointer '*' -- only to a function-pointer '*'"));
+                }
+                if (ptr_attrs.lifetime.present()) {
+                    if (!allow_type_lifetime_attributes_) {
+                        return std::unexpected(ParseError(ptr_attr_tok.line, ptr_attr_tok.column,
+                                         "'[[scpp::lifetime(name)]]' cannot appertain to a type-id here -- only to an eligible parameter declaration or function declarator"));
+                    }
+                    if (auto _rv = merge_lifetime_attribute(type.lifetime, ptr_attrs.lifetime, ptr_attr_tok,
+                                                            "a pointer type within a parameter or return type");
+                        !_rv.has_value()) {
+                        return std::unexpected(std::move(_rv).error());
+                    }
+                }
+                if (ptr_attrs.has("null_terminated")) {
+                    if (!allow_type_lifetime_attributes_) {
+                        return std::unexpected(ParseError(ptr_attr_tok.line, ptr_attr_tok.column,
+                                         "'[[scpp::null_terminated]]' cannot appertain to a type here -- only to a 'char*' or 'const char*' parameter declaration or function declarator"));
+                    }
+                    if (auto _rv = merge_null_terminated_attribute(type.is_null_terminated, true, ptr_attr_tok,
+                                                                   "a pointer type within a parameter or return type");
+                        !_rv.has_value()) {
+                        return std::unexpected(std::move(_rv).error());
+                    }
+                }
+            }
             if (match(TokenKind::KwConst)) type.is_const_qualified = true;
         }
         return type;
@@ -4510,6 +4645,9 @@ private:
         auto attrs_result = parse_attribute_specifier_seq();
         if (!attrs_result.has_value()) return std::unexpected(std::move(attrs_result).error());
         ParsedAttributes attrs = std::move(attrs_result).value();
+        if (auto _rv = reject_null_terminated_attribute(attrs, attr_start_tok, "a template type argument"); !_rv.has_value()) {
+            return std::unexpected(std::move(_rv).error());
+        }
         if (attrs.lifetime.present() && !allow_type_lifetime_attributes_) {
             {
                 std::string _msg_3504{"'[[scpp::lifetime(name)]]' cannot appertain to a type-id here -- only to an eligible "};
@@ -4536,6 +4674,7 @@ private:
         if (!ptr_attrs_result.has_value()) return std::unexpected(std::move(ptr_attrs_result).error());
         ParsedAttributes ptr_attrs = std::move(ptr_attrs_result).value();
         if (auto _rv = reject_packed_attribute(ptr_attrs, attr_start_tok, "a function-pointer declarator"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+        if (auto _rv = reject_null_terminated_attribute(ptr_attrs, attr_start_tok, "a function-pointer declarator"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
         auto fn_ptr_name_result = expect(TokenKind::Identifier, "function pointer name");
         if (!fn_ptr_name_result.has_value()) return std::unexpected(std::move(fn_ptr_name_result).error());
         out_name = std::string(fn_ptr_name_result.value().text.data(), fn_ptr_name_result.value().text.size());
@@ -4806,6 +4945,7 @@ private:
         clone.loc = fn.loc;
         for (const Param& param : fn.params) clone.params.push_back(deep_clone_param(param));
         clone.return_lifetime = fn.return_lifetime;
+        clone.return_is_null_terminated = fn.return_is_null_terminated;
         if (keep_body && fn.body != nullptr) clone.body = deep_clone_stmt(*fn.body);
         clone.is_extern_c = fn.is_extern_c;
         clone.is_module_extern = fn.is_module_extern;
@@ -4884,6 +5024,22 @@ private:
     // modules.
     [[nodiscard]] std::expected<void, ParseError> merge_imported_module(Program& program, const Program& imported, const std::string& imported_name,
                                 bool is_reexport) {
+        program.visible_imported_modules[program.module_name].insert(imported_name);
+        for (const std::string& reexported : imported.reexported_modules) {
+            program.visible_imported_modules[program.module_name].insert(reexported);
+        }
+        if (is_reexport) {
+            program.reexported_modules.insert(imported_name);
+            for (const std::string& reexported : imported.reexported_modules) {
+                program.reexported_modules.insert(reexported);
+            }
+        }
+        for (const auto& entry : imported.visible_imported_modules) {
+            std::unordered_set<std::string>& dst = program.visible_imported_modules[entry.first];
+            for (const std::string& vis_mod : entry.second) {
+                dst.insert(vis_mod);
+            }
+        }
         std::unordered_set<std::string> hidden_function_designators = imported_hidden_function_designators(imported);
         for (const EnumDef& enum_def : imported.enums) {
             std::string effective_owner{};
@@ -4892,8 +5048,7 @@ private:
             } else {
                 effective_owner = enum_def.owning_module;
             }
-            if (!enum_def.is_exported && effective_owner != imported_name) continue;
-            if (!enum_def.is_exported && !enum_def.is_compile_time_dependency) continue;
+            if (effective_owner == imported_name && !enum_def.is_exported && !enum_def.is_compile_time_dependency) continue;
             if (enum_def.is_exported) struct_names_.insert(enum_def.name);
             EnumDef* existing_enum = nullptr;
             for (std::size_t i = 0; i < program.enums.size(); i++) {
@@ -4925,8 +5080,7 @@ private:
             } else {
                 effective_owner = struct_def.owning_module;
             }
-            if (!struct_def.is_exported && effective_owner != imported_name) continue;
-            if (!struct_def.is_exported && !struct_def.is_compile_time_dependency) continue;
+            if (effective_owner == imported_name && !struct_def.is_exported && !struct_def.is_compile_time_dependency) continue;
             if (struct_def.is_exported) {
                 struct_names_.insert(struct_def.name);
                 if (auto _rv = register_record_tag_kind(struct_def.name, struct_def.is_union ? RecordTagKind::Union : RecordTagKind::Struct, struct_def.loc); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
@@ -4965,8 +5119,7 @@ private:
             } else {
                 effective_owner = class_def.owning_module;
             }
-            if (!class_def.is_exported && effective_owner != imported_name) continue;
-            if (!class_def.is_exported && !class_def.is_compile_time_dependency) continue;
+            if (effective_owner == imported_name && !class_def.is_exported && !class_def.is_compile_time_dependency) continue;
             if (class_def.is_exported) {
                 struct_names_.insert(class_def.name);
                 class_names_.insert(class_def.name);
@@ -5004,14 +5157,14 @@ private:
             program.classes.push_back(std::move(clone_class));
         }
         for (const TypeAliasDecl& alias : imported.type_aliases) {
-            if (!alias.is_exported) continue;
-            type_aliases_.insert_or_assign(alias.name, alias.underlying_type);
             std::string effective_owner{};
             if (alias.owning_module.empty()) {
                 effective_owner = imported_name;
             } else {
                 effective_owner = alias.owning_module;
             }
+            if (effective_owner == imported_name && !alias.is_exported) continue;
+            if (alias.is_exported) type_aliases_.insert_or_assign(alias.name, alias.underlying_type);
             TypeAliasDecl* existing_alias = nullptr;
             for (std::size_t i = 0; i < program.type_aliases.size(); i++) {
                 if (program.type_aliases[i].owning_module == effective_owner && program.type_aliases[i].name == alias.name &&
@@ -5050,8 +5203,8 @@ private:
             } else {
                 effective_owner = concept_def.owning_module;
             }
-            if (!concept_def.is_exported) continue;
-            concept_names_.insert(concept_def.name);
+            if (effective_owner == imported_name && !concept_def.is_exported) continue;
+            if (concept_def.is_exported) concept_names_.insert(concept_def.name);
             ConceptDef* existing_concept = nullptr;
             for (std::size_t i = 0; i < program.concepts.size(); i++) {
                 if (program.concepts[i].owning_module == effective_owner && program.concepts[i].name == concept_def.name) {
@@ -5081,11 +5234,13 @@ private:
             } else {
                 effective_owner = fn.owning_module;
             }
-            if (!fn.is_exported && effective_owner != imported_name) continue;
             bool keep_body = imported_function_body_must_stay_available(imported, fn);
             bool needs_hidden_compile_time_visibility =
-                !fn.is_exported && hidden_function_designators.contains(fn.name);
-            if (!fn.is_exported && !fn.is_compile_time_dependency && !needs_hidden_compile_time_visibility) continue;
+                effective_owner == imported_name && !fn.is_exported && hidden_function_designators.contains(fn.name);
+            if (effective_owner == imported_name && !fn.is_exported && !fn.is_compile_time_dependency &&
+                !needs_hidden_compile_time_visibility) {
+                continue;
+            }
             if (fn.is_exported && !fn.template_params.empty()) generic_function_template_params_.insert_or_assign(fn.name, fn.template_params);
             Function* existing_fn = nullptr;
             for (std::size_t i = 0; i < program.functions.size(); i++) {
@@ -5122,13 +5277,13 @@ private:
             program.functions.push_back(std::move(clone_fn));
         }
         for (const GlobalVar& global : imported.globals) {
-            if (!global.is_exported) continue;
             std::string effective_owner{};
             if (global.owning_module.empty()) {
                 effective_owner = imported_name;
             } else {
                 effective_owner = global.owning_module;
             }
+            if (effective_owner == imported_name && !global.is_exported) continue;
             GlobalVar* existing_global = nullptr;
             for (std::size_t i = 0; i < program.globals.size(); i++) {
                 if (program.globals[i].owning_module == effective_owner && program.globals[i].decl != nullptr &&
@@ -5196,8 +5351,22 @@ private:
                               _msg_4019));
             }
         }
+        for (const auto& entry : partition.visible_imported_modules) {
+            std::unordered_set<std::string>& dst = program.visible_imported_modules[entry.first];
+            for (const std::string& vis_mod : entry.second) {
+                dst.insert(vis_mod);
+            }
+        }
+        if (is_reexport) {
+            for (const std::string& reexported : partition.reexported_modules) {
+                program.reexported_modules.insert(reexported);
+            }
+        }
         for (EnumDef& enum_def : partition.enums) {
-            struct_names_.insert(enum_def.name);
+            if (program_record_is_name_visible_from(program, program.module_name, enum_def.owning_module,
+                                                    enum_def.is_compile_time_dependency)) {
+                struct_names_.insert(enum_def.name);
+            }
             EnumDef* existing_enum = nullptr;
             for (std::size_t i = 0; i < program.enums.size(); i++) {
                 if (program.enums[i].owning_module == enum_def.owning_module && same_enum_identity(program.enums[i], enum_def)) {
@@ -5220,11 +5389,14 @@ private:
             program.enums.push_back(std::move(enum_def));
         }
         for (StructDef& struct_def : partition.structs) {
-            struct_names_.insert(struct_def.name);
-            if (auto _rv = register_record_tag_kind(struct_def.name, struct_def.is_union ? RecordTagKind::Union : RecordTagKind::Struct, struct_def.loc); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
-            if (!struct_def.template_params.empty()) {
-                generic_type_names_.insert(struct_def.name);
-                ordinary_generic_type_template_params_.insert_or_assign(struct_def.name, struct_def.template_params);
+            if (program_record_is_name_visible_from(program, program.module_name, struct_def.owning_module,
+                                                    struct_def.is_compile_time_dependency)) {
+                struct_names_.insert(struct_def.name);
+                if (auto _rv = register_record_tag_kind(struct_def.name, struct_def.is_union ? RecordTagKind::Union : RecordTagKind::Struct, struct_def.loc); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+                if (!struct_def.template_params.empty()) {
+                    generic_type_names_.insert(struct_def.name);
+                    ordinary_generic_type_template_params_.insert_or_assign(struct_def.name, struct_def.template_params);
+                }
             }
             StructDef* existing_struct = nullptr;
             for (std::size_t i = 0; i < program.structs.size(); i++) {
@@ -5248,15 +5420,18 @@ private:
             program.structs.push_back(std::move(struct_def));
         }
         for (ClassDef& class_def : partition.classes) {
-            struct_names_.insert(class_def.name);
-            class_names_.insert(class_def.name);
-            if (auto _rv = register_record_tag_kind(class_def.name, RecordTagKind::Class, class_def.loc); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
-            if (!class_def.template_params.empty() || class_def.is_variadic_primary_template) {
-                generic_type_names_.insert(class_def.name);
-                if (class_def.is_variadic_primary_template) {
-                    variadic_primary_template_params_.insert_or_assign(class_def.name, class_def.template_params);
-                } else if (!class_def.is_partial_specialization) {
-                    ordinary_generic_type_template_params_.insert_or_assign(class_def.name, class_def.template_params);
+            if (program_record_is_name_visible_from(program, program.module_name, class_def.owning_module,
+                                                    class_def.is_compile_time_dependency)) {
+                struct_names_.insert(class_def.name);
+                class_names_.insert(class_def.name);
+                if (auto _rv = register_record_tag_kind(class_def.name, RecordTagKind::Class, class_def.loc); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+                if (!class_def.template_params.empty() || class_def.is_variadic_primary_template) {
+                    generic_type_names_.insert(class_def.name);
+                    if (class_def.is_variadic_primary_template) {
+                        variadic_primary_template_params_.insert_or_assign(class_def.name, class_def.template_params);
+                    } else if (!class_def.is_partial_specialization) {
+                        ordinary_generic_type_template_params_.insert_or_assign(class_def.name, class_def.template_params);
+                    }
                 }
             }
             ClassDef* existing_class = nullptr;
@@ -5281,7 +5456,9 @@ private:
             program.classes.push_back(std::move(class_def));
         }
         for (TypeAliasDecl& alias : partition.type_aliases) {
-            type_aliases_.insert_or_assign(alias.name, alias.underlying_type);
+            if (program_module_is_name_visible_from(program, program.module_name, alias.owning_module)) {
+                type_aliases_.insert_or_assign(alias.name, alias.underlying_type);
+            }
             TypeAliasDecl* existing_alias = nullptr;
             for (std::size_t i = 0; i < program.type_aliases.size(); i++) {
                 if (program.type_aliases[i].owning_module == alias.owning_module && program.type_aliases[i].name == alias.name &&
@@ -5314,7 +5491,9 @@ private:
         // partition of the same module (e.g. `:vector`), exactly like a
         // struct/class/type-alias declared in one partition already is.
         for (ConceptDef& concept_def : partition.concepts) {
-            concept_names_.insert(concept_def.name);
+            if (program_module_is_name_visible_from(program, program.module_name, concept_def.owning_module)) {
+                concept_names_.insert(concept_def.name);
+            }
             ConceptDef* existing_concept = nullptr;
             for (std::size_t i = 0; i < program.concepts.size(); i++) {
                 if (program.concepts[i].owning_module == concept_def.owning_module && program.concepts[i].name == concept_def.name) {
@@ -5336,6 +5515,11 @@ private:
             program.concepts.push_back(std::move(concept_def));
         }
         for (Function& fn : partition.functions) {
+            if (!fn.template_params.empty() &&
+                program_record_is_name_visible_from(program, program.module_name, effective_function_owning_module(fn),
+                                                    fn.is_compile_time_dependency)) {
+                generic_function_template_params_.insert_or_assign(fn.name, fn.template_params);
+            }
             Function* existing_fn = nullptr;
             for (std::size_t i = 0; i < program.functions.size(); i++) {
                 if (program.functions[i].owning_module == fn.owning_module &&
@@ -5499,6 +5683,9 @@ private:
         auto leading_attrs_result = parse_attribute_specifier_seq();
         if (!leading_attrs_result.has_value()) return std::unexpected(std::move(leading_attrs_result).error());
         ParsedAttributes leading_attrs = std::move(leading_attrs_result).value();
+        if (auto _rv = reject_null_terminated_attribute(leading_attrs, attr_start_tok, "a declaration's leading attribute-specifier-seq"); !_rv.has_value()) {
+            return std::unexpected(std::move(_rv).error());
+        }
         bool requested_unsafe = leading_attrs.has("unsafe");
         bool requested_packed = leading_attrs.has("packed");
         bool requested_nodiscard = leading_attrs.has_nodiscard;
@@ -6384,9 +6571,13 @@ private:
         // real C++ grammar already gives a class-head an optional
         // attribute-specifier-seq right after its class-key, the same
         // slot `struct [[deprecated]] Name { ... };` would use.
+        const Token& struct_attr_tok = peek();
         auto attrs_result = parse_attribute_specifier_seq();
         if (!attrs_result.has_value()) return std::unexpected(std::move(attrs_result).error());
         ParsedAttributes attrs = std::move(attrs_result).value();
+        if (auto _rv = reject_null_terminated_attribute(attrs, struct_attr_tok, "a 'struct' declaration"); !_rv.has_value()) {
+            return std::unexpected(std::move(_rv).error());
+        }
         auto trailing_alignments_result = parse_alignment_specifier_seq();
         if (!trailing_alignments_result.has_value()) return std::unexpected(std::move(trailing_alignments_result).error());
         std::vector<AlignmentSpecifier> trailing_alignments = std::move(trailing_alignments_result).value();
@@ -6606,9 +6797,13 @@ private:
 
         def.loc = loc;
         def.is_union = true;
+        const Token& union_attr_tok = peek();
         auto attrs_result = parse_attribute_specifier_seq();
         if (!attrs_result.has_value()) return std::unexpected(std::move(attrs_result).error());
         ParsedAttributes attrs = std::move(attrs_result).value();
+        if (auto _rv = reject_null_terminated_attribute(attrs, union_attr_tok, "a 'union' declaration"); !_rv.has_value()) {
+            return std::unexpected(std::move(_rv).error());
+        }
         auto trailing_alignments_result = parse_alignment_specifier_seq();
         if (!trailing_alignments_result.has_value()) return std::unexpected(std::move(trailing_alignments_result).error());
         std::vector<AlignmentSpecifier> trailing_alignments = std::move(trailing_alignments_result).value();
@@ -6787,6 +6982,16 @@ private:
                 if (auto _rv = reject_packed_attribute(param_attrs, param_attr_start_tok, "a parameter declaration"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
                 param.require_thread_movable = param_attrs.has("thread_movable");
                 param.require_thread_shareable = param_attrs.has("thread_shareable");
+                if (auto _rv = merge_null_terminated_attribute(param.is_null_terminated, param_attrs.has("null_terminated"),
+                                                               param_attr_start_tok, "a parameter declaration");
+                    !_rv.has_value()) {
+                    return std::unexpected(std::move(_rv).error());
+                }
+                if (auto _rv = hoist_type_null_terminated_annotation(param.type, param.is_null_terminated,
+                                                                     param_attr_start_tok, "a parameter declaration");
+                    !_rv.has_value()) {
+                    return std::unexpected(std::move(_rv).error());
+                }
                 if (auto _rv = merge_lifetime_attribute(param.lifetime, param_attrs.lifetime, param_attr_start_tok,
                                          "a parameter declaration"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
                 LifetimeAnnotation param_lifetime_for_hoist = param.lifetime;
@@ -6919,6 +7124,18 @@ private:
         if (!attrs_result.has_value()) return std::unexpected(std::move(attrs_result).error());
         ParsedAttributes attrs = std::move(attrs_result).value();
         if (auto _rv = reject_packed_attribute(attrs, attr_start_tok, what); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+        if (auto _rv = merge_null_terminated_attribute(fn.return_is_null_terminated, attrs.has("null_terminated"),
+                                                       attr_start_tok, what);
+            !_rv.has_value()) {
+            return std::unexpected(std::move(_rv).error());
+        }
+        bool return_null_terminated_for_hoist = fn.return_is_null_terminated;
+        if (auto _rv = hoist_type_null_terminated_annotation(fn.return_type, return_null_terminated_for_hoist,
+                                                             attr_start_tok, what);
+            !_rv.has_value()) {
+            return std::unexpected(std::move(_rv).error());
+        }
+        fn.return_is_null_terminated = return_null_terminated_for_hoist;
         if (auto _rv = merge_lifetime_attribute(fn.return_lifetime, attrs.lifetime, attr_start_tok, what); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
         LifetimeAnnotation return_lifetime_for_hoist = fn.return_lifetime;
         if (auto _rv = hoist_type_lifetime_annotation(fn.return_type, return_lifetime_for_hoist, attr_start_tok, what); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
@@ -7704,6 +7921,7 @@ private:
         if (!header_attrs_result.has_value()) return std::unexpected(std::move(header_attrs_result).error());
         ParsedAttributes header_attrs = std::move(header_attrs_result).value();
         if (auto _rv = reject_packed_attribute(header_attrs, header_attr_start_tok, "a function declaration"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+        if (auto _rv = reject_null_terminated_attribute(header_attrs, header_attr_start_tok, "a function declaration's leading attribute-specifier-seq"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
         bool header_is_unsafe = is_unsafe || header_attrs.has("unsafe");
         bool header_is_nodiscard = is_nodiscard || header_attrs.has_nodiscard;
         std::string header_nodiscard_reason = nodiscard_reason;
@@ -7845,6 +8063,15 @@ private:
                     ParsedAttributes helper_attrs = std::move(helper_attrs_result).value();
                     if (auto _rv = reject_packed_attribute(helper_attrs, helper_attr_start_tok,
                                              "a requires-expression parameter declaration"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+                    if (auto _rv = reject_null_terminated_attribute(helper_attrs, helper_attr_start_tok,
+                                             "a requires-expression parameter declaration"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+                    bool unused_helper_nt = false;
+                    if (auto _rv = hoist_type_null_terminated_annotation(helper_type, unused_helper_nt, helper_attr_start_tok,
+                                                  "a requires-expression parameter declaration"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+                    if (unused_helper_nt) {
+                        return std::unexpected(ParseError(helper_attr_start_tok.line, helper_attr_start_tok.column,
+                                         "'[[scpp::null_terminated]]' cannot appertain to a requires-expression parameter declaration"));
+                    }
                     LifetimeAnnotation helper_lifetime{};
 
                     if (auto _rv = merge_lifetime_attribute(helper_lifetime, helper_attrs.lifetime, helper_attr_start_tok,
@@ -8259,9 +8486,11 @@ private:
                                                     std::vector<GenericTypeParam> template_params) {
         SourceLocation loc = current_loc();
         if (auto _r = expect(TokenKind::KwClass, "'class'"); !_r.has_value()) return std::unexpected(std::move(_r).error());
+        const Token& class_attr_tok = peek();
         auto class_attrs_result = parse_attribute_specifier_seq();
         if (!class_attrs_result.has_value()) return std::unexpected(std::move(class_attrs_result).error());
         ParsedAttributes class_attrs = std::move(class_attrs_result).value();
+        if (auto _rv = reject_null_terminated_attribute(class_attrs, class_attr_tok, "a 'class' declaration"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
         if (class_attrs.has("packed")) {
             return std::unexpected(ParseError(loc.line, loc.column,
                              "'[[scpp::packed]]' is only supported on struct/union declarations"));
@@ -8328,9 +8557,11 @@ private:
                 }
             }
         }
+        const Token& spec_class_attr_tok = peek();
         auto class_attrs_result = parse_attribute_specifier_seq();
         if (!class_attrs_result.has_value()) return std::unexpected(std::move(class_attrs_result).error());
         ParsedAttributes class_attrs = std::move(class_attrs_result).value();
+        if (auto _rv = reject_null_terminated_attribute(class_attrs, spec_class_attr_tok, "a 'class' declaration"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
         if (class_attrs.has("packed")) {
             return std::unexpected(ParseError(loc.line, loc.column,
                              "'[[scpp::packed]]' is only supported on struct/union declarations"));
@@ -8487,9 +8718,11 @@ private:
         }
         // ch05 §5.15: `class [[scpp::thread_movable]] Name { ... };` --
         // see parse_struct_def's identical handling.
+        const Token& def_class_attr_tok = peek();
         auto class_attrs_result = parse_attribute_specifier_seq();
         if (!class_attrs_result.has_value()) return std::unexpected(std::move(class_attrs_result).error());
         ParsedAttributes class_attrs = std::move(class_attrs_result).value();
+        if (auto _rv = reject_null_terminated_attribute(class_attrs, def_class_attr_tok, "a 'class' declaration"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
         auto trailing_alignments_result = parse_alignment_specifier_seq();
         if (!trailing_alignments_result.has_value()) return std::unexpected(std::move(trailing_alignments_result).error());
         std::vector<AlignmentSpecifier> trailing_alignments = std::move(trailing_alignments_result).value();
@@ -8889,6 +9122,7 @@ private:
             if (!member_attrs_result.has_value()) return std::unexpected(std::move(member_attrs_result).error());
             ParsedAttributes member_attrs = std::move(member_attrs_result).value();
             if (auto _rv = reject_packed_attribute(member_attrs, member_attr_start_tok, member_decl_context.data()); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+            if (auto _rv = reject_null_terminated_attribute(member_attrs, member_attr_start_tok, member_decl_context.data()); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
             bool member_requested_unsafe = member_attrs.has("unsafe");
             bool member_requested_nodiscard = member_attrs.has_nodiscard;
             std::string member_nodiscard_reason = member_attrs.nodiscard_reason;
@@ -9196,7 +9430,7 @@ private:
                 // any cv-/ref-qualifier) has been read.
                 member_type = named_type("void");
             } else {
-                auto member_type_result = parse_type();
+                auto member_type_result = parse_type_with_lifetime_attributes_enabled();
 
                 if (!member_type_result.has_value()) return std::unexpected(std::move(member_type_result).error());
 
@@ -9355,6 +9589,10 @@ private:
                     return std::unexpected(ParseError(member_loc.line, member_loc.column,
                                      "a member variable cannot be declared virtual"));
                 }
+                if (any_type_has_lifetime_or_null_terminated_annotation(member_type)) {
+                    return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                     "'[[scpp::lifetime(name)]]' and '[[scpp::null_terminated]]' cannot appertain to a member variable"));
+                }
                 std::string field_name{};
 
                 auto field_type_result = parse_function_pointer_declarator(std::move(member_type), field_name);
@@ -9407,6 +9645,7 @@ private:
                     member_type = std::move(trailing_return_result).value();
                 }
                 fn.return_type = std::move(member_type);
+                if (auto _rv = parse_function_trailing_attributes(fn, "a member function declarator"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
                 fn.name = synthesized_member_owner_name;
                 fn.name += "_";
                 fn.name += member_name;
@@ -9533,9 +9772,22 @@ private:
                 const Token& tok = peek();
                 return std::unexpected(ParseError(tok.line, tok.column, "bit-field declarations are not supported in this version"));
             }
+            if (any_type_has_lifetime_or_null_terminated_annotation(member_type)) {
+                return std::unexpected(ParseError(member_loc.line, member_loc.column,
+                                 "'[[scpp::lifetime(name)]]' and '[[scpp::null_terminated]]' cannot appertain to a member variable"));
+            }
             auto field_type_result = parse_array_suffix(std::move(member_type));
             if (!field_type_result.has_value()) return std::unexpected(std::move(field_type_result).error());
             Type field_type = std::move(field_type_result).value();
+            if (check(TokenKind::LBracket) && peek_at(1).kind == TokenKind::LBracket) {
+                const Token& field_attr_tok = peek();
+                auto field_attrs_result = parse_attribute_specifier_seq();
+                if (!field_attrs_result.has_value()) return std::unexpected(std::move(field_attrs_result).error());
+                ParsedAttributes field_attrs = std::move(field_attrs_result).value();
+                if (auto _rv = reject_packed_attribute(field_attrs, field_attr_tok, "a member variable"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+                if (auto _rv = reject_null_terminated_attribute(field_attrs, field_attr_tok, "a member variable"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+                if (auto _rv = reject_lifetime_attribute(field_attrs, field_attr_tok, "a member variable"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+            }
             auto default_initializer_result = parse_optional_default_initializer(std::string(member_decl_context.data(), member_decl_context.size()));
             if (!default_initializer_result.has_value()) return std::unexpected(std::move(default_initializer_result).error());
             std::optional<Initializer> default_initializer = std::move(default_initializer_result).value();
@@ -9806,6 +10058,16 @@ private:
                 if (auto _rv = reject_packed_attribute(param_attrs, param_attr_start_tok, "a parameter declaration"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
                 param.require_thread_movable = param_attrs.has("thread_movable");
                 param.require_thread_shareable = param_attrs.has("thread_shareable");
+                if (auto _rv = merge_null_terminated_attribute(param.is_null_terminated, param_attrs.has("null_terminated"),
+                                                               param_attr_start_tok, "a parameter declaration");
+                    !_rv.has_value()) {
+                    return std::unexpected(std::move(_rv).error());
+                }
+                if (auto _rv = hoist_type_null_terminated_annotation(param.type, param.is_null_terminated,
+                                                                     param_attr_start_tok, "a parameter declaration");
+                    !_rv.has_value()) {
+                    return std::unexpected(std::move(_rv).error());
+                }
                 if (auto _rv = merge_lifetime_attribute(param.lifetime, param_attrs.lifetime, param_attr_start_tok,
                                          "a parameter declaration"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
                 LifetimeAnnotation param_lifetime_for_hoist = param.lifetime;
@@ -9872,6 +10134,18 @@ private:
             if (!trailing_return_result.has_value()) return std::unexpected(std::move(trailing_return_result).error());
             fn.return_type = std::move(trailing_return_result).value();
         }
+        if (auto _rv = merge_null_terminated_attribute(fn.return_is_null_terminated, fn_attrs.has("null_terminated"),
+                                                       fn_attr_start_tok, "a function declarator");
+            !_rv.has_value()) {
+            return std::unexpected(std::move(_rv).error());
+        }
+        bool return_null_terminated_for_hoist = fn.return_is_null_terminated;
+        if (auto _rv = hoist_type_null_terminated_annotation(fn.return_type, return_null_terminated_for_hoist,
+                                                             fn_attr_start_tok, "a function declarator");
+            !_rv.has_value()) {
+            return std::unexpected(std::move(_rv).error());
+        }
+        fn.return_is_null_terminated = return_null_terminated_for_hoist;
         if (auto _rv = merge_lifetime_attribute(fn.return_lifetime, fn_attrs.lifetime, fn_attr_start_tok, "a function declarator"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
         LifetimeAnnotation return_lifetime_for_hoist = fn.return_lifetime;
         if (auto _rv = hoist_type_lifetime_annotation(fn.return_type, return_lifetime_for_hoist, fn_attr_start_tok, "a function declarator"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
@@ -10167,6 +10441,7 @@ private:
             if (!attrs_result.has_value()) return std::unexpected(std::move(attrs_result).error());
             ParsedAttributes attrs = std::move(attrs_result).value();
             if (auto _rv = reject_packed_attribute(attrs, attr_start_tok, "a statement"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+            if (auto _rv = reject_null_terminated_attribute(attrs, attr_start_tok, "a statement"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
             if (attrs.has_fallthrough) {
                 if (!check(TokenKind::Semicolon)) {
                     const Token& tok = peek();
@@ -10404,6 +10679,19 @@ private:
             auto type_result = parse_array_suffix(base);
             if (!type_result.has_value()) return std::unexpected(std::move(type_result).error());
             stmt->type = std::move(type_result).value();
+        }
+        if (check(TokenKind::LBracket) && peek_at(1).kind == TokenKind::LBracket) {
+            const Token& var_attr_tok = peek();
+            auto var_attrs_result = parse_attribute_specifier_seq();
+            if (!var_attrs_result.has_value()) return std::unexpected(std::move(var_attrs_result).error());
+            ParsedAttributes var_attrs = std::move(var_attrs_result).value();
+            if (auto _rv = reject_packed_attribute(var_attrs, var_attr_tok, "a variable declaration"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+            if (auto _rv = reject_null_terminated_attribute(var_attrs, var_attr_tok, "a variable declaration"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+            if (auto _rv = reject_lifetime_attribute(var_attrs, var_attr_tok, "a variable declaration"); !_rv.has_value()) return std::unexpected(std::move(_rv).error());
+            if (var_attrs.has("unsafe")) {
+                return std::unexpected(ParseError(var_attr_tok.line, var_attr_tok.column,
+                                 "'[[scpp::unsafe]]' cannot appertain to a variable declaration -- only to a compound-statement or a function's own declaration (ch01 §1.3)"));
+            }
         }
         if (qualify_variable_name) stmt->var_name = qualify_name(stmt->var_name);
         if (match(TokenKind::Assign)) {

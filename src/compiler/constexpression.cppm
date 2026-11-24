@@ -1159,11 +1159,11 @@ public:
         steps_ = 0;
         call_depth_ = 0;
         string_storage_counter_ = 0;
-        std::vector<std::string> saved_namespace_path = enter_namespace(fn.namespace_path);
+        enter_lookup_scope_for_function(fn);
         frames_.emplace_back();
         auto result = validate_constexpr_stmt_tree(*fn.body);
         frames_.pop_back();
-        leave_namespace(saved_namespace_path);
+        leave_lookup_scope();
         return result;
     }
 
@@ -1203,8 +1203,10 @@ public:
         std::vector<std::string> namespace_path = global.namespace_path;
         std::string name = global.decl->var_name;
         SourceLocation loc = global.decl->loc;
+        enter_lookup_scope(namespace_path, global.owning_module);
         auto value_result =
             resolve_global_constant(name, namespace_path, /*explicit_global_qualification=*/false, loc);
+        leave_lookup_scope();
         if (!value_result.has_value()) return std::unexpected(std::move(value_result).error());
         std::shared_ptr<Cell> value = std::move(value_result).value();
         if (value == nullptr) return {};
@@ -1224,24 +1226,41 @@ public:
     // Copies rather than moves: `std::move` of a *member* is one of the
     // constructs self-hosting does not yet accept (see the identical
     // `std::move(frames_)` below), and src/ is dual-compiled.
-    [[nodiscard]] std::vector<std::string> enter_namespace(const std::vector<std::string>& namespace_path) {
-        std::vector<std::string> saved = lookup_namespace_path_;
+    void enter_lookup_scope(const std::vector<std::string>& namespace_path,
+                            const std::string& visibility_module) {
+        saved_lookup_namespace_paths_.push_back(std::vector<std::string>(lookup_namespace_path_));
+        saved_lookup_visibility_modules_.push_back(std::string(lookup_visibility_module_));
         lookup_namespace_path_ = namespace_path;
-        return saved;
+        lookup_visibility_module_ = visibility_module;
     }
 
-    void leave_namespace(const std::vector<std::string>& saved) { lookup_namespace_path_ = saved; }
+    void enter_lookup_scope_for_function(const Function& fn) {
+        const std::string& visibility_module =
+            !fn.visibility_module.empty() ? fn.visibility_module : fn.owning_module;
+        enter_lookup_scope(fn.namespace_path, visibility_module);
+    }
+
+    void leave_lookup_scope() {
+        std::size_t idx = saved_lookup_namespace_paths_.size() - 1;
+        std::vector<std::string> ns = saved_lookup_namespace_paths_[idx];
+        std::string mod = std::string(saved_lookup_visibility_modules_[idx]);
+        saved_lookup_namespace_paths_.pop_back();
+        saved_lookup_visibility_modules_.pop_back();
+        lookup_namespace_path_ = std::move(ns);
+        lookup_visibility_module_ = std::move(mod);
+    }
 
     [[nodiscard]] std::expected<std::uint64_t, ConstexprError> resolve_root_alignment_specs(const std::vector<AlignmentSpecifier>& specs, std::uint64_t natural_alignment,
                                                const std::string& what,
-                                               const std::vector<std::string>& namespace_path) {
+                                               const std::vector<std::string>& namespace_path,
+                                               const std::string& visibility_module = {}) {
         frames_.clear();
         steps_ = 0;
         call_depth_ = 0;
         string_storage_counter_ = 0;
-        std::vector<std::string> saved_namespace_path = enter_namespace(namespace_path);
+        enter_lookup_scope(namespace_path, visibility_module);
         auto result = resolve_alignment_specs(specs, natural_alignment, what);
-        leave_namespace(saved_namespace_path);
+        leave_lookup_scope();
         return result;
     }
 
@@ -1280,14 +1299,15 @@ public:
     // `resolve_root_alignment_specs`) before evaluating. Only safe to call
     // when no other evaluation is already in progress on this engine.
     [[nodiscard]] std::expected<std::int64_t, ConstexprError> resolve_root_array_bound(const Expr& expr,
-                                                                                       const std::vector<std::string>& namespace_path) {
+                                                                                       const std::vector<std::string>& namespace_path,
+                                                                                       const std::string& visibility_module = {}) {
         frames_.clear();
         steps_ = 0;
         call_depth_ = 0;
         string_storage_counter_ = 0;
-        std::vector<std::string> saved_namespace_path = enter_namespace(namespace_path);
+        enter_lookup_scope(namespace_path, visibility_module);
         auto result = evaluate_and_validate_array_bound(expr);
-        leave_namespace(saved_namespace_path);
+        leave_lookup_scope();
         return result;
     }
 
@@ -1356,8 +1376,9 @@ public:
     // enclosing or the same block is visible to a later array bound, one
     // from a later statement or an unrelated sibling block is not, and an
     // inner declaration correctly shadows an outer one of the same name.
-    void begin_local_constant_scope(const std::vector<std::string>& namespace_path) {
-        saved_local_constant_namespace_path_ = enter_namespace(namespace_path);
+    void begin_local_constant_scope(const std::vector<std::string>& namespace_path,
+                                    const std::string& visibility_module = {}) {
+        enter_lookup_scope(namespace_path, visibility_module);
         frames_.clear();
         steps_ = 0;
         call_depth_ = 0;
@@ -1367,7 +1388,7 @@ public:
 
     void end_local_constant_scope() {
         frames_.pop_back();
-        leave_namespace(saved_local_constant_namespace_path_);
+        leave_lookup_scope();
     }
 
     void push_local_constant_scope() { frames_.emplace_back(); }
@@ -1454,7 +1475,9 @@ private:
     // its body runs -- so lookup never depends on which reference
     // happened to trigger the evaluation.
     std::vector<std::string> lookup_namespace_path_{};
-    std::vector<std::string> saved_local_constant_namespace_path_{};
+    std::string lookup_visibility_module_{};
+    std::vector<std::vector<std::string>> saved_lookup_namespace_paths_{};
+    std::vector<std::string> saved_lookup_visibility_modules_{};
 
     // ch05 §9.4(6): `struct Self { char buf[sizeof(Self)]; };` -- Self is
     // incomplete at this point, so evaluating its size/alignment must be
@@ -1927,7 +1950,8 @@ private:
         // not itself a constant expression has to have that initializer
         // fixed instead.
         std::optional<std::size_t> index =
-            find_visible_global_index(program_, lookup_namespace_path_, name, explicit_global_qualification);
+            find_visible_global_index(program_, lookup_namespace_path_, name, explicit_global_qualification,
+                                      lookup_visibility_module_);
         if (index.has_value()) {
             const GlobalVar& global = program_.globals[*index];
             if (global.decl != nullptr) {
@@ -1995,7 +2019,8 @@ private:
     resolve_global_constant(const std::string& name, const std::vector<std::string>& namespace_path,
                             bool explicit_global_qualification, const SourceLocation& loc) {
         std::optional<std::size_t> index =
-            find_visible_global_index(program_, namespace_path, name, explicit_global_qualification);
+            find_visible_global_index(program_, namespace_path, name, explicit_global_qualification,
+                                      lookup_visibility_module_);
         if (!index.has_value()) return nullptr;
         const GlobalVar& global = program_.globals[*index];
         if (global.decl == nullptr || !global.decl->init) return nullptr;
@@ -2020,9 +2045,9 @@ private:
         // A global's initializer is looked up from the namespace the
         // global itself was declared in, never from wherever the
         // reference that triggered this resolution happened to sit.
-        std::vector<std::string> saved_namespace_path = enter_namespace(global.namespace_path);
+        enter_lookup_scope(global.namespace_path, global.owning_module);
         auto value_result = evaluate_expr_in_context(*global.decl->init, make_type_ref(global.decl->type));
-        leave_namespace(saved_namespace_path);
+        leave_lookup_scope();
         frames_ = std::move(saved_frames);
         globals_resolving_.erase(key);
         if (!value_result.has_value()) {
@@ -2478,7 +2503,8 @@ private:
     [[nodiscard]] OptionalFunctionRef find_callable(const std::string& name, const std::vector<std::shared_ptr<Cell>>& args,
                                                 bool explicit_global_qualification,
                                                 const OptionalExprListRef& arg_exprs,
-                                                std::vector<std::size_t>& out_ambiguous) {
+                                                std::vector<std::size_t>& out_ambiguous,
+                                                bool allow_reachable_modules = false) {
         out_ambiguous.clear();
         if (!explicit_global_qualification) {
             for (std::size_t depth = lookup_namespace_path_.size(); depth > 0; --depth) {
@@ -2489,7 +2515,8 @@ private:
                 }
                 candidate += "::";
                 candidate += name;
-                if (OptionalFunctionRef found = find_callable_exact(candidate, args, arg_exprs, out_ambiguous);
+                if (OptionalFunctionRef found =
+                        find_callable_exact(candidate, args, arg_exprs, out_ambiguous, allow_reachable_modules);
                     found.has_value()) {
                     return found;
                 }
@@ -2498,12 +2525,13 @@ private:
                 if (out_ambiguous.size() > 1) return {};
             }
         }
-        return find_callable_exact(name, args, arg_exprs, out_ambiguous);
+        return find_callable_exact(name, args, arg_exprs, out_ambiguous, allow_reachable_modules);
     }
 
     [[nodiscard]] OptionalFunctionRef find_callable_exact(const std::string& name, const std::vector<std::shared_ptr<Cell>>& args,
                                                 const OptionalExprListRef& arg_exprs,
-                                                std::vector<std::size_t>& out_ambiguous) {
+                                                std::vector<std::size_t>& out_ambiguous,
+                                                bool allow_reachable_modules = false) {
         if (!functions_by_name_.contains(name)) return {};
         // Collect every match rather than returning the first. Returning
         // the first made a constexpr call's meaning depend on the order
@@ -2513,6 +2541,22 @@ private:
         std::vector<std::size_t> matches{};
         for (std::size_t fn_index : functions_by_name_.at(name)) {
             const Function& fn = program_.functions[fn_index];
+            if (!(fn.is_extern_c && fn.body == nullptr)) {
+                if (allow_reachable_modules) {
+                    if (fn.is_compile_time_dependency && !lookup_visibility_module_.empty() &&
+                        effective_function_owning_module(fn) != lookup_visibility_module_) {
+                        continue;
+                    }
+                    if (fn.is_compile_time_dependency && lookup_visibility_module_.empty() &&
+                        !effective_function_owning_module(fn).empty()) {
+                        continue;
+                    }
+                } else if (!program_record_is_name_visible_from(program_, lookup_visibility_module_,
+                                                                effective_function_owning_module(fn),
+                                                                fn.is_compile_time_dependency)) {
+                    continue;
+                }
+            }
             if (fn.params.size() != args.size()) continue;
             bool params_match = true;
             for (std::size_t i = 0; i < args.size(); ++i) {
@@ -3361,6 +3405,24 @@ private:
         return classes_by_name_.contains(name) || structs_by_name_.contains(name);
     }
 
+    [[nodiscard]] bool is_direct_call_record_visible(const Expr& expr) const {
+        if (!is_record_name(expr.name)) return false;
+        if (expr.type.kind == TypeKind::Named && !expr.type.name.empty() && expr.type.name == expr.name) {
+            return true;
+        }
+        if (classes_by_name_.contains(expr.name)) {
+            const ClassDef& def = program_.classes[classes_by_name_.at(expr.name)];
+            return program_record_is_name_visible_from(program_, lookup_visibility_module_, def.owning_module,
+                                                       def.is_compile_time_dependency);
+        }
+        if (structs_by_name_.contains(expr.name)) {
+            const StructDef& def = program_.structs[structs_by_name_.at(expr.name)];
+            return program_record_is_name_visible_from(program_, lookup_visibility_module_, def.owning_module,
+                                                       def.is_compile_time_dependency);
+        }
+        return false;
+    }
+
     // [dcl.init.aggr], stated once for the evaluator's two
     // constructor-call sites (evaluate_constructor_expr and the
     // local-declaration path) so they cannot drift apart. The codegen
@@ -3735,7 +3797,7 @@ private:
         frames_.emplace_back();
         // ch11 §11.5: while the callee's body runs, unqualified names in
         // it resolve from the callee's own namespace, not the caller's.
-        std::vector<std::string> saved_namespace_path = enter_namespace(fn.namespace_path);
+        enter_lookup_scope_for_function(fn);
         std::unordered_map<std::string, Binding>& frame = frames_.back();
         for (std::size_t i = 0; i < fn.params.size(); ++i) frame.emplace(fn.params[i].name, std::move(bindings[i]));
         auto init_result = execute_constructor_member_initializers(fn);
@@ -3743,7 +3805,7 @@ private:
         if (init_result.has_value()) {
             body_result = execute_stmt(*fn.body, fn.return_type);
         }
-        leave_namespace(saved_namespace_path);
+        leave_lookup_scope();
         frames_.pop_back();
         --call_depth_;
         if (!init_result.has_value()) return std::unexpected(std::move(init_result).error());
@@ -4352,7 +4414,7 @@ private:
                 for (const ExprPtr& arg : expr.args) all_args.push_back(make_expr_view(*arg));
                 return call_with_expr_arg_views(method_ref->get(), all_args, expr.loc);
             }();
-        if (is_record_name(expr.name)) return evaluate_constructor_expr(expr);
+        if (is_direct_call_record_visible(expr)) return evaluate_constructor_expr(expr);
         std::vector<std::shared_ptr<Cell>> arg_values{};
         arg_values.reserve(expr.args.size());
         for (const ExprPtr& arg : expr.args) {
@@ -4390,7 +4452,8 @@ private:
     // Forwards to scpp::find_enum_variant_index (scpp.ast), the one
     // enumerator-by-name lookup, which movecheck and codegen also ask.
     [[nodiscard]] std::optional<std::reference_wrapper<const EnumDef>> find_enum_for_variant(const std::string& variant_name) const {
-        std::optional<EnumVariantIndex> found = find_enum_variant_index(program_, variant_name);
+        std::optional<EnumVariantIndex> found =
+            find_enum_variant_index(program_, variant_name, lookup_visibility_module_);
         if (!found.has_value()) return {};
         const EnumDef& def = program_.enums[found->enum_index];
         return std::optional<std::reference_wrapper<const EnumDef>>{std::reference_wrapper<const EnumDef>{def}};
@@ -4403,7 +4466,8 @@ private:
     // "identifier 'E::B' is not available". Codegen has always folded the
     // same expression -- two layers, one question, two answers.
     [[nodiscard]] std::shared_ptr<Cell> enumerator_cell(const std::string& variant_name) const {
-        std::optional<EnumVariantIndex> found = find_enum_variant_index(program_, variant_name);
+        std::optional<EnumVariantIndex> found =
+            find_enum_variant_index(program_, variant_name, lookup_visibility_module_);
         if (!found.has_value()) return nullptr;
         const EnumDef& def = program_.enums[found->enum_index];
         auto cell = std::make_shared<Cell>();
@@ -4602,10 +4666,16 @@ private:
                         }
                         return std::nullopt;
                     }
-                    if (is_record_name(expr.name)) return named_type(expr.name);
+                    if (is_direct_call_record_visible(expr)) return named_type(expr.name);
                     if (functions_by_name_.contains(expr.name)) {
                         for (std::size_t fn_index : functions_by_name_.at(expr.name)) {
                             const Function& fn = program_.functions[fn_index];
+                            if (!(fn.is_extern_c && fn.body == nullptr) &&
+                                !program_record_is_name_visible_from(program_, lookup_visibility_module_,
+                                                                     effective_function_owning_module(fn),
+                                                                     fn.is_compile_time_dependency)) {
+                                continue;
+                            }
                             if (fn.params.size() == expr.args.size()) return fn.return_type;
                         }
                     }
@@ -5221,7 +5291,7 @@ private:
                         std::vector<std::size_t> tied_constructors{};
                         OptionalFunctionRef ctor_ref = find_callable(
                             constructor_name, arg_values, /*explicit_global_qualification=*/false,
-                            /*arg_exprs=*/no_expr_list_ref(), tied_constructors);
+                            /*arg_exprs=*/no_expr_list_ref(), tied_constructors, /*allow_reachable_modules=*/true);
                         if (!ctor_ref.has_value()) {
                             // A tie is the answer, not a miss: falling
                             // through to "no constexpr/consteval
@@ -5895,27 +5965,20 @@ public:
         }
         for (GlobalVar& global : program_.globals) {
             if (global.decl == nullptr) continue;
-            if (auto result = resolve_array_bounds_type_dependencies(global.decl->type, global.namespace_path); !result.has_value()) return result;
+            if (auto result = resolve_array_bounds_type_dependencies(global.decl->type, global.namespace_path, global.owning_module); !result.has_value()) return result;
         }
         for (Function& fn : program_.functions) {
             if (fn.is_generic_template) continue;
             if (!fn.member_owner_class.empty() && generic_template_owner_names_.contains(fn.member_owner_class)) {
                 continue;
             }
+            std::string fn_vis_module = effective_function_owning_module(fn);
             for (Param& param : fn.params) {
-                if (auto result = resolve_array_bounds_type_dependencies(param.type, fn.namespace_path); !result.has_value()) return result;
+                if (auto result = resolve_array_bounds_type_dependencies(param.type, fn.namespace_path, fn_vis_module); !result.has_value()) return result;
             }
-            if (auto result = resolve_array_bounds_type_dependencies(fn.return_type, fn.namespace_path); !result.has_value()) return result;
+            if (auto result = resolve_array_bounds_type_dependencies(fn.return_type, fn.namespace_path, fn_vis_module); !result.has_value()) return result;
             if (fn.body) {
-                // ch05 §9.4 (local-constexpr-as-array-bound gap fix):
-                // opens this function's own local constant-evaluation
-                // frame (see ConstexprEngine::begin_local_constant_scope)
-                // so a local `constexpr`/const-with-init declaration seen
-                // while walking this body below becomes visible to a
-                // later array bound in the same function, exactly like it
-                // already is for `alignas` via validate_constexpr_locals.
-                // Reset fresh per function -- never leaks across functions.
-                engine_.begin_local_constant_scope(fn.namespace_path);
+                engine_.begin_local_constant_scope(fn.namespace_path, fn_vis_module);
                 auto result = resolve_array_bounds_in_stmt(*fn.body);
                 engine_.end_local_constant_scope();
                 if (!result.has_value()) return result;
@@ -5933,7 +5996,7 @@ public:
         }
         for (GlobalVar& global : program_.globals) {
             if (global.decl == nullptr) continue;
-            if (auto result = resolve_type_dependencies(global.decl->type, global.namespace_path); !result.has_value()) return result;
+            if (auto result = resolve_type_dependencies(global.decl->type, global.namespace_path, global.owning_module); !result.has_value()) return result;
             std::optional<TypeLayoutInfo> layout = layout_of_type(program_, global.decl->type);
             if (!layout.has_value()) {
                 global.decl->resolved_alignment = 0;
@@ -5945,7 +6008,7 @@ public:
             alignment_context += "'";
             auto alignment_result =
                 engine_.resolve_root_alignment_specs(global.decl->alignment_specs, layout->abi_align_bytes, alignment_context,
-                                                     global.namespace_path);
+                                                     global.namespace_path, global.owning_module);
             if (!alignment_result.has_value()) return std::unexpected(std::move(alignment_result).error());
             global.decl->resolved_alignment = alignment_result.value();
         }
@@ -5994,7 +6057,8 @@ private:
     // `sizeof(Other)` inside an array-bound expression sees Other's own
     // array-sized fields correctly, regardless of declaration order.
     [[nodiscard]] std::expected<void, ConstexprError> resolve_array_bounds_type_dependencies(Type& type,
-                                                                                             const std::vector<std::string>& namespace_path) {
+                                                                                             const std::vector<std::string>& namespace_path,
+                                                                                             const std::string& visibility_module = {}) {
         switch (type.kind) {
             case TypeKind::Named:
                 if (OptionalStructDefRef bounds_struct = find_struct_mut(type.name); bounds_struct.has_value()) {
@@ -6006,14 +6070,14 @@ private:
             case TypeKind::Pointer:
             case TypeKind::Reference:
             case TypeKind::Span:
-                if (type.pointee) return resolve_array_bounds_type_dependencies(*type.pointee, namespace_path);
+                if (type.pointee) return resolve_array_bounds_type_dependencies(*type.pointee, namespace_path, visibility_module);
                 return {};
             case TypeKind::Array:
                 if (type.element) {
-                    if (auto result = resolve_array_bounds_type_dependencies(*type.element, namespace_path); !result.has_value()) return result;
+                    if (auto result = resolve_array_bounds_type_dependencies(*type.element, namespace_path, visibility_module); !result.has_value()) return result;
                 }
                 if (type.array_size_expr) {
-                    auto bound_result = engine_.resolve_root_array_bound(*type.array_size_expr, namespace_path);
+                    auto bound_result = engine_.resolve_root_array_bound(*type.array_size_expr, namespace_path, visibility_module);
                     if (!bound_result.has_value()) return std::unexpected(std::move(bound_result).error());
                     type.array_size = bound_result.value();
                     type.array_size_expr.reset();
@@ -6022,12 +6086,12 @@ private:
             case TypeKind::Function:
             case TypeKind::FunctionPointer:
                 if (type.function_return) {
-                    if (auto result = resolve_array_bounds_type_dependencies(*type.function_return, namespace_path); !result.has_value()) {
+                    if (auto result = resolve_array_bounds_type_dependencies(*type.function_return, namespace_path, visibility_module); !result.has_value()) {
                         return result;
                     }
                 }
                 for (Type& param : type.function_params) {
-                    if (auto result = resolve_array_bounds_type_dependencies(param, namespace_path); !result.has_value()) return result;
+                    if (auto result = resolve_array_bounds_type_dependencies(param, namespace_path, visibility_module); !result.has_value()) return result;
                 }
                 return {};
         }
@@ -6173,7 +6237,7 @@ private:
         }
         engine_.mark_type_incomplete(name);
         for (StructField& field : def.fields) {
-            if (auto result = resolve_array_bounds_type_dependencies(field.type, def.namespace_path); !result.has_value()) return result;
+            if (auto result = resolve_array_bounds_type_dependencies(field.type, def.namespace_path, def.owning_module); !result.has_value()) return result;
         }
         engine_.mark_type_complete(name);
         array_bounds_resolving_structs_.erase(name);
@@ -6214,10 +6278,10 @@ private:
         engine_.mark_type_incomplete(name);
         if (auto base = def.direct_ordinary_base(); base.has_value()) {
             Type base_type = base->get().base_type;
-            if (auto result = resolve_array_bounds_type_dependencies(base_type, def.namespace_path); !result.has_value()) return result;
+            if (auto result = resolve_array_bounds_type_dependencies(base_type, def.namespace_path, def.owning_module); !result.has_value()) return result;
         }
         for (ClassField& field : def.fields) {
-            if (auto result = resolve_array_bounds_type_dependencies(field.type, def.namespace_path); !result.has_value()) return result;
+            if (auto result = resolve_array_bounds_type_dependencies(field.type, def.namespace_path, def.owning_module); !result.has_value()) return result;
         }
         engine_.mark_type_complete(name);
         array_bounds_resolving_classes_.erase(name);
@@ -6240,7 +6304,8 @@ private:
     }
 
     [[nodiscard]] std::expected<void, ConstexprError> resolve_type_dependencies(Type& type,
-                                                                                const std::vector<std::string>& namespace_path) {
+                                                                                const std::vector<std::string>& namespace_path,
+                                                                                const std::string& visibility_module = {}) {
         switch (type.kind) {
             case TypeKind::Named:
                 if (OptionalStructDefRef dep_struct = find_struct_mut(type.name); dep_struct.has_value()) {
@@ -6252,20 +6317,14 @@ private:
             case TypeKind::Pointer:
             case TypeKind::Reference:
             case TypeKind::Span:
-                if (type.pointee) return resolve_type_dependencies(*type.pointee, namespace_path);
+                if (type.pointee) return resolve_type_dependencies(*type.pointee, namespace_path, visibility_module);
                 return {};
             case TypeKind::Array:
                 if (type.element) {
-                    if (auto result = resolve_type_dependencies(*type.element, namespace_path); !result.has_value()) return result;
+                    if (auto result = resolve_type_dependencies(*type.element, namespace_path, visibility_module); !result.has_value()) return result;
                 }
-                // ch05 §9.4: this array's own bound (not its element's --
-                // that was just handled by the recursive call above)
-                // must be resolved before any layout_of_type call below
-                // (natural_field_alignment/natural_struct_alignment/
-                // natural_class_alignment, and this same function's own
-                // callers) ever reads `array_size`.
                 if (type.array_size_expr) {
-                    auto bound_result = engine_.resolve_root_array_bound(*type.array_size_expr, namespace_path);
+                    auto bound_result = engine_.resolve_root_array_bound(*type.array_size_expr, namespace_path, visibility_module);
                     if (!bound_result.has_value()) return std::unexpected(std::move(bound_result).error());
                     type.array_size = bound_result.value();
                     type.array_size_expr.reset();
@@ -6274,10 +6333,10 @@ private:
             case TypeKind::Function:
             case TypeKind::FunctionPointer:
                 if (type.function_return) {
-                    if (auto result = resolve_type_dependencies(*type.function_return, namespace_path); !result.has_value()) return result;
+                    if (auto result = resolve_type_dependencies(*type.function_return, namespace_path, visibility_module); !result.has_value()) return result;
                 }
                 for (Type& param : type.function_params) {
-                    if (auto result = resolve_type_dependencies(param, namespace_path); !result.has_value()) return result;
+                    if (auto result = resolve_type_dependencies(param, namespace_path, visibility_module); !result.has_value()) return result;
                 }
                 return {};
         }
@@ -6357,7 +6416,7 @@ private:
         }
         engine_.mark_type_incomplete(name);
         for (StructField& field : def.fields) {
-            if (auto result = resolve_type_dependencies(field.type, def.namespace_path); !result.has_value()) return result;
+            if (auto result = resolve_type_dependencies(field.type, def.namespace_path, def.owning_module); !result.has_value()) return result;
         }
         if (def.is_packed && !def.alignment_specs.empty()) {
             std::string message{};
@@ -6385,7 +6444,7 @@ private:
             alignment_context += "'";
             auto alignment_result =
                 engine_.resolve_root_alignment_specs(field.alignment_specs, layout->abi_align_bytes, alignment_context,
-                                                     def.namespace_path);
+                                                     def.namespace_path, def.owning_module);
             if (!alignment_result.has_value()) return std::unexpected(std::move(alignment_result).error());
             field.resolved_alignment = alignment_result.value();
             if (def.is_packed && type_has_strengthened_record_alignment(field.type)) {
@@ -6403,7 +6462,7 @@ private:
         def_alignment_context += "'";
         auto def_alignment_result =
             engine_.resolve_root_alignment_specs(def.alignment_specs, natural_align, def_alignment_context,
-                                                 def.namespace_path);
+                                                 def.namespace_path, def.owning_module);
         if (!def_alignment_result.has_value()) return std::unexpected(std::move(def_alignment_result).error());
         def.resolved_alignment = def_alignment_result.value();
         engine_.mark_type_complete(name);
@@ -6442,10 +6501,10 @@ private:
         engine_.mark_type_incomplete(name);
         if (auto base = def.direct_ordinary_base(); base.has_value()) {
             Type base_type = base->get().base_type;
-            if (auto result = resolve_type_dependencies(base_type, def.namespace_path); !result.has_value()) return result;
+            if (auto result = resolve_type_dependencies(base_type, def.namespace_path, def.owning_module); !result.has_value()) return result;
         }
         for (ClassField& field : def.fields) {
-            if (auto result = resolve_type_dependencies(field.type, def.namespace_path); !result.has_value()) return result;
+            if (auto result = resolve_type_dependencies(field.type, def.namespace_path, def.owning_module); !result.has_value()) return result;
         }
         for (ClassField& field : def.fields) {
             std::optional<TypeLayoutInfo> layout = layout_of_type(program_, field.type);
@@ -6459,7 +6518,7 @@ private:
             alignment_context += "'";
             auto alignment_result =
                 engine_.resolve_root_alignment_specs(field.alignment_specs, layout->abi_align_bytes, alignment_context,
-                                                     def.namespace_path);
+                                                     def.namespace_path, def.owning_module);
             if (!alignment_result.has_value()) return std::unexpected(std::move(alignment_result).error());
             field.resolved_alignment = alignment_result.value();
         }
@@ -6470,7 +6529,7 @@ private:
         def_alignment_context += "'";
         auto def_alignment_result =
             engine_.resolve_root_alignment_specs(def.alignment_specs, natural_align, def_alignment_context,
-                                                 def.namespace_path);
+                                                 def.namespace_path, def.owning_module);
         if (!def_alignment_result.has_value()) return std::unexpected(std::move(def_alignment_result).error());
         def.resolved_alignment = def_alignment_result.value();
         engine_.mark_type_complete(name);
@@ -6528,7 +6587,7 @@ export namespace scpp {
         // `constexpr`/constant-`const` local declared earlier in this body
         // is visible to an immediate invocation written later in it.
         if (!stmt_may_fold_immediately(*fn.body, engine)) continue;
-        engine.begin_local_constant_scope(fn.namespace_path);
+        engine.begin_local_constant_scope(fn.namespace_path, effective_function_owning_module(fn));
         auto result = collect_runtime_stmt_rewrites(program, *fn.body, engine, expr_rewrites, consteval_if_rewrites,
                                                     fn.eval_mode == FunctionEvalMode::Consteval);
         engine.end_local_constant_scope();

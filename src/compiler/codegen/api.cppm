@@ -186,7 +186,8 @@ private:
     [[nodiscard]] static bool is_scalar_type_name(const std::string& name);
     [[nodiscard]] static const EnumDef* find_enum_def(const Program* program [[scpp::lifetime(p)]], const std::string& name) [[scpp::lifetime(p)]];
     [[nodiscard]] static const EnumVariant* find_enum_variant(const Program* program [[scpp::lifetime(p)]], const std::string& name,
-                                                   const EnumDef** owning_enum = nullptr) [[scpp::lifetime(p)]];
+                                                   const EnumDef** owning_enum = nullptr,
+                                                   std::string_view viewer_module = {}) [[scpp::lifetime(p)]];
 
     [[nodiscard]] static bool is_enum_cast_store_builtin_name(const std::string& name);
 
@@ -432,6 +433,8 @@ private:
     std::unordered_map<std::string, llvm::LLVMValueRef> ordinary_vtables_{};
     std::unordered_map<std::string, llvm::LLVMValueRef> ordinary_destructor_thunks_{};
     std::vector<std::string> current_global_namespace_path_{};
+    bool has_current_global_context_ = false;
+    std::string current_global_owning_module_{};
 
     [[nodiscard]] std::string default_debug_source_path() const;
 
@@ -440,6 +443,13 @@ private:
     [[nodiscard]] llvm::LLVMMetadataRef debug_file_for_program();
 
     [[nodiscard]] const std::vector<std::string>& current_lookup_namespace_path() const;
+
+    [[nodiscard]] std::string current_visibility_module() const;
+
+    [[nodiscard]] bool is_direct_function_name_visible_in_current_context(const Function& fn) const;
+
+    [[nodiscard]] bool is_direct_record_name_visible_in_current_context(const std::string& record_name,
+                                                                        const Expr& call_expr) const;
 
     [[nodiscard]] const GlobalSlot* find_visible_global_slot(const std::string& name,
                                                              bool explicit_global_qualification = false) const;
@@ -619,7 +629,8 @@ private:
     const Function* resolve_overload_by_type(const std::string& callee_name, const std::vector<ExprPtr>& args,
                                               std::size_t param_offset, bool receiver_is_mutable = true,
                                               const Expr* receiver_expr = nullptr,
-                                              std::vector<const Function*>* out_ambiguous = nullptr);
+                                              std::vector<const Function*>* out_ambiguous = nullptr,
+                                              bool allow_reachable_modules = false);
 
     // The candidate set and the per-candidate viability test that
     // resolve_overload_by_type is built from, exposed so that
@@ -627,7 +638,8 @@ private:
     // the very predicates that failed rather than a second, drifting
     // re-implementation of them.
     std::vector<const Function*> collect_call_candidates(const std::string& callee_name, std::size_t param_offset,
-                                                         const Expr* receiver_expr);
+                                                         const Expr* receiver_expr,
+                                                         bool allow_reachable_modules = false);
 
     CallCandidateRejection classify_call_candidate(const Function& fn, const std::vector<ExprPtr>& args,
                                                    std::size_t param_offset, bool receiver_is_mutable,
@@ -991,7 +1003,8 @@ private:
     // parse_class_def used to create the method in the first place --
     // see ClassDef's own comment) -- then `&obj` is passed as the
     // implicit first (`this`) argument, ahead of the explicit ones.
-    [[nodiscard]] std::expected<CallResult, CodegenError> codegen_call(const Expr& expr);
+    [[nodiscard]] std::expected<CallResult, CodegenError> codegen_call(const Expr& expr,
+                                                                       bool allow_reachable_modules = false);
 
     // Builds the llvm::LLVM argument list for a call to `callee_def` (nullable
     // -- an unresolvable callee still needs *some* argument list, just

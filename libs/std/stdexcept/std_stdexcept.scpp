@@ -28,7 +28,7 @@ public:
 
     virtual ~runtime_error() = default;
 
-    const char* what() const {
+    const char* what() const [[scpp::null_terminated]] {
         return this->message_.c_str();
     }
 };

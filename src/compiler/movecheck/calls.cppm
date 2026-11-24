@@ -18,7 +18,7 @@ namespace scpp {
     [[scpp::unsafe]] {
         std::reference_wrapper<const Program> program_ref{*body.program};
         ret = find_visible_global(OptionalProgramRef{program_ref}, body.function_namespace_path, expr.name,
-                                   expr.explicit_global_qualification);
+                                   expr.explicit_global_qualification, body.function_visibility_module);
     }
     return ret;
 }
@@ -46,13 +46,25 @@ namespace scpp {
 // function calling it.
 [[nodiscard]] std::optional<std::string> resolve_visible_class_or_struct_name(
     const Program& program, const std::vector<std::string>& namespace_path, const std::string& name,
-    bool explicit_global_qualification) {
+    bool explicit_global_qualification, std::string_view viewer_module = {}, bool allow_reachable = false) {
     auto matches_name = [&](std::string_view candidate) {
         for (const ClassDef& def : program.classes) {
-            if (std::string_view{def.name} == candidate) return true;
+            if (std::string_view{def.name} != candidate) continue;
+            if (!allow_reachable &&
+                !program_record_is_name_visible_from(program, viewer_module, def.owning_module,
+                                                     def.is_compile_time_dependency)) {
+                continue;
+            }
+            return true;
         }
         for (const StructDef& def : program.structs) {
-            if (std::string_view{def.name} == candidate) return true;
+            if (std::string_view{def.name} != candidate) continue;
+            if (!allow_reachable &&
+                !program_record_is_name_visible_from(program, viewer_module, def.owning_module,
+                                                     def.is_compile_time_dependency)) {
+                continue;
+            }
+            return true;
         }
         return false;
     };
@@ -109,12 +121,16 @@ public:
     }
     for (std::size_t i = 0; i < num_aliases; i++) {
         std::string aname{};
+        std::string aowner{};
         Type atype{};
+        bool alias_visible = false;
         [[scpp::unsafe]] {
             aname = body.program->type_aliases[i].name;
+            aowner = body.program->type_aliases[i].owning_module;
             atype = body.program->type_aliases[i].underlying_type;
+            alias_visible = program_module_is_name_visible_from(*body.program, body.function_visibility_module, aowner);
         }
-        if (matches_name(aname)) return atype;
+        if (alias_visible && matches_name(aname)) return atype;
     }
     return std::nullopt;
 }
@@ -122,6 +138,7 @@ public:
 void rewrite_type_alias_constructor_call(Expr& expr, const Body& body) {
     std::optional<Type> alias_type = resolve_direct_type_alias_call_type(expr, body);
     if (!alias_type.has_value() || alias_type->kind != TypeKind::Named) return;
+    expr.type = *alias_type;
     expr.name = alias_type->name;
     expr.explicit_global_qualification = true;
 }
@@ -175,6 +192,8 @@ public:
         [[nodiscard]] bool is_named_class_type(const Type& type, const Body& body);
 [[nodiscard]] bool is_named_record_type(const Type& type, const Body& body);
 [[nodiscard]] bool compile_time_dependency_visible_in_body(const FunctionSignature& candidate, const Body& body);
+[[nodiscard]] bool module_name_visible_in_body(const FunctionSignature& candidate, const Body& body);
+[[nodiscard]] bool direct_callee_visible_in_body(const FunctionSignature& candidate, const Body& body);
 
 [[nodiscard]] bool is_copyable_class_lvalue_boundary_source(const Expr& expr, const Type& target_type,
                                                             const Body& body,
@@ -221,7 +240,8 @@ class ConditionalComposite {
                                                      const Signatures& signatures);
 [[nodiscard]] const FunctionSignature* resolve_overload(const Expr& call_expr, const CalleeSignature& callee,
                                                         const Body& body, const Signatures& signatures,
-                                                          std::vector<const FunctionSignature*>* out_ambiguous = nullptr);
+                                                          std::vector<const FunctionSignature*>* out_ambiguous = nullptr,
+                                                          bool allow_reachable_modules = false);
 [[nodiscard]] const FunctionSignature* find_const_blocked_method_candidate(const Expr& call_expr,
                                                                            const CalleeSignature& callee,
                                                                            const Body& body,
@@ -353,6 +373,7 @@ std::expected<void, DataflowError> check_enum_conversion_compatibility(const Typ
     sig.param_default_exprs.resize(sig.param_types.size(), nullptr);
     sig.param_require_thread_movable.resize(sig.param_types.size(), false);
     sig.param_require_thread_shareable.resize(sig.param_types.size(), false);
+    sig.param_is_null_terminated.resize(sig.param_types.size(), false);
     sig.return_type = *type.function_return;
     sig.is_unsafe = type.is_unsafe_function_pointer;
     return sig;
@@ -633,7 +654,8 @@ std::expected<void, DataflowError> check_enum_conversion_compatibility(const Typ
 [[nodiscard]] std::optional<Type> infer_expr_type(const Expr& expr, const Body& body, const Signatures& signatures);
 [[nodiscard]] const FunctionSignature* resolve_overload(const Expr& call_expr, const CalleeSignature& callee,
                                                           const Body& body, const Signatures& signatures,
-                                                          std::vector<const FunctionSignature*>* out_ambiguous);
+                                                          std::vector<const FunctionSignature*>* out_ambiguous,
+                                                          bool allow_reachable_modules);
 // is_read_only_reachable: defined in borrows.cppm -- module-extern per
 // SCPP spec ch11 §11.6 (see constructor_argument_conversions' own
 // comment above).
@@ -833,6 +855,21 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     if (!candidate.is_compile_time_dependency) return true;
     if (!candidate.owning_module.empty() && candidate.owning_module == body.function_visibility_module) return true;
     return !body.function_source_path.empty() && body.function_source_path == candidate.loc.source_path_text();
+}
+
+[[nodiscard]] bool module_name_visible_in_body(const FunctionSignature& candidate, const Body& body) {
+    if (candidate.is_extern_c_declaration_only || body.program == nullptr) return true;
+    bool visible = false;
+    [[scpp::unsafe]] {
+        visible = program_module_is_name_visible_from(*body.program, body.function_visibility_module,
+                                                      candidate.owning_module);
+    }
+    return visible;
+}
+
+[[nodiscard]] bool direct_callee_visible_in_body(const FunctionSignature& candidate, const Body& body) {
+    if (!compile_time_dependency_visible_in_body(candidate, body)) return false;
+    return module_name_visible_in_body(candidate, body);
 }
 
 [[nodiscard]] const NodiscardInfo* nodiscard_info_for_named_type(const Type& type, const Body& body) {
@@ -1387,7 +1424,8 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
 [[nodiscard]] std::string describe_overload_failure(const Expr& call_expr, const CalleeSignature& callee,
                                                      const std::string& display_name,
                                                      const std::vector<FunctionSignature>& candidates, const Body& body,
-                                                     const Signatures& signatures) {
+                                                     const Signatures& signatures,
+                                                     bool allow_reachable_modules = false) {
     auto describe_signature = [&](const FunctionSignature& sig) {
         std::string result = display_name + "(";
         for (std::size_t i = callee.param_offset; i < sig.param_types.size(); i++) {
@@ -1412,7 +1450,8 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     // happened: they all matched.
     {
         std::vector<const FunctionSignature*> tied{};
-        if (resolve_overload(call_expr, callee, body, signatures, &tied) == nullptr && tied.size() > 1) {
+        if (resolve_overload(call_expr, callee, body, signatures, &tied, allow_reachable_modules) == nullptr &&
+            tied.size() > 1) {
             std::string result = "ambiguous call to '" + display_name + "': " + std::to_string(tied.size()) +
                                  " overloads match these argument types equally well and none is better than the others ([over.match.best])";
             for (const FunctionSignature* sig : tied) {
@@ -1581,7 +1620,8 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
 
 [[nodiscard]] const FunctionSignature* resolve_overload(const Expr& call_expr, const CalleeSignature& callee,
                                                           const Body& body, const Signatures& signatures,
-                                                          std::vector<const FunctionSignature*>* out_ambiguous) {
+                                                          std::vector<const FunctionSignature*>* out_ambiguous,
+                                                          bool allow_reachable_modules) {
     if (out_ambiguous != nullptr) {
         [[scpp::unsafe]] {
             out_ambiguous->clear();
@@ -1596,24 +1636,15 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
     }
     auto it = signatures.find(callee.key);
     if (it == signatures.end()) return nullptr;
-    // The overwhelmingly common case: exactly one function has ever been
-    // declared under this name, so there's nothing to *disambiguate*
-    // between -- return it unconditionally, without running any of the
-    // exact-type-match/this-mutability machinery below at all. This
-    // matters beyond just being a harmless shortcut: infer_expr_type
-    // can't resolve every expression shape (Member/Subscript chains,
-    // notably -- movecheck has no Program access to their field/element
-    // types), so *requiring* a successful match here would wrongly break
-    // an ordinary, non-overloaded call whose argument happens to be one
-    // of those shapes (e.g. `f(obj.field)`) purely because overload
-    // resolution can't prove a match, not because one doesn't exist.
-    // Whether this one candidate's parameters actually fit the call's
-    // arguments is left to the checks that already existed before
-    // overloading (apply_reference_argument, codegen's own type
-    // checking, ...), exactly as before this feature.
+    auto candidate_visible = [&](const FunctionSignature& candidate) {
+        if (callee.param_offset == 0 && !allow_reachable_modules) {
+            return direct_callee_visible_in_body(candidate, body);
+        }
+        return compile_time_dependency_visible_in_body(candidate, body);
+    };
     if (it->second.size() == 1) {
         const FunctionSignature& only = it->second[0];
-        if (!compile_time_dependency_visible_in_body(only, body)) return nullptr;
+        if (!candidate_visible(only)) return nullptr;
         if (callee.param_offset == 1 && call_expr.lhs) {
             if (!only.param_types.empty() && is_reference(only.param_types[0]) && only.param_types[0].is_mutable_ref &&
                 is_read_only_reachable(*call_expr.lhs, body, signatures)) {
@@ -1629,7 +1660,7 @@ void count_braced_init_list_fill(const Type& type, const std::vector<ExprPtr>& a
 
     std::vector<const FunctionSignature*> matches{};
     for (const FunctionSignature& candidate : it->second) {
-        if (!compile_time_dependency_visible_in_body(candidate, body)) continue;
+        if (!candidate_visible(candidate)) continue;
         if (!signature_accepts_argument_count(candidate, call_expr.args.size(), callee.param_offset)) continue;
         bool all_match = true;
         // The receiver (`this`), for a method call: viable only if the
@@ -1846,7 +1877,7 @@ void collect_operator_lookup_keys(const std::string& method_name, const std::opt
         if (!signatures.contains(key)) continue;
         ExprPtr call = make_free_operator_call_expr(*expr.lhs, *expr.rhs, key, expr.loc);
         CalleeSignature callee{key, 0, std::nullopt};
-        if (const FunctionSignature* sig = resolve_overload(*call, callee, body, signatures); sig != nullptr) {
+        if (const FunctionSignature* sig = resolve_overload(*call, callee, body, signatures, nullptr, /*allow_reachable_modules=*/true); sig != nullptr) {
             selected.signature = sig;
             selected.call = std::move(call);
             selected.param_offset = 0;
@@ -2023,7 +2054,8 @@ void collect_operator_lookup_keys(const std::string& method_name, const std::opt
     type.kind = TypeKind::FunctionPointer;
     type.function_return = std::make_shared<Type>(sig.return_type);
     type.function_params = sig.param_types;
-    type.is_unsafe_function_pointer = sig.is_unsafe || sig.is_extern_c_declaration_only;
+    type.is_unsafe_function_pointer =
+        sig.is_unsafe || sig.is_extern_c_declaration_only || sig.has_any_null_terminated_param();
     return type;
 }
 
@@ -2093,13 +2125,13 @@ void collect_operator_lookup_keys(const std::string& method_name, const std::opt
         [[scpp::unsafe]] {
             std::reference_wrapper<const Program> program_ref{*body.program};
             visible_global = find_visible_global(OptionalProgramRef{program_ref}, body.function_namespace_path, source_name,
-                                                 explicit_gq);
+                                                 explicit_gq, body.function_visibility_module);
         }
     } else {
         OptionalProgramRef none{};
         visible_global =
             find_visible_global(none, body.function_namespace_path, source_name,
-                                explicit_gq);
+                                explicit_gq, body.function_visibility_module);
     }
     if (visible_global != nullptr) {
         return std::nullopt;
@@ -2116,7 +2148,7 @@ void collect_operator_lookup_keys(const std::string& method_name, const std::opt
         Type candidate{};
         [[scpp::unsafe]] {
             p_sig = &(*candidates)[c_i];
-            ct_vis = compile_time_dependency_visible_in_body(*p_sig, body);
+            ct_vis = direct_callee_visible_in_body(*p_sig, body);
             candidate = function_pointer_type_from_signature(*p_sig);
         }
         if (!ct_vis) continue;
@@ -2162,9 +2194,13 @@ void collect_operator_lookup_keys(const std::string& method_name, const std::opt
             } else {
                 fn_visibility_module = fn.visibility_module;
             }
-            bool same_module = !fn_visibility_module.empty() && fn_visibility_module == body.function_visibility_module;
             bool same_source = !body.function_source_path.empty() && body.function_source_path == fn.loc.source_path_text();
-            if (!fn.is_exported && !same_module && !same_source) continue;
+            bool module_visible = false;
+            [[scpp::unsafe]] {
+                module_visible = program_record_is_name_visible_from(*body.program, body.function_visibility_module,
+                                                                     fn_visibility_module, fn.is_compile_time_dependency);
+            }
+            if (!module_visible && !same_source) continue;
             saw_visible_generic_template = true;
             std::unordered_map<std::string, Type> type_bindings{};
             std::unordered_map<std::string, std::vector<Type>> pack_bindings{};
@@ -2201,7 +2237,14 @@ void collect_operator_lookup_keys(const std::string& method_name, const std::opt
             Type candidate{};
             candidate.kind = TypeKind::FunctionPointer;
             candidate.function_return = std::make_shared<Type>(substitute_type(substitute_type, fn.return_type, type_bindings));
-            candidate.is_unsafe_function_pointer = fn.is_unsafe || fn.is_extern_c;
+            bool has_nt_param = false;
+            for (const Param& param : fn.params) {
+                if (param.is_null_terminated) {
+                    has_nt_param = true;
+                    break;
+                }
+            }
+            candidate.is_unsafe_function_pointer = fn.is_unsafe || fn.is_extern_c || has_nt_param;
             for (const Param& param : fn.params) {
                 if (param.is_parameter_pack && param.type.kind == TypeKind::Named) {
                     auto pack_it = pack_bindings.find(param.type.name);
@@ -3408,7 +3451,8 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             // own returned raw pointer.
             if (const EnumDef* def = [&]() {
                     const EnumDef* enum_def = nullptr;
-                    [[maybe_unused]] const EnumVariant* variant = find_enum_variant(body.program, expr.name, &enum_def);
+                    [[maybe_unused]] const EnumVariant* variant =
+                        find_enum_variant(body.program, expr.name, &enum_def, body.function_visibility_module);
                     return enum_def;
                 }();
                 def != nullptr) {
@@ -3421,12 +3465,13 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
             auto sig_it = signatures.find(expr.name);
             if (sig_it != signatures.end() && sig_it->second.size() == 1) {
                 const FunctionSignature& sig = sig_it->second[0];
-                if (!compile_time_dependency_visible_in_body(sig, body)) return std::nullopt;
+                if (!direct_callee_visible_in_body(sig, body)) return std::nullopt;
                 Type result{};
                 result.kind = TypeKind::FunctionPointer;
                 result.function_return = std::make_shared<Type>(sig.return_type);
                 result.function_params = sig.param_types;
-                result.is_unsafe_function_pointer = sig.is_unsafe || sig.is_extern_c_declaration_only;
+                result.is_unsafe_function_pointer =
+                    sig.is_unsafe || sig.is_extern_c_declaration_only || sig.has_any_null_terminated_param();
                 return result;
             }
             return std::nullopt;
@@ -3536,12 +3581,15 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
                         auto it = signatures.find(expr.lhs->name);
                         if (it != signatures.end() && it->second.size() == 1) {
                             const FunctionSignature& sig = it->second[0];
-                            Type result{};
-                            result.kind = TypeKind::FunctionPointer;
-                            result.function_return = std::make_shared<Type>(sig.return_type);
-                            result.function_params = sig.param_types;
-                            result.is_unsafe_function_pointer = sig.is_unsafe || sig.is_extern_c_declaration_only;
-                            return result;
+                            if (direct_callee_visible_in_body(sig, body)) {
+                                Type result{};
+                                result.kind = TypeKind::FunctionPointer;
+                                result.function_return = std::make_shared<Type>(sig.return_type);
+                                result.function_params = sig.param_types;
+                                result.is_unsafe_function_pointer =
+                                    sig.is_unsafe || sig.is_extern_c_declaration_only || sig.has_any_null_terminated_param();
+                                return result;
+                            }
                         }
                     }
                     std::optional<Type> operand = infer_expr_type(*expr.lhs, body, signatures);
@@ -3951,10 +3999,13 @@ std::expected<void, DataflowError> check_raw_pointer_assignment(const Type& targ
                 }
             }
             if (expr.lhs == nullptr && body.program != nullptr) {
+                bool rewritten_from_visible_alias =
+                    expr.type.kind == TypeKind::Named && !expr.type.name.empty() && expr.type.name == expr.name;
                 std::optional<std::string> resolved{};
                 [[scpp::unsafe]] {
                     resolved = resolve_visible_class_or_struct_name(
-                        *body.program, body.function_namespace_path, expr.name, expr.explicit_global_qualification);
+                        *body.program, body.function_namespace_path, expr.name, expr.explicit_global_qualification,
+                        body.function_visibility_module, rewritten_from_visible_alias);
                 }
                 if (resolved.has_value()) {
                     return named_type(*resolved);

@@ -454,16 +454,86 @@ namespace scpp {
     }
 
 
+    [[nodiscard]] std::string Codegen::current_visibility_module() const
+{
+        if (has_current_global_context_) return std::string(current_global_owning_module_);
+        if (current_function_def_ != nullptr) {
+            [[scpp::unsafe]] {
+                return effective_function_owning_module(*current_function_def_);
+            }
+        }
+        if (program_ != nullptr) {
+            [[scpp::unsafe]] {
+                return std::string(program_->module_name);
+            }
+        }
+        return std::string{};
+    }
+
+
+    [[nodiscard]] bool Codegen::is_direct_function_name_visible_in_current_context(const Function& fn) const
+{
+        if (program_ == nullptr) return true;
+        if (fn.is_extern_c && fn.body == nullptr) return true;
+        if (is_enum_cast_store_builtin_name(fn.name)) return true;
+        if (fn.is_compile_time_dependency && current_function_def_ != nullptr) {
+            bool same_source = false;
+            [[scpp::unsafe]] {
+                same_source = !fn.loc.source_path_text().empty() &&
+                              fn.loc.source_path_text() == current_function_def_->loc.source_path_text();
+            }
+            if (same_source) return true;
+        }
+        std::string viewer = current_visibility_module();
+        std::string owner = effective_function_owning_module(fn);
+        bool visible = false;
+        [[scpp::unsafe]] {
+            visible = program_record_is_name_visible_from(*program_, viewer, owner, fn.is_compile_time_dependency);
+        }
+        return visible;
+    }
+
+
+    [[nodiscard]] bool Codegen::is_direct_record_name_visible_in_current_context(const std::string& record_name,
+                                                                                  const Expr& call_expr) const
+{
+        if (program_ == nullptr) return true;
+        if (call_expr.type.kind == TypeKind::Named && !call_expr.type.name.empty() &&
+            call_expr.type.name == record_name) {
+            return true;
+        }
+        std::string viewer = current_visibility_module();
+        if (const ClassDef* class_def = find_class_def(record_name); class_def != nullptr) {
+            bool visible = false;
+            [[scpp::unsafe]] {
+                visible = program_record_is_name_visible_from(*program_, viewer, class_def->owning_module,
+                                                              class_def->is_compile_time_dependency);
+            }
+            return visible;
+        }
+        if (const StructDef* struct_def = find_struct_def(record_name); struct_def != nullptr) {
+            bool visible = false;
+            [[scpp::unsafe]] {
+                visible = program_record_is_name_visible_from(*program_, viewer, struct_def->owning_module,
+                                                              struct_def->is_compile_time_dependency);
+            }
+            return visible;
+        }
+        return false;
+    }
+
+
     [[nodiscard]] const Codegen::GlobalSlot* Codegen::find_visible_global_slot(const std::string& name,
                                                                       bool explicit_global_qualification) const
 {
         if (program_ == nullptr) return nullptr;
         const Program* prog = program_;
         std::string var_name{};
+        std::string viewer = current_visibility_module();
         [[scpp::unsafe]] {
             std::reference_wrapper<const Program> program_ref{*prog};
             const GlobalVar* global = find_visible_global(OptionalProgramRef{program_ref}, current_lookup_namespace_path(), name,
-                                                          explicit_global_qualification);
+                                                          explicit_global_qualification, viewer);
             if (global != nullptr && global->decl != nullptr) {
                 var_name = global->decl->var_name;
             }
@@ -626,10 +696,18 @@ namespace scpp {
         [[scpp::unsafe]] {
             for (std::size_t i = 0; i < prog->functions.size(); ++i) {
                 const Function& fn = prog->functions[i];
+                if (!is_direct_function_name_visible_in_current_context(fn)) continue;
                 std::string full_name{};
                 for (const std::string& seg : fn.namespace_path) full_name += seg + "::";
                 full_name += fn.name;
                 if (fn.name != source.name && full_name != source.name) continue;
+                bool fn_has_nt_param = false;
+                for (const Param& param : fn.params) {
+                    if (param.is_null_terminated) {
+                        fn_has_nt_param = true;
+                        break;
+                    }
+                }
                 Type candidate =
                     function_pointer_type_from_signature(fn.return_type, [&]() {
                         std::vector<Type> params{};
@@ -637,7 +715,7 @@ namespace scpp {
                         for (const Param& param : fn.params) params.push_back(param.type);
                         return params;
                     }(),
-                        fn.is_unsafe || (fn.is_extern_c && fn.body == nullptr));
+                        fn.is_unsafe || (fn.is_extern_c && fn.body == nullptr) || fn_has_nt_param);
                 if (target_type.has_value()) {
                     if (same_function_pointer_shape_ignoring_unsafe(candidate, *target_type)) return candidate;
                     continue;
@@ -662,16 +740,24 @@ namespace scpp {
         [[scpp::unsafe]] {
             for (std::size_t k = 0; k < prog->functions.size(); ++k) {
                 const Function& fn = prog->functions[k];
+                if (!is_direct_function_name_visible_in_current_context(fn)) continue;
                 std::string full_name{};
                 for (const std::string& seg : fn.namespace_path) full_name += seg + "::";
                 full_name += fn.name;
                 if (fn.name != source.name && full_name != source.name) continue;
+                bool fn_has_nt_param = false;
+                for (const Param& param : fn.params) {
+                    if (param.is_null_terminated) {
+                        fn_has_nt_param = true;
+                        break;
+                    }
+                }
                 Type candidate = function_pointer_type_from_signature(fn.return_type, [&]() {
                     std::vector<Type> params{};
                     params.reserve(fn.params.size());
                     for (const Param& param : fn.params) params.push_back(param.type);
                     return params;
-                }(), fn.is_unsafe || (fn.is_extern_c && fn.body == nullptr));
+                }(), fn.is_unsafe || (fn.is_extern_c && fn.body == nullptr) || fn_has_nt_param);
                 if (!same_function_pointer_shape_ignoring_unsafe(candidate, target_type)) continue;
                 auto name_it = overload_names_.find(&fn);
                 if (name_it == overload_names_.end()) continue;
@@ -872,7 +958,6 @@ namespace scpp {
                 overload_names_[fns[0]] = name;
                 continue;
             }
-            bool recovered_from_elsewhere = !fns0_owning_module.empty();
             bool defined_in_this_module = false;
             if (program_ != nullptr) {
                 const Program* prog = program_;
@@ -880,7 +965,7 @@ namespace scpp {
                     defined_in_this_module = !prog->module_name.empty();
                 }
             }
-            if (recovered_from_elsewhere || defined_in_this_module) {
+            if (defined_in_this_module) {
                 for (const Function* fn : fns) {
                     [[scpp::unsafe]] {
                         overload_names_[fn] = mangle_exported_symbol(*fn);
@@ -888,8 +973,25 @@ namespace scpp {
                 }
                 continue;
             }
-            if (fns.size() == 1) {
-                overload_names_[fns[0]] = name;
+            std::vector<const Function*> local_fns{};
+            for (const Function* fn : fns) {
+                bool from_module = false;
+                [[scpp::unsafe]] {
+                    if (fn != nullptr) from_module = !fn->owning_module.empty();
+                }
+                if (from_module) {
+                    [[scpp::unsafe]] {
+                        overload_names_[fn] = mangle_exported_symbol(*fn);
+                    }
+                } else {
+                    local_fns.push_back(fn);
+                }
+            }
+            if (local_fns.empty()) {
+                continue;
+            }
+            if (local_fns.size() == 1) {
+                overload_names_[local_fns[0]] = name;
                 continue;
             }
             // `extern "C"` functions can never be overloaded: C itself
@@ -899,7 +1001,7 @@ namespace scpp {
             // declaration exists to describe -- unlike an ordinary scpp
             // function, there is no "give it a different llvm::LLVM name" fix
             // available at all, so this must be a hard error instead.
-            for (const Function* fn : fns) {
+            for (const Function* fn : local_fns) {
                 bool fn_is_ext_c = false;
                 [[scpp::unsafe]] {
                     if (fn != nullptr) fn_is_ext_c = fn->is_extern_c;
@@ -912,7 +1014,7 @@ namespace scpp {
                         current_loc_));
                 }
             }
-            for (const Function* fn : fns) {
+            for (const Function* fn : local_fns) {
                 std::string mangled = name;
                 [[scpp::unsafe]] {
                     if (fn->receiver_ref_qualifier == ReceiverRefQualifier::LValue) mangled += ".lrefq";
@@ -959,6 +1061,8 @@ namespace scpp {
         }
         current_function_def_ = nullptr;
         current_global_namespace_path_.clear();
+        has_current_global_context_ = false;
+        current_global_owning_module_.clear();
 
         for (const GlobalVar& global : program.globals) {
             if (global.decl == nullptr) continue;
@@ -979,6 +1083,8 @@ namespace scpp {
             auto it = globals_.find(var_name);
             if (it == globals_.end()) continue;
             current_global_namespace_path_ = global.namespace_path;
+            has_current_global_context_ = true;
+            current_global_owning_module_ = global.owning_module;
             if (has_ctor_args) {
                 std::optional<unsigned int> target_align = resolved_alignment != 0
                     ? std::optional<unsigned int>{static_cast<unsigned int>(resolved_alignment)}
@@ -1060,6 +1166,8 @@ namespace scpp {
             llvm::LLVMBuildRetVoid(builder_);
         }
         current_global_namespace_path_.clear();
+        has_current_global_context_ = false;
+        current_global_owning_module_.clear();
 
         [[scpp::unsafe]] {
             llvm::LLVMTypeRef ptr_type = llvm::LLVMPointerTypeInContext(context_, 0);

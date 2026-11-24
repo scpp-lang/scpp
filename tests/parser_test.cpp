@@ -5992,10 +5992,12 @@ void test_explicit_template_arg_field_count_is_guarded() {
 void test_param_field_count_is_guarded() {
     const scpp::Param probe{};
     const auto& [type, name, resolved_local, lifetime, default_expr, generic_concept,
-                 require_thread_movable, require_thread_shareable, is_parameter_pack, is_const, loc] = probe;
+                 require_thread_movable, require_thread_shareable, is_null_terminated, is_parameter_pack,
+                 is_const, loc] = probe;
     expect(type.kind == scpp::TypeKind::Named && name.empty() && resolved_local == 0 &&
                !lifetime.present() && default_expr == nullptr && generic_concept.empty() &&
-               !require_thread_movable && !require_thread_shareable && !is_parameter_pack && !is_const &&
+               !require_thread_movable && !require_thread_shareable && !is_null_terminated &&
+               !is_parameter_pack && !is_const &&
                loc.line == 0 && loc.column == 0,
            "a default-constructed Param value-initializes every field");
 }
@@ -6066,6 +6068,7 @@ scpp::Expr make_fully_populated_expr() {
     param.generic_concept = "Concept";
     param.require_thread_movable = true;
     param.require_thread_shareable = true;
+    param.is_null_terminated = true;
     param.is_parameter_pack = true;
     param.is_const = true;
     param.loc = scpp::SourceLocation{61, 62};
@@ -6199,6 +6202,7 @@ void expect_expr_round_trip(const scpp::Expr& clone, std::string_view label) {
                lambda_params[0].lifetime.name == "a" && lambda_params[0].type.name == "param_type" &&
                lambda_params[0].generic_concept == "Concept" &&
                lambda_params[0].require_thread_movable && lambda_params[0].require_thread_shareable &&
+               lambda_params[0].is_null_terminated &&
                lambda_params[0].is_parameter_pack && lambda_params[0].is_const &&
                lambda_params[0].loc.line == 61 && lambda_params[0].loc.column == 62 &&
                lambda_params[0].default_expr != nullptr &&
@@ -7068,6 +7072,53 @@ void test_attributes_after_a_template_head_appertain_to_the_function() {
            "attributes_after_template_head: the trailing return type should still be read");
 }
 
+void test_null_terminated_attribute_parses_on_parameters_and_return_types() {
+    scpp::Program program = expect_parse_ok(
+        "const char* cstr_trailing(const char* s [[scpp::null_terminated]]) [[scpp::null_terminated]] { return s; }\n"
+        "const char* [[scpp::null_terminated]] cstr_ptr(const char* [[scpp::null_terminated]] p) { return p; }\n"
+        "class Holder {\n"
+        "public:\n"
+        "    virtual ~Holder() = default;\n"
+        "    Holder(const char* s [[scpp::null_terminated]]) { return; }\n"
+        "    const char* get() const [[scpp::null_terminated]];\n"
+        "};\n"
+        "const char* Holder::get() const [[scpp::null_terminated]] { return \"ok\"; }\n");
+    const scpp::Function* trailing_fn = find_function_named(program, "cstr_trailing");
+    expect(trailing_fn != nullptr && trailing_fn->return_is_null_terminated &&
+               trailing_fn->params.size() == 1 && trailing_fn->params[0].is_null_terminated,
+           "null_terminated_parse: trailing declarator form should set parameter and return flags");
+    const scpp::Function* ptr_fn = find_function_named(program, "cstr_ptr");
+    expect(ptr_fn != nullptr && ptr_fn->return_is_null_terminated &&
+               ptr_fn->params.size() == 1 && ptr_fn->params[0].is_null_terminated,
+           "null_terminated_parse: ptr-operator form should hoist parameter and return flags");
+    const scpp::Function* ctor_fn = find_function_named(program, "Holder_new");
+    expect(ctor_fn != nullptr && ctor_fn->params.size() == 2 && ctor_fn->params[1].is_null_terminated,
+           "null_terminated_parse: constructor parameter should preserve null_terminated");
+    const scpp::Function* get_fn = find_function_named(program, "Holder_get");
+    expect(get_fn != nullptr && get_fn->return_is_null_terminated && get_fn->body != nullptr,
+           "null_terminated_parse: out-of-line const method definition should reconcile null_terminated");
+}
+
+void test_null_terminated_attribute_invalid_placements_are_rejected() {
+    const char* bad_cases[] = {
+        "void f(const char* s [[scpp::null_terminated(1)]]) { return; }",
+        "void f(const char* [[scpp::null_terminated]] s [[scpp::null_terminated]]) { return; }",
+        "const char* [[scpp::null_terminated]] f() [[scpp::null_terminated]] { return \"a\"; }",
+        "void f(const char* [[scpp::null_terminated]] * p) { return; }",
+        "[[scpp::null_terminated]] const char* f() { return \"a\"; }",
+        "struct [[scpp::null_terminated]] S { int x{}; };",
+        "class [[scpp::null_terminated]] C { public: virtual ~C() = default; };",
+        "struct S { const char* p [[scpp::null_terminated]]{}; };",
+        "int main() { const char* p [[scpp::null_terminated]] = \"a\"; return 0; }",
+        "int main() { [[scpp::null_terminated]] { return 0; } }",
+    };
+    for (const char* source : bad_cases) {
+        auto parsed = scpp::parse(source);
+        expect(!parsed.has_value(),
+               std::string("null_terminated_invalid_placement: expected parse failure for: ") + source);
+    }
+}
+
 int main() {
     test_int_main_return();
     test_function_with_params();
@@ -7406,6 +7457,8 @@ int main() {
     test_trailing_return_type_carries_a_reference_return();
     test_auto_return_type_without_a_trailing_type_is_rejected();
     test_attributes_after_a_template_head_appertain_to_the_function();
+    test_null_terminated_attribute_parses_on_parameters_and_return_types();
+    test_null_terminated_attribute_invalid_placements_are_rejected();
 
     test_hexadecimal_literals_have_their_value();
     test_octal_and_binary_literals_have_their_value();

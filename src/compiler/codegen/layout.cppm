@@ -45,17 +45,15 @@ namespace scpp {
 // Forwards to scpp::find_enum_variant_index (scpp.ast), the one
 // enumerator-by-name lookup.
 [[nodiscard]] const EnumVariant* Codegen::find_enum_variant(const Program* program [[scpp::lifetime(p)]], const std::string& name,
-                                                   const EnumDef** owning_enum) [[scpp::lifetime(p)]]
+                                                   const EnumDef** owning_enum,
+                                                   std::string_view viewer_module) [[scpp::lifetime(p)]]
 {
     if (program == nullptr) return nullptr;
     [[scpp::unsafe]] {
-        for (std::size_t i = 0; i < program->enums.size(); ++i) {
-            for (std::size_t j = 0; j < program->enums[i].variants.size(); ++j) {
-                if (program->enums[i].variants[j].name == name) {
-                    if (owning_enum != nullptr) *owning_enum = &program->enums[i];
-                    return &program->enums[i].variants[j];
-                }
-            }
+        std::optional<EnumVariantIndex> found = scpp::find_enum_variant_index(*program, name, viewer_module);
+        if (found.has_value()) {
+            if (owning_enum != nullptr) *owning_enum = &program->enums[found->enum_index];
+            return &program->enums[found->enum_index].variants[found->variant_index];
         }
     }
     return nullptr;

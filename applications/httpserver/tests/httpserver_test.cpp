@@ -119,7 +119,7 @@ int start_server(const std::string& root, int port) {
     [[scpp::unsafe]] { pid = fork(); }
     if (pid != 0) return pid;
     httpserver::ServerBuilder builder{};
-    builder.mount("/", root.c_str());
+    builder.mount("/", root);
     builder.set_port(port);
     builder.set_max_connections(32);
     builder.set_worker_count(2);
@@ -285,8 +285,20 @@ void run_integration_test(int& failures) {
     return;
 }
 
+void run_builder_validation_test(int& failures) {
+    httpserver::ServerBuilder bad_prefix{};
+    bad_prefix.mount("/sub", ".");
+    expect(bad_prefix.serve() == 1, "non-root mount prefix fails validation", failures);
+
+    httpserver::ServerBuilder empty_root{};
+    empty_root.mount("/", "");
+    expect(empty_root.serve() == 1, "empty filesystem root fails validation", failures);
+    return;
+}
+
 int main() {
     int failures = 0;
+    run_builder_validation_test(failures);
     run_integration_test(failures);
     if (failures != 0) {
         std::println("{} httpserver test(s) failed.", failures);
