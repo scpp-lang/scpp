@@ -268,6 +268,16 @@ void run_integration_test(int& failures) {
     std::string traversal = send_request(port, "GET /../secret.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
     expect(traversal.starts_with("HTTP/1.1 400 Bad Request"), "traversal returns 400", failures);
 
+    std::string encoded_ok = send_request(port, "GET /%68ello.txt?query=1 HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(encoded_ok.starts_with("HTTP/1.1 200 OK"), "percent-decoded path with query returns 200", failures);
+    expect(encoded_ok.contains("hello from file\n"), "percent-decoded path returns body", failures);
+
+    std::string post_resp = send_request(port, "POST /hello.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(post_resp.starts_with("HTTP/1.1 405 Method Not Allowed"), "POST returns 405", failures);
+
+    std::string double_slash = send_request(port, "GET /book//en/ HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    expect(double_slash.starts_with("HTTP/1.1 400 Bad Request"), "empty path segment returns 400", failures);
+
     std::string encoded_slash = send_request(port, "GET /nested%2fchild.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
     expect(encoded_slash.starts_with("HTTP/1.1 400 Bad Request"), "encoded slash returns 400", failures);
 

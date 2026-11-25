@@ -1,5 +1,7 @@
 export module httpserver:platform;
 
+import std;
+
 extern "C" {
     union [[scpp::packed]] epoll_data_t {
         void* ptr;
@@ -261,23 +263,30 @@ int scpp_httpserver_socket_write(int fd, const char* buffer, int count) {
     return static_cast<int>(n);
 }
 
-int scpp_httpserver_open_root_directory(const char* path) {
+int scpp_httpserver_socket_write(int fd, std::string_view data) {
+    long n{};
+    [[scpp::unsafe]] { n = send(fd, data.data(), static_cast<unsigned long>(data.size()), msg_nosignal()); }
+    if (n < 0) return negative_errno();
+    return static_cast<int>(n);
+}
+
+int scpp_httpserver_open_root_directory(const std::string& path) {
     int fd{};
-    [[scpp::unsafe]] { fd = open(path, o_rdonly() + o_directory() + o_cloexec()); }
+    [[scpp::unsafe]] { fd = open(path.c_str(), o_rdonly() + o_directory() + o_cloexec()); }
     if (fd < 0) return negative_errno();
     return fd;
 }
 
-int scpp_httpserver_open_subdirectory(int dir_fd, const char* path) {
+int scpp_httpserver_open_subdirectory(int dir_fd, const std::string& path) {
     int fd{};
-    [[scpp::unsafe]] { fd = openat(dir_fd, path, o_rdonly() + o_directory() + o_nofollow() + o_cloexec()); }
+    [[scpp::unsafe]] { fd = openat(dir_fd, path.c_str(), o_rdonly() + o_directory() + o_nofollow() + o_cloexec()); }
     if (fd < 0) return negative_errno();
     return fd;
 }
 
-int scpp_httpserver_open_file_readonly(int dir_fd, const char* path) {
+int scpp_httpserver_open_file_readonly(int dir_fd, const std::string& path) {
     int fd{};
-    [[scpp::unsafe]] { fd = openat(dir_fd, path, o_rdonly() + o_nofollow() + o_cloexec()); }
+    [[scpp::unsafe]] { fd = openat(dir_fd, path.c_str(), o_rdonly() + o_nofollow() + o_cloexec()); }
     if (fd < 0) return negative_errno();
     return fd;
 }
@@ -313,153 +322,19 @@ int scpp_httpserver_pread(int file_fd, char* buffer, int count, int offset) {
     return static_cast<int>(n);
 }
 
-export int text_length(const char* text) {
-    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
-    [[scpp::unsafe]] {
-        int i = 0;
-        while (text[i] != '\0') { i = i + 1; }
-        return i;
-    }
+export bool ends_with(std::string_view text, std::string_view suffix) {
+    if (suffix.size() > text.size()) return false;
+    return text.substr(text.size() - suffix.size()) == suffix;
 }
 
-export bool copy_text(char* dst, int capacity, const char* src) {
-    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
-    [[scpp::unsafe]] {
-        int i = 0;
-        while (src[i] != '\0') {
-            if (i + 1 >= capacity) {
-                if (capacity > 0) dst[0] = '\0';
-                return false;
-            }
-            dst[i] = src[i];
-            i = i + 1;
-        }
-        dst[i] = '\0';
-        return true;
-    }
+export bool is_dot_segment(std::string_view text) {
+    return text == "." || text == "..";
 }
 
-export bool append_text(char* dst, int capacity, int& len, const char* src) {
-    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
-    [[scpp::unsafe]] {
-        int i = 0;
-        while (src[i] != '\0') {
-            if (len + 1 >= capacity) return false;
-            dst[len] = src[i];
-            len = len + 1;
-            i = i + 1;
-        }
-        dst[len] = '\0';
-        return true;
-    }
-}
-
-export bool append_char(char* dst, int capacity, int& len, char c) {
-    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
-    [[scpp::unsafe]] {
-        if (len + 1 >= capacity) return false;
-        dst[len] = c;
-        len = len + 1;
-        dst[len] = '\0';
-        return true;
-    }
-}
-
-export bool append_int(char* dst, int capacity, int& len, int value) {
-    char digits[32];
-    int digit_count = 0;
-    int n = value;
-    if (n == 0) return append_char(dst, capacity, len, '0');
-    if (n < 0) {
-        if (!append_char(dst, capacity, len, '-')) return false;
-        n = 0 - n;
-    }
-    while (n > 0) {
-        int quotient = n / 10;
-        int remainder = n - quotient * 10;
-        digits[digit_count] = static_cast<char>(48 + remainder);
-        digit_count = digit_count + 1;
-        n = quotient;
-    }
-    while (digit_count > 0) {
-        digit_count = digit_count - 1;
-        if (!append_char(dst, capacity, len, digits[digit_count])) return false;
-    }
-    return true;
-}
-
-export bool span_equals(const char* buffer, int start, int end, const char* text) {
-    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
-    [[scpp::unsafe]] {
-        int i = 0;
-        int index = start;
-        while (index < end && text[i] != '\0') {
-            if (buffer[index] != text[i]) return false;
-            index = index + 1;
-            i = i + 1;
-        }
-        return index == end && text[i] == '\0';
-    }
-}
-
-export bool ends_with(const char* text, const char* suffix) {
-    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
-    [[scpp::unsafe]] {
-        int text_len = text_length(text);
-        int suffix_len = text_length(suffix);
-        if (suffix_len > text_len) return false;
-        int i = 0;
-        while (i < suffix_len) {
-            if (text[text_len - suffix_len + i] != suffix[i]) return false;
-            i = i + 1;
-        }
-        return true;
-    }
-}
-
-export bool is_dot_segment(const char* text) {
-    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
-    [[scpp::unsafe]] {
-        return (text[0] == '.' && text[1] == '\0') || (text[0] == '.' && text[1] == '.' && text[2] == '\0');
-    }
-}
-
-export bool contains_forbidden_segment_char(const char* text) {
-    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
-    [[scpp::unsafe]] {
-        int i = 0;
-        while (text[i] != '\0') {
-            if (text[i] == '/' || text[i] == '\\') return true;
-            i = i + 1;
-        }
-        return false;
-    }
-}
-
-export int header_end_index(const char* buffer, int length) {
-    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
-    [[scpp::unsafe]] {
-        int i = 0;
-        while (i + 3 < length) {
-            if (buffer[i] == '\r' && buffer[i + 1] == '\n' && buffer[i + 2] == '\r' && buffer[i + 3] == '\n') {
-                return i;
-            }
-            i = i + 1;
-        }
-        return -1;
-    }
-}
-
-export int first_line_end_index(const char* buffer, int length) {
-    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
-    [[scpp::unsafe]] {
-        int i = 0;
-        while (i + 1 < length) {
-            if (buffer[i] == '\r' && buffer[i + 1] == '\n') return i;
-            i = i + 1;
-        }
-        return -1;
-    }
+export bool contains_forbidden_segment_char(std::string_view text) {
+    return text.find('/') != std::string_view::npos ||
+           text.find('\\') != std::string_view::npos ||
+           text.find('\0') != std::string_view::npos;
 }
 
 export int hex_value(char c) {
@@ -469,42 +344,45 @@ export int hex_value(char c) {
     return -1;
 }
 
-export bool decode_request_path(const char* buffer, int start, int end, char* out, int capacity) {
-    // spec §5.1(5.1): raw pointer indexing/arithmetic throughout.
-    [[scpp::unsafe]] {
-        if (start >= end || buffer[start] != '/') return false;
-        int out_len = 0;
-        int i = start + 1;
-        while (i < end) {
-            char c = buffer[i];
-            if (c == '?') break;
-            if (c == '%') {
-                if (i + 2 >= end) return false;
-                int hi = hex_value(buffer[i + 1]);
-                int lo = hex_value(buffer[i + 2]);
-                if (hi < 0 || lo < 0) return false;
-                char decoded = static_cast<char>(hi * 16 + lo);
-                if (decoded == '\0' || decoded == '/' || decoded == '\\') return false;
-                if (out_len + 1 >= capacity) return false;
-                out[out_len] = decoded;
-                out_len = out_len + 1;
-                i = i + 3;
-                continue;
-            }
-            if (c == '\\') return false;
-            if (out_len + 1 >= capacity) return false;
-            out[out_len] = c;
-            out_len = out_len + 1;
-            i = i + 1;
+export bool decode_request_path(std::string_view raw_target, std::string& out, size_t max_len) {
+    out.clear();
+    if (raw_target.empty() || raw_target.at(0) != '/') return false;
+    std::string decoded_path{};
+    size_t i = 1;
+    while (i < raw_target.size()) {
+        char c = raw_target.at(i);
+        if (c == '?') break;
+        if (c == '\0' || c == '\\') return false;
+        if (c == '%') {
+            if (i + 2 >= raw_target.size()) return false;
+            int hi = hex_value(raw_target.at(i + 1));
+            int lo = hex_value(raw_target.at(i + 2));
+            if (hi < 0 || lo < 0) return false;
+            char decoded = static_cast<char>(hi * 16 + lo);
+            if (decoded == '\0' || decoded == '/' || decoded == '\\') return false;
+            if (decoded_path.size() >= max_len) return false;
+            decoded_path.push_back(decoded);
+            i = i + 3;
+            continue;
         }
-        while (out_len > 0 && out[out_len - 1] == '/') { out_len = out_len - 1; }
-        out[out_len] = '\0';
-        return true;
+        if (decoded_path.size() >= max_len) return false;
+        decoded_path.push_back(c);
+        i = i + 1;
     }
+    size_t trimmed_len = decoded_path.size();
+    while (trimmed_len > 0 && decoded_path.at(trimmed_len - 1) == '/') {
+        trimmed_len = trimmed_len - 1;
+    }
+    if (trimmed_len == decoded_path.size()) {
+        out = std::move(decoded_path);
+    } else {
+        out = decoded_path.substr(0, trimmed_len);
+    }
+    return true;
 }
 
-export const char* content_type_for(const char* relative_path) {
-    if (text_length(relative_path) == 0 || ends_with(relative_path, ".html")) return "text/html";
+export std::string_view content_type_for(std::string_view relative_path) {
+    if (relative_path.empty() || ends_with(relative_path, ".html")) return "text/html";
     if (ends_with(relative_path, ".txt")) return "text/plain";
     if (ends_with(relative_path, ".css")) return "text/css";
     if (ends_with(relative_path, ".js")) return "application/javascript";
@@ -521,36 +399,32 @@ export class Connection {
         virtual ~Connection() { return; }
 public:
     int fd_{};
-    int request_len_{};
-    char request_[8192];
-    int response_len_{};
-    int response_sent_{};
-    char response_[512];
+    std::string request_{};
+    size_t response_sent_{};
+    std::string response_{};
     int file_fd_{};
     int file_size_{};
     int file_offset_{};
     bool head_only_{};
     bool use_sendfile_{};
-    char relative_path_[512];
-    const char* content_type_{};
+    std::string relative_path_{};
+    std::string_view content_type_{};
     char file_buffer_[4096];
     int file_buffer_len_{};
     int file_buffer_sent_{};
 
     void initialize_empty() {
         this->fd_ = -1;
-        this->request_len_ = 0;
-        this->request_[0] = '\0';
-        this->response_len_ = 0;
+        this->request_.clear();
         this->response_sent_ = 0;
-        this->response_[0] = '\0';
+        this->response_.clear();
         this->file_fd_ = -1;
         this->file_size_ = 0;
         this->file_offset_ = 0;
         this->head_only_ = false;
         this->use_sendfile_ = true;
-        this->relative_path_[0] = '\0';
-        this->content_type_ = "application/octet-stream";
+        this->relative_path_.clear();
+        this->content_type_ = std::string_view{"application/octet-stream"};
         this->file_buffer_len_ = 0;
         this->file_buffer_sent_ = 0;
         return;

@@ -33,24 +33,20 @@ public:
     }
 };
 
-void build_empty_response(Connection& conn, const char* status_line) {
-    conn.response_len_ = 0;
+void build_empty_response(Connection& conn, std::string_view status_line) {
     conn.response_sent_ = 0;
-    conn.response_[0] = '\0';
-    append_text(conn.response_, 512, conn.response_len_, status_line);
-    append_text(conn.response_, 512, conn.response_len_, "\r\nContent-Length: 0\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n");
+    conn.response_ = std::string{status_line.data(), status_line.size()};
+    conn.response_ += "\r\nContent-Length: 0\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n";
     return;
 }
 
 void build_ok_response(Connection& conn) {
-    conn.response_len_ = 0;
     conn.response_sent_ = 0;
-    conn.response_[0] = '\0';
-    append_text(conn.response_, 512, conn.response_len_, "HTTP/1.1 200 OK\r\nContent-Length: ");
-    append_int(conn.response_, 512, conn.response_len_, conn.file_size_);
-    append_text(conn.response_, 512, conn.response_len_, "\r\nContent-Type: ");
-    append_text(conn.response_, 512, conn.response_len_, conn.content_type_);
-    append_text(conn.response_, 512, conn.response_len_, "\r\nConnection: close\r\n\r\n");
+    conn.response_ = std::string{"HTTP/1.1 200 OK\r\nContent-Length: "};
+    conn.response_ += std::to_string(static_cast<int64_t>(conn.file_size_));
+    conn.response_ += "\r\nContent-Type: ";
+    conn.response_ += std::string{conn.content_type_.data(), conn.content_type_.size()};
+    conn.response_ += "\r\nConnection: close\r\n\r\n";
     return;
 }
 
@@ -70,14 +66,13 @@ int classify_open_error(int err) {
 }
 
 bool open_index_from_directory(int dir_fd, int& out_file_fd, int& out_size, int& out_error) {
-    int file_fd{};
-    [[scpp::unsafe]] { file_fd = scpp_httpserver_open_file_readonly(dir_fd, "index.html"); }
+    std::string index_name{"index.html"};
+    int file_fd = scpp_httpserver_open_file_readonly(dir_fd, index_name);
     if (file_fd < 0) {
         out_error = 0 - file_fd;
         return false;
     }
-    int size{};
-    [[scpp::unsafe]] { size = scpp_httpserver_file_size(file_fd); }
+    int size = scpp_httpserver_file_size(file_fd);
     if (size < 0) {
         out_error = 0 - size;
         close_fd(file_fd);
@@ -88,132 +83,63 @@ bool open_index_from_directory(int dir_fd, int& out_file_fd, int& out_size, int&
     return true;
 }
 
-bool open_resolved_file(const std::string& root, bool allow_index_html, bool deny_hidden_files, const char* relative_path,
-                        int& out_file_fd, int& out_size, int& out_status_code, bool& out_served_directory_index) {
-    // spec §5.1(5.1): walks the raw `relative_path`/request buffers by index.
-    [[scpp::unsafe]] {
-        int root_fd{};
-        [[scpp::unsafe]] { root_fd = scpp_httpserver_open_root_directory(root.c_str()); }
-        if (root_fd < 0) {
+bool open_resolved_file(const std::string& root, bool allow_index_html, bool deny_hidden_files,
+                        std::string_view relative_path, int& out_file_fd, int& out_size, int& out_status_code,
+                        bool& out_served_directory_index) {
+    int root_fd = scpp_httpserver_open_root_directory(root);
+    if (root_fd < 0) {
+        out_status_code = 403;
+        return false;
+    }
+    if (relative_path.empty()) {
+        if (!allow_index_html) {
+            close_fd(root_fd);
             out_status_code = 403;
             return false;
         }
-        if (text_length(relative_path) == 0) {
-            if (!allow_index_html) {
-                close_fd(root_fd);
-                out_status_code = 403;
-                return false;
-            }
-            int index_fd = -1;
-            int index_size = 0;
-            int index_error = 0;
-            bool ok = open_index_from_directory(root_fd, index_fd, index_size, index_error);
-            close_fd(root_fd);
-            if (!ok) {
-                out_status_code = classify_open_error(index_error);
-                return false;
-            }
-            out_file_fd = index_fd;
-            out_size = index_size;
-            out_served_directory_index = true;
-            return true;
+        int index_fd = -1;
+        int index_size = 0;
+        int index_error = 0;
+        bool ok = open_index_from_directory(root_fd, index_fd, index_size, index_error);
+        close_fd(root_fd);
+        if (!ok) {
+            out_status_code = classify_open_error(index_error);
+            return false;
         }
+        out_file_fd = index_fd;
+        out_size = index_size;
+        out_served_directory_index = true;
+        return true;
+    }
 
-        int current_fd = root_fd;
-        int start = 0;
-        char segment[256];
-        while (true) {
-            int end = start;
-            while (relative_path[end] != '\0' && relative_path[end] != '/') { end = end + 1; }
-            int segment_len = end - start;
-            if (segment_len <= 0 || segment_len >= 256) {
-                close_fd(current_fd);
-                out_status_code = 400;
-                return false;
-            }
-            int i = 0;
-            while (i < segment_len) {
-                segment[i] = relative_path[start + i];
-                i = i + 1;
-            }
-            segment[segment_len] = '\0';
-            if (is_dot_segment(segment) || contains_forbidden_segment_char(segment)) {
-                close_fd(current_fd);
-                out_status_code = 400;
-                return false;
-            }
-            if (deny_hidden_files && segment[0] == '.') {
-                close_fd(current_fd);
-                out_status_code = 403;
-                return false;
-            }
-            if (relative_path[end] == '\0') {
-                int final_dir_fd{};
-                [[scpp::unsafe]] { final_dir_fd = scpp_httpserver_open_subdirectory(current_fd, segment); }
-                if (final_dir_fd >= 0) {
-                    if (!allow_index_html) {
-                        close_fd(final_dir_fd);
-                        close_fd(current_fd);
-                        out_status_code = 403;
-                        return false;
-                    }
-                    int index_fd = -1;
-                    int index_size = 0;
-                    int index_error = 0;
-                    bool ok = open_index_from_directory(final_dir_fd, index_fd, index_size, index_error);
-                    close_fd(final_dir_fd);
-                    close_fd(current_fd);
-                    if (!ok) {
-                        out_status_code = classify_open_error(index_error);
-                        return false;
-                    }
-                    out_file_fd = index_fd;
-                    out_size = index_size;
-                    out_served_directory_index = true;
-                    return true;
-                }
-                int dir_err = 0 - final_dir_fd;
-                if (dir_err != errno_enotdir()) {
-                    close_fd(current_fd);
-                    out_status_code = classify_open_error(dir_err);
-                    return false;
-                }
-                int file_fd{};
-                [[scpp::unsafe]] { file_fd = scpp_httpserver_open_file_readonly(current_fd, segment); }
-                if (file_fd < 0) {
-                    int err = 0 - file_fd;
-                    close_fd(current_fd);
-                    out_status_code = classify_open_error(err);
-                    return false;
-                }
-                int size{};
-                [[scpp::unsafe]] { size = scpp_httpserver_file_size(file_fd); }
-                if (size < 0) {
-                    int err = 0 - size;
-                    close_fd(file_fd);
-                    close_fd(current_fd);
-                    out_status_code = classify_open_error(err);
-                    return false;
-                }
-                close_fd(current_fd);
-                out_file_fd = file_fd;
-                out_size = size;
-                out_served_directory_index = false;
-                return true;
-            }
-            int next_fd{};
-            [[scpp::unsafe]] { next_fd = scpp_httpserver_open_subdirectory(current_fd, segment); }
-            if (next_fd < 0) {
-                int err = 0 - next_fd;
-                close_fd(current_fd);
-                out_status_code = classify_open_error(err);
-                return false;
-            }
+    int current_fd = root_fd;
+    size_t start = 0;
+    while (true) {
+        std::string_view remaining = relative_path.substr(start);
+        size_t slash = remaining.find('/');
+        bool is_last = slash == std::string_view::npos;
+        std::string_view segment_view = is_last ? remaining : remaining.substr(0, slash);
+        if (segment_view.empty() || segment_view.size() >= 256) {
             close_fd(current_fd);
-            current_fd = next_fd;
-            start = end + 1;
-            if (relative_path[start] == '\0') {
+            out_status_code = 400;
+            return false;
+        }
+        if (is_dot_segment(segment_view) || contains_forbidden_segment_char(segment_view)) {
+            close_fd(current_fd);
+            out_status_code = 400;
+            return false;
+        }
+        if (deny_hidden_files && segment_view.at(0) == '.') {
+            close_fd(current_fd);
+            out_status_code = 403;
+            return false;
+        }
+        std::string segment{segment_view.data(), segment_view.size()};
+        if (is_last) {
+            int final_dir_fd = scpp_httpserver_open_subdirectory(current_fd, segment);
+            if (final_dir_fd >= 0) {
                 if (!allow_index_html) {
+                    close_fd(final_dir_fd);
                     close_fd(current_fd);
                     out_status_code = 403;
                     return false;
@@ -221,7 +147,8 @@ bool open_resolved_file(const std::string& root, bool allow_index_html, bool den
                 int index_fd = -1;
                 int index_size = 0;
                 int index_error = 0;
-                bool ok = open_index_from_directory(current_fd, index_fd, index_size, index_error);
+                bool ok = open_index_from_directory(final_dir_fd, index_fd, index_size, index_error);
+                close_fd(final_dir_fd);
                 close_fd(current_fd);
                 if (!ok) {
                     out_status_code = classify_open_error(index_error);
@@ -232,74 +159,123 @@ bool open_resolved_file(const std::string& root, bool allow_index_html, bool den
                 out_served_directory_index = true;
                 return true;
             }
+            int dir_err = 0 - final_dir_fd;
+            if (dir_err != errno_enotdir()) {
+                close_fd(current_fd);
+                out_status_code = classify_open_error(dir_err);
+                return false;
+            }
+            int file_fd = scpp_httpserver_open_file_readonly(current_fd, segment);
+            if (file_fd < 0) {
+                int err = 0 - file_fd;
+                close_fd(current_fd);
+                out_status_code = classify_open_error(err);
+                return false;
+            }
+            int size = scpp_httpserver_file_size(file_fd);
+            if (size < 0) {
+                int err = 0 - size;
+                close_fd(file_fd);
+                close_fd(current_fd);
+                out_status_code = classify_open_error(err);
+                return false;
+            }
+            close_fd(current_fd);
+            out_file_fd = file_fd;
+            out_size = size;
+            out_served_directory_index = false;
+            return true;
         }
-        return false;
+        int next_fd = scpp_httpserver_open_subdirectory(current_fd, segment);
+        if (next_fd < 0) {
+            int err = 0 - next_fd;
+            close_fd(current_fd);
+            out_status_code = classify_open_error(err);
+            return false;
+        }
+        close_fd(current_fd);
+        current_fd = next_fd;
+        start = start + slash + 1;
+        if (start == relative_path.size()) {
+            if (!allow_index_html) {
+                close_fd(current_fd);
+                out_status_code = 403;
+                return false;
+            }
+            int index_fd = -1;
+            int index_size = 0;
+            int index_error = 0;
+            bool ok = open_index_from_directory(current_fd, index_fd, index_size, index_error);
+            close_fd(current_fd);
+            if (!ok) {
+                out_status_code = classify_open_error(index_error);
+                return false;
+            }
+            out_file_fd = index_fd;
+            out_size = index_size;
+            out_served_directory_index = true;
+            return true;
+        }
     }
+    return false;
 }
 
 bool parse_request(Connection& conn, const std::string& root, bool allow_index_html, bool deny_hidden_files) {
-    // spec §5.1(5.1): walks the raw `relative_path`/request buffers by index.
-    [[scpp::unsafe]] {
-        int header_end = header_end_index(conn.request_, conn.request_len_);
-        if (header_end < 0) return false;
-        int line_end = first_line_end_index(conn.request_, conn.request_len_);
-        if (line_end < 0) {
-            build_empty_response(conn, "HTTP/1.1 400 Bad Request");
-            return true;
-        }
-        int first_space = -1;
-        int second_space = -1;
-        int i = 0;
-        while (i < line_end) {
-            if (conn.request_[i] == ' ') {
-                if (first_space < 0) first_space = i;
-                second_space = i;
-            }
-            i = i + 1;
-        }
-        if (first_space < 0 || second_space <= first_space + 1) {
-            build_empty_response(conn, "HTTP/1.1 400 Bad Request");
-            return true;
-        }
-        if (span_equals(conn.request_, 0, first_space, "GET")) {
-            conn.head_only_ = false;
-        } else if (span_equals(conn.request_, 0, first_space, "HEAD")) {
-            conn.head_only_ = true;
-        } else {
-            build_empty_response(conn, "HTTP/1.1 405 Method Not Allowed");
-            return true;
-        }
-        if (!(span_equals(conn.request_, second_space + 1, line_end, "HTTP/1.1") ||
-              span_equals(conn.request_, second_space + 1, line_end, "HTTP/1.0"))) {
-            build_empty_response(conn, "HTTP/1.1 400 Bad Request");
-            return true;
-        }
-        if (!decode_request_path(conn.request_, first_space + 1, second_space, conn.relative_path_, 512)) {
-            build_empty_response(conn, "HTTP/1.1 400 Bad Request");
-            return true;
-        }
-        int file_fd = -1;
-        int file_size = 0;
-        int status_code = 0;
-        bool served_directory_index = false;
-        if (!open_resolved_file(root, allow_index_html, deny_hidden_files, conn.relative_path_, file_fd, file_size,
-                                status_code, served_directory_index)) {
-            if (status_code == 400) build_empty_response(conn, "HTTP/1.1 400 Bad Request");
-            else if (status_code == 404) build_empty_response(conn, "HTTP/1.1 404 Not Found");
-            else build_empty_response(conn, "HTTP/1.1 403 Forbidden");
-            return true;
-        }
-        conn.file_fd_ = file_fd;
-        conn.file_size_ = file_size;
-        conn.file_offset_ = 0;
-        conn.use_sendfile_ = true;
-        conn.file_buffer_len_ = 0;
-        conn.file_buffer_sent_ = 0;
-        if (served_directory_index) conn.content_type_ = "text/html";
-        else conn.content_type_ = content_type_for(conn.relative_path_);
-        build_ok_response(conn);
+    std::string_view request_view{conn.request_};
+    if (request_view.find("\r\n\r\n") == std::string_view::npos) return false;
+    size_t line_end = request_view.find("\r\n");
+    if (line_end == std::string_view::npos) {
+        build_empty_response(conn, "HTTP/1.1 400 Bad Request");
         return true;
     }
+    std::string_view request_line = request_view.substr(0, line_end);
+    size_t first_space = request_line.find(' ');
+    size_t second_space = request_line.rfind(" ");
+    if (first_space == std::string_view::npos || second_space == std::string_view::npos ||
+        second_space <= first_space + 1) {
+        build_empty_response(conn, "HTTP/1.1 400 Bad Request");
+        return true;
+    }
+    std::string_view method = request_line.substr(0, first_space);
+    if (method == "GET") {
+        conn.head_only_ = false;
+    } else if (method == "HEAD") {
+        conn.head_only_ = true;
+    } else {
+        build_empty_response(conn, "HTTP/1.1 405 Method Not Allowed");
+        return true;
+    }
+    std::string_view version = request_line.substr(second_space + 1);
+    if (!(version == "HTTP/1.1" || version == "HTTP/1.0")) {
+        build_empty_response(conn, "HTTP/1.1 400 Bad Request");
+        return true;
+    }
+    std::string_view raw_target = request_line.substr(first_space + 1, second_space - first_space - 1);
+    if (!decode_request_path(raw_target, conn.relative_path_, 511)) {
+        build_empty_response(conn, "HTTP/1.1 400 Bad Request");
+        return true;
+    }
+    int file_fd = -1;
+    int file_size = 0;
+    int status_code = 0;
+    bool served_directory_index = false;
+    if (!open_resolved_file(root, allow_index_html, deny_hidden_files, std::string_view{conn.relative_path_},
+                            file_fd, file_size, status_code, served_directory_index)) {
+        if (status_code == 400) build_empty_response(conn, "HTTP/1.1 400 Bad Request");
+        else if (status_code == 404) build_empty_response(conn, "HTTP/1.1 404 Not Found");
+        else build_empty_response(conn, "HTTP/1.1 403 Forbidden");
+        return true;
+    }
+    conn.file_fd_ = file_fd;
+    conn.file_size_ = file_size;
+    conn.file_offset_ = 0;
+    conn.use_sendfile_ = true;
+    conn.file_buffer_len_ = 0;
+    conn.file_buffer_sent_ = 0;
+    if (served_directory_index) conn.content_type_ = std::string_view{"text/html"};
+    else conn.content_type_ = content_type_for(std::string_view{conn.relative_path_});
+    build_ok_response(conn);
+    return true;
 }
 
 int find_free_slot(Connection connections[64], int max_connections) {
@@ -362,21 +338,18 @@ void handle_readable(int epoll_fd, Connection connections[64], int slot, const s
                 close_connection(epoll_fd, connections[slot]);
                 return;
             }
-            if (connections[slot].request_len_ + n >= 8192) {
-                connections[slot].request_len_ = 0;
-                connections[slot].request_[0] = '\0';
+            if (connections[slot].request_.size() + static_cast<size_t>(n) >= 8192) {
+                connections[slot].request_.clear();
                 build_empty_response(connections[slot], "HTTP/1.1 400 Bad Request");
                 [[scpp::unsafe]] { scpp_httpserver_epoll_mod(epoll_fd, connections[slot].fd_, slot + 1, 0, 1); }
                 return;
             }
             int i = 0;
             while (i < n) {
-                connections[slot].request_[connections[slot].request_len_] = buffer[i];
-                connections[slot].request_len_ = connections[slot].request_len_ + 1;
+                connections[slot].request_.push_back(buffer[i]);
                 i = i + 1;
             }
-            connections[slot].request_[connections[slot].request_len_] = '\0';
-            if (header_end_index(connections[slot].request_, connections[slot].request_len_) >= 0) {
+            if (std::string_view{connections[slot].request_}.find("\r\n\r\n") != std::string_view::npos) {
                 parse_request(connections[slot], root, allow_index_html, deny_hidden_files);
                 [[scpp::unsafe]] { scpp_httpserver_epoll_mod(epoll_fd, connections[slot].fd_, slot + 1, 0, 1); }
                 return;
@@ -391,20 +364,17 @@ void handle_writable(int epoll_fd, Connection connections[64], int slot) {
     // `Connection*`, so indexing it is raw pointer indexing (unlike the
     // array local in run_worker_loop, which keeps its array type).
     [[scpp::unsafe]] {
-        while (connections[slot].response_sent_ < connections[slot].response_len_) {
-            int n{};
-            [[scpp::unsafe]] {
-                n = scpp_httpserver_socket_write(connections[slot].fd_,
-                                                 &connections[slot].response_[connections[slot].response_sent_],
-                                                 connections[slot].response_len_ - connections[slot].response_sent_);
-            }
+        while (connections[slot].response_sent_ < connections[slot].response_.size()) {
+            std::string_view remaining_response =
+                std::string_view{connections[slot].response_}.substr(connections[slot].response_sent_);
+            int n = scpp_httpserver_socket_write(connections[slot].fd_, remaining_response);
             if (n < 0) {
                 int err = 0 - n;
                 if (err == errno_eagain() || err == errno_eintr()) return;
                 close_connection(epoll_fd, connections[slot]);
                 return;
             }
-            connections[slot].response_sent_ = connections[slot].response_sent_ + n;
+            connections[slot].response_sent_ = connections[slot].response_sent_ + static_cast<size_t>(n);
         }
         if (connections[slot].head_only_ || connections[slot].file_fd_ < 0 || connections[slot].file_size_ == 0) {
             close_connection(epoll_fd, connections[slot]);
