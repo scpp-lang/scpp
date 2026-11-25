@@ -56,8 +56,8 @@
 
 - Closures and Callable Code
   - [Closures and Captures](ch11-01-closures-and-captures.md)
-  - Generic Lambdas
-  - Choosing a Callable Representation
+  - [Function Pointers](ch11-02-function-pointers.md)
+  - Owning Callable Wrappers
 
 - An I/O Project: Building a Command-Line Program
   - Accepting Command-Line Arguments

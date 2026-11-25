@@ -56,8 +56,8 @@
 
 - 閉包與可呼叫程式碼
   - [閉包與捕獲](ch11-01-closures-and-captures.md)
-  - 泛型 lambda
-  - 選擇可呼叫表示形式
+  - [函式指標](ch11-02-function-pointers.md)
+  - 擁有型可呼叫包裝器
 
 - 一個 I/O 專案：打造命令列程式
   - 接收命令列參數
